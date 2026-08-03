@@ -47,9 +47,10 @@ const WL_RESOURCE: unsafe extern "C" fn(
     *mut wayland_sys::server::wl_resource,
 ) -> *mut wlr_sys::wlr_surface = wlr_sys::wlr_surface_from_resource;
 
-const WL_EVENT_LOOP: unsafe extern "C" fn(
-    *mut wayland_sys::server::wl_event_loop,
-) -> *mut wlr_sys::wlr_backend = wlr_sys::wlr_headless_backend_create;
+// No `wl_event_loop` coercion on this branch: wlroots 0.17 constructors take a
+// `wl_display`, and nothing in its public API accepts a `wl_event_loop`. The
+// type is still blocklisted so it cannot be locally regenerated; there is simply
+// no signature to pin it against until 0.19.
 
 const SEAT_NAME: unsafe extern "C" fn(
     *mut wayland_sys::server::wl_display,
@@ -93,11 +94,11 @@ const LIBINPUT_DEVICE: unsafe extern "C" fn(
     *mut wlr_sys::wlr_input_device,
 ) -> *mut input_sys::libinput_device = wlr_sys::wlr_libinput_get_device_handle;
 
-/// The regression this whole file exists for.
-#[cfg(wlr_has_libinput_backend)]
-const LIBINPUT_TABLET_TOOL: unsafe extern "C" fn(
-    *mut wlr_sys::wlr_tablet_tool,
-) -> *mut input_sys::libinput_tablet_tool = wlr_sys::wlr_libinput_get_tablet_tool_handle;
+// `wlr_libinput_get_tablet_tool_handle` — the function whose return type the
+// `libinput_tablet_tool` blocklist bug corrupted — does not exist in wlroots
+// 0.17; it was added in 0.20. The type stays blocklisted (harmlessly: nothing in
+// 0.17's headers reaches it), but there is no public signature to pin it against
+// on this branch.
 
 // --- deliberately local ----------------------------------------------------
 

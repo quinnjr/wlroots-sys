@@ -24,11 +24,12 @@ use std::os::raw::c_char;
 use std::os::raw::c_int;
 
 #[cfg(wlr_has_session)]
-const SESSION: unsafe extern "C" fn(*mut wlr_sys::wl_event_loop) -> *mut wlr_sys::wlr_session =
+const SESSION: unsafe extern "C" fn(*mut wlr_sys::wl_display) -> *mut wlr_sys::wlr_session =
     wlr_sys::wlr_session_create;
 
 #[cfg(wlr_has_drm_backend)]
 const DRM_BACKEND: unsafe extern "C" fn(
+    *mut wlr_sys::wl_display,
     *mut wlr_sys::wlr_session,
     *mut wlr_sys::wlr_device,
     *mut wlr_sys::wlr_backend,
@@ -36,12 +37,13 @@ const DRM_BACKEND: unsafe extern "C" fn(
 
 #[cfg(wlr_has_x11_backend)]
 const X11_BACKEND: unsafe extern "C" fn(
-    *mut wlr_sys::wl_event_loop,
+    *mut wlr_sys::wl_display,
     *const c_char,
 ) -> *mut wlr_sys::wlr_backend = wlr_sys::wlr_x11_backend_create;
 
 #[cfg(wlr_has_libinput_backend)]
 const LIBINPUT_BACKEND: unsafe extern "C" fn(
+    *mut wlr_sys::wl_display,
     *mut wlr_sys::wlr_session,
 ) -> *mut wlr_sys::wlr_backend = wlr_sys::wlr_libinput_backend_create;
 
@@ -60,12 +62,5 @@ const XWAYLAND: unsafe extern "C" fn(
     bool,
 ) -> *mut wlr_sys::wlr_xwayland = wlr_sys::wlr_xwayland_create;
 
-/// Colour management has no dedicated header — `wlr/render/color.h` is always
-/// bound — so the cfg only reports whether ICC support was compiled in. Pin the
-/// header's presence rather than a gated symbol.
-const COLOR: unsafe extern "C" fn(*mut wlr_sys::wlr_color_transform) = {
-    // Both `wlr_color_transform_unref` and the type come from the always-bound
-    // `wlr/render/color.h`; if that header ever became gated this stops
-    // compiling in the default configuration.
-    wlr_sys::wlr_color_transform_unref
-};
+// No colour-management entry: `wlr/render/color.h` and `have_color_management`
+// both arrived in 0.19, so there is nothing to pin here.

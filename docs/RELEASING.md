@@ -33,7 +33,7 @@ either.
 `links = "wlroots"` is deliberately **not** version-suffixed and must stay that
 way: cargo enforces one package per `links` value, and that is precisely what
 stops a graph from containing two `wlr-sys` minors — which would otherwise link
-`libwlroots-0.20.so` and `libwlroots-0.21.so` together, where identical symbol
+`libwlroots.so` and `libwlroots-0.21.so` together, where identical symbol
 names bind to whichever wins interposition and struct offsets silently disagree.
 
 Verify with:
@@ -72,7 +72,7 @@ yanked, never replaced, so this is not optional.
 
 ## Frozen within a minor
 
-Under cargo's 0.x rules, `0.20.0 → 0.20.1` is an automatic upgrade for every
+Under cargo's 0.x rules, `0.17.0 → 0.17.1` is an automatic upgrade for every
 consumer. So within a wlroots minor, the crate's **hand-written** surface is
 frozen: `wl_list_iter`, `container_of!`, `wl_list_for_each!`,
 `wl_signal_emit_mutable`, the feature names, the `wlr_has_*` cfg names, the

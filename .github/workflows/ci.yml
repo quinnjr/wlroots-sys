@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [wlroots-0.17]
   pull_request:
 
 # This job builds PR code, and building Rust means executing build.rs. It needs
@@ -15,24 +15,30 @@ env:
 
 jobs:
   test:
-    # Arch is currently the only distro shipping wlroots 0.20. That also makes
+    # Ubuntu 24.04 LTS ships wlroots 0.17, which is what this branch binds. That makes
     # this workflow unpinnable in one respect: `pacman -Syu` against a rolling
     # distro pulls whatever rustc and wlroots are current, so a new clippy lint
     # or a wlroots patch can redden an unrelated PR. Accepted deliberately —
     # `-D warnings` is therefore scoped to the lint steps rather than global, so
     # upstream lint churn cannot fail `build` and `test` too.
     runs-on: ubuntu-latest
-    container: archlinux:base-devel
+    container: ubuntu:24.04
     steps:
       - name: Install dependencies
         run: |
-          # Refresh the keyring first: a stale one in the base image is the
-          # classic `pacman -Syu` container failure.
-          pacman -Sy --noconfirm archlinux-keyring
-          pacman -Syu --noconfirm \
-            git rust clang pkgconf \
-            wlroots0.20 wayland wayland-protocols \
-            libxkbcommon libinput libdrm pixman mesa vulkan-headers
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libclang-dev clang libwlroots-dev \
+            libwayland-dev wayland-protocols \
+            libxkbcommon-dev libinput-dev libdrm-dev libpixman-1-dev \
+            libegl1-mesa-dev libgles2-mesa-dev libvulkan-dev \
+            libxcb1-dev libxcb-composite0-dev libxcb-ewmh-dev libxcb-icccm4-dev \
+            libxcb-render0-dev libxcb-res0-dev libxcb-xfixes0-dev
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path \
+            --profile minimal -c rustfmt -c clippy
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -40,7 +46,7 @@ jobs:
         run: |
           cargo --version
           rustc --version
-          pkg-config --modversion wlroots-0.20
+          pkg-config --modversion wlroots
 
       - name: Verify vendored protocol XML is unmodified
         working-directory: crates/wlr-sys/protocol
@@ -111,15 +117,19 @@ jobs:
   msrv:
     # rust-version in Cargo.toml is a published promise; nothing else checks it.
     runs-on: ubuntu-latest
-    container: archlinux:base-devel
+    container: ubuntu:24.04
     steps:
       - name: Install dependencies
         run: |
-          pacman -Sy --noconfirm archlinux-keyring
-          pacman -Syu --noconfirm \
-            git rustup clang pkgconf \
-            wlroots0.20 wayland wayland-protocols \
-            libxkbcommon libinput libdrm pixman mesa vulkan-headers
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libclang-dev clang libwlroots-dev libwayland-dev wayland-protocols \
+            libxkbcommon-dev libinput-dev libdrm-dev libpixman-1-dev \
+            libegl1-mesa-dev libgles2-mesa-dev libvulkan-dev libxcb1-dev
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install the declared MSRV
         run: |

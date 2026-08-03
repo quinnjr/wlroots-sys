@@ -1,6 +1,6 @@
 //! Build script for `wlr-sys`.
 //!
-//! Locates wlroots 0.20 via pkg-config, reconciles the crate's Cargo features
+//! Locates wlroots 0.17 via pkg-config, reconciles the crate's Cargo features
 //! against the subsystems the installed library was actually compiled with,
 //! generates whichever protocol server headers wlroots' public headers `#include`
 //! but do not ship, and runs bindgen over the result.
@@ -21,12 +21,18 @@ use std::process::Command;
 /// `sed 's/0.20/0.21/'` produced `range_version("0.21".."0.21")` — an empty
 /// range that rejects every installed wlroots, with no occurrence of the
 /// searched string to reveal it.
-const WLROOTS_MINOR: &str = "0.20";
-const WLROOTS_NEXT_MINOR: &str = "0.21";
+const WLROOTS_MINOR: &str = "0.17";
+const WLROOTS_NEXT_MINOR: &str = "0.18";
 
-/// The pkg-config module name. wlroots embeds its minor version here because it
-/// has no stable ABI: `libwlroots-0.20.so` and `libwlroots-0.21.so` coexist.
-const WLROOTS_PC: &str = concat!("wlroots-", "0.20");
+/// The pkg-config module name.
+///
+/// wlroots only began version-suffixing this at 0.19 (`wlroots-0.19`); 0.17 and
+/// earlier ship a bare `wlroots.pc`, so two wlroots versions cannot coexist on
+/// such a system and the module name carries no version information. The
+/// `range_version` check in `probe_wlroots` is therefore the *only* thing
+/// standing between this crate and a wrong-ABI build here — it is load-bearing
+/// in a way it is not on 0.19+.
+const WLROOTS_PC: &str = "wlroots";
 
 /// Cfg names referenced outside the `SUBSYSTEMS` table. Hoisted so a rename in
 /// the table is a compile error here rather than a silently-stopped match — the
@@ -40,7 +46,7 @@ struct Subsystem {
     /// Cargo feature that requests it, or `None` for detect-only subsystems that
     /// gate no public header and are surfaced purely as a `cfg`.
     feature: Option<&'static str>,
-    /// The `have_*` variable in `wlroots-0.20.pc`.
+    /// The `have_*` variable in `wlroots.pc`.
     pc_var: &'static str,
     /// The `cfg` emitted when the subsystem is both requested and available.
     cfg: &'static str,
@@ -105,30 +111,18 @@ const SUBSYSTEMS: &[Subsystem] = &[
         ],
         extra_pc: &["xcb"],
     },
-    // Detect-only: these gate no public header, so they get no Cargo feature.
-    // `wlr/render/color.h` is always bindable — `have_color_management` only
-    // reports whether ICC support was compiled in. Giving it a feature would
-    // have made the cfg suppressible on a machine where the capability is
-    // genuinely present, i.e. a knob whose only reachable states are "correct"
-    // and "lying".
-    Subsystem {
-        feature: None,
-        pc_var: "have_color_management",
-        cfg: "wlr_has_color_management",
-        headers: &[],
-        extra_pc: &[],
-    },
+    // Detect-only: gates no public header, so it gets no Cargo feature.
+    //
+    // 0.17 publishes eight `have_*` flags, not the ten of 0.19+. There is no
+    // `have_udmabuf_allocator` (added 0.19) and no `have_color_management`
+    // (added 0.19, alongside `wlr/render/color.h`, which does not exist here).
+    // Their rows are absent rather than present-and-false, so `wlr_has_*` and
+    // `DEP_WLROOTS_HAVE_*` for them are simply never emitted — a consumer that
+    // checks for them sees nothing, which is the truthful answer.
     Subsystem {
         feature: None,
         pc_var: "have_gbm_allocator",
         cfg: "wlr_has_gbm_allocator",
-        headers: &[],
-        extra_pc: &[],
-    },
-    Subsystem {
-        feature: None,
-        pc_var: "have_udmabuf_allocator",
-        cfg: "wlr_has_udmabuf_allocator",
         headers: &[],
         extra_pc: &[],
     },
@@ -437,7 +431,7 @@ fn probe_wlroots() -> pkg_config::Library {
                 None => panic!(
                     "could not find `{WLROOTS_PC}` via pkg-config.\n\
                      Install wlroots {WLROOTS_MINOR} and its development headers:\n  \
-                     Arch:   pacman -S wlroots0.20\n  \
+                     Ubuntu: apt install libwlroots-dev\n  \
                      Fedora: dnf install wlroots-devel\n  \
                      Debian: apt install libwlroots-0.20-dev\n\
                      If it is installed somewhere unusual, set PKG_CONFIG_PATH.\n\n\
@@ -496,7 +490,7 @@ fn probe_include_paths(name: &str, requested_by: Option<&str>) -> Vec<String> {
     }
 }
 
-/// Read a `have_*` flag out of `wlroots-0.20.pc`.
+/// Read a `have_*` flag out of `wlroots.pc`.
 ///
 /// `pkg-config-rs` exposes only the `-D` defines from `Cflags`, not arbitrary
 /// `.pc` variables, so this goes through its `get_variable` helper. That matters
@@ -770,6 +764,15 @@ fn generate_bindings(wrapper: &Path, clang_args: &[String], out_dir: &Path, bind
             is_bitfield: false,
             is_global: false,
         })
+        // wlroots 0.17 declares `enum wlr_xwayland_icccm_input_model` *and* a
+        // function of the same name. C keeps tags and ordinary identifiers in
+        // separate namespaces, so that is legal there; Rust does not. The
+        // newtype style emits a tuple struct, whose constructor lands in the
+        // value namespace and collides with the extern fn. A constified module
+        // keeps the constants but occupies only the type namespace, so both can
+        // coexist. wlroots renamed the function in a later release, which is why
+        // this is needed on 0.17 and not on 0.19+.
+        .constified_enum_module("wlr_xwayland_icccm_input_model")
         // Layout assertions are this crate's primary safety net for the
         // blocklisted ecosystem types — pin the default so an upgrade cannot
         // silently drop them.

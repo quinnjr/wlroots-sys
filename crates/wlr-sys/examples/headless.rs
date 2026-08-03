@@ -3,7 +3,8 @@
 //!
 //! This exercises the parts of the crate that compile-time layout assertions
 //! cannot: that the symbols actually resolve at link time, that `wl_display`
-//! from `wayland-sys` really is the type wlroots expects, and that the wlroots
+//! from `wayland-sys` really is the type wlroots expects (0.17 constructors
+//! take the display directly), and that the wlroots
 //! event-loop plumbing works against a real libwayland. It needs no GPU, no
 //! seat, and no running compositor.
 //!
@@ -30,6 +31,9 @@ fn main() {
         );
         assert!(!display.is_null(), "wl_display_create failed");
 
+        // wlroots 0.17 constructors take the `wl_display`; the migration to
+        // `wl_event_loop` landed later. The event loop is still needed to
+        // dispatch below.
         let event_loop = ffi_dispatch!(
             wayland_sys::server::wayland_server_handle(),
             wl_display_get_event_loop,
@@ -39,7 +43,7 @@ fn main() {
 
         // The headless backend renders nowhere and drives itself, which is what
         // makes it usable in CI.
-        let backend = wlr_sys::wlr_headless_backend_create(event_loop);
+        let backend = wlr_sys::wlr_headless_backend_create(display);
         assert!(!backend.is_null(), "wlr_headless_backend_create failed");
 
         assert!(
