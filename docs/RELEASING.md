@@ -49,8 +49,9 @@ docs.rs has no wlroots, so `build.rs` falls back to a committed snapshot when
 
 ```sh
 cargo build -p wlr-sys --all-features
-cp "$(ls -t target/debug/build/wlr-sys-*/out/bindings.rs | head -1)" \
-   crates/wlr-sys/prebuilt/bindings-docsrs.rs
+newest=$(find target/debug/build -maxdepth 3 -name bindings.rs -path '*wlr-sys*' \
+  -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
+cp "$newest" crates/wlr-sys/prebuilt/bindings-docsrs.rs
 DOCS_RS=1 cargo doc -p wlr-sys --no-deps --all-features   # confirm it renders
 ```
 

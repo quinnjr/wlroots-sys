@@ -96,7 +96,8 @@ jobs:
       - name: Committed bindings snapshot is current
         run: |
           cargo build -p wlr-sys --all-features
-          latest=$(ls -t target/debug/build/wlr-sys-*/out/bindings.rs | head -1)
+          latest=$(find target/debug/build -maxdepth 3 -name bindings.rs -path '*wlr-sys*' \
+            -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
           diff -u crates/wlr-sys/prebuilt/bindings-docsrs.rs "$latest" || {
             echo "::error::prebuilt/bindings-docsrs.rs is stale; see docs/RELEASING.md"
             exit 1
