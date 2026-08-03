@@ -16,7 +16,7 @@ pub const WLR_HAS_UDMABUF_ALLOCATOR: u32 = 1;
 pub const WLR_HAS_XWAYLAND: u32 = 1;
 pub const WLR_HAS_SESSION: u32 = 1;
 pub const WLR_HAS_COLOR_MANAGEMENT: u32 = 1;
-pub const WLR_LED_COUNT: u32 = 5;
+pub const WLR_LED_COUNT: u32 = 3;
 pub const WLR_MODIFIER_COUNT: u32 = 8;
 pub const WLR_KEYBOARD_KEYS_CAP: u32 = 32;
 pub const WLR_POINTER_BUTTONS_CAP: u32 = 16;
@@ -25,11 +25,11 @@ pub const WLR_SWAPCHAIN_CAP: u32 = 4;
 pub const WLR_SERIAL_RINGSET_SIZE: u32 = 128;
 pub const WLR_TABLET_V2_TOOL_BUTTONS_CAP: u32 = 16;
 pub const WLR_XDG_FOREIGN_HANDLE_SIZE: u32 = 37;
-pub const WLR_VERSION_STR: &[u8; 7] = b"0.20.2\0";
+pub const WLR_VERSION_STR: &[u8; 7] = b"0.19.2\0";
 pub const WLR_VERSION_MAJOR: u32 = 0;
-pub const WLR_VERSION_MINOR: u32 = 20;
+pub const WLR_VERSION_MINOR: u32 = 19;
 pub const WLR_VERSION_MICRO: u32 = 2;
-pub const WLR_VERSION_NUM: u32 = 5122;
+pub const WLR_VERSION_NUM: u32 = 4866;
 pub type __dev_t = ::std::os::raw::c_ulong;
 pub type __off_t = ::std::os::raw::c_long;
 pub type __pid_t = ::std::os::raw::c_int;
@@ -126,6 +126,7 @@ const _: () = {
         [::std::mem::offset_of!(wl_object, implementation) - 8usize];
     ["Offset of field: wl_object::id"][::std::mem::offset_of!(wl_object, id) - 16usize];
 };
+#[doc = " @page page_tearing_control_v1 The tearing_control_v1 protocol\n @section page_ifaces_tearing_control_v1 Interfaces\n - @subpage page_iface_wp_tearing_control_manager_v1 - protocol for tearing control\n - @subpage page_iface_wp_tearing_control_v1 - per-surface tearing control interface\n @section page_copyright_tearing_control_v1 Copyright\n <pre>\n\n Copyright © 2021 Xaver Hugl\n\n Permission is hereby granted, free of charge, to any person obtaining a\n copy of this software and associated documentation files (the \"Software\"),\n to deal in the Software without restriction, including without limitation\n the rights to use, copy, modify, merge, publish, distribute, sublicense,\n and/or sell copies of the Software, and to permit persons to whom the\n Software is furnished to do so, subject to the following conditions:\n\n The above copyright notice and this permission notice (including the next\n paragraph) shall be included in all copies or substantial portions of the\n Software.\n\n THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL\n THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING\n FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER\n DEALINGS IN THE SOFTWARE.\n </pre>"]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct wl_surface {
@@ -209,208 +210,6 @@ impl wl_output_transform {
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct wl_output_transform(pub ::std::os::raw::c_uint);
-impl wlr_color_named_primaries {
-    pub const WLR_COLOR_NAMED_PRIMARIES_SRGB: wlr_color_named_primaries =
-        wlr_color_named_primaries(1);
-    pub const WLR_COLOR_NAMED_PRIMARIES_BT2020: wlr_color_named_primaries =
-        wlr_color_named_primaries(2);
-}
-#[repr(transparent)]
-#[doc = " Well-known color primaries."]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub struct wlr_color_named_primaries(pub ::std::os::raw::c_uint);
-impl wlr_color_transfer_function {
-    pub const WLR_COLOR_TRANSFER_FUNCTION_SRGB: wlr_color_transfer_function =
-        wlr_color_transfer_function(1);
-    pub const WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ: wlr_color_transfer_function =
-        wlr_color_transfer_function(2);
-    pub const WLR_COLOR_TRANSFER_FUNCTION_EXT_LINEAR: wlr_color_transfer_function =
-        wlr_color_transfer_function(4);
-    pub const WLR_COLOR_TRANSFER_FUNCTION_GAMMA22: wlr_color_transfer_function =
-        wlr_color_transfer_function(8);
-    pub const WLR_COLOR_TRANSFER_FUNCTION_BT1886: wlr_color_transfer_function =
-        wlr_color_transfer_function(16);
-}
-#[repr(transparent)]
-#[doc = " Well-known color transfer functions."]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub struct wlr_color_transfer_function(pub ::std::os::raw::c_uint);
-impl wlr_alpha_mode {
-    pub const WLR_COLOR_ALPHA_MODE_PREMULTIPLIED_ELECTRICAL: wlr_alpha_mode = wlr_alpha_mode(0);
-    pub const WLR_COLOR_ALPHA_MODE_PREMULTIPLIED_OPTICAL: wlr_alpha_mode = wlr_alpha_mode(1);
-    pub const WLR_COLOR_ALPHA_MODE_STRAIGHT: wlr_alpha_mode = wlr_alpha_mode(2);
-}
-#[repr(transparent)]
-#[doc = " Specifies alpha blending modes.  Note that premultiplied_electrical\n is the default, so there is no \"none\" or \"unset\" value."]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub struct wlr_alpha_mode(pub ::std::os::raw::c_uint);
-impl wlr_color_encoding {
-    pub const WLR_COLOR_ENCODING_NONE: wlr_color_encoding = wlr_color_encoding(0);
-    pub const WLR_COLOR_ENCODING_IDENTITY: wlr_color_encoding = wlr_color_encoding(1);
-    pub const WLR_COLOR_ENCODING_BT709: wlr_color_encoding = wlr_color_encoding(2);
-    pub const WLR_COLOR_ENCODING_FCC: wlr_color_encoding = wlr_color_encoding(4);
-    pub const WLR_COLOR_ENCODING_BT601: wlr_color_encoding = wlr_color_encoding(8);
-    pub const WLR_COLOR_ENCODING_SMPTE240: wlr_color_encoding = wlr_color_encoding(16);
-    pub const WLR_COLOR_ENCODING_BT2020: wlr_color_encoding = wlr_color_encoding(32);
-    pub const WLR_COLOR_ENCODING_BT2020_CL: wlr_color_encoding = wlr_color_encoding(64);
-    pub const WLR_COLOR_ENCODING_ICTCP: wlr_color_encoding = wlr_color_encoding(128);
-}
-#[repr(transparent)]
-#[doc = " Well-known color encodings, each representing a set of matrix coefficients\n used to convert that particular YCbCr encoding to RGB.  NONE means the\n value is unset or unknown."]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub struct wlr_color_encoding(pub ::std::os::raw::c_uint);
-impl wlr_color_range {
-    pub const WLR_COLOR_RANGE_NONE: wlr_color_range = wlr_color_range(0);
-    pub const WLR_COLOR_RANGE_LIMITED: wlr_color_range = wlr_color_range(1);
-    pub const WLR_COLOR_RANGE_FULL: wlr_color_range = wlr_color_range(2);
-}
-#[repr(transparent)]
-#[doc = " Specifies whether a particular color-encoding uses full- or limited-range\n values.  NONE means the value is unset or unknown."]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub struct wlr_color_range(pub ::std::os::raw::c_uint);
-impl wlr_color_chroma_location {
-    pub const WLR_COLOR_CHROMA_LOCATION_NONE: wlr_color_chroma_location =
-        wlr_color_chroma_location(0);
-    pub const WLR_COLOR_CHROMA_LOCATION_TYPE0: wlr_color_chroma_location =
-        wlr_color_chroma_location(1);
-    pub const WLR_COLOR_CHROMA_LOCATION_TYPE1: wlr_color_chroma_location =
-        wlr_color_chroma_location(2);
-    pub const WLR_COLOR_CHROMA_LOCATION_TYPE2: wlr_color_chroma_location =
-        wlr_color_chroma_location(3);
-    pub const WLR_COLOR_CHROMA_LOCATION_TYPE3: wlr_color_chroma_location =
-        wlr_color_chroma_location(4);
-    pub const WLR_COLOR_CHROMA_LOCATION_TYPE4: wlr_color_chroma_location =
-        wlr_color_chroma_location(5);
-    pub const WLR_COLOR_CHROMA_LOCATION_TYPE5: wlr_color_chroma_location =
-        wlr_color_chroma_location(6);
-}
-#[repr(transparent)]
-#[doc = " Chroma sample locations, corresponding to Chroma420SampleLocType code\n points in H.273.  NONE means the value is unset or unknown."]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub struct wlr_color_chroma_location(pub ::std::os::raw::c_uint);
-#[doc = " CIE 1931 xy chromaticity coordinates."]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_color_cie1931_xy {
-    pub x: f32,
-    pub y: f32,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_color_cie1931_xy"][::std::mem::size_of::<wlr_color_cie1931_xy>() - 8usize];
-    ["Alignment of wlr_color_cie1931_xy"][::std::mem::align_of::<wlr_color_cie1931_xy>() - 4usize];
-    ["Offset of field: wlr_color_cie1931_xy::x"]
-        [::std::mem::offset_of!(wlr_color_cie1931_xy, x) - 0usize];
-    ["Offset of field: wlr_color_cie1931_xy::y"]
-        [::std::mem::offset_of!(wlr_color_cie1931_xy, y) - 4usize];
-};
-#[doc = " Color primaries and white point describing a color volume."]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_color_primaries {
-    pub red: wlr_color_cie1931_xy,
-    pub green: wlr_color_cie1931_xy,
-    pub blue: wlr_color_cie1931_xy,
-    pub white: wlr_color_cie1931_xy,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_color_primaries"][::std::mem::size_of::<wlr_color_primaries>() - 32usize];
-    ["Alignment of wlr_color_primaries"][::std::mem::align_of::<wlr_color_primaries>() - 4usize];
-    ["Offset of field: wlr_color_primaries::red"]
-        [::std::mem::offset_of!(wlr_color_primaries, red) - 0usize];
-    ["Offset of field: wlr_color_primaries::green"]
-        [::std::mem::offset_of!(wlr_color_primaries, green) - 8usize];
-    ["Offset of field: wlr_color_primaries::blue"]
-        [::std::mem::offset_of!(wlr_color_primaries, blue) - 16usize];
-    ["Offset of field: wlr_color_primaries::white"]
-        [::std::mem::offset_of!(wlr_color_primaries, white) - 24usize];
-};
-#[doc = " Luminance range and reference white luminance level, in cd/m²."]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_color_luminances {
-    pub min: f32,
-    pub max: f32,
-    pub reference: f32,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_color_luminances"][::std::mem::size_of::<wlr_color_luminances>() - 12usize];
-    ["Alignment of wlr_color_luminances"][::std::mem::align_of::<wlr_color_luminances>() - 4usize];
-    ["Offset of field: wlr_color_luminances::min"]
-        [::std::mem::offset_of!(wlr_color_luminances, min) - 0usize];
-    ["Offset of field: wlr_color_luminances::max"]
-        [::std::mem::offset_of!(wlr_color_luminances, max) - 4usize];
-    ["Offset of field: wlr_color_luminances::reference"]
-        [::std::mem::offset_of!(wlr_color_luminances, reference) - 8usize];
-};
-#[doc = " A color transformation formula, which maps a linear color space with\n sRGB primaries to an output color space.\n\n For ease of use, this type is heap allocated and reference counted.\n Use wlr_color_transform_ref()/wlr_color_transform_unref(). The initial reference\n count after creation is 1.\n\n Color transforms are immutable; their type/parameters should not be changed,\n and this API provides no functions to modify them after creation.\n\n This formula may be implemented using a 3d look-up table, or some other\n means."]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_color_transform {
-    _unused: [u8; 0],
-}
-unsafe extern "C" {
-    #[doc = " Initialize a color transformation to convert linear\n (with sRGB(?) primaries) to an ICC profile. Returns NULL on failure."]
-    pub fn wlr_color_transform_init_linear_to_icc(
-        data: *const ::std::os::raw::c_void,
-        size: usize,
-    ) -> *mut wlr_color_transform;
-}
-unsafe extern "C" {
-    #[doc = " Initialize a color transformation to apply EOTF⁻¹ encoding. Returns\n NULL on failure."]
-    pub fn wlr_color_transform_init_linear_to_inverse_eotf(
-        tf: wlr_color_transfer_function,
-    ) -> *mut wlr_color_transform;
-}
-unsafe extern "C" {
-    #[doc = " Initialize a color transformation to apply three 1D look-up tables. dim\n is the number of elements in each individual LUT. Returns NULL on failure."]
-    pub fn wlr_color_transform_init_lut_3x1d(
-        dim: usize,
-        r: *const u16,
-        g: *const u16,
-        b: *const u16,
-    ) -> *mut wlr_color_transform;
-}
-unsafe extern "C" {
-    #[doc = " Initialize a color transformation to apply a 3×3 matrix. Returns NULL on\n failure."]
-    pub fn wlr_color_transform_init_matrix(matrix: *const f32) -> *mut wlr_color_transform;
-}
-unsafe extern "C" {
-    #[doc = " Initialize a color transformation to apply a sequence of color transforms\n one after another."]
-    pub fn wlr_color_transform_init_pipeline(
-        transforms: *mut *mut wlr_color_transform,
-        len: usize,
-    ) -> *mut wlr_color_transform;
-}
-unsafe extern "C" {
-    #[doc = " Increase the reference count of the color transform by 1."]
-    pub fn wlr_color_transform_ref(tr: *mut wlr_color_transform) -> *mut wlr_color_transform;
-}
-unsafe extern "C" {
-    #[doc = " Reduce the reference count of the color transform by 1; freeing it and\n all associated resources when the reference count hits zero."]
-    pub fn wlr_color_transform_unref(tr: *mut wlr_color_transform);
-}
-unsafe extern "C" {
-    #[doc = " Evaluate a color transform for a given RGB triplet."]
-    pub fn wlr_color_transform_eval(tr: *mut wlr_color_transform, out: *mut f32, in_: *const f32);
-}
-unsafe extern "C" {
-    #[doc = " Obtain primaries values from a well-known primaries name."]
-    pub fn wlr_color_primaries_from_named(
-        out: *mut wlr_color_primaries,
-        named: wlr_color_named_primaries,
-    );
-}
-unsafe extern "C" {
-    #[doc = " Compute the matrix to convert between two linear RGB color spaces"]
-    pub fn wlr_color_primaries_transform_absolute_colorimetric(
-        source: *const wlr_color_primaries,
-        destination: *const wlr_color_primaries,
-        matrix: *mut f32,
-    );
-}
 #[doc = " A box representing a rectangle region in a 2D space.\n\n The x and y coordinates are inclusive, and the width and height lengths are\n exclusive. In other words, the box starts from the coordinates (x, y), and\n goes up to but not including (x + width, y + height)."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -570,18 +369,13 @@ pub struct wlr_render_texture_options {
     pub transform: wl_output_transform,
     pub filter_mode: wlr_scale_filter_mode,
     pub blend_mode: wlr_render_blend_mode,
-    pub transfer_function: wlr_color_transfer_function,
-    pub primaries: *const wlr_color_primaries,
-    pub color_encoding: wlr_color_encoding,
-    pub color_range: wlr_color_range,
-    pub luminance_multiplier: *const f32,
     pub wait_timeline: *mut wlr_drm_syncobj_timeline,
     pub wait_point: u64,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_render_texture_options"]
-        [::std::mem::size_of::<wlr_render_texture_options>() - 128usize];
+        [::std::mem::size_of::<wlr_render_texture_options>() - 104usize];
     ["Alignment of wlr_render_texture_options"]
         [::std::mem::align_of::<wlr_render_texture_options>() - 8usize];
     ["Offset of field: wlr_render_texture_options::texture"]
@@ -600,20 +394,10 @@ const _: () = {
         [::std::mem::offset_of!(wlr_render_texture_options, filter_mode) - 76usize];
     ["Offset of field: wlr_render_texture_options::blend_mode"]
         [::std::mem::offset_of!(wlr_render_texture_options, blend_mode) - 80usize];
-    ["Offset of field: wlr_render_texture_options::transfer_function"]
-        [::std::mem::offset_of!(wlr_render_texture_options, transfer_function) - 84usize];
-    ["Offset of field: wlr_render_texture_options::primaries"]
-        [::std::mem::offset_of!(wlr_render_texture_options, primaries) - 88usize];
-    ["Offset of field: wlr_render_texture_options::color_encoding"]
-        [::std::mem::offset_of!(wlr_render_texture_options, color_encoding) - 96usize];
-    ["Offset of field: wlr_render_texture_options::color_range"]
-        [::std::mem::offset_of!(wlr_render_texture_options, color_range) - 100usize];
-    ["Offset of field: wlr_render_texture_options::luminance_multiplier"]
-        [::std::mem::offset_of!(wlr_render_texture_options, luminance_multiplier) - 104usize];
     ["Offset of field: wlr_render_texture_options::wait_timeline"]
-        [::std::mem::offset_of!(wlr_render_texture_options, wait_timeline) - 112usize];
+        [::std::mem::offset_of!(wlr_render_texture_options, wait_timeline) - 88usize];
     ["Offset of field: wlr_render_texture_options::wait_point"]
-        [::std::mem::offset_of!(wlr_render_texture_options, wait_point) - 120usize];
+        [::std::mem::offset_of!(wlr_render_texture_options, wait_point) - 96usize];
 };
 unsafe extern "C" {
     #[doc = " Render a texture."]
@@ -818,7 +602,6 @@ unsafe extern "C" {
 #[repr(C)]
 pub struct wlr_renderer {
     pub render_buffer_caps: u32,
-    pub color_encodings: u32,
     pub events: wlr_renderer__bindgen_ty_1,
     pub features: wlr_renderer__bindgen_ty_2,
     pub WLR_PRIVATE: wlr_renderer__bindgen_ty_3,
@@ -843,8 +626,6 @@ const _: () = {
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct wlr_renderer__bindgen_ty_2 {
-    #[doc = " Whether color transforms are supported for input textures"]
-    pub input_color_transform: bool,
     #[doc = " Does the renderer support color transforms on its output?"]
     pub output_color_transform: bool,
     #[doc = " Whether wait/signal timelines are supported.\n\n See struct wlr_drm_syncobj_timeline."]
@@ -853,15 +634,13 @@ pub struct wlr_renderer__bindgen_ty_2 {
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_renderer__bindgen_ty_2"]
-        [::std::mem::size_of::<wlr_renderer__bindgen_ty_2>() - 3usize];
+        [::std::mem::size_of::<wlr_renderer__bindgen_ty_2>() - 2usize];
     ["Alignment of wlr_renderer__bindgen_ty_2"]
         [::std::mem::align_of::<wlr_renderer__bindgen_ty_2>() - 1usize];
-    ["Offset of field: wlr_renderer__bindgen_ty_2::input_color_transform"]
-        [::std::mem::offset_of!(wlr_renderer__bindgen_ty_2, input_color_transform) - 0usize];
     ["Offset of field: wlr_renderer__bindgen_ty_2::output_color_transform"]
-        [::std::mem::offset_of!(wlr_renderer__bindgen_ty_2, output_color_transform) - 1usize];
+        [::std::mem::offset_of!(wlr_renderer__bindgen_ty_2, output_color_transform) - 0usize];
     ["Offset of field: wlr_renderer__bindgen_ty_2::timeline"]
-        [::std::mem::offset_of!(wlr_renderer__bindgen_ty_2, timeline) - 2usize];
+        [::std::mem::offset_of!(wlr_renderer__bindgen_ty_2, timeline) - 1usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -883,8 +662,6 @@ const _: () = {
     ["Alignment of wlr_renderer"][::std::mem::align_of::<wlr_renderer>() - 8usize];
     ["Offset of field: wlr_renderer::render_buffer_caps"]
         [::std::mem::offset_of!(wlr_renderer, render_buffer_caps) - 0usize];
-    ["Offset of field: wlr_renderer::color_encodings"]
-        [::std::mem::offset_of!(wlr_renderer, color_encodings) - 4usize];
     ["Offset of field: wlr_renderer::events"]
         [::std::mem::offset_of!(wlr_renderer, events) - 8usize];
     ["Offset of field: wlr_renderer::features"]
@@ -1322,22 +1099,19 @@ pub struct wlr_output_cursor {
 #[repr(C)]
 pub struct wlr_output_cursor__bindgen_ty_1 {
     pub renderer_destroy: wl_listener,
-    pub color_transform: *mut wlr_color_transform,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_output_cursor__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_output_cursor__bindgen_ty_1>() - 32usize];
+        [::std::mem::size_of::<wlr_output_cursor__bindgen_ty_1>() - 24usize];
     ["Alignment of wlr_output_cursor__bindgen_ty_1"]
         [::std::mem::align_of::<wlr_output_cursor__bindgen_ty_1>() - 8usize];
     ["Offset of field: wlr_output_cursor__bindgen_ty_1::renderer_destroy"]
         [::std::mem::offset_of!(wlr_output_cursor__bindgen_ty_1, renderer_destroy) - 0usize];
-    ["Offset of field: wlr_output_cursor__bindgen_ty_1::color_transform"]
-        [::std::mem::offset_of!(wlr_output_cursor__bindgen_ty_1, color_transform) - 24usize];
 };
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_output_cursor"][::std::mem::size_of::<wlr_output_cursor>() - 168usize];
+    ["Size of wlr_output_cursor"][::std::mem::size_of::<wlr_output_cursor>() - 160usize];
     ["Alignment of wlr_output_cursor"][::std::mem::align_of::<wlr_output_cursor>() - 8usize];
     ["Offset of field: wlr_output_cursor::output"]
         [::std::mem::offset_of!(wlr_output_cursor, output) - 0usize];
@@ -1392,16 +1166,13 @@ impl wlr_output_state_field {
     pub const WLR_OUTPUT_STATE_TRANSFORM: wlr_output_state_field = wlr_output_state_field(32);
     pub const WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED: wlr_output_state_field =
         wlr_output_state_field(64);
-    pub const WLR_OUTPUT_STATE_RENDER_FORMAT: wlr_output_state_field = wlr_output_state_field(128);
-    pub const WLR_OUTPUT_STATE_SUBPIXEL: wlr_output_state_field = wlr_output_state_field(256);
-    pub const WLR_OUTPUT_STATE_LAYERS: wlr_output_state_field = wlr_output_state_field(512);
-    pub const WLR_OUTPUT_STATE_WAIT_TIMELINE: wlr_output_state_field = wlr_output_state_field(1024);
+    pub const WLR_OUTPUT_STATE_GAMMA_LUT: wlr_output_state_field = wlr_output_state_field(128);
+    pub const WLR_OUTPUT_STATE_RENDER_FORMAT: wlr_output_state_field = wlr_output_state_field(256);
+    pub const WLR_OUTPUT_STATE_SUBPIXEL: wlr_output_state_field = wlr_output_state_field(512);
+    pub const WLR_OUTPUT_STATE_LAYERS: wlr_output_state_field = wlr_output_state_field(1024);
+    pub const WLR_OUTPUT_STATE_WAIT_TIMELINE: wlr_output_state_field = wlr_output_state_field(2048);
     pub const WLR_OUTPUT_STATE_SIGNAL_TIMELINE: wlr_output_state_field =
-        wlr_output_state_field(2048);
-    pub const WLR_OUTPUT_STATE_COLOR_TRANSFORM: wlr_output_state_field =
         wlr_output_state_field(4096);
-    pub const WLR_OUTPUT_STATE_IMAGE_DESCRIPTION: wlr_output_state_field =
-        wlr_output_state_field(8192);
 }
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
@@ -1415,55 +1186,6 @@ impl wlr_output_state_mode_type {
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct wlr_output_state_mode_type(pub ::std::os::raw::c_uint);
-#[doc = " Colorimetric image description.\n\n Carries information about the color encoding used for a struct wlr_buffer.\n\n Supported primaries are advertised in wlr_output.supported_primaries.\n Supported transfer functions are advertised in\n wlr_output.supported_transfer_functions.\n\n mastering_display_primaries, mastering_luminance, max_cll and max_fall are\n optional. Luminances are given in cd/m²."]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_output_image_description {
-    pub primaries: wlr_color_named_primaries,
-    pub transfer_function: wlr_color_transfer_function,
-    pub mastering_display_primaries: wlr_color_primaries,
-    pub mastering_luminance: wlr_output_image_description__bindgen_ty_1,
-    pub max_cll: f64,
-    pub max_fall: f64,
-}
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_output_image_description__bindgen_ty_1 {
-    pub min: f64,
-    pub max: f64,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_output_image_description__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_output_image_description__bindgen_ty_1>() - 16usize];
-    ["Alignment of wlr_output_image_description__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_output_image_description__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_output_image_description__bindgen_ty_1::min"]
-        [::std::mem::offset_of!(wlr_output_image_description__bindgen_ty_1, min) - 0usize];
-    ["Offset of field: wlr_output_image_description__bindgen_ty_1::max"]
-        [::std::mem::offset_of!(wlr_output_image_description__bindgen_ty_1, max) - 8usize];
-};
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_output_image_description"]
-        [::std::mem::size_of::<wlr_output_image_description>() - 72usize];
-    ["Alignment of wlr_output_image_description"]
-        [::std::mem::align_of::<wlr_output_image_description>() - 8usize];
-    ["Offset of field: wlr_output_image_description::primaries"]
-        [::std::mem::offset_of!(wlr_output_image_description, primaries) - 0usize];
-    ["Offset of field: wlr_output_image_description::transfer_function"]
-        [::std::mem::offset_of!(wlr_output_image_description, transfer_function) - 4usize];
-    ["Offset of field: wlr_output_image_description::mastering_display_primaries"][::std::mem::offset_of!(
-        wlr_output_image_description,
-        mastering_display_primaries
-    ) - 8usize];
-    ["Offset of field: wlr_output_image_description::mastering_luminance"]
-        [::std::mem::offset_of!(wlr_output_image_description, mastering_luminance) - 40usize];
-    ["Offset of field: wlr_output_image_description::max_cll"]
-        [::std::mem::offset_of!(wlr_output_image_description, max_cll) - 56usize];
-    ["Offset of field: wlr_output_image_description::max_fall"]
-        [::std::mem::offset_of!(wlr_output_image_description, max_fall) - 64usize];
-};
 #[doc = " Holds the double-buffered output state."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -1484,14 +1206,14 @@ pub struct wlr_output_state {
     pub mode_type: wlr_output_state_mode_type,
     pub mode: *mut wlr_output_mode,
     pub custom_mode: wlr_output_state__bindgen_ty_1,
+    pub gamma_lut: *mut u16,
+    pub gamma_lut_size: usize,
     pub layers: *mut wlr_output_layer_state,
     pub layers_len: usize,
     pub wait_timeline: *mut wlr_drm_syncobj_timeline,
     pub wait_point: u64,
     pub signal_timeline: *mut wlr_drm_syncobj_timeline,
     pub signal_point: u64,
-    pub color_transform: *mut wlr_color_transform,
-    pub image_description: *mut wlr_output_image_description,
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -1549,22 +1271,22 @@ const _: () = {
         [::std::mem::offset_of!(wlr_output_state, mode) - 120usize];
     ["Offset of field: wlr_output_state::custom_mode"]
         [::std::mem::offset_of!(wlr_output_state, custom_mode) - 128usize];
+    ["Offset of field: wlr_output_state::gamma_lut"]
+        [::std::mem::offset_of!(wlr_output_state, gamma_lut) - 144usize];
+    ["Offset of field: wlr_output_state::gamma_lut_size"]
+        [::std::mem::offset_of!(wlr_output_state, gamma_lut_size) - 152usize];
     ["Offset of field: wlr_output_state::layers"]
-        [::std::mem::offset_of!(wlr_output_state, layers) - 144usize];
+        [::std::mem::offset_of!(wlr_output_state, layers) - 160usize];
     ["Offset of field: wlr_output_state::layers_len"]
-        [::std::mem::offset_of!(wlr_output_state, layers_len) - 152usize];
+        [::std::mem::offset_of!(wlr_output_state, layers_len) - 168usize];
     ["Offset of field: wlr_output_state::wait_timeline"]
-        [::std::mem::offset_of!(wlr_output_state, wait_timeline) - 160usize];
+        [::std::mem::offset_of!(wlr_output_state, wait_timeline) - 176usize];
     ["Offset of field: wlr_output_state::wait_point"]
-        [::std::mem::offset_of!(wlr_output_state, wait_point) - 168usize];
+        [::std::mem::offset_of!(wlr_output_state, wait_point) - 184usize];
     ["Offset of field: wlr_output_state::signal_timeline"]
-        [::std::mem::offset_of!(wlr_output_state, signal_timeline) - 176usize];
+        [::std::mem::offset_of!(wlr_output_state, signal_timeline) - 192usize];
     ["Offset of field: wlr_output_state::signal_point"]
-        [::std::mem::offset_of!(wlr_output_state, signal_point) - 184usize];
-    ["Offset of field: wlr_output_state::color_transform"]
-        [::std::mem::offset_of!(wlr_output_state, color_transform) - 192usize];
-    ["Offset of field: wlr_output_state::image_description"]
-        [::std::mem::offset_of!(wlr_output_state, image_description) - 200usize];
+        [::std::mem::offset_of!(wlr_output_state, signal_point) - 200usize];
 };
 #[doc = " A compositor output region. This typically corresponds to a monitor that\n displays part of the compositor space.\n\n The `frame` event will be emitted when it is a good time for the compositor\n to submit a new frame.\n\n To render a new frame compositors should call wlr_output_begin_render_pass(),\n perform rendering on that render pass, and finally call\n wlr_output_commit_state()."]
 #[repr(C)]
@@ -1581,21 +1303,17 @@ pub struct wlr_output {
     pub serial: *mut ::std::os::raw::c_char,
     pub phys_width: i32,
     pub phys_height: i32,
-    pub default_primaries: *const wlr_color_primaries,
     pub modes: wl_list,
     pub current_mode: *mut wlr_output_mode,
     pub width: i32,
     pub height: i32,
     pub refresh: i32,
-    pub supported_primaries: u32,
-    pub supported_transfer_functions: u32,
     pub enabled: bool,
     pub scale: f32,
     pub subpixel: wl_output_subpixel,
     pub transform: wl_output_transform,
     pub adaptive_sync_status: wlr_output_adaptive_sync_status,
     pub render_format: u32,
-    pub image_description: *const wlr_output_image_description,
     pub adaptive_sync_supported: bool,
     pub needs_frame: bool,
     pub frame_pending: bool,
@@ -1661,28 +1379,19 @@ const _: () = {
 #[repr(C)]
 pub struct wlr_output__bindgen_ty_2 {
     pub display_destroy: wl_listener,
-    pub image_description_value: wlr_output_image_description,
-    pub color_transform: *mut wlr_color_transform,
-    pub default_primaries_value: wlr_color_primaries,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_output__bindgen_ty_2"]
-        [::std::mem::size_of::<wlr_output__bindgen_ty_2>() - 136usize];
+        [::std::mem::size_of::<wlr_output__bindgen_ty_2>() - 24usize];
     ["Alignment of wlr_output__bindgen_ty_2"]
         [::std::mem::align_of::<wlr_output__bindgen_ty_2>() - 8usize];
     ["Offset of field: wlr_output__bindgen_ty_2::display_destroy"]
         [::std::mem::offset_of!(wlr_output__bindgen_ty_2, display_destroy) - 0usize];
-    ["Offset of field: wlr_output__bindgen_ty_2::image_description_value"]
-        [::std::mem::offset_of!(wlr_output__bindgen_ty_2, image_description_value) - 24usize];
-    ["Offset of field: wlr_output__bindgen_ty_2::color_transform"]
-        [::std::mem::offset_of!(wlr_output__bindgen_ty_2, color_transform) - 96usize];
-    ["Offset of field: wlr_output__bindgen_ty_2::default_primaries_value"]
-        [::std::mem::offset_of!(wlr_output__bindgen_ty_2, default_primaries_value) - 104usize];
 };
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_output"][::std::mem::size_of::<wlr_output>() - 624usize];
+    ["Size of wlr_output"][::std::mem::size_of::<wlr_output>() - 488usize];
     ["Alignment of wlr_output"][::std::mem::align_of::<wlr_output>() - 8usize];
     ["Offset of field: wlr_output::impl_"][::std::mem::offset_of!(wlr_output, impl_) - 0usize];
     ["Offset of field: wlr_output::backend"][::std::mem::offset_of!(wlr_output, backend) - 8usize];
@@ -1701,70 +1410,62 @@ const _: () = {
         [::std::mem::offset_of!(wlr_output, phys_width) - 88usize];
     ["Offset of field: wlr_output::phys_height"]
         [::std::mem::offset_of!(wlr_output, phys_height) - 92usize];
-    ["Offset of field: wlr_output::default_primaries"]
-        [::std::mem::offset_of!(wlr_output, default_primaries) - 96usize];
-    ["Offset of field: wlr_output::modes"][::std::mem::offset_of!(wlr_output, modes) - 104usize];
+    ["Offset of field: wlr_output::modes"][::std::mem::offset_of!(wlr_output, modes) - 96usize];
     ["Offset of field: wlr_output::current_mode"]
-        [::std::mem::offset_of!(wlr_output, current_mode) - 120usize];
-    ["Offset of field: wlr_output::width"][::std::mem::offset_of!(wlr_output, width) - 128usize];
-    ["Offset of field: wlr_output::height"][::std::mem::offset_of!(wlr_output, height) - 132usize];
+        [::std::mem::offset_of!(wlr_output, current_mode) - 112usize];
+    ["Offset of field: wlr_output::width"][::std::mem::offset_of!(wlr_output, width) - 120usize];
+    ["Offset of field: wlr_output::height"][::std::mem::offset_of!(wlr_output, height) - 124usize];
     ["Offset of field: wlr_output::refresh"]
-        [::std::mem::offset_of!(wlr_output, refresh) - 136usize];
-    ["Offset of field: wlr_output::supported_primaries"]
-        [::std::mem::offset_of!(wlr_output, supported_primaries) - 140usize];
-    ["Offset of field: wlr_output::supported_transfer_functions"]
-        [::std::mem::offset_of!(wlr_output, supported_transfer_functions) - 144usize];
+        [::std::mem::offset_of!(wlr_output, refresh) - 128usize];
     ["Offset of field: wlr_output::enabled"]
-        [::std::mem::offset_of!(wlr_output, enabled) - 148usize];
-    ["Offset of field: wlr_output::scale"][::std::mem::offset_of!(wlr_output, scale) - 152usize];
+        [::std::mem::offset_of!(wlr_output, enabled) - 132usize];
+    ["Offset of field: wlr_output::scale"][::std::mem::offset_of!(wlr_output, scale) - 136usize];
     ["Offset of field: wlr_output::subpixel"]
-        [::std::mem::offset_of!(wlr_output, subpixel) - 156usize];
+        [::std::mem::offset_of!(wlr_output, subpixel) - 140usize];
     ["Offset of field: wlr_output::transform"]
-        [::std::mem::offset_of!(wlr_output, transform) - 160usize];
+        [::std::mem::offset_of!(wlr_output, transform) - 144usize];
     ["Offset of field: wlr_output::adaptive_sync_status"]
-        [::std::mem::offset_of!(wlr_output, adaptive_sync_status) - 164usize];
+        [::std::mem::offset_of!(wlr_output, adaptive_sync_status) - 148usize];
     ["Offset of field: wlr_output::render_format"]
-        [::std::mem::offset_of!(wlr_output, render_format) - 168usize];
-    ["Offset of field: wlr_output::image_description"]
-        [::std::mem::offset_of!(wlr_output, image_description) - 176usize];
+        [::std::mem::offset_of!(wlr_output, render_format) - 152usize];
     ["Offset of field: wlr_output::adaptive_sync_supported"]
-        [::std::mem::offset_of!(wlr_output, adaptive_sync_supported) - 184usize];
+        [::std::mem::offset_of!(wlr_output, adaptive_sync_supported) - 156usize];
     ["Offset of field: wlr_output::needs_frame"]
-        [::std::mem::offset_of!(wlr_output, needs_frame) - 185usize];
+        [::std::mem::offset_of!(wlr_output, needs_frame) - 157usize];
     ["Offset of field: wlr_output::frame_pending"]
-        [::std::mem::offset_of!(wlr_output, frame_pending) - 186usize];
+        [::std::mem::offset_of!(wlr_output, frame_pending) - 158usize];
     ["Offset of field: wlr_output::non_desktop"]
-        [::std::mem::offset_of!(wlr_output, non_desktop) - 187usize];
+        [::std::mem::offset_of!(wlr_output, non_desktop) - 159usize];
     ["Offset of field: wlr_output::commit_seq"]
-        [::std::mem::offset_of!(wlr_output, commit_seq) - 188usize];
-    ["Offset of field: wlr_output::events"][::std::mem::offset_of!(wlr_output, events) - 192usize];
+        [::std::mem::offset_of!(wlr_output, commit_seq) - 160usize];
+    ["Offset of field: wlr_output::events"][::std::mem::offset_of!(wlr_output, events) - 168usize];
     ["Offset of field: wlr_output::idle_frame"]
-        [::std::mem::offset_of!(wlr_output, idle_frame) - 352usize];
+        [::std::mem::offset_of!(wlr_output, idle_frame) - 328usize];
     ["Offset of field: wlr_output::idle_done"]
-        [::std::mem::offset_of!(wlr_output, idle_done) - 360usize];
+        [::std::mem::offset_of!(wlr_output, idle_done) - 336usize];
     ["Offset of field: wlr_output::attach_render_locks"]
-        [::std::mem::offset_of!(wlr_output, attach_render_locks) - 368usize];
+        [::std::mem::offset_of!(wlr_output, attach_render_locks) - 344usize];
     ["Offset of field: wlr_output::cursors"]
-        [::std::mem::offset_of!(wlr_output, cursors) - 376usize];
+        [::std::mem::offset_of!(wlr_output, cursors) - 352usize];
     ["Offset of field: wlr_output::hardware_cursor"]
-        [::std::mem::offset_of!(wlr_output, hardware_cursor) - 392usize];
+        [::std::mem::offset_of!(wlr_output, hardware_cursor) - 368usize];
     ["Offset of field: wlr_output::cursor_swapchain"]
-        [::std::mem::offset_of!(wlr_output, cursor_swapchain) - 400usize];
+        [::std::mem::offset_of!(wlr_output, cursor_swapchain) - 376usize];
     ["Offset of field: wlr_output::cursor_front_buffer"]
-        [::std::mem::offset_of!(wlr_output, cursor_front_buffer) - 408usize];
+        [::std::mem::offset_of!(wlr_output, cursor_front_buffer) - 384usize];
     ["Offset of field: wlr_output::software_cursor_locks"]
-        [::std::mem::offset_of!(wlr_output, software_cursor_locks) - 416usize];
-    ["Offset of field: wlr_output::layers"][::std::mem::offset_of!(wlr_output, layers) - 424usize];
+        [::std::mem::offset_of!(wlr_output, software_cursor_locks) - 392usize];
+    ["Offset of field: wlr_output::layers"][::std::mem::offset_of!(wlr_output, layers) - 400usize];
     ["Offset of field: wlr_output::allocator"]
-        [::std::mem::offset_of!(wlr_output, allocator) - 440usize];
+        [::std::mem::offset_of!(wlr_output, allocator) - 416usize];
     ["Offset of field: wlr_output::renderer"]
-        [::std::mem::offset_of!(wlr_output, renderer) - 448usize];
+        [::std::mem::offset_of!(wlr_output, renderer) - 424usize];
     ["Offset of field: wlr_output::swapchain"]
-        [::std::mem::offset_of!(wlr_output, swapchain) - 456usize];
-    ["Offset of field: wlr_output::addons"][::std::mem::offset_of!(wlr_output, addons) - 464usize];
-    ["Offset of field: wlr_output::data"][::std::mem::offset_of!(wlr_output, data) - 480usize];
+        [::std::mem::offset_of!(wlr_output, swapchain) - 432usize];
+    ["Offset of field: wlr_output::addons"][::std::mem::offset_of!(wlr_output, addons) - 440usize];
+    ["Offset of field: wlr_output::data"][::std::mem::offset_of!(wlr_output, data) - 456usize];
     ["Offset of field: wlr_output::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_output, WLR_PRIVATE) - 488usize];
+        [::std::mem::offset_of!(wlr_output, WLR_PRIVATE) - 464usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -1786,13 +1487,13 @@ const _: () = {
 #[derive(Debug, Copy, Clone)]
 pub struct wlr_output_event_precommit {
     pub output: *mut wlr_output,
-    pub when: timespec,
+    pub when: *mut timespec,
     pub state: *const wlr_output_state,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_output_event_precommit"]
-        [::std::mem::size_of::<wlr_output_event_precommit>() - 32usize];
+        [::std::mem::size_of::<wlr_output_event_precommit>() - 24usize];
     ["Alignment of wlr_output_event_precommit"]
         [::std::mem::align_of::<wlr_output_event_precommit>() - 8usize];
     ["Offset of field: wlr_output_event_precommit::output"]
@@ -1800,18 +1501,18 @@ const _: () = {
     ["Offset of field: wlr_output_event_precommit::when"]
         [::std::mem::offset_of!(wlr_output_event_precommit, when) - 8usize];
     ["Offset of field: wlr_output_event_precommit::state"]
-        [::std::mem::offset_of!(wlr_output_event_precommit, state) - 24usize];
+        [::std::mem::offset_of!(wlr_output_event_precommit, state) - 16usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct wlr_output_event_commit {
     pub output: *mut wlr_output,
-    pub when: timespec,
+    pub when: *mut timespec,
     pub state: *const wlr_output_state,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_output_event_commit"][::std::mem::size_of::<wlr_output_event_commit>() - 32usize];
+    ["Size of wlr_output_event_commit"][::std::mem::size_of::<wlr_output_event_commit>() - 24usize];
     ["Alignment of wlr_output_event_commit"]
         [::std::mem::align_of::<wlr_output_event_commit>() - 8usize];
     ["Offset of field: wlr_output_event_commit::output"]
@@ -1819,7 +1520,7 @@ const _: () = {
     ["Offset of field: wlr_output_event_commit::when"]
         [::std::mem::offset_of!(wlr_output_event_commit, when) - 8usize];
     ["Offset of field: wlr_output_event_commit::state"]
-        [::std::mem::offset_of!(wlr_output_event_commit, state) - 24usize];
+        [::std::mem::offset_of!(wlr_output_event_commit, state) - 16usize];
 };
 impl wlr_output_present_flag {
     pub const WLR_OUTPUT_PRESENT_VSYNC: wlr_output_present_flag = wlr_output_present_flag(1);
@@ -2065,6 +1766,16 @@ unsafe extern "C" {
     pub fn wlr_output_state_set_buffer(state: *mut wlr_output_state, buffer: *mut wlr_buffer);
 }
 unsafe extern "C" {
+    #[doc = " Sets the gamma table for an output. `r`, `g` and `b` are gamma ramps for\n red, green and blue. `size` is the length of the ramps and must not exceed\n the value returned by wlr_output_get_gamma_size().\n\n Providing zero-sized ramps resets the gamma table.\n\n This state will be applied once wlr_output_commit_state() is called."]
+    pub fn wlr_output_state_set_gamma_lut(
+        state: *mut wlr_output_state,
+        ramp_size: usize,
+        r: *const u16,
+        g: *const u16,
+        b: *const u16,
+    ) -> bool;
+}
+unsafe extern "C" {
     #[doc = " Sets the damage region for an output. This is used as a hint to the backend\n and can be used to reduce power consumption or increase performance on some\n devices.\n\n This should be called in along with wlr_output_state_set_buffer().\n This state will be applied once wlr_output_commit_state() is called."]
     pub fn wlr_output_state_set_damage(
         state: *mut wlr_output_state,
@@ -2094,20 +1805,6 @@ unsafe extern "C" {
         timeline: *mut wlr_drm_syncobj_timeline,
         dst_point: u64,
     );
-}
-unsafe extern "C" {
-    #[doc = " Set the color transform for an output.\n\n The color transform is applied after blending output layers."]
-    pub fn wlr_output_state_set_color_transform(
-        state: *mut wlr_output_state,
-        tr: *mut wlr_color_transform,
-    );
-}
-unsafe extern "C" {
-    #[doc = " Set the colorimetry image description."]
-    pub fn wlr_output_state_set_image_description(
-        state: *mut wlr_output_state,
-        image_desc: *const wlr_output_image_description,
-    ) -> bool;
 }
 unsafe extern "C" {
     #[doc = " Copies the output state from src to dst. It is safe to then\n wlr_output_state_finish() src and have dst still be valid.\n\n Note: The lifetime of the output layers inside the state are not managed. It\n is the responsibility of the constructor of the output layers to make sure\n they remain valid for the output state and all copies made."]
@@ -2619,12 +2316,6 @@ unsafe extern "C" {
     pub fn wlr_libinput_get_device_handle(dev: *mut wlr_input_device) -> *mut libinput_device;
 }
 unsafe extern "C" {
-    #[doc = " Gets the underlying struct libinput_tablet_tool handle for the given tablet tool."]
-    pub fn wlr_libinput_get_tablet_tool_handle(
-        wlr_tablet_tool: *mut wlr_tablet_tool,
-    ) -> *mut libinput_tablet_tool;
-}
-unsafe extern "C" {
     pub fn wlr_backend_is_libinput(backend: *mut wlr_backend) -> bool;
 }
 unsafe extern "C" {
@@ -3067,141 +2758,6 @@ const _: () = {
         WLR_PRIVATE
     ) - 8usize];
 };
-#[doc = " Interface exposing one screen capture source per foreign toplevel."]
-#[repr(C)]
-pub struct wlr_ext_foreign_toplevel_image_capture_source_manager_v1 {
-    pub global: *mut wl_global,
-    pub events: wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_1,
-    pub WLR_PRIVATE: wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_2,
-}
-#[repr(C)]
-pub struct wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_1 {
-    pub destroy: wl_signal,
-    pub new_request: wl_signal,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_1"]
-        [::std::mem::size_of::<
-            wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_1,
-        >() - 32usize];
-    ["Alignment of wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_1"]
-        [::std::mem::align_of::<
-            wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_1,
-        >() - 8usize];
-    [
-        "Offset of field: wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_1::destroy",
-    ][::std::mem::offset_of!(
-        wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_1,
-        destroy
-    ) - 0usize];
-    [
-        "Offset of field: wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_1::new_request",
-    ][::std::mem::offset_of!(
-        wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_1,
-        new_request
-    ) - 16usize];
-};
-#[repr(C)]
-pub struct wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_2 {
-    pub display_destroy: wl_listener,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_2"]
-        [::std::mem::size_of::<
-            wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_2,
-        >() - 24usize];
-    ["Alignment of wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_2"]
-        [::std::mem::align_of::<
-            wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_2,
-        >() - 8usize];
-    [
-        "Offset of field: wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_2::display_destroy",
-    ][::std::mem::offset_of!(
-        wlr_ext_foreign_toplevel_image_capture_source_manager_v1__bindgen_ty_2,
-        display_destroy
-    ) - 0usize];
-};
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_foreign_toplevel_image_capture_source_manager_v1"][::std::mem::size_of::<
-        wlr_ext_foreign_toplevel_image_capture_source_manager_v1,
-    >() - 64usize];
-    ["Alignment of wlr_ext_foreign_toplevel_image_capture_source_manager_v1"][::std::mem::align_of::<
-        wlr_ext_foreign_toplevel_image_capture_source_manager_v1,
-    >() - 8usize];
-    ["Offset of field: wlr_ext_foreign_toplevel_image_capture_source_manager_v1::global"][::std::mem::offset_of!(
-        wlr_ext_foreign_toplevel_image_capture_source_manager_v1,
-        global
-    )
-        - 0usize];
-    ["Offset of field: wlr_ext_foreign_toplevel_image_capture_source_manager_v1::events"][::std::mem::offset_of!(
-        wlr_ext_foreign_toplevel_image_capture_source_manager_v1,
-        events
-    )
-        - 8usize];
-    ["Offset of field: wlr_ext_foreign_toplevel_image_capture_source_manager_v1::WLR_PRIVATE"][::std::mem::offset_of!(
-        wlr_ext_foreign_toplevel_image_capture_source_manager_v1,
-        WLR_PRIVATE
-    )
-        - 40usize];
-};
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request {
-    pub toplevel_handle: *mut wlr_ext_foreign_toplevel_handle_v1,
-    pub client: *mut wl_client,
-    pub WLR_PRIVATE: wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request__bindgen_ty_1,
-}
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request__bindgen_ty_1 {
-    pub new_id: u32,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request__bindgen_ty_1"]
-        [::std::mem::size_of::<
-            wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request__bindgen_ty_1,
-        >() - 4usize];
-    ["Alignment of wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request__bindgen_ty_1"]
-        [::std::mem::align_of::<
-            wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request__bindgen_ty_1,
-        >() - 4usize];
-    [
-        "Offset of field: wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request__bindgen_ty_1::new_id",
-    ][::std::mem::offset_of!(
-        wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request__bindgen_ty_1,
-        new_id
-    ) - 0usize];
-};
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request"][::std::mem::size_of::<
-        wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request,
-    >() - 24usize];
-    ["Alignment of wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request"]
-        [::std::mem::align_of::<wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request>(
-        ) - 8usize];
-    [
-        "Offset of field: wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request::toplevel_handle",
-    ][::std::mem::offset_of!(
-        wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request,
-        toplevel_handle
-    ) - 0usize];
-    ["Offset of field: wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request::client"][::std::mem::offset_of!(
-        wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request,
-        client
-    )
-        - 8usize];
-    [
-        "Offset of field: wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request::WLR_PRIVATE",
-    ][::std::mem::offset_of!(
-        wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request,
-        WLR_PRIVATE
-    ) - 16usize];
-};
 unsafe extern "C" {
     #[doc = " Obtain a struct wlr_ext_image_capture_source_v1 from an ext_image_capture_source_v1\n resource.\n\n Asserts that the resource has the correct type. Returns NULL if the resource\n is inert."]
     pub fn wlr_ext_image_capture_source_v1_from_resource(
@@ -3214,32 +2770,6 @@ unsafe extern "C" {
         version: u32,
     ) -> *mut wlr_ext_output_image_capture_source_manager_v1;
 }
-unsafe extern "C" {
-    pub fn wlr_ext_foreign_toplevel_image_capture_source_manager_v1_create(
-        display: *mut wl_display,
-        version: u32,
-    ) -> *mut wlr_ext_foreign_toplevel_image_capture_source_manager_v1;
-}
-unsafe extern "C" {
-    pub fn wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request_accept(
-        request: *mut wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request,
-        source: *mut wlr_ext_image_capture_source_v1,
-    ) -> bool;
-}
-unsafe extern "C" {
-    pub fn wlr_ext_image_capture_source_v1_create_with_scene_node(
-        node: *mut wlr_scene_node,
-        event_loop: *mut wl_event_loop,
-        allocator: *mut wlr_allocator,
-        renderer: *mut wlr_renderer,
-    ) -> *mut wlr_ext_image_capture_source_v1;
-}
-unsafe extern "C" {
-    #[doc = " Returns the corresponding wlr_output for a image capture source\n managed by wlr_ext_output_image_capture_source_manager_v1\n or NULL if the image capture source is not managed by\n wlr_ext_output_image_capture_source_manager_v1."]
-    pub fn wlr_output_try_from_ext_image_capture_source_v1(
-        source: *mut wlr_ext_image_capture_source_v1,
-    ) -> *mut wlr_output;
-}
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct wlr_ext_image_capture_source_v1_interface {
@@ -3248,9 +2778,8 @@ pub struct wlr_ext_image_capture_source_v1_interface {
     >,
     pub stop:
         ::std::option::Option<unsafe extern "C" fn(source: *mut wlr_ext_image_capture_source_v1)>,
-    pub request_frame: ::std::option::Option<
-        unsafe extern "C" fn(source: *mut wlr_ext_image_capture_source_v1, schedule_frame: bool),
-    >,
+    pub schedule_frame:
+        ::std::option::Option<unsafe extern "C" fn(source: *mut wlr_ext_image_capture_source_v1)>,
     pub copy_frame: ::std::option::Option<
         unsafe extern "C" fn(
             source: *mut wlr_ext_image_capture_source_v1,
@@ -3275,9 +2804,9 @@ const _: () = {
         [::std::mem::offset_of!(wlr_ext_image_capture_source_v1_interface, start) - 0usize];
     ["Offset of field: wlr_ext_image_capture_source_v1_interface::stop"]
         [::std::mem::offset_of!(wlr_ext_image_capture_source_v1_interface, stop) - 8usize];
-    ["Offset of field: wlr_ext_image_capture_source_v1_interface::request_frame"][::std::mem::offset_of!(
+    ["Offset of field: wlr_ext_image_capture_source_v1_interface::schedule_frame"][::std::mem::offset_of!(
         wlr_ext_image_capture_source_v1_interface,
-        request_frame
+        schedule_frame
     ) - 16usize];
     ["Offset of field: wlr_ext_image_capture_source_v1_interface::copy_frame"]
         [::std::mem::offset_of!(wlr_ext_image_capture_source_v1_interface, copy_frame) - 24usize];
@@ -3377,8 +2906,6 @@ impl wlr_keyboard_led {
     pub const WLR_LED_NUM_LOCK: wlr_keyboard_led = wlr_keyboard_led(1);
     pub const WLR_LED_CAPS_LOCK: wlr_keyboard_led = wlr_keyboard_led(2);
     pub const WLR_LED_SCROLL_LOCK: wlr_keyboard_led = wlr_keyboard_led(4);
-    pub const WLR_LED_COMPOSE: wlr_keyboard_led = wlr_keyboard_led(8);
-    pub const WLR_LED_KANA: wlr_keyboard_led = wlr_keyboard_led(16);
 }
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
@@ -3427,7 +2954,7 @@ pub struct wlr_keyboard {
     pub keymap_fd: ::std::os::raw::c_int,
     pub keymap: *mut xkb_keymap,
     pub xkb_state: *mut xkb_state,
-    pub led_indexes: [xkb_led_index_t; 5usize],
+    pub led_indexes: [xkb_led_index_t; 3usize],
     pub mod_indexes: [xkb_mod_index_t; 8usize],
     pub leds: u32,
     pub keycodes: [u32; 32usize],
@@ -3480,7 +3007,7 @@ const _: () = {
 };
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_keyboard"][::std::mem::size_of::<wlr_keyboard>() - 384usize];
+    ["Size of wlr_keyboard"][::std::mem::size_of::<wlr_keyboard>() - 376usize];
     ["Alignment of wlr_keyboard"][::std::mem::align_of::<wlr_keyboard>() - 8usize];
     ["Offset of field: wlr_keyboard::base"][::std::mem::offset_of!(wlr_keyboard, base) - 0usize];
     ["Offset of field: wlr_keyboard::impl_"][::std::mem::offset_of!(wlr_keyboard, impl_) - 40usize];
@@ -3498,19 +3025,19 @@ const _: () = {
     ["Offset of field: wlr_keyboard::led_indexes"]
         [::std::mem::offset_of!(wlr_keyboard, led_indexes) - 96usize];
     ["Offset of field: wlr_keyboard::mod_indexes"]
-        [::std::mem::offset_of!(wlr_keyboard, mod_indexes) - 116usize];
-    ["Offset of field: wlr_keyboard::leds"][::std::mem::offset_of!(wlr_keyboard, leds) - 148usize];
+        [::std::mem::offset_of!(wlr_keyboard, mod_indexes) - 108usize];
+    ["Offset of field: wlr_keyboard::leds"][::std::mem::offset_of!(wlr_keyboard, leds) - 140usize];
     ["Offset of field: wlr_keyboard::keycodes"]
-        [::std::mem::offset_of!(wlr_keyboard, keycodes) - 152usize];
+        [::std::mem::offset_of!(wlr_keyboard, keycodes) - 144usize];
     ["Offset of field: wlr_keyboard::num_keycodes"]
-        [::std::mem::offset_of!(wlr_keyboard, num_keycodes) - 280usize];
+        [::std::mem::offset_of!(wlr_keyboard, num_keycodes) - 272usize];
     ["Offset of field: wlr_keyboard::modifiers"]
-        [::std::mem::offset_of!(wlr_keyboard, modifiers) - 288usize];
+        [::std::mem::offset_of!(wlr_keyboard, modifiers) - 280usize];
     ["Offset of field: wlr_keyboard::repeat_info"]
-        [::std::mem::offset_of!(wlr_keyboard, repeat_info) - 304usize];
+        [::std::mem::offset_of!(wlr_keyboard, repeat_info) - 296usize];
     ["Offset of field: wlr_keyboard::events"]
-        [::std::mem::offset_of!(wlr_keyboard, events) - 312usize];
-    ["Offset of field: wlr_keyboard::data"][::std::mem::offset_of!(wlr_keyboard, data) - 376usize];
+        [::std::mem::offset_of!(wlr_keyboard, events) - 304usize];
+    ["Offset of field: wlr_keyboard::data"][::std::mem::offset_of!(wlr_keyboard, data) - 368usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -4157,7 +3684,6 @@ const _: () = {
 impl wlr_switch_type {
     pub const WLR_SWITCH_TYPE_LID: wlr_switch_type = wlr_switch_type(0);
     pub const WLR_SWITCH_TYPE_TABLET_MODE: wlr_switch_type = wlr_switch_type(1);
-    pub const WLR_SWITCH_TYPE_KEYPAD_SLIDE: wlr_switch_type = wlr_switch_type(2);
 }
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
@@ -4990,6 +4516,108 @@ unsafe extern "C" {
         format: *const wlr_drm_format,
     ) -> *mut wlr_buffer;
 }
+impl wlr_color_named_primaries {
+    pub const WLR_COLOR_NAMED_PRIMARIES_SRGB: wlr_color_named_primaries =
+        wlr_color_named_primaries(1);
+    pub const WLR_COLOR_NAMED_PRIMARIES_BT2020: wlr_color_named_primaries =
+        wlr_color_named_primaries(2);
+}
+#[repr(transparent)]
+#[doc = " Well-known color primaries."]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub struct wlr_color_named_primaries(pub ::std::os::raw::c_uint);
+impl wlr_color_transfer_function {
+    pub const WLR_COLOR_TRANSFER_FUNCTION_SRGB: wlr_color_transfer_function =
+        wlr_color_transfer_function(1);
+    pub const WLR_COLOR_TRANSFER_FUNCTION_ST2084_PQ: wlr_color_transfer_function =
+        wlr_color_transfer_function(2);
+}
+#[repr(transparent)]
+#[doc = " Well-known color transfer functions."]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub struct wlr_color_transfer_function(pub ::std::os::raw::c_uint);
+#[doc = " CIE 1931 xy chromaticity coordinates."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct wlr_color_cie1931_xy {
+    pub x: f32,
+    pub y: f32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of wlr_color_cie1931_xy"][::std::mem::size_of::<wlr_color_cie1931_xy>() - 8usize];
+    ["Alignment of wlr_color_cie1931_xy"][::std::mem::align_of::<wlr_color_cie1931_xy>() - 4usize];
+    ["Offset of field: wlr_color_cie1931_xy::x"]
+        [::std::mem::offset_of!(wlr_color_cie1931_xy, x) - 0usize];
+    ["Offset of field: wlr_color_cie1931_xy::y"]
+        [::std::mem::offset_of!(wlr_color_cie1931_xy, y) - 4usize];
+};
+#[doc = " Color primaries and white point describing a color volume."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct wlr_color_primaries {
+    pub red: wlr_color_cie1931_xy,
+    pub green: wlr_color_cie1931_xy,
+    pub blue: wlr_color_cie1931_xy,
+    pub white: wlr_color_cie1931_xy,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of wlr_color_primaries"][::std::mem::size_of::<wlr_color_primaries>() - 32usize];
+    ["Alignment of wlr_color_primaries"][::std::mem::align_of::<wlr_color_primaries>() - 4usize];
+    ["Offset of field: wlr_color_primaries::red"]
+        [::std::mem::offset_of!(wlr_color_primaries, red) - 0usize];
+    ["Offset of field: wlr_color_primaries::green"]
+        [::std::mem::offset_of!(wlr_color_primaries, green) - 8usize];
+    ["Offset of field: wlr_color_primaries::blue"]
+        [::std::mem::offset_of!(wlr_color_primaries, blue) - 16usize];
+    ["Offset of field: wlr_color_primaries::white"]
+        [::std::mem::offset_of!(wlr_color_primaries, white) - 24usize];
+};
+#[doc = " Luminance range and reference white luminance level, in cd/m²."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct wlr_color_luminances {
+    pub min: f32,
+    pub max: f32,
+    pub reference: f32,
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of wlr_color_luminances"][::std::mem::size_of::<wlr_color_luminances>() - 12usize];
+    ["Alignment of wlr_color_luminances"][::std::mem::align_of::<wlr_color_luminances>() - 4usize];
+    ["Offset of field: wlr_color_luminances::min"]
+        [::std::mem::offset_of!(wlr_color_luminances, min) - 0usize];
+    ["Offset of field: wlr_color_luminances::max"]
+        [::std::mem::offset_of!(wlr_color_luminances, max) - 4usize];
+    ["Offset of field: wlr_color_luminances::reference"]
+        [::std::mem::offset_of!(wlr_color_luminances, reference) - 8usize];
+};
+#[doc = " A color transformation formula, which maps a linear color space with\n sRGB primaries to an output color space.\n\n For ease of use, this type is heap allocated and reference counted.\n Use wlr_color_transform_ref()/wlr_color_transform_unref(). The initial reference\n count after creation is 1.\n\n Color transforms are immutable; their type/parameters should not be changed,\n and this API provides no functions to modify them after creation.\n\n This formula may be implemented using a 3d look-up table, or some other\n means."]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct wlr_color_transform {
+    _unused: [u8; 0],
+}
+unsafe extern "C" {
+    #[doc = " Initialize a color transformation to convert linear\n (with sRGB(?) primaries) to an ICC profile. Returns NULL on failure."]
+    pub fn wlr_color_transform_init_linear_to_icc(
+        data: *const ::std::os::raw::c_void,
+        size: usize,
+    ) -> *mut wlr_color_transform;
+}
+unsafe extern "C" {
+    #[doc = " Initialize a color transformation to apply sRGB encoding.\n Returns NULL on failure."]
+    pub fn wlr_color_transform_init_srgb() -> *mut wlr_color_transform;
+}
+unsafe extern "C" {
+    #[doc = " Increase the reference count of the color transform by 1."]
+    pub fn wlr_color_transform_ref(tr: *mut wlr_color_transform) -> *mut wlr_color_transform;
+}
+unsafe extern "C" {
+    #[doc = " Reduce the reference count of the color transform by 1; freeing it and\n all associated resources when the reference count hits zero."]
+    pub fn wlr_color_transform_unref(tr: *mut wlr_color_transform);
+}
 #[doc = " A synchronization timeline.\n\n Timelines are used to synchronize accesses to buffers. Given a producer\n (writing contents to a buffer) and a consumer (reading from the buffer), the\n compositor needs to synchronize back-and-forth between these two users. The\n consumer needs to wait for the producer to signal that they're done with the\n writes, and the producer needs to wait for the consumer to signal that\n they're done with the reads.\n\n Timelines provide synchronization points in the form of monotonically\n increasing 64-bit integer values.\n\n wlroots timelines are designed after Vulkan timeline semaphores. For more\n information on the Vulkan APIs, see:\n https://www.khronos.org/blog/vulkan-timeline-semaphores\n\n wlroots timelines are powered by DRM synchronization objects (drm_syncobj):\n https://dri.freedesktop.org/docs/drm/gpu/drm-mm.html#drm-sync-objects"]
 #[repr(C)]
 pub struct wlr_drm_syncobj_timeline {
@@ -5110,13 +4738,6 @@ unsafe extern "C" {
         point: u64,
         flags: u32,
         result: *mut bool,
-    ) -> bool;
-}
-unsafe extern "C" {
-    #[doc = " Signals a timeline point."]
-    pub fn wlr_drm_syncobj_timeline_signal(
-        timeline: *mut wlr_drm_syncobj_timeline,
-        point: u64,
     ) -> bool;
 }
 unsafe extern "C" {
@@ -5545,6 +5166,12 @@ unsafe extern "C" {
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct VkImage_T {
+    _unused: [u8; 0],
+}
+pub type VkImage = *mut VkImage_T;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct VkInstance_T {
     _unused: [u8; 0],
 }
@@ -5561,12 +5188,66 @@ pub struct VkDevice_T {
     _unused: [u8; 0],
 }
 pub type VkDevice = *mut VkDevice_T;
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct VkImage_T {
-    _unused: [u8; 0],
+impl VkImageLayout {
+    pub const VK_IMAGE_LAYOUT_UNDEFINED: VkImageLayout = VkImageLayout(0);
+    pub const VK_IMAGE_LAYOUT_GENERAL: VkImageLayout = VkImageLayout(1);
+    pub const VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: VkImageLayout = VkImageLayout(2);
+    pub const VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL: VkImageLayout = VkImageLayout(3);
+    pub const VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL: VkImageLayout = VkImageLayout(4);
+    pub const VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: VkImageLayout = VkImageLayout(5);
+    pub const VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: VkImageLayout = VkImageLayout(6);
+    pub const VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: VkImageLayout = VkImageLayout(7);
+    pub const VK_IMAGE_LAYOUT_PREINITIALIZED: VkImageLayout = VkImageLayout(8);
+    pub const VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL: VkImageLayout =
+        VkImageLayout(1000117000);
+    pub const VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL: VkImageLayout =
+        VkImageLayout(1000117001);
+    pub const VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL: VkImageLayout = VkImageLayout(1000241000);
+    pub const VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL: VkImageLayout = VkImageLayout(1000241001);
+    pub const VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL: VkImageLayout = VkImageLayout(1000241002);
+    pub const VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL: VkImageLayout = VkImageLayout(1000241003);
+    pub const VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL: VkImageLayout = VkImageLayout(1000314000);
+    pub const VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL: VkImageLayout = VkImageLayout(1000314001);
+    pub const VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ: VkImageLayout = VkImageLayout(1000232000);
+    pub const VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: VkImageLayout = VkImageLayout(1000001002);
+    pub const VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR: VkImageLayout = VkImageLayout(1000024000);
+    pub const VK_IMAGE_LAYOUT_VIDEO_DECODE_SRC_KHR: VkImageLayout = VkImageLayout(1000024001);
+    pub const VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR: VkImageLayout = VkImageLayout(1000024002);
+    pub const VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR: VkImageLayout = VkImageLayout(1000111000);
+    pub const VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT: VkImageLayout =
+        VkImageLayout(1000218000);
+    pub const VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR: VkImageLayout =
+        VkImageLayout(1000164003);
+    pub const VK_IMAGE_LAYOUT_VIDEO_ENCODE_DST_KHR: VkImageLayout = VkImageLayout(1000299000);
+    pub const VK_IMAGE_LAYOUT_VIDEO_ENCODE_SRC_KHR: VkImageLayout = VkImageLayout(1000299001);
+    pub const VK_IMAGE_LAYOUT_VIDEO_ENCODE_DPB_KHR: VkImageLayout = VkImageLayout(1000299002);
+    pub const VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT: VkImageLayout =
+        VkImageLayout(1000339000);
+    pub const VK_IMAGE_LAYOUT_TENSOR_ALIASING_ARM: VkImageLayout = VkImageLayout(1000460000);
+    pub const VK_IMAGE_LAYOUT_VIDEO_ENCODE_QUANTIZATION_MAP_KHR: VkImageLayout =
+        VkImageLayout(1000553000);
+    pub const VK_IMAGE_LAYOUT_ZERO_INITIALIZED_EXT: VkImageLayout = VkImageLayout(1000620000);
+    pub const VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL_KHR: VkImageLayout =
+        VkImageLayout(1000117000);
+    pub const VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL_KHR: VkImageLayout =
+        VkImageLayout(1000117001);
+    pub const VK_IMAGE_LAYOUT_SHADING_RATE_OPTIMAL_NV: VkImageLayout = VkImageLayout(1000164003);
+    pub const VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ_KHR: VkImageLayout = VkImageLayout(1000232000);
+    pub const VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL_KHR: VkImageLayout =
+        VkImageLayout(1000241000);
+    pub const VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL_KHR: VkImageLayout =
+        VkImageLayout(1000241001);
+    pub const VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL_KHR: VkImageLayout =
+        VkImageLayout(1000241002);
+    pub const VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL_KHR: VkImageLayout =
+        VkImageLayout(1000241003);
+    pub const VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL_KHR: VkImageLayout = VkImageLayout(1000314000);
+    pub const VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL_KHR: VkImageLayout = VkImageLayout(1000314001);
+    pub const VK_IMAGE_LAYOUT_MAX_ENUM: VkImageLayout = VkImageLayout(2147483647);
 }
-pub type VkImage = *mut VkImage_T;
+#[repr(transparent)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub struct VkImageLayout(pub ::std::os::raw::c_uint);
 impl VkFormat {
     pub const VK_FORMAT_UNDEFINED: VkFormat = VkFormat(0);
     pub const VK_FORMAT_R4G4_UNORM_PACK8: VkFormat = VkFormat(1);
@@ -5848,9 +5529,6 @@ impl VkFormat {
     pub const VK_FORMAT_ASTC_6x6x6_SRGB_BLOCK_EXT: VkFormat = VkFormat(1000288028);
     pub const VK_FORMAT_ASTC_6x6x6_SFLOAT_BLOCK_EXT: VkFormat = VkFormat(1000288029);
     pub const VK_FORMAT_R8_BOOL_ARM: VkFormat = VkFormat(1000460000);
-    pub const VK_FORMAT_R16_SFLOAT_FPENCODING_BFLOAT16_ARM: VkFormat = VkFormat(1000460001);
-    pub const VK_FORMAT_R8_SFLOAT_FPENCODING_FLOAT8E4M3_ARM: VkFormat = VkFormat(1000460002);
-    pub const VK_FORMAT_R8_SFLOAT_FPENCODING_FLOAT8E5M2_ARM: VkFormat = VkFormat(1000460003);
     pub const VK_FORMAT_R16G16_SFIXED5_NV: VkFormat = VkFormat(1000464000);
     pub const VK_FORMAT_R10X6_UINT_PACK16_ARM: VkFormat = VkFormat(1000609000);
     pub const VK_FORMAT_R10X6G10X6_UINT_2PACK16_ARM: VkFormat = VkFormat(1000609001);
@@ -5942,66 +5620,6 @@ impl VkFormat {
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct VkFormat(pub ::std::os::raw::c_uint);
-impl VkImageLayout {
-    pub const VK_IMAGE_LAYOUT_UNDEFINED: VkImageLayout = VkImageLayout(0);
-    pub const VK_IMAGE_LAYOUT_GENERAL: VkImageLayout = VkImageLayout(1);
-    pub const VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL: VkImageLayout = VkImageLayout(2);
-    pub const VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL: VkImageLayout = VkImageLayout(3);
-    pub const VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL: VkImageLayout = VkImageLayout(4);
-    pub const VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: VkImageLayout = VkImageLayout(5);
-    pub const VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: VkImageLayout = VkImageLayout(6);
-    pub const VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: VkImageLayout = VkImageLayout(7);
-    pub const VK_IMAGE_LAYOUT_PREINITIALIZED: VkImageLayout = VkImageLayout(8);
-    pub const VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL: VkImageLayout =
-        VkImageLayout(1000117000);
-    pub const VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL: VkImageLayout =
-        VkImageLayout(1000117001);
-    pub const VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL: VkImageLayout = VkImageLayout(1000241000);
-    pub const VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL: VkImageLayout = VkImageLayout(1000241001);
-    pub const VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL: VkImageLayout = VkImageLayout(1000241002);
-    pub const VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL: VkImageLayout = VkImageLayout(1000241003);
-    pub const VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL: VkImageLayout = VkImageLayout(1000314000);
-    pub const VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL: VkImageLayout = VkImageLayout(1000314001);
-    pub const VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ: VkImageLayout = VkImageLayout(1000232000);
-    pub const VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: VkImageLayout = VkImageLayout(1000001002);
-    pub const VK_IMAGE_LAYOUT_VIDEO_DECODE_DST_KHR: VkImageLayout = VkImageLayout(1000024000);
-    pub const VK_IMAGE_LAYOUT_VIDEO_DECODE_SRC_KHR: VkImageLayout = VkImageLayout(1000024001);
-    pub const VK_IMAGE_LAYOUT_VIDEO_DECODE_DPB_KHR: VkImageLayout = VkImageLayout(1000024002);
-    pub const VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR: VkImageLayout = VkImageLayout(1000111000);
-    pub const VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT: VkImageLayout =
-        VkImageLayout(1000218000);
-    pub const VK_IMAGE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR: VkImageLayout =
-        VkImageLayout(1000164003);
-    pub const VK_IMAGE_LAYOUT_VIDEO_ENCODE_DST_KHR: VkImageLayout = VkImageLayout(1000299000);
-    pub const VK_IMAGE_LAYOUT_VIDEO_ENCODE_SRC_KHR: VkImageLayout = VkImageLayout(1000299001);
-    pub const VK_IMAGE_LAYOUT_VIDEO_ENCODE_DPB_KHR: VkImageLayout = VkImageLayout(1000299002);
-    pub const VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT: VkImageLayout =
-        VkImageLayout(1000339000);
-    pub const VK_IMAGE_LAYOUT_TENSOR_ALIASING_ARM: VkImageLayout = VkImageLayout(1000460000);
-    pub const VK_IMAGE_LAYOUT_VIDEO_ENCODE_QUANTIZATION_MAP_KHR: VkImageLayout =
-        VkImageLayout(1000553000);
-    pub const VK_IMAGE_LAYOUT_ZERO_INITIALIZED_EXT: VkImageLayout = VkImageLayout(1000620000);
-    pub const VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL_KHR: VkImageLayout =
-        VkImageLayout(1000117000);
-    pub const VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL_KHR: VkImageLayout =
-        VkImageLayout(1000117001);
-    pub const VK_IMAGE_LAYOUT_SHADING_RATE_OPTIMAL_NV: VkImageLayout = VkImageLayout(1000164003);
-    pub const VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ_KHR: VkImageLayout = VkImageLayout(1000232000);
-    pub const VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL_KHR: VkImageLayout =
-        VkImageLayout(1000241000);
-    pub const VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL_KHR: VkImageLayout =
-        VkImageLayout(1000241001);
-    pub const VK_IMAGE_LAYOUT_STENCIL_ATTACHMENT_OPTIMAL_KHR: VkImageLayout =
-        VkImageLayout(1000241002);
-    pub const VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL_KHR: VkImageLayout =
-        VkImageLayout(1000241003);
-    pub const VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL_KHR: VkImageLayout = VkImageLayout(1000314000);
-    pub const VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL_KHR: VkImageLayout = VkImageLayout(1000314001);
-    pub const VK_IMAGE_LAYOUT_MAX_ENUM: VkImageLayout = VkImageLayout(2147483647);
-}
-#[repr(transparent)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub struct VkImageLayout(pub ::std::os::raw::c_uint);
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct wlr_vk_image_attribs {
@@ -6101,78 +5719,111 @@ unsafe extern "C" {
     ) -> *const wlr_alpha_modifier_surface_v1_state;
 }
 impl wp_color_manager_v1_render_intent {
+    #[doc = " perceptual"]
     pub const WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL: wp_color_manager_v1_render_intent =
         wp_color_manager_v1_render_intent(0);
+    #[doc = " media-relative colorimetric"]
     pub const WP_COLOR_MANAGER_V1_RENDER_INTENT_RELATIVE: wp_color_manager_v1_render_intent =
         wp_color_manager_v1_render_intent(1);
+    #[doc = " saturation"]
     pub const WP_COLOR_MANAGER_V1_RENDER_INTENT_SATURATION: wp_color_manager_v1_render_intent =
         wp_color_manager_v1_render_intent(2);
+    #[doc = " ICC-absolute colorimetric"]
     pub const WP_COLOR_MANAGER_V1_RENDER_INTENT_ABSOLUTE: wp_color_manager_v1_render_intent =
         wp_color_manager_v1_render_intent(3);
+    #[doc = " media-relative colorimetric + black point compensation"]
     pub const WP_COLOR_MANAGER_V1_RENDER_INTENT_RELATIVE_BPC: wp_color_manager_v1_render_intent =
         wp_color_manager_v1_render_intent(4);
+    #[doc = " ICC-absolute colorimetric without adaptation\n\n This rendering intent is a modified absolute rendering intent\n that assumes the viewer is not adapted to the display white\n point, so no chromatic adaptation between surface and display is\n done. This can be useful for color proofing applications.\n @since 2"]
     pub const WP_COLOR_MANAGER_V1_RENDER_INTENT_ABSOLUTE_NO_ADAPTATION:
         wp_color_manager_v1_render_intent = wp_color_manager_v1_render_intent(5);
 }
 #[repr(transparent)]
+#[doc = " @ingroup iface_wp_color_manager_v1\n rendering intents\n\n See the ICC.1:2022 specification from the International Color Consortium\n for more details about rendering intents.\n\n The principles of ICC defined rendering intents apply with all types of\n image descriptions, not only those with ICC file profiles.\n\n Compositors must support the perceptual rendering intent. Other\n rendering intents are optional."]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct wp_color_manager_v1_render_intent(pub ::std::os::raw::c_uint);
 impl wp_color_manager_v1_primaries {
+    #[doc = " Color primaries for the sRGB color space as defined by the BT.709 standard\n\n Color primaries as defined by - Rec. ITU-R BT.709-6 - Rec.\n ITU-R BT.1361-0 conventional colour gamut system and extended\n colour gamut system (historical) - IEC 61966-2-1 sRGB or sYCC -\n IEC 61966-2-4 - Society of Motion Picture and Television\n Engineers (SMPTE) RP 177 (1993) Annex B"]
     pub const WP_COLOR_MANAGER_V1_PRIMARIES_SRGB: wp_color_manager_v1_primaries =
         wp_color_manager_v1_primaries(1);
+    #[doc = " Color primaries for PAL-M as defined by the BT.470 standard\n\n Color primaries as defined by - Rec. ITU-R BT.470-6 System M\n (historical) - United States National Television System\n Committee 1953 Recommendation for transmission standards for\n color television - United States Federal Communications\n Commission (2003) Title 47 Code of Federal Regulations 73.682\n (a)(20)"]
     pub const WP_COLOR_MANAGER_V1_PRIMARIES_PAL_M: wp_color_manager_v1_primaries =
         wp_color_manager_v1_primaries(2);
+    #[doc = " Color primaries for PAL as defined by the BT.601 standard\n\n Color primaries as defined by - Rec. ITU-R BT.470-6 System B,\n G (historical) - Rec. ITU-R BT.601-7 625 - Rec. ITU-R BT.1358-0\n 625 (historical) - Rec. ITU-R BT.1700-0 625 PAL and 625 SECAM"]
     pub const WP_COLOR_MANAGER_V1_PRIMARIES_PAL: wp_color_manager_v1_primaries =
         wp_color_manager_v1_primaries(3);
+    #[doc = " Color primaries for NTSC as defined by the BT.601 standard\n\n Color primaries as defined by - Rec. ITU-R BT.601-7 525 - Rec.\n ITU-R BT.1358-1 525 or 625 (historical) - Rec. ITU-R BT.1700-0\n NTSC - SMPTE 170M (2004) - SMPTE 240M (1999) (historical)"]
     pub const WP_COLOR_MANAGER_V1_PRIMARIES_NTSC: wp_color_manager_v1_primaries =
         wp_color_manager_v1_primaries(4);
+    #[doc = " Generic film with colour filters using Illuminant C\n\n Color primaries as defined by Recommendation ITU-T H.273\n \"Coding-independent code points for video signal type\n identification\" for \"generic film\"."]
     pub const WP_COLOR_MANAGER_V1_PRIMARIES_GENERIC_FILM: wp_color_manager_v1_primaries =
         wp_color_manager_v1_primaries(5);
+    #[doc = " Color primaries as defined by the BT.2020 and BT.2100 standard\n\n Color primaries as defined by - Rec. ITU-R BT.2020-2 - Rec.\n ITU-R BT.2100-0"]
     pub const WP_COLOR_MANAGER_V1_PRIMARIES_BT2020: wp_color_manager_v1_primaries =
         wp_color_manager_v1_primaries(6);
+    #[doc = " Color primaries of the full CIE 1931 XYZ color space\n\n Color primaries as defined as the maximum of the CIE 1931 XYZ\n color space by - SMPTE ST 428-1 - (CIE 1931 XYZ as in ISO\n 11664-1)"]
     pub const WP_COLOR_MANAGER_V1_PRIMARIES_CIE1931_XYZ: wp_color_manager_v1_primaries =
         wp_color_manager_v1_primaries(7);
+    #[doc = " Color primaries of the DCI P3 color space as defined by the SMPTE RP 431 standard\n\n Color primaries as defined by Digital Cinema System and\n published in SMPTE RP 431-2 (2011)."]
     pub const WP_COLOR_MANAGER_V1_PRIMARIES_DCI_P3: wp_color_manager_v1_primaries =
         wp_color_manager_v1_primaries(8);
+    #[doc = " Color primaries of Display P3 variant of the DCI-P3 color space as defined by the SMPTE EG 432 standard\n\n Color primaries as defined by Digital Cinema System and\n published in SMPTE EG 432-1 (2010)."]
     pub const WP_COLOR_MANAGER_V1_PRIMARIES_DISPLAY_P3: wp_color_manager_v1_primaries =
         wp_color_manager_v1_primaries(9);
+    #[doc = " Color primaries of the Adobe RGB color space as defined by the ISO 12640 standard\n\n Color primaries as defined by Adobe as \"Adobe RGB\" and later\n published by ISO 12640-4 (2011)."]
     pub const WP_COLOR_MANAGER_V1_PRIMARIES_ADOBE_RGB: wp_color_manager_v1_primaries =
         wp_color_manager_v1_primaries(10);
 }
 #[repr(transparent)]
+#[doc = " @ingroup iface_wp_color_manager_v1\n named color primaries\n\n Named color primaries used to encode well-known sets of primaries.\n\n A value of 0 is invalid and will never be present in the list of enums."]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct wp_color_manager_v1_primaries(pub ::std::os::raw::c_uint);
 impl wp_color_manager_v1_transfer_function {
+    #[doc = " BT.1886 display transfer characteristic\n\n Rec. ITU-R BT.1886 is the display transfer characteristic\n assumed by - Rec. ITU-R BT.601-7 525 and 625 - Rec. ITU-R\n BT.709-6 - Rec. ITU-R BT.2020-2\n\n This TF implies these default luminances from Rec. ITU-R\n BT.2035: - primary color volume minimum: 0.01 cd/m² - primary\n color volume maximum: 100 cd/m² - reference white: 100 cd/m²"]
     pub const WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_BT1886: wp_color_manager_v1_transfer_function =
         wp_color_manager_v1_transfer_function(1);
+    #[doc = " Assumed display gamma 2.2 transfer function\n\n Transfer characteristics as defined by - Rec. ITU-R BT.470-6\n System M (historical) - United States National Television System\n Committee 1953 Recommendation for transmission standards for\n color television - United States Federal Communications\n Commission (2003) Title 47 Code of Federal Regulations 73.682\n (a) (20) - Rec. ITU-R BT.1700-0 625 PAL and 625 SECAM - IEC\n 61966-2-1 (reference display)"]
     pub const WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA22: wp_color_manager_v1_transfer_function =
         wp_color_manager_v1_transfer_function(2);
+    #[doc = " Assumed display gamma 2.8 transfer function\n\n Transfer characteristics as defined by - Rec. ITU-R BT.470-6\n System B, G (historical)"]
     pub const WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_GAMMA28: wp_color_manager_v1_transfer_function =
         wp_color_manager_v1_transfer_function(3);
+    #[doc = " SMPTE ST 240 transfer function\n\n Transfer characteristics as defined by - SMPTE ST 240 (1999)"]
     pub const WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST240: wp_color_manager_v1_transfer_function =
         wp_color_manager_v1_transfer_function(4);
+    #[doc = " extended linear transfer function\n\n Linear transfer function defined over all real numbers.\n Normalised electrical values are equal the normalised optical\n values."]
     pub const WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_EXT_LINEAR:
         wp_color_manager_v1_transfer_function = wp_color_manager_v1_transfer_function(5);
+    #[doc = " logarithmic 100:1 transfer function\n\n Logarithmic transfer characteristic (100:1 range)."]
     pub const WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_LOG_100: wp_color_manager_v1_transfer_function =
         wp_color_manager_v1_transfer_function(6);
+    #[doc = " logarithmic (100*Sqrt(10) : 1) transfer function\n\n Logarithmic transfer characteristic (100 * Sqrt(10) : 1\n range)."]
     pub const WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_LOG_316: wp_color_manager_v1_transfer_function =
         wp_color_manager_v1_transfer_function(7);
+    #[doc = " IEC 61966-2-4 transfer function\n\n Transfer characteristics as defined by - IEC 61966-2-4"]
     pub const WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_XVYCC: wp_color_manager_v1_transfer_function =
         wp_color_manager_v1_transfer_function(8);
+    #[doc = " Deprecated (ambiguous sRGB transfer function)\n\n Transfer characteristics as defined by - IEC 61966-2-1 sRGB\n\n As a rule of thumb, use gamma22 for video, motion picture and\n computer graphics, or compound_power_2_4 for ICC calibrated\n print workflows.\n @deprecated Deprecated since version 2"]
     pub const WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_SRGB: wp_color_manager_v1_transfer_function =
         wp_color_manager_v1_transfer_function(9);
+    #[doc = " Deprecated (Extended sRGB piece-wise transfer function)\n\n Transfer characteristics as defined by - IEC 61966-2-1 sYCC\n @deprecated Deprecated since version 2"]
     pub const WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_EXT_SRGB:
         wp_color_manager_v1_transfer_function = wp_color_manager_v1_transfer_function(10);
+    #[doc = " perceptual quantizer transfer function\n\n Transfer characteristics as defined by - SMPTE ST 2084 (2014)\n for 10-, 12-, 14- and 16-bit systems - Rec. ITU-R BT.2100-2\n perceptual quantization (PQ) system\n\n This TF implies these default luminances - primary color volume\n minimum: 0.005 cd/m² - primary color volume maximum: 10000\n cd/m² - reference white: 203 cd/m²\n\n The difference between the primary color volume minimum and\n maximum must be approximately 10000 cd/m² as that is the swing\n of the EOTF defined by ST 2084 and BT.2100. The default value\n for the reference white is a protocol addition: it is suggested\n by Report ITU-R BT.2408-7 and is not part of ST 2084 or BT.2100."]
     pub const WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST2084_PQ:
         wp_color_manager_v1_transfer_function = wp_color_manager_v1_transfer_function(11);
+    #[doc = " SMPTE ST 428 transfer function\n\n Transfer characteristics as defined by - SMPTE ST 428-1 (2019)"]
     pub const WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_ST428: wp_color_manager_v1_transfer_function =
         wp_color_manager_v1_transfer_function(12);
+    #[doc = " hybrid log-gamma transfer function\n\n Transfer characteristics as defined by - ARIB STD-B67 (2015) -\n Rec. ITU-R BT.2100-2 hybrid log-gamma (HLG) system\n\n This TF implies these default luminances - primary color volume\n minimum: 0.005 cd/m² - primary color volume maximum: 1000\n cd/m² - reference white: 203 cd/m²\n\n HLG is a relative display-referred signal with a specified\n non-linear mapping to the display peak luminance (the HLG OOTF).\n All absolute luminance values used here for HLG assume a 1000\n cd/m² peak display.\n\n The default value for the reference white is a protocol\n addition: it is suggested by Report ITU-R BT.2408-7 and is not\n part of ARIB STD-B67 or BT.2100."]
     pub const WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_HLG: wp_color_manager_v1_transfer_function =
         wp_color_manager_v1_transfer_function(13);
+    #[doc = " IEC 61966-2-1 encoding function\n\n Encoding characteristics as defined by IEC 61966-2-1, for\n displays that invert the encoding function.\n @since 2"]
     pub const WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_COMPOUND_POWER_2_4:
         wp_color_manager_v1_transfer_function = wp_color_manager_v1_transfer_function(14);
 }
 #[repr(transparent)]
+#[doc = " @ingroup iface_wp_color_manager_v1\n named transfer functions\n\n Named transfer functions used to represent well-known transfer\n characteristics of displays.\n\n A value of 0 is invalid and will never be present in the list of enums.\n\n See appendix.md for the formulae."]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct wp_color_manager_v1_transfer_function(pub ::std::os::raw::c_uint);
 #[repr(C)]
@@ -6303,24 +5954,10 @@ const _: () = {
 #[repr(C)]
 pub struct wlr_color_manager_v1 {
     pub global: *mut wl_global,
-    pub events: wlr_color_manager_v1__bindgen_ty_1,
-    pub WLR_PRIVATE: wlr_color_manager_v1__bindgen_ty_2,
+    pub WLR_PRIVATE: wlr_color_manager_v1__bindgen_ty_1,
 }
 #[repr(C)]
 pub struct wlr_color_manager_v1__bindgen_ty_1 {
-    pub destroy: wl_signal,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_color_manager_v1__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_color_manager_v1__bindgen_ty_1>() - 16usize];
-    ["Alignment of wlr_color_manager_v1__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_color_manager_v1__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_color_manager_v1__bindgen_ty_1::destroy"]
-        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_1, destroy) - 0usize];
-};
-#[repr(C)]
-pub struct wlr_color_manager_v1__bindgen_ty_2 {
     pub features: wlr_color_manager_v1_features,
     pub render_intents: *mut wp_color_manager_v1_render_intent,
     pub render_intents_len: usize,
@@ -6330,52 +5967,50 @@ pub struct wlr_color_manager_v1__bindgen_ty_2 {
     pub primaries_len: usize,
     pub outputs: wl_list,
     pub surface_feedbacks: wl_list,
-    pub last_image_desc_identity: u64,
+    pub last_image_desc_identity: u32,
     pub display_destroy: wl_listener,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_color_manager_v1__bindgen_ty_2"]
-        [::std::mem::size_of::<wlr_color_manager_v1__bindgen_ty_2>() - 120usize];
-    ["Alignment of wlr_color_manager_v1__bindgen_ty_2"]
-        [::std::mem::align_of::<wlr_color_manager_v1__bindgen_ty_2>() - 8usize];
-    ["Offset of field: wlr_color_manager_v1__bindgen_ty_2::features"]
-        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_2, features) - 0usize];
-    ["Offset of field: wlr_color_manager_v1__bindgen_ty_2::render_intents"]
-        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_2, render_intents) - 8usize];
-    ["Offset of field: wlr_color_manager_v1__bindgen_ty_2::render_intents_len"]
-        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_2, render_intents_len) - 16usize];
-    ["Offset of field: wlr_color_manager_v1__bindgen_ty_2::transfer_functions"]
-        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_2, transfer_functions) - 24usize];
-    ["Offset of field: wlr_color_manager_v1__bindgen_ty_2::transfer_functions_len"][::std::mem::offset_of!(
-        wlr_color_manager_v1__bindgen_ty_2,
+    ["Size of wlr_color_manager_v1__bindgen_ty_1"]
+        [::std::mem::size_of::<wlr_color_manager_v1__bindgen_ty_1>() - 120usize];
+    ["Alignment of wlr_color_manager_v1__bindgen_ty_1"]
+        [::std::mem::align_of::<wlr_color_manager_v1__bindgen_ty_1>() - 8usize];
+    ["Offset of field: wlr_color_manager_v1__bindgen_ty_1::features"]
+        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_1, features) - 0usize];
+    ["Offset of field: wlr_color_manager_v1__bindgen_ty_1::render_intents"]
+        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_1, render_intents) - 8usize];
+    ["Offset of field: wlr_color_manager_v1__bindgen_ty_1::render_intents_len"]
+        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_1, render_intents_len) - 16usize];
+    ["Offset of field: wlr_color_manager_v1__bindgen_ty_1::transfer_functions"]
+        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_1, transfer_functions) - 24usize];
+    ["Offset of field: wlr_color_manager_v1__bindgen_ty_1::transfer_functions_len"][::std::mem::offset_of!(
+        wlr_color_manager_v1__bindgen_ty_1,
         transfer_functions_len
     ) - 32usize];
-    ["Offset of field: wlr_color_manager_v1__bindgen_ty_2::primaries"]
-        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_2, primaries) - 40usize];
-    ["Offset of field: wlr_color_manager_v1__bindgen_ty_2::primaries_len"]
-        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_2, primaries_len) - 48usize];
-    ["Offset of field: wlr_color_manager_v1__bindgen_ty_2::outputs"]
-        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_2, outputs) - 56usize];
-    ["Offset of field: wlr_color_manager_v1__bindgen_ty_2::surface_feedbacks"]
-        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_2, surface_feedbacks) - 72usize];
-    ["Offset of field: wlr_color_manager_v1__bindgen_ty_2::last_image_desc_identity"][::std::mem::offset_of!(
-        wlr_color_manager_v1__bindgen_ty_2,
+    ["Offset of field: wlr_color_manager_v1__bindgen_ty_1::primaries"]
+        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_1, primaries) - 40usize];
+    ["Offset of field: wlr_color_manager_v1__bindgen_ty_1::primaries_len"]
+        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_1, primaries_len) - 48usize];
+    ["Offset of field: wlr_color_manager_v1__bindgen_ty_1::outputs"]
+        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_1, outputs) - 56usize];
+    ["Offset of field: wlr_color_manager_v1__bindgen_ty_1::surface_feedbacks"]
+        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_1, surface_feedbacks) - 72usize];
+    ["Offset of field: wlr_color_manager_v1__bindgen_ty_1::last_image_desc_identity"][::std::mem::offset_of!(
+        wlr_color_manager_v1__bindgen_ty_1,
         last_image_desc_identity
     ) - 88usize];
-    ["Offset of field: wlr_color_manager_v1__bindgen_ty_2::display_destroy"]
-        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_2, display_destroy) - 96usize];
+    ["Offset of field: wlr_color_manager_v1__bindgen_ty_1::display_destroy"]
+        [::std::mem::offset_of!(wlr_color_manager_v1__bindgen_ty_1, display_destroy) - 96usize];
 };
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_color_manager_v1"][::std::mem::size_of::<wlr_color_manager_v1>() - 144usize];
+    ["Size of wlr_color_manager_v1"][::std::mem::size_of::<wlr_color_manager_v1>() - 128usize];
     ["Alignment of wlr_color_manager_v1"][::std::mem::align_of::<wlr_color_manager_v1>() - 8usize];
     ["Offset of field: wlr_color_manager_v1::global"]
         [::std::mem::offset_of!(wlr_color_manager_v1, global) - 0usize];
-    ["Offset of field: wlr_color_manager_v1::events"]
-        [::std::mem::offset_of!(wlr_color_manager_v1, events) - 8usize];
     ["Offset of field: wlr_color_manager_v1::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_color_manager_v1, WLR_PRIVATE) - 24usize];
+        [::std::mem::offset_of!(wlr_color_manager_v1, WLR_PRIVATE) - 8usize];
 };
 unsafe extern "C" {
     pub fn wlr_color_manager_v1_create(
@@ -6395,310 +6030,6 @@ unsafe extern "C" {
         surface: *mut wlr_surface,
         data: *const wlr_image_description_v1_data,
     );
-}
-unsafe extern "C" {
-    #[doc = " Convert a protocol transfer function to enum wlr_color_transfer_function.\n Aborts if there is no matching wlroots entry."]
-    pub fn wlr_color_manager_v1_transfer_function_to_wlr(
-        tf: wp_color_manager_v1_transfer_function,
-    ) -> wlr_color_transfer_function;
-}
-unsafe extern "C" {
-    #[doc = " Convert an enum wlr_color_transfer_function value into a protocol transfer function."]
-    pub fn wlr_color_manager_v1_transfer_function_from_wlr(
-        tf: wlr_color_transfer_function,
-    ) -> wp_color_manager_v1_transfer_function;
-}
-unsafe extern "C" {
-    #[doc = " Convert a protocol named primaries to enum wlr_color_named_primaries.\n Aborts if there is no matching wlroots entry."]
-    pub fn wlr_color_manager_v1_primaries_to_wlr(
-        primaries: wp_color_manager_v1_primaries,
-    ) -> wlr_color_named_primaries;
-}
-unsafe extern "C" {
-    #[doc = " Convert an enum wlr_color_named_primaries value into protocol primaries."]
-    pub fn wlr_color_manager_v1_primaries_from_wlr(
-        primaries: wlr_color_named_primaries,
-    ) -> wp_color_manager_v1_primaries;
-}
-unsafe extern "C" {
-    #[doc = " Get a list of supported transfer functions for a renderer. The caller is\n responsible for free'ing the array."]
-    pub fn wlr_color_manager_v1_transfer_function_list_from_renderer(
-        renderer: *mut wlr_renderer,
-        len: *mut usize,
-    ) -> *mut wp_color_manager_v1_transfer_function;
-}
-unsafe extern "C" {
-    #[doc = " Get a list of supported named primaries for a renderer. The caller is\n responsible for free'ing the array."]
-    pub fn wlr_color_manager_v1_primaries_list_from_renderer(
-        renderer: *mut wlr_renderer,
-        len: *mut usize,
-    ) -> *mut wp_color_manager_v1_primaries;
-}
-impl wp_color_representation_surface_v1_alpha_mode {
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_ALPHA_MODE_PREMULTIPLIED_ELECTRICAL:
-        wp_color_representation_surface_v1_alpha_mode =
-        wp_color_representation_surface_v1_alpha_mode(0);
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_ALPHA_MODE_PREMULTIPLIED_OPTICAL:
-        wp_color_representation_surface_v1_alpha_mode =
-        wp_color_representation_surface_v1_alpha_mode(1);
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_ALPHA_MODE_STRAIGHT:
-        wp_color_representation_surface_v1_alpha_mode =
-        wp_color_representation_surface_v1_alpha_mode(2);
-}
-#[repr(transparent)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub struct wp_color_representation_surface_v1_alpha_mode(pub ::std::os::raw::c_uint);
-impl wp_color_representation_surface_v1_coefficients {
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_IDENTITY:
-        wp_color_representation_surface_v1_coefficients =
-        wp_color_representation_surface_v1_coefficients(1);
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT709:
-        wp_color_representation_surface_v1_coefficients =
-        wp_color_representation_surface_v1_coefficients(2);
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_FCC:
-        wp_color_representation_surface_v1_coefficients =
-        wp_color_representation_surface_v1_coefficients(3);
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT601:
-        wp_color_representation_surface_v1_coefficients =
-        wp_color_representation_surface_v1_coefficients(4);
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_SMPTE240:
-        wp_color_representation_surface_v1_coefficients =
-        wp_color_representation_surface_v1_coefficients(5);
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT2020:
-        wp_color_representation_surface_v1_coefficients =
-        wp_color_representation_surface_v1_coefficients(6);
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_BT2020_CL:
-        wp_color_representation_surface_v1_coefficients =
-        wp_color_representation_surface_v1_coefficients(7);
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_COEFFICIENTS_ICTCP:
-        wp_color_representation_surface_v1_coefficients =
-        wp_color_representation_surface_v1_coefficients(8);
-}
-#[repr(transparent)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub struct wp_color_representation_surface_v1_coefficients(pub ::std::os::raw::c_uint);
-impl wp_color_representation_surface_v1_range {
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_RANGE_FULL:
-        wp_color_representation_surface_v1_range = wp_color_representation_surface_v1_range(1);
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_RANGE_LIMITED:
-        wp_color_representation_surface_v1_range = wp_color_representation_surface_v1_range(2);
-}
-#[repr(transparent)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub struct wp_color_representation_surface_v1_range(pub ::std::os::raw::c_uint);
-impl wp_color_representation_surface_v1_chroma_location {
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_CHROMA_LOCATION_TYPE_0:
-        wp_color_representation_surface_v1_chroma_location =
-        wp_color_representation_surface_v1_chroma_location(1);
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_CHROMA_LOCATION_TYPE_1:
-        wp_color_representation_surface_v1_chroma_location =
-        wp_color_representation_surface_v1_chroma_location(2);
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_CHROMA_LOCATION_TYPE_2:
-        wp_color_representation_surface_v1_chroma_location =
-        wp_color_representation_surface_v1_chroma_location(3);
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_CHROMA_LOCATION_TYPE_3:
-        wp_color_representation_surface_v1_chroma_location =
-        wp_color_representation_surface_v1_chroma_location(4);
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_CHROMA_LOCATION_TYPE_4:
-        wp_color_representation_surface_v1_chroma_location =
-        wp_color_representation_surface_v1_chroma_location(5);
-    pub const WP_COLOR_REPRESENTATION_SURFACE_V1_CHROMA_LOCATION_TYPE_5:
-        wp_color_representation_surface_v1_chroma_location =
-        wp_color_representation_surface_v1_chroma_location(6);
-}
-#[repr(transparent)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub struct wp_color_representation_surface_v1_chroma_location(pub ::std::os::raw::c_uint);
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_color_representation_v1_coeffs_and_range {
-    pub coeffs: wp_color_representation_surface_v1_coefficients,
-    pub range: wp_color_representation_surface_v1_range,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_color_representation_v1_coeffs_and_range"]
-        [::std::mem::size_of::<wlr_color_representation_v1_coeffs_and_range>() - 8usize];
-    ["Alignment of wlr_color_representation_v1_coeffs_and_range"]
-        [::std::mem::align_of::<wlr_color_representation_v1_coeffs_and_range>() - 4usize];
-    ["Offset of field: wlr_color_representation_v1_coeffs_and_range::coeffs"]
-        [::std::mem::offset_of!(wlr_color_representation_v1_coeffs_and_range, coeffs) - 0usize];
-    ["Offset of field: wlr_color_representation_v1_coeffs_and_range::range"]
-        [::std::mem::offset_of!(wlr_color_representation_v1_coeffs_and_range, range) - 4usize];
-};
-#[repr(C)]
-pub struct wlr_color_representation_manager_v1 {
-    pub global: *mut wl_global,
-    pub events: wlr_color_representation_manager_v1__bindgen_ty_1,
-    pub WLR_PRIVATE: wlr_color_representation_manager_v1__bindgen_ty_2,
-}
-#[repr(C)]
-pub struct wlr_color_representation_manager_v1__bindgen_ty_1 {
-    pub destroy: wl_signal,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_color_representation_manager_v1__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_color_representation_manager_v1__bindgen_ty_1>() - 16usize];
-    ["Alignment of wlr_color_representation_manager_v1__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_color_representation_manager_v1__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_color_representation_manager_v1__bindgen_ty_1::destroy"][::std::mem::offset_of!(
-        wlr_color_representation_manager_v1__bindgen_ty_1,
-        destroy
-    ) - 0usize];
-};
-#[repr(C)]
-pub struct wlr_color_representation_manager_v1__bindgen_ty_2 {
-    pub supported_alpha_modes: *mut wp_color_representation_surface_v1_alpha_mode,
-    pub supported_alpha_modes_len: usize,
-    pub supported_coeffs_and_ranges: *mut wlr_color_representation_v1_coeffs_and_range,
-    pub supported_coeffs_and_ranges_len: usize,
-    pub display_destroy: wl_listener,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_color_representation_manager_v1__bindgen_ty_2"]
-        [::std::mem::size_of::<wlr_color_representation_manager_v1__bindgen_ty_2>() - 56usize];
-    ["Alignment of wlr_color_representation_manager_v1__bindgen_ty_2"]
-        [::std::mem::align_of::<wlr_color_representation_manager_v1__bindgen_ty_2>() - 8usize];
-    ["Offset of field: wlr_color_representation_manager_v1__bindgen_ty_2::supported_alpha_modes"][::std::mem::offset_of!(
-        wlr_color_representation_manager_v1__bindgen_ty_2,
-        supported_alpha_modes
-    )
-        - 0usize];
-    [
-        "Offset of field: wlr_color_representation_manager_v1__bindgen_ty_2::supported_alpha_modes_len",
-    ][::std::mem::offset_of!(
-        wlr_color_representation_manager_v1__bindgen_ty_2,
-        supported_alpha_modes_len
-    ) - 8usize];
-    [
-        "Offset of field: wlr_color_representation_manager_v1__bindgen_ty_2::supported_coeffs_and_ranges",
-    ][::std::mem::offset_of!(
-        wlr_color_representation_manager_v1__bindgen_ty_2,
-        supported_coeffs_and_ranges
-    ) - 16usize];
-    [
-        "Offset of field: wlr_color_representation_manager_v1__bindgen_ty_2::supported_coeffs_and_ranges_len",
-    ][::std::mem::offset_of!(
-        wlr_color_representation_manager_v1__bindgen_ty_2,
-        supported_coeffs_and_ranges_len
-    ) - 24usize];
-    ["Offset of field: wlr_color_representation_manager_v1__bindgen_ty_2::display_destroy"][::std::mem::offset_of!(
-        wlr_color_representation_manager_v1__bindgen_ty_2,
-        display_destroy
-    )
-        - 32usize];
-};
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_color_representation_manager_v1"]
-        [::std::mem::size_of::<wlr_color_representation_manager_v1>() - 80usize];
-    ["Alignment of wlr_color_representation_manager_v1"]
-        [::std::mem::align_of::<wlr_color_representation_manager_v1>() - 8usize];
-    ["Offset of field: wlr_color_representation_manager_v1::global"]
-        [::std::mem::offset_of!(wlr_color_representation_manager_v1, global) - 0usize];
-    ["Offset of field: wlr_color_representation_manager_v1::events"]
-        [::std::mem::offset_of!(wlr_color_representation_manager_v1, events) - 8usize];
-    ["Offset of field: wlr_color_representation_manager_v1::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_color_representation_manager_v1, WLR_PRIVATE) - 24usize];
-};
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_color_representation_v1_options {
-    pub supported_alpha_modes: *const wp_color_representation_surface_v1_alpha_mode,
-    pub supported_alpha_modes_len: usize,
-    pub supported_coeffs_and_ranges: *const wlr_color_representation_v1_coeffs_and_range,
-    pub supported_coeffs_and_ranges_len: usize,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_color_representation_v1_options"]
-        [::std::mem::size_of::<wlr_color_representation_v1_options>() - 32usize];
-    ["Alignment of wlr_color_representation_v1_options"]
-        [::std::mem::align_of::<wlr_color_representation_v1_options>() - 8usize];
-    ["Offset of field: wlr_color_representation_v1_options::supported_alpha_modes"][::std::mem::offset_of!(
-        wlr_color_representation_v1_options,
-        supported_alpha_modes
-    ) - 0usize];
-    ["Offset of field: wlr_color_representation_v1_options::supported_alpha_modes_len"][::std::mem::offset_of!(
-        wlr_color_representation_v1_options,
-        supported_alpha_modes_len
-    ) - 8usize];
-    ["Offset of field: wlr_color_representation_v1_options::supported_coeffs_and_ranges"][::std::mem::offset_of!(
-        wlr_color_representation_v1_options,
-        supported_coeffs_and_ranges
-    )
-        - 16usize];
-    ["Offset of field: wlr_color_representation_v1_options::supported_coeffs_and_ranges_len"][::std::mem::offset_of!(
-        wlr_color_representation_v1_options,
-        supported_coeffs_and_ranges_len
-    )
-        - 24usize];
-};
-unsafe extern "C" {
-    pub fn wlr_color_representation_manager_v1_create(
-        display: *mut wl_display,
-        version: u32,
-        options: *const wlr_color_representation_v1_options,
-    ) -> *mut wlr_color_representation_manager_v1;
-}
-unsafe extern "C" {
-    pub fn wlr_color_representation_manager_v1_create_with_renderer(
-        display: *mut wl_display,
-        version: u32,
-        renderer: *mut wlr_renderer,
-    ) -> *mut wlr_color_representation_manager_v1;
-}
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_color_representation_v1_surface_state {
-    pub alpha_mode: wp_color_representation_surface_v1_alpha_mode,
-    pub coefficients: u32,
-    pub range: u32,
-    pub chroma_location: u32,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_color_representation_v1_surface_state"]
-        [::std::mem::size_of::<wlr_color_representation_v1_surface_state>() - 16usize];
-    ["Alignment of wlr_color_representation_v1_surface_state"]
-        [::std::mem::align_of::<wlr_color_representation_v1_surface_state>() - 4usize];
-    ["Offset of field: wlr_color_representation_v1_surface_state::alpha_mode"]
-        [::std::mem::offset_of!(wlr_color_representation_v1_surface_state, alpha_mode) - 0usize];
-    ["Offset of field: wlr_color_representation_v1_surface_state::coefficients"]
-        [::std::mem::offset_of!(wlr_color_representation_v1_surface_state, coefficients) - 4usize];
-    ["Offset of field: wlr_color_representation_v1_surface_state::range"]
-        [::std::mem::offset_of!(wlr_color_representation_v1_surface_state, range) - 8usize];
-    ["Offset of field: wlr_color_representation_v1_surface_state::chroma_location"][::std::mem::offset_of!(
-        wlr_color_representation_v1_surface_state,
-        chroma_location
-    ) - 12usize];
-};
-unsafe extern "C" {
-    pub fn wlr_color_representation_v1_get_surface_state(
-        surface: *mut wlr_surface,
-    ) -> *const wlr_color_representation_v1_surface_state;
-}
-unsafe extern "C" {
-    pub fn wlr_color_representation_v1_alpha_mode_to_wlr(
-        wp_val: wp_color_representation_surface_v1_alpha_mode,
-    ) -> wlr_alpha_mode;
-}
-unsafe extern "C" {
-    pub fn wlr_color_representation_v1_color_encoding_to_wlr(
-        wp_val: wp_color_representation_surface_v1_coefficients,
-    ) -> wlr_color_encoding;
-}
-unsafe extern "C" {
-    pub fn wlr_color_representation_v1_color_range_to_wlr(
-        wp_val: wp_color_representation_surface_v1_range,
-    ) -> wlr_color_range;
-}
-unsafe extern "C" {
-    pub fn wlr_color_representation_v1_chroma_location_to_wlr(
-        wp_val: wp_color_representation_surface_v1_chroma_location,
-    ) -> wlr_color_chroma_location;
 }
 impl wlr_surface_state_field {
     pub const WLR_SURFACE_STATE_BUFFER: wlr_surface_state_field = wlr_surface_state_field(1);
@@ -6865,24 +6196,21 @@ pub struct wlr_surface_output {
 pub struct wlr_surface_output__bindgen_ty_1 {
     pub bind: wl_listener,
     pub destroy: wl_listener,
-    pub suspended: bool,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_surface_output__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_surface_output__bindgen_ty_1>() - 56usize];
+        [::std::mem::size_of::<wlr_surface_output__bindgen_ty_1>() - 48usize];
     ["Alignment of wlr_surface_output__bindgen_ty_1"]
         [::std::mem::align_of::<wlr_surface_output__bindgen_ty_1>() - 8usize];
     ["Offset of field: wlr_surface_output__bindgen_ty_1::bind"]
         [::std::mem::offset_of!(wlr_surface_output__bindgen_ty_1, bind) - 0usize];
     ["Offset of field: wlr_surface_output__bindgen_ty_1::destroy"]
         [::std::mem::offset_of!(wlr_surface_output__bindgen_ty_1, destroy) - 24usize];
-    ["Offset of field: wlr_surface_output__bindgen_ty_1::suspended"]
-        [::std::mem::offset_of!(wlr_surface_output__bindgen_ty_1, suspended) - 48usize];
 };
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_surface_output"][::std::mem::size_of::<wlr_surface_output>() - 88usize];
+    ["Size of wlr_surface_output"][::std::mem::size_of::<wlr_surface_output>() - 80usize];
     ["Alignment of wlr_surface_output"][::std::mem::align_of::<wlr_surface_output>() - 8usize];
     ["Offset of field: wlr_surface_output::surface"]
         [::std::mem::offset_of!(wlr_surface_output, surface) - 0usize];
@@ -7344,12 +6672,17 @@ unsafe extern "C" {
     );
 }
 impl wp_content_type_v1_type {
+    #[doc = " no content type applies\n\n The content type none means that either the application has no\n data about the content type, or that the content doesn't fit\n into one of the other categories."]
     pub const WP_CONTENT_TYPE_V1_TYPE_NONE: wp_content_type_v1_type = wp_content_type_v1_type(0);
+    #[doc = " photo content type\n\n The content type photo describes content derived from digital\n still pictures and may be presented with minimal processing."]
     pub const WP_CONTENT_TYPE_V1_TYPE_PHOTO: wp_content_type_v1_type = wp_content_type_v1_type(1);
+    #[doc = " video content type\n\n The content type video describes a video or animation and may\n be presented with more accurate timing to avoid stutter. Where\n scaling is needed, scaling methods more appropriate for video\n may be used."]
     pub const WP_CONTENT_TYPE_V1_TYPE_VIDEO: wp_content_type_v1_type = wp_content_type_v1_type(2);
+    #[doc = " game content type\n\n The content type game describes a running game. Its content\n may be presented with reduced latency."]
     pub const WP_CONTENT_TYPE_V1_TYPE_GAME: wp_content_type_v1_type = wp_content_type_v1_type(3);
 }
 #[repr(transparent)]
+#[doc = " @ingroup iface_wp_content_type_v1\n possible content types\n\n These values describe the available content types for a surface."]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct wp_content_type_v1_type(pub ::std::os::raw::c_uint);
 #[repr(C)]
@@ -7869,80 +7202,117 @@ unsafe extern "C" {
     );
 }
 impl wp_cursor_shape_device_v1_shape {
+    #[doc = " default cursor"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(1);
+    #[doc = " a context menu is available for the object under the cursor"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CONTEXT_MENU: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(2);
+    #[doc = " help is available for the object under the cursor"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_HELP: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(3);
+    #[doc = " pointer that indicates a link or another interactive element"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(4);
+    #[doc = " progress indicator"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_PROGRESS: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(5);
+    #[doc = " program is busy, user should wait"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_WAIT: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(6);
+    #[doc = " a cell or set of cells may be selected"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CELL: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(7);
+    #[doc = " simple crosshair"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CROSSHAIR: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(8);
+    #[doc = " text may be selected"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(9);
+    #[doc = " vertical text may be selected"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_VERTICAL_TEXT: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(10);
+    #[doc = " drag-and-drop: alias of/shortcut to something is to be created"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALIAS: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(11);
+    #[doc = " drag-and-drop: something is to be copied"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_COPY: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(12);
+    #[doc = " drag-and-drop: something is to be moved"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_MOVE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(13);
+    #[doc = " drag-and-drop: the dragged item cannot be dropped at the current cursor location"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NO_DROP: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(14);
+    #[doc = " drag-and-drop: the requested action will not be carried out"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NOT_ALLOWED: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(15);
+    #[doc = " drag-and-drop: something can be grabbed"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_GRAB: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(16);
+    #[doc = " drag-and-drop: something is being grabbed"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_GRABBING: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(17);
+    #[doc = " resizing: the east border is to be moved"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_E_RESIZE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(18);
+    #[doc = " resizing: the north border is to be moved"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_N_RESIZE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(19);
+    #[doc = " resizing: the north-east corner is to be moved"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NE_RESIZE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(20);
+    #[doc = " resizing: the north-west corner is to be moved"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NW_RESIZE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(21);
+    #[doc = " resizing: the south border is to be moved"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_S_RESIZE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(22);
+    #[doc = " resizing: the south-east corner is to be moved"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SE_RESIZE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(23);
+    #[doc = " resizing: the south-west corner is to be moved"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SW_RESIZE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(24);
+    #[doc = " resizing: the west border is to be moved"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_W_RESIZE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(25);
+    #[doc = " resizing: the east and west borders are to be moved"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_EW_RESIZE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(26);
+    #[doc = " resizing: the north and south borders are to be moved"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NS_RESIZE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(27);
+    #[doc = " resizing: the north-east and south-west corners are to be moved"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NESW_RESIZE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(28);
+    #[doc = " resizing: the north-west and south-east corners are to be moved"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NWSE_RESIZE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(29);
+    #[doc = " resizing: that the item/column can be resized horizontally"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_COL_RESIZE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(30);
+    #[doc = " resizing: that the item/row can be resized vertically"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ROW_RESIZE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(31);
+    #[doc = " something can be scrolled in any direction"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALL_SCROLL: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(32);
+    #[doc = " something can be zoomed in"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ZOOM_IN: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(33);
+    #[doc = " something can be zoomed out"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ZOOM_OUT: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(34);
+    #[doc = " drag-and-drop: the user will select which action will be carried out (non-css value)\n @since 2"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DND_ASK: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(35);
+    #[doc = " resizing: something can be moved or resized in any direction (non-css value)\n @since 2"]
     pub const WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALL_RESIZE: wp_cursor_shape_device_v1_shape =
         wp_cursor_shape_device_v1_shape(36);
 }
 #[repr(transparent)]
+#[doc = " @ingroup iface_wp_cursor_shape_device_v1\n cursor shapes\n\n This enum describes cursor shapes.\n\n The names are taken from the CSS W3C specification:\n https://w3c.github.io/csswg-drafts/css-ui/#cursor\n with a few additions.\n\n Note that there are some groups of cursor shapes that are related:\n The first group is drag-and-drop cursors which are used to indicate\n the selected action during dnd operations. The second group is resize\n cursors which are used to indicate resizing and moving possibilities\n on window borders. It is recommended that the shapes in these groups\n should use visually compatible images and metaphors."]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct wp_cursor_shape_device_v1_shape(pub ::std::os::raw::c_uint);
 #[doc = " Manager for the cursor-shape-v1 protocol.\n\n Compositors should listen to the request_set_shape event and handle it in\n the same way as wlr_seat.events.request_set_cursor."]
@@ -8470,18 +7840,11 @@ pub struct wlr_touch_grab_interface {
     pub wl_cancel: ::std::option::Option<
         unsafe extern "C" fn(grab: *mut wlr_seat_touch_grab, seat_client: *mut wlr_seat_client),
     >,
-    pub clear_focus: ::std::option::Option<
-        unsafe extern "C" fn(
-            grab: *mut wlr_seat_touch_grab,
-            time_msec: u32,
-            point: *mut wlr_touch_point,
-        ),
-    >,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_touch_grab_interface"]
-        [::std::mem::size_of::<wlr_touch_grab_interface>() - 64usize];
+        [::std::mem::size_of::<wlr_touch_grab_interface>() - 56usize];
     ["Alignment of wlr_touch_grab_interface"]
         [::std::mem::align_of::<wlr_touch_grab_interface>() - 8usize];
     ["Offset of field: wlr_touch_grab_interface::down"]
@@ -8498,8 +7861,6 @@ const _: () = {
         [::std::mem::offset_of!(wlr_touch_grab_interface, cancel) - 40usize];
     ["Offset of field: wlr_touch_grab_interface::wl_cancel"]
         [::std::mem::offset_of!(wlr_touch_grab_interface, wl_cancel) - 48usize];
-    ["Offset of field: wlr_touch_grab_interface::clear_focus"]
-        [::std::mem::offset_of!(wlr_touch_grab_interface, clear_focus) - 56usize];
 };
 #[doc = " Passed to wlr_seat_touch_start_grab() to start a grab of the touch device.\n The grabber is responsible for handling touch events for the seat."]
 #[repr(C)]
@@ -9312,9 +8673,6 @@ unsafe extern "C" {
     pub fn wlr_seat_touch_notify_frame(seat: *mut wlr_seat);
 }
 unsafe extern "C" {
-    pub fn wlr_seat_touch_notify_clear_focus(seat: *mut wlr_seat, time_msec: u32, touch_id: i32);
-}
-unsafe extern "C" {
     #[doc = " How many touch points are currently down for the seat."]
     pub fn wlr_seat_touch_num_points(seat: *mut wlr_seat) -> ::std::os::raw::c_int;
 }
@@ -9370,7 +8728,6 @@ unsafe extern "C" {
     #[doc = " Check whether a surface has bound to touch events."]
     pub fn wlr_surface_accepts_touch(surface: *mut wlr_surface, wlr_seat: *mut wlr_seat) -> bool;
 }
-#[doc = " Deprecated: this protocol is legacy and superseded by ext-data-control-v1.\n The implementation will be dropped in a future wlroots version.\n\n Consider using `wlr_ext_data_control_manager_v1` as a replacement."]
 #[repr(C)]
 pub struct wlr_data_control_manager_v1 {
     pub global: *mut wl_global,
@@ -10394,7 +9751,7 @@ pub struct wlr_ext_data_control_manager_v1 {
     pub global: *mut wl_global,
     pub devices: wl_list,
     pub events: wlr_ext_data_control_manager_v1__bindgen_ty_1,
-    pub WLR_PRIVATE: wlr_ext_data_control_manager_v1__bindgen_ty_2,
+    pub display_destroy: wl_listener,
 }
 #[repr(C)]
 pub struct wlr_ext_data_control_manager_v1__bindgen_ty_1 {
@@ -10414,21 +9771,6 @@ const _: () = {
         new_device
     ) - 16usize];
 };
-#[repr(C)]
-pub struct wlr_ext_data_control_manager_v1__bindgen_ty_2 {
-    pub display_destroy: wl_listener,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_data_control_manager_v1__bindgen_ty_2"]
-        [::std::mem::size_of::<wlr_ext_data_control_manager_v1__bindgen_ty_2>() - 24usize];
-    ["Alignment of wlr_ext_data_control_manager_v1__bindgen_ty_2"]
-        [::std::mem::align_of::<wlr_ext_data_control_manager_v1__bindgen_ty_2>() - 8usize];
-    ["Offset of field: wlr_ext_data_control_manager_v1__bindgen_ty_2::display_destroy"][::std::mem::offset_of!(
-        wlr_ext_data_control_manager_v1__bindgen_ty_2,
-        display_destroy
-    ) - 0usize];
-};
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_ext_data_control_manager_v1"]
@@ -10441,8 +9783,8 @@ const _: () = {
         [::std::mem::offset_of!(wlr_ext_data_control_manager_v1, devices) - 8usize];
     ["Offset of field: wlr_ext_data_control_manager_v1::events"]
         [::std::mem::offset_of!(wlr_ext_data_control_manager_v1, events) - 24usize];
-    ["Offset of field: wlr_ext_data_control_manager_v1::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_ext_data_control_manager_v1, WLR_PRIVATE) - 56usize];
+    ["Offset of field: wlr_ext_data_control_manager_v1::display_destroy"]
+        [::std::mem::offset_of!(wlr_ext_data_control_manager_v1, display_destroy) - 56usize];
 };
 #[repr(C)]
 pub struct wlr_ext_data_control_device_v1 {
@@ -10452,35 +9794,10 @@ pub struct wlr_ext_data_control_device_v1 {
     pub seat: *mut wlr_seat,
     pub selection_offer_resource: *mut wl_resource,
     pub primary_selection_offer_resource: *mut wl_resource,
-    pub WLR_PRIVATE: wlr_ext_data_control_device_v1__bindgen_ty_1,
-}
-#[repr(C)]
-pub struct wlr_ext_data_control_device_v1__bindgen_ty_1 {
     pub seat_destroy: wl_listener,
     pub seat_set_selection: wl_listener,
     pub seat_set_primary_selection: wl_listener,
 }
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_data_control_device_v1__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_ext_data_control_device_v1__bindgen_ty_1>() - 72usize];
-    ["Alignment of wlr_ext_data_control_device_v1__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_ext_data_control_device_v1__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_ext_data_control_device_v1__bindgen_ty_1::seat_destroy"][::std::mem::offset_of!(
-        wlr_ext_data_control_device_v1__bindgen_ty_1,
-        seat_destroy
-    ) - 0usize];
-    ["Offset of field: wlr_ext_data_control_device_v1__bindgen_ty_1::seat_set_selection"][::std::mem::offset_of!(
-        wlr_ext_data_control_device_v1__bindgen_ty_1,
-        seat_set_selection
-    )
-        - 24usize];
-    ["Offset of field: wlr_ext_data_control_device_v1__bindgen_ty_1::seat_set_primary_selection"][::std::mem::offset_of!(
-        wlr_ext_data_control_device_v1__bindgen_ty_1,
-        seat_set_primary_selection
-    )
-        - 48usize];
-};
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_ext_data_control_device_v1"]
@@ -10504,8 +9821,14 @@ const _: () = {
         primary_selection_offer_resource
     )
         - 48usize];
-    ["Offset of field: wlr_ext_data_control_device_v1::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_ext_data_control_device_v1, WLR_PRIVATE) - 56usize];
+    ["Offset of field: wlr_ext_data_control_device_v1::seat_destroy"]
+        [::std::mem::offset_of!(wlr_ext_data_control_device_v1, seat_destroy) - 56usize];
+    ["Offset of field: wlr_ext_data_control_device_v1::seat_set_selection"]
+        [::std::mem::offset_of!(wlr_ext_data_control_device_v1, seat_set_selection) - 80usize];
+    ["Offset of field: wlr_ext_data_control_device_v1::seat_set_primary_selection"][::std::mem::offset_of!(
+        wlr_ext_data_control_device_v1,
+        seat_set_primary_selection
+    ) - 104usize];
 };
 unsafe extern "C" {
     pub fn wlr_ext_data_control_manager_v1_create(
@@ -10669,12 +9992,15 @@ unsafe extern "C" {
     ) -> *mut wlr_ext_foreign_toplevel_handle_v1;
 }
 impl ext_image_copy_capture_frame_v1_failure_reason {
+    #[doc = " unknown runtime error\n\n An unspecified runtime error has occurred. The client may\n retry."]
     pub const EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_UNKNOWN:
         ext_image_copy_capture_frame_v1_failure_reason =
         ext_image_copy_capture_frame_v1_failure_reason(0);
+    #[doc = " buffer constraints mismatch\n\n The buffer submitted by the client doesn't match the latest\n session constraints. The client should re-allocate its buffers\n and retry."]
     pub const EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS:
         ext_image_copy_capture_frame_v1_failure_reason =
         ext_image_copy_capture_frame_v1_failure_reason(1);
+    #[doc = " session is no longer available\n\n The session has stopped. See\n ext_image_copy_capture_session_v1.stopped."]
     pub const EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_STOPPED:
         ext_image_copy_capture_frame_v1_failure_reason =
         ext_image_copy_capture_frame_v1_failure_reason(2);
@@ -10685,37 +10011,20 @@ pub struct ext_image_copy_capture_frame_v1_failure_reason(pub ::std::os::raw::c_
 #[repr(C)]
 pub struct wlr_ext_image_copy_capture_manager_v1 {
     pub global: *mut wl_global,
-    pub events: wlr_ext_image_copy_capture_manager_v1__bindgen_ty_1,
-    pub WLR_PRIVATE: wlr_ext_image_copy_capture_manager_v1__bindgen_ty_2,
+    pub WLR_PRIVATE: wlr_ext_image_copy_capture_manager_v1__bindgen_ty_1,
 }
 #[repr(C)]
 pub struct wlr_ext_image_copy_capture_manager_v1__bindgen_ty_1 {
-    pub new_session: wl_signal,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_image_copy_capture_manager_v1__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_ext_image_copy_capture_manager_v1__bindgen_ty_1>() - 16usize];
-    ["Alignment of wlr_ext_image_copy_capture_manager_v1__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_ext_image_copy_capture_manager_v1__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_ext_image_copy_capture_manager_v1__bindgen_ty_1::new_session"][::std::mem::offset_of!(
-        wlr_ext_image_copy_capture_manager_v1__bindgen_ty_1,
-        new_session
-    )
-        - 0usize];
-};
-#[repr(C)]
-pub struct wlr_ext_image_copy_capture_manager_v1__bindgen_ty_2 {
     pub display_destroy: wl_listener,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_ext_image_copy_capture_manager_v1__bindgen_ty_2"]
-        [::std::mem::size_of::<wlr_ext_image_copy_capture_manager_v1__bindgen_ty_2>() - 24usize];
-    ["Alignment of wlr_ext_image_copy_capture_manager_v1__bindgen_ty_2"]
-        [::std::mem::align_of::<wlr_ext_image_copy_capture_manager_v1__bindgen_ty_2>() - 8usize];
-    ["Offset of field: wlr_ext_image_copy_capture_manager_v1__bindgen_ty_2::display_destroy"][::std::mem::offset_of!(
-        wlr_ext_image_copy_capture_manager_v1__bindgen_ty_2,
+    ["Size of wlr_ext_image_copy_capture_manager_v1__bindgen_ty_1"]
+        [::std::mem::size_of::<wlr_ext_image_copy_capture_manager_v1__bindgen_ty_1>() - 24usize];
+    ["Alignment of wlr_ext_image_copy_capture_manager_v1__bindgen_ty_1"]
+        [::std::mem::align_of::<wlr_ext_image_copy_capture_manager_v1__bindgen_ty_1>() - 8usize];
+    ["Offset of field: wlr_ext_image_copy_capture_manager_v1__bindgen_ty_1::display_destroy"][::std::mem::offset_of!(
+        wlr_ext_image_copy_capture_manager_v1__bindgen_ty_1,
         display_destroy
     )
         - 0usize];
@@ -10723,89 +10032,13 @@ const _: () = {
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_ext_image_copy_capture_manager_v1"]
-        [::std::mem::size_of::<wlr_ext_image_copy_capture_manager_v1>() - 48usize];
+        [::std::mem::size_of::<wlr_ext_image_copy_capture_manager_v1>() - 32usize];
     ["Alignment of wlr_ext_image_copy_capture_manager_v1"]
         [::std::mem::align_of::<wlr_ext_image_copy_capture_manager_v1>() - 8usize];
     ["Offset of field: wlr_ext_image_copy_capture_manager_v1::global"]
         [::std::mem::offset_of!(wlr_ext_image_copy_capture_manager_v1, global) - 0usize];
-    ["Offset of field: wlr_ext_image_copy_capture_manager_v1::events"]
-        [::std::mem::offset_of!(wlr_ext_image_copy_capture_manager_v1, events) - 8usize];
     ["Offset of field: wlr_ext_image_copy_capture_manager_v1::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_ext_image_copy_capture_manager_v1, WLR_PRIVATE) - 24usize];
-};
-#[repr(C)]
-pub struct wlr_ext_image_copy_capture_session_v1 {
-    pub resource: *mut wl_resource,
-    pub source: *mut wlr_ext_image_capture_source_v1,
-    pub frame: *mut wlr_ext_image_copy_capture_frame_v1,
-    pub events: wlr_ext_image_copy_capture_session_v1__bindgen_ty_1,
-    pub WLR_PRIVATE: wlr_ext_image_copy_capture_session_v1__bindgen_ty_2,
-}
-#[repr(C)]
-pub struct wlr_ext_image_copy_capture_session_v1__bindgen_ty_1 {
-    pub destroy: wl_signal,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_image_copy_capture_session_v1__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_ext_image_copy_capture_session_v1__bindgen_ty_1>() - 16usize];
-    ["Alignment of wlr_ext_image_copy_capture_session_v1__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_ext_image_copy_capture_session_v1__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_ext_image_copy_capture_session_v1__bindgen_ty_1::destroy"][::std::mem::offset_of!(
-        wlr_ext_image_copy_capture_session_v1__bindgen_ty_1,
-        destroy
-    ) - 0usize];
-};
-#[repr(C)]
-pub struct wlr_ext_image_copy_capture_session_v1__bindgen_ty_2 {
-    pub source_destroy: wl_listener,
-    pub source_constraints_update: wl_listener,
-    pub source_frame: wl_listener,
-    pub damage: pixman_region32_t,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_image_copy_capture_session_v1__bindgen_ty_2"]
-        [::std::mem::size_of::<wlr_ext_image_copy_capture_session_v1__bindgen_ty_2>() - 96usize];
-    ["Alignment of wlr_ext_image_copy_capture_session_v1__bindgen_ty_2"]
-        [::std::mem::align_of::<wlr_ext_image_copy_capture_session_v1__bindgen_ty_2>() - 8usize];
-    ["Offset of field: wlr_ext_image_copy_capture_session_v1__bindgen_ty_2::source_destroy"][::std::mem::offset_of!(
-        wlr_ext_image_copy_capture_session_v1__bindgen_ty_2,
-        source_destroy
-    )
-        - 0usize];
-    [
-        "Offset of field: wlr_ext_image_copy_capture_session_v1__bindgen_ty_2::source_constraints_update",
-    ][::std::mem::offset_of!(
-        wlr_ext_image_copy_capture_session_v1__bindgen_ty_2,
-        source_constraints_update
-    ) - 24usize];
-    ["Offset of field: wlr_ext_image_copy_capture_session_v1__bindgen_ty_2::source_frame"][::std::mem::offset_of!(
-        wlr_ext_image_copy_capture_session_v1__bindgen_ty_2,
-        source_frame
-    )
-        - 48usize];
-    ["Offset of field: wlr_ext_image_copy_capture_session_v1__bindgen_ty_2::damage"][::std::mem::offset_of!(
-        wlr_ext_image_copy_capture_session_v1__bindgen_ty_2,
-        damage
-    ) - 72usize];
-};
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_image_copy_capture_session_v1"]
-        [::std::mem::size_of::<wlr_ext_image_copy_capture_session_v1>() - 136usize];
-    ["Alignment of wlr_ext_image_copy_capture_session_v1"]
-        [::std::mem::align_of::<wlr_ext_image_copy_capture_session_v1>() - 8usize];
-    ["Offset of field: wlr_ext_image_copy_capture_session_v1::resource"]
-        [::std::mem::offset_of!(wlr_ext_image_copy_capture_session_v1, resource) - 0usize];
-    ["Offset of field: wlr_ext_image_copy_capture_session_v1::source"]
-        [::std::mem::offset_of!(wlr_ext_image_copy_capture_session_v1, source) - 8usize];
-    ["Offset of field: wlr_ext_image_copy_capture_session_v1::frame"]
-        [::std::mem::offset_of!(wlr_ext_image_copy_capture_session_v1, frame) - 16usize];
-    ["Offset of field: wlr_ext_image_copy_capture_session_v1::events"]
-        [::std::mem::offset_of!(wlr_ext_image_copy_capture_session_v1, events) - 24usize];
-    ["Offset of field: wlr_ext_image_copy_capture_session_v1::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_ext_image_copy_capture_session_v1, WLR_PRIVATE) - 40usize];
+        [::std::mem::offset_of!(wlr_ext_image_copy_capture_manager_v1, WLR_PRIVATE) - 8usize];
 };
 #[repr(C)]
 pub struct wlr_ext_image_copy_capture_frame_v1 {
@@ -10894,498 +10127,6 @@ unsafe extern "C" {
         src: *mut wlr_buffer,
         renderer: *mut wlr_renderer,
     ) -> bool;
-}
-impl wlr_ext_workspace_v1_request_type {
-    pub const WLR_EXT_WORKSPACE_V1_REQUEST_CREATE_WORKSPACE: wlr_ext_workspace_v1_request_type =
-        wlr_ext_workspace_v1_request_type(0);
-    pub const WLR_EXT_WORKSPACE_V1_REQUEST_ACTIVATE: wlr_ext_workspace_v1_request_type =
-        wlr_ext_workspace_v1_request_type(1);
-    pub const WLR_EXT_WORKSPACE_V1_REQUEST_DEACTIVATE: wlr_ext_workspace_v1_request_type =
-        wlr_ext_workspace_v1_request_type(2);
-    pub const WLR_EXT_WORKSPACE_V1_REQUEST_ASSIGN: wlr_ext_workspace_v1_request_type =
-        wlr_ext_workspace_v1_request_type(3);
-    pub const WLR_EXT_WORKSPACE_V1_REQUEST_REMOVE: wlr_ext_workspace_v1_request_type =
-        wlr_ext_workspace_v1_request_type(4);
-}
-#[repr(transparent)]
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub struct wlr_ext_workspace_v1_request_type(pub ::std::os::raw::c_uint);
-#[repr(C)]
-pub struct wlr_ext_workspace_v1_request {
-    pub type_: wlr_ext_workspace_v1_request_type,
-    pub link: wl_list,
-    pub __bindgen_anon_1: wlr_ext_workspace_v1_request__bindgen_ty_1,
-}
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub union wlr_ext_workspace_v1_request__bindgen_ty_1 {
-    pub create_workspace: wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_1,
-    pub activate: wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_2,
-    pub deactivate: wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_3,
-    pub assign: wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_4,
-    pub remove: wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_5,
-}
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_1 {
-    pub name: *mut ::std::os::raw::c_char,
-    pub group: *mut wlr_ext_workspace_group_handle_v1,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_1"][::std::mem::size_of::<
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_1,
-    >() - 16usize];
-    ["Alignment of wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_1"][::std::mem::align_of::<
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_1,
-    >() - 8usize];
-    ["Offset of field: wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_1::name"][::std::mem::offset_of!(
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_1,
-        name
-    ) - 0usize];
-    ["Offset of field: wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_1::group"][::std::mem::offset_of!(
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_1,
-        group
-    )
-        - 8usize];
-};
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_2 {
-    pub workspace: *mut wlr_ext_workspace_handle_v1,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_2"][::std::mem::size_of::<
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_2,
-    >() - 8usize];
-    ["Alignment of wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_2"][::std::mem::align_of::<
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_2,
-    >() - 8usize];
-    ["Offset of field: wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_2::workspace"][::std::mem::offset_of!(
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_2,
-        workspace
-    )
-        - 0usize];
-};
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_3 {
-    pub workspace: *mut wlr_ext_workspace_handle_v1,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_3"][::std::mem::size_of::<
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_3,
-    >() - 8usize];
-    ["Alignment of wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_3"][::std::mem::align_of::<
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_3,
-    >() - 8usize];
-    ["Offset of field: wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_3::workspace"][::std::mem::offset_of!(
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_3,
-        workspace
-    )
-        - 0usize];
-};
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_4 {
-    pub workspace: *mut wlr_ext_workspace_handle_v1,
-    pub group: *mut wlr_ext_workspace_group_handle_v1,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_4"][::std::mem::size_of::<
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_4,
-    >() - 16usize];
-    ["Alignment of wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_4"][::std::mem::align_of::<
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_4,
-    >() - 8usize];
-    ["Offset of field: wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_4::workspace"][::std::mem::offset_of!(
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_4,
-        workspace
-    )
-        - 0usize];
-    ["Offset of field: wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_4::group"][::std::mem::offset_of!(
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_4,
-        group
-    )
-        - 8usize];
-};
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_5 {
-    pub workspace: *mut wlr_ext_workspace_handle_v1,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_5"][::std::mem::size_of::<
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_5,
-    >() - 8usize];
-    ["Alignment of wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_5"][::std::mem::align_of::<
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_5,
-    >() - 8usize];
-    ["Offset of field: wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_5::workspace"][::std::mem::offset_of!(
-        wlr_ext_workspace_v1_request__bindgen_ty_1__bindgen_ty_5,
-        workspace
-    )
-        - 0usize];
-};
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_v1_request__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_ext_workspace_v1_request__bindgen_ty_1>() - 16usize];
-    ["Alignment of wlr_ext_workspace_v1_request__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_ext_workspace_v1_request__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_ext_workspace_v1_request__bindgen_ty_1::create_workspace"][::std::mem::offset_of!(
-        wlr_ext_workspace_v1_request__bindgen_ty_1,
-        create_workspace
-    ) - 0usize];
-    ["Offset of field: wlr_ext_workspace_v1_request__bindgen_ty_1::activate"]
-        [::std::mem::offset_of!(wlr_ext_workspace_v1_request__bindgen_ty_1, activate) - 0usize];
-    ["Offset of field: wlr_ext_workspace_v1_request__bindgen_ty_1::deactivate"]
-        [::std::mem::offset_of!(wlr_ext_workspace_v1_request__bindgen_ty_1, deactivate) - 0usize];
-    ["Offset of field: wlr_ext_workspace_v1_request__bindgen_ty_1::assign"]
-        [::std::mem::offset_of!(wlr_ext_workspace_v1_request__bindgen_ty_1, assign) - 0usize];
-    ["Offset of field: wlr_ext_workspace_v1_request__bindgen_ty_1::remove"]
-        [::std::mem::offset_of!(wlr_ext_workspace_v1_request__bindgen_ty_1, remove) - 0usize];
-};
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_v1_request"]
-        [::std::mem::size_of::<wlr_ext_workspace_v1_request>() - 40usize];
-    ["Alignment of wlr_ext_workspace_v1_request"]
-        [::std::mem::align_of::<wlr_ext_workspace_v1_request>() - 8usize];
-    ["Offset of field: wlr_ext_workspace_v1_request::type_"]
-        [::std::mem::offset_of!(wlr_ext_workspace_v1_request, type_) - 0usize];
-    ["Offset of field: wlr_ext_workspace_v1_request::link"]
-        [::std::mem::offset_of!(wlr_ext_workspace_v1_request, link) - 8usize];
-};
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_ext_workspace_v1_commit_event {
-    pub requests: *mut wl_list,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_v1_commit_event"]
-        [::std::mem::size_of::<wlr_ext_workspace_v1_commit_event>() - 8usize];
-    ["Alignment of wlr_ext_workspace_v1_commit_event"]
-        [::std::mem::align_of::<wlr_ext_workspace_v1_commit_event>() - 8usize];
-    ["Offset of field: wlr_ext_workspace_v1_commit_event::requests"]
-        [::std::mem::offset_of!(wlr_ext_workspace_v1_commit_event, requests) - 0usize];
-};
-#[repr(C)]
-pub struct wlr_ext_workspace_manager_v1 {
-    pub global: *mut wl_global,
-    pub groups: wl_list,
-    pub workspaces: wl_list,
-    pub events: wlr_ext_workspace_manager_v1__bindgen_ty_1,
-    pub data: *mut ::std::os::raw::c_void,
-    pub WLR_PRIVATE: wlr_ext_workspace_manager_v1__bindgen_ty_2,
-}
-#[repr(C)]
-pub struct wlr_ext_workspace_manager_v1__bindgen_ty_1 {
-    pub commit: wl_signal,
-    pub destroy: wl_signal,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_manager_v1__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_ext_workspace_manager_v1__bindgen_ty_1>() - 32usize];
-    ["Alignment of wlr_ext_workspace_manager_v1__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_ext_workspace_manager_v1__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_ext_workspace_manager_v1__bindgen_ty_1::commit"]
-        [::std::mem::offset_of!(wlr_ext_workspace_manager_v1__bindgen_ty_1, commit) - 0usize];
-    ["Offset of field: wlr_ext_workspace_manager_v1__bindgen_ty_1::destroy"]
-        [::std::mem::offset_of!(wlr_ext_workspace_manager_v1__bindgen_ty_1, destroy) - 16usize];
-};
-#[repr(C)]
-pub struct wlr_ext_workspace_manager_v1__bindgen_ty_2 {
-    pub resources: wl_list,
-    pub idle_source: *mut wl_event_source,
-    pub event_loop: *mut wl_event_loop,
-    pub display_destroy: wl_listener,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_manager_v1__bindgen_ty_2"]
-        [::std::mem::size_of::<wlr_ext_workspace_manager_v1__bindgen_ty_2>() - 56usize];
-    ["Alignment of wlr_ext_workspace_manager_v1__bindgen_ty_2"]
-        [::std::mem::align_of::<wlr_ext_workspace_manager_v1__bindgen_ty_2>() - 8usize];
-    ["Offset of field: wlr_ext_workspace_manager_v1__bindgen_ty_2::resources"]
-        [::std::mem::offset_of!(wlr_ext_workspace_manager_v1__bindgen_ty_2, resources) - 0usize];
-    ["Offset of field: wlr_ext_workspace_manager_v1__bindgen_ty_2::idle_source"]
-        [::std::mem::offset_of!(wlr_ext_workspace_manager_v1__bindgen_ty_2, idle_source) - 16usize];
-    ["Offset of field: wlr_ext_workspace_manager_v1__bindgen_ty_2::event_loop"]
-        [::std::mem::offset_of!(wlr_ext_workspace_manager_v1__bindgen_ty_2, event_loop) - 24usize];
-    ["Offset of field: wlr_ext_workspace_manager_v1__bindgen_ty_2::display_destroy"][::std::mem::offset_of!(
-        wlr_ext_workspace_manager_v1__bindgen_ty_2,
-        display_destroy
-    ) - 32usize];
-};
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_manager_v1"]
-        [::std::mem::size_of::<wlr_ext_workspace_manager_v1>() - 136usize];
-    ["Alignment of wlr_ext_workspace_manager_v1"]
-        [::std::mem::align_of::<wlr_ext_workspace_manager_v1>() - 8usize];
-    ["Offset of field: wlr_ext_workspace_manager_v1::global"]
-        [::std::mem::offset_of!(wlr_ext_workspace_manager_v1, global) - 0usize];
-    ["Offset of field: wlr_ext_workspace_manager_v1::groups"]
-        [::std::mem::offset_of!(wlr_ext_workspace_manager_v1, groups) - 8usize];
-    ["Offset of field: wlr_ext_workspace_manager_v1::workspaces"]
-        [::std::mem::offset_of!(wlr_ext_workspace_manager_v1, workspaces) - 24usize];
-    ["Offset of field: wlr_ext_workspace_manager_v1::events"]
-        [::std::mem::offset_of!(wlr_ext_workspace_manager_v1, events) - 40usize];
-    ["Offset of field: wlr_ext_workspace_manager_v1::data"]
-        [::std::mem::offset_of!(wlr_ext_workspace_manager_v1, data) - 72usize];
-    ["Offset of field: wlr_ext_workspace_manager_v1::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_ext_workspace_manager_v1, WLR_PRIVATE) - 80usize];
-};
-#[repr(C)]
-pub struct wlr_ext_workspace_group_handle_v1 {
-    pub manager: *mut wlr_ext_workspace_manager_v1,
-    pub caps: u32,
-    pub events: wlr_ext_workspace_group_handle_v1__bindgen_ty_1,
-    pub link: wl_list,
-    pub data: *mut ::std::os::raw::c_void,
-    pub WLR_PRIVATE: wlr_ext_workspace_group_handle_v1__bindgen_ty_2,
-}
-#[repr(C)]
-pub struct wlr_ext_workspace_group_handle_v1__bindgen_ty_1 {
-    pub destroy: wl_signal,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_group_handle_v1__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_ext_workspace_group_handle_v1__bindgen_ty_1>() - 16usize];
-    ["Alignment of wlr_ext_workspace_group_handle_v1__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_ext_workspace_group_handle_v1__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_ext_workspace_group_handle_v1__bindgen_ty_1::destroy"]
-        [::std::mem::offset_of!(wlr_ext_workspace_group_handle_v1__bindgen_ty_1, destroy) - 0usize];
-};
-#[repr(C)]
-pub struct wlr_ext_workspace_group_handle_v1__bindgen_ty_2 {
-    pub outputs: wl_list,
-    pub resources: wl_list,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_group_handle_v1__bindgen_ty_2"]
-        [::std::mem::size_of::<wlr_ext_workspace_group_handle_v1__bindgen_ty_2>() - 32usize];
-    ["Alignment of wlr_ext_workspace_group_handle_v1__bindgen_ty_2"]
-        [::std::mem::align_of::<wlr_ext_workspace_group_handle_v1__bindgen_ty_2>() - 8usize];
-    ["Offset of field: wlr_ext_workspace_group_handle_v1__bindgen_ty_2::outputs"]
-        [::std::mem::offset_of!(wlr_ext_workspace_group_handle_v1__bindgen_ty_2, outputs) - 0usize];
-    ["Offset of field: wlr_ext_workspace_group_handle_v1__bindgen_ty_2::resources"][::std::mem::offset_of!(
-        wlr_ext_workspace_group_handle_v1__bindgen_ty_2,
-        resources
-    ) - 16usize];
-};
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_group_handle_v1"]
-        [::std::mem::size_of::<wlr_ext_workspace_group_handle_v1>() - 88usize];
-    ["Alignment of wlr_ext_workspace_group_handle_v1"]
-        [::std::mem::align_of::<wlr_ext_workspace_group_handle_v1>() - 8usize];
-    ["Offset of field: wlr_ext_workspace_group_handle_v1::manager"]
-        [::std::mem::offset_of!(wlr_ext_workspace_group_handle_v1, manager) - 0usize];
-    ["Offset of field: wlr_ext_workspace_group_handle_v1::caps"]
-        [::std::mem::offset_of!(wlr_ext_workspace_group_handle_v1, caps) - 8usize];
-    ["Offset of field: wlr_ext_workspace_group_handle_v1::events"]
-        [::std::mem::offset_of!(wlr_ext_workspace_group_handle_v1, events) - 16usize];
-    ["Offset of field: wlr_ext_workspace_group_handle_v1::link"]
-        [::std::mem::offset_of!(wlr_ext_workspace_group_handle_v1, link) - 32usize];
-    ["Offset of field: wlr_ext_workspace_group_handle_v1::data"]
-        [::std::mem::offset_of!(wlr_ext_workspace_group_handle_v1, data) - 48usize];
-    ["Offset of field: wlr_ext_workspace_group_handle_v1::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_ext_workspace_group_handle_v1, WLR_PRIVATE) - 56usize];
-};
-#[repr(C)]
-pub struct wlr_ext_workspace_handle_v1 {
-    pub manager: *mut wlr_ext_workspace_manager_v1,
-    pub group: *mut wlr_ext_workspace_group_handle_v1,
-    pub id: *mut ::std::os::raw::c_char,
-    pub name: *mut ::std::os::raw::c_char,
-    pub coordinates: wl_array,
-    pub caps: u32,
-    pub state: u32,
-    pub events: wlr_ext_workspace_handle_v1__bindgen_ty_1,
-    pub link: wl_list,
-    pub data: *mut ::std::os::raw::c_void,
-    pub WLR_PRIVATE: wlr_ext_workspace_handle_v1__bindgen_ty_2,
-}
-#[repr(C)]
-pub struct wlr_ext_workspace_handle_v1__bindgen_ty_1 {
-    pub destroy: wl_signal,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_handle_v1__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_ext_workspace_handle_v1__bindgen_ty_1>() - 16usize];
-    ["Alignment of wlr_ext_workspace_handle_v1__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_ext_workspace_handle_v1__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_ext_workspace_handle_v1__bindgen_ty_1::destroy"]
-        [::std::mem::offset_of!(wlr_ext_workspace_handle_v1__bindgen_ty_1, destroy) - 0usize];
-};
-#[repr(C)]
-pub struct wlr_ext_workspace_handle_v1__bindgen_ty_2 {
-    pub resources: wl_list,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_handle_v1__bindgen_ty_2"]
-        [::std::mem::size_of::<wlr_ext_workspace_handle_v1__bindgen_ty_2>() - 16usize];
-    ["Alignment of wlr_ext_workspace_handle_v1__bindgen_ty_2"]
-        [::std::mem::align_of::<wlr_ext_workspace_handle_v1__bindgen_ty_2>() - 8usize];
-    ["Offset of field: wlr_ext_workspace_handle_v1__bindgen_ty_2::resources"]
-        [::std::mem::offset_of!(wlr_ext_workspace_handle_v1__bindgen_ty_2, resources) - 0usize];
-};
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_ext_workspace_handle_v1"]
-        [::std::mem::size_of::<wlr_ext_workspace_handle_v1>() - 120usize];
-    ["Alignment of wlr_ext_workspace_handle_v1"]
-        [::std::mem::align_of::<wlr_ext_workspace_handle_v1>() - 8usize];
-    ["Offset of field: wlr_ext_workspace_handle_v1::manager"]
-        [::std::mem::offset_of!(wlr_ext_workspace_handle_v1, manager) - 0usize];
-    ["Offset of field: wlr_ext_workspace_handle_v1::group"]
-        [::std::mem::offset_of!(wlr_ext_workspace_handle_v1, group) - 8usize];
-    ["Offset of field: wlr_ext_workspace_handle_v1::id"]
-        [::std::mem::offset_of!(wlr_ext_workspace_handle_v1, id) - 16usize];
-    ["Offset of field: wlr_ext_workspace_handle_v1::name"]
-        [::std::mem::offset_of!(wlr_ext_workspace_handle_v1, name) - 24usize];
-    ["Offset of field: wlr_ext_workspace_handle_v1::coordinates"]
-        [::std::mem::offset_of!(wlr_ext_workspace_handle_v1, coordinates) - 32usize];
-    ["Offset of field: wlr_ext_workspace_handle_v1::caps"]
-        [::std::mem::offset_of!(wlr_ext_workspace_handle_v1, caps) - 56usize];
-    ["Offset of field: wlr_ext_workspace_handle_v1::state"]
-        [::std::mem::offset_of!(wlr_ext_workspace_handle_v1, state) - 60usize];
-    ["Offset of field: wlr_ext_workspace_handle_v1::events"]
-        [::std::mem::offset_of!(wlr_ext_workspace_handle_v1, events) - 64usize];
-    ["Offset of field: wlr_ext_workspace_handle_v1::link"]
-        [::std::mem::offset_of!(wlr_ext_workspace_handle_v1, link) - 80usize];
-    ["Offset of field: wlr_ext_workspace_handle_v1::data"]
-        [::std::mem::offset_of!(wlr_ext_workspace_handle_v1, data) - 96usize];
-    ["Offset of field: wlr_ext_workspace_handle_v1::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_ext_workspace_handle_v1, WLR_PRIVATE) - 104usize];
-};
-unsafe extern "C" {
-    pub fn wlr_ext_workspace_manager_v1_create(
-        display: *mut wl_display,
-        version: u32,
-    ) -> *mut wlr_ext_workspace_manager_v1;
-}
-unsafe extern "C" {
-    pub fn wlr_ext_workspace_group_handle_v1_create(
-        manager: *mut wlr_ext_workspace_manager_v1,
-        caps: u32,
-    ) -> *mut wlr_ext_workspace_group_handle_v1;
-}
-unsafe extern "C" {
-    pub fn wlr_ext_workspace_group_handle_v1_destroy(group: *mut wlr_ext_workspace_group_handle_v1);
-}
-unsafe extern "C" {
-    pub fn wlr_ext_workspace_group_handle_v1_output_enter(
-        group: *mut wlr_ext_workspace_group_handle_v1,
-        output: *mut wlr_output,
-    );
-}
-unsafe extern "C" {
-    pub fn wlr_ext_workspace_group_handle_v1_output_leave(
-        group: *mut wlr_ext_workspace_group_handle_v1,
-        output: *mut wlr_output,
-    );
-}
-unsafe extern "C" {
-    pub fn wlr_ext_workspace_handle_v1_create(
-        manager: *mut wlr_ext_workspace_manager_v1,
-        id: *const ::std::os::raw::c_char,
-        caps: u32,
-    ) -> *mut wlr_ext_workspace_handle_v1;
-}
-unsafe extern "C" {
-    pub fn wlr_ext_workspace_handle_v1_destroy(workspace: *mut wlr_ext_workspace_handle_v1);
-}
-unsafe extern "C" {
-    pub fn wlr_ext_workspace_handle_v1_set_group(
-        workspace: *mut wlr_ext_workspace_handle_v1,
-        group: *mut wlr_ext_workspace_group_handle_v1,
-    );
-}
-unsafe extern "C" {
-    pub fn wlr_ext_workspace_handle_v1_set_name(
-        workspace: *mut wlr_ext_workspace_handle_v1,
-        name: *const ::std::os::raw::c_char,
-    );
-}
-unsafe extern "C" {
-    pub fn wlr_ext_workspace_handle_v1_set_coordinates(
-        workspace: *mut wlr_ext_workspace_handle_v1,
-        coords: *const u32,
-        coords_len: usize,
-    );
-}
-unsafe extern "C" {
-    pub fn wlr_ext_workspace_handle_v1_set_active(
-        workspace: *mut wlr_ext_workspace_handle_v1,
-        enabled: bool,
-    );
-}
-unsafe extern "C" {
-    pub fn wlr_ext_workspace_handle_v1_set_urgent(
-        workspace: *mut wlr_ext_workspace_handle_v1,
-        enabled: bool,
-    );
-}
-unsafe extern "C" {
-    pub fn wlr_ext_workspace_handle_v1_set_hidden(
-        workspace: *mut wlr_ext_workspace_handle_v1,
-        enabled: bool,
-    );
-}
-#[repr(C)]
-pub struct wlr_fixes {
-    pub global: *mut wl_global,
-    pub events: wlr_fixes__bindgen_ty_1,
-    pub WLR_PRIVATE: wlr_fixes__bindgen_ty_2,
-}
-#[repr(C)]
-pub struct wlr_fixes__bindgen_ty_1 {
-    pub destroy: wl_signal,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_fixes__bindgen_ty_1"][::std::mem::size_of::<wlr_fixes__bindgen_ty_1>() - 16usize];
-    ["Alignment of wlr_fixes__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_fixes__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_fixes__bindgen_ty_1::destroy"]
-        [::std::mem::offset_of!(wlr_fixes__bindgen_ty_1, destroy) - 0usize];
-};
-#[repr(C)]
-pub struct wlr_fixes__bindgen_ty_2 {
-    pub display_destroy: wl_listener,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_fixes__bindgen_ty_2"][::std::mem::size_of::<wlr_fixes__bindgen_ty_2>() - 24usize];
-    ["Alignment of wlr_fixes__bindgen_ty_2"]
-        [::std::mem::align_of::<wlr_fixes__bindgen_ty_2>() - 8usize];
-    ["Offset of field: wlr_fixes__bindgen_ty_2::display_destroy"]
-        [::std::mem::offset_of!(wlr_fixes__bindgen_ty_2, display_destroy) - 0usize];
-};
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_fixes"][::std::mem::size_of::<wlr_fixes>() - 48usize];
-    ["Alignment of wlr_fixes"][::std::mem::align_of::<wlr_fixes>() - 8usize];
-    ["Offset of field: wlr_fixes::global"][::std::mem::offset_of!(wlr_fixes, global) - 0usize];
-    ["Offset of field: wlr_fixes::events"][::std::mem::offset_of!(wlr_fixes, events) - 8usize];
-    ["Offset of field: wlr_fixes::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_fixes, WLR_PRIVATE) - 24usize];
-};
-unsafe extern "C" {
-    pub fn wlr_fixes_create(display: *mut wl_display, version: u32) -> *mut wlr_fixes;
 }
 #[repr(C)]
 pub struct wlr_foreign_toplevel_manager_v1 {
@@ -11837,7 +10578,6 @@ unsafe extern "C" {
 pub struct wlr_gamma_control_manager_v1 {
     pub global: *mut wl_global,
     pub controls: wl_list,
-    pub fallback_gamma_size: usize,
     pub events: wlr_gamma_control_manager_v1__bindgen_ty_1,
     pub data: *mut ::std::os::raw::c_void,
     pub WLR_PRIVATE: wlr_gamma_control_manager_v1__bindgen_ty_2,
@@ -11876,21 +10616,19 @@ const _: () = {
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_gamma_control_manager_v1"]
-        [::std::mem::size_of::<wlr_gamma_control_manager_v1>() - 96usize];
+        [::std::mem::size_of::<wlr_gamma_control_manager_v1>() - 88usize];
     ["Alignment of wlr_gamma_control_manager_v1"]
         [::std::mem::align_of::<wlr_gamma_control_manager_v1>() - 8usize];
     ["Offset of field: wlr_gamma_control_manager_v1::global"]
         [::std::mem::offset_of!(wlr_gamma_control_manager_v1, global) - 0usize];
     ["Offset of field: wlr_gamma_control_manager_v1::controls"]
         [::std::mem::offset_of!(wlr_gamma_control_manager_v1, controls) - 8usize];
-    ["Offset of field: wlr_gamma_control_manager_v1::fallback_gamma_size"]
-        [::std::mem::offset_of!(wlr_gamma_control_manager_v1, fallback_gamma_size) - 24usize];
     ["Offset of field: wlr_gamma_control_manager_v1::events"]
-        [::std::mem::offset_of!(wlr_gamma_control_manager_v1, events) - 32usize];
+        [::std::mem::offset_of!(wlr_gamma_control_manager_v1, events) - 24usize];
     ["Offset of field: wlr_gamma_control_manager_v1::data"]
-        [::std::mem::offset_of!(wlr_gamma_control_manager_v1, data) - 64usize];
+        [::std::mem::offset_of!(wlr_gamma_control_manager_v1, data) - 56usize];
     ["Offset of field: wlr_gamma_control_manager_v1::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_gamma_control_manager_v1, WLR_PRIVATE) - 72usize];
+        [::std::mem::offset_of!(wlr_gamma_control_manager_v1, WLR_PRIVATE) - 64usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -11972,11 +10710,6 @@ unsafe extern "C" {
         gamma_control: *mut wlr_gamma_control_v1,
         output_state: *mut wlr_output_state,
     ) -> bool;
-}
-unsafe extern "C" {
-    pub fn wlr_gamma_control_v1_get_color_transform(
-        gamma_control: *mut wlr_gamma_control_v1,
-    ) -> *mut wlr_color_transform;
 }
 unsafe extern "C" {
     pub fn wlr_gamma_control_v1_send_failed_and_destroy(gamma_control: *mut wlr_gamma_control_v1);
@@ -12402,7 +11135,7 @@ pub struct wlr_input_method_manager_v2 {
 }
 #[repr(C)]
 pub struct wlr_input_method_manager_v2__bindgen_ty_1 {
-    pub new_input_method: wl_signal,
+    pub input_method: wl_signal,
     pub destroy: wl_signal,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
@@ -12411,10 +11144,8 @@ const _: () = {
         [::std::mem::size_of::<wlr_input_method_manager_v2__bindgen_ty_1>() - 32usize];
     ["Alignment of wlr_input_method_manager_v2__bindgen_ty_1"]
         [::std::mem::align_of::<wlr_input_method_manager_v2__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_input_method_manager_v2__bindgen_ty_1::new_input_method"][::std::mem::offset_of!(
-        wlr_input_method_manager_v2__bindgen_ty_1,
-        new_input_method
-    ) - 0usize];
+    ["Offset of field: wlr_input_method_manager_v2__bindgen_ty_1::input_method"]
+        [::std::mem::offset_of!(wlr_input_method_manager_v2__bindgen_ty_1, input_method) - 0usize];
     ["Offset of field: wlr_input_method_manager_v2__bindgen_ty_1::destroy"]
         [::std::mem::offset_of!(wlr_input_method_manager_v2__bindgen_ty_1, destroy) - 16usize];
 };
@@ -12551,18 +11282,18 @@ const _: () = {
 };
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_keyboard_group"][::std::mem::size_of::<wlr_keyboard_group>() - 456usize];
+    ["Size of wlr_keyboard_group"][::std::mem::size_of::<wlr_keyboard_group>() - 448usize];
     ["Alignment of wlr_keyboard_group"][::std::mem::align_of::<wlr_keyboard_group>() - 8usize];
     ["Offset of field: wlr_keyboard_group::keyboard"]
         [::std::mem::offset_of!(wlr_keyboard_group, keyboard) - 0usize];
     ["Offset of field: wlr_keyboard_group::devices"]
-        [::std::mem::offset_of!(wlr_keyboard_group, devices) - 384usize];
+        [::std::mem::offset_of!(wlr_keyboard_group, devices) - 376usize];
     ["Offset of field: wlr_keyboard_group::keys"]
-        [::std::mem::offset_of!(wlr_keyboard_group, keys) - 400usize];
+        [::std::mem::offset_of!(wlr_keyboard_group, keys) - 392usize];
     ["Offset of field: wlr_keyboard_group::events"]
-        [::std::mem::offset_of!(wlr_keyboard_group, events) - 416usize];
+        [::std::mem::offset_of!(wlr_keyboard_group, events) - 408usize];
     ["Offset of field: wlr_keyboard_group::data"]
-        [::std::mem::offset_of!(wlr_keyboard_group, data) - 448usize];
+        [::std::mem::offset_of!(wlr_keyboard_group, data) - 440usize];
 };
 unsafe extern "C" {
     pub fn wlr_keyboard_group_create() -> *mut wlr_keyboard_group;
@@ -13328,55 +12059,25 @@ unsafe extern "C" {
 pub struct wlr_linux_drm_syncobj_surface_v1_state {
     pub acquire_timeline: *mut wlr_drm_syncobj_timeline,
     pub acquire_point: u64,
-    pub WLR_PRIVATE: wlr_linux_drm_syncobj_surface_v1_state__bindgen_ty_1,
-}
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_linux_drm_syncobj_surface_v1_state__bindgen_ty_1 {
-    pub committed: bool,
     pub release_timeline: *mut wlr_drm_syncobj_timeline,
     pub release_point: u64,
-    pub release_merger: *mut wlr_drm_syncobj_merger,
 }
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_linux_drm_syncobj_surface_v1_state__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_linux_drm_syncobj_surface_v1_state__bindgen_ty_1>() - 32usize];
-    ["Alignment of wlr_linux_drm_syncobj_surface_v1_state__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_linux_drm_syncobj_surface_v1_state__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_linux_drm_syncobj_surface_v1_state__bindgen_ty_1::committed"][::std::mem::offset_of!(
-        wlr_linux_drm_syncobj_surface_v1_state__bindgen_ty_1,
-        committed
-    )
-        - 0usize];
-    ["Offset of field: wlr_linux_drm_syncobj_surface_v1_state__bindgen_ty_1::release_timeline"][::std::mem::offset_of!(
-        wlr_linux_drm_syncobj_surface_v1_state__bindgen_ty_1,
-        release_timeline
-    )
-        - 8usize];
-    ["Offset of field: wlr_linux_drm_syncobj_surface_v1_state__bindgen_ty_1::release_point"][::std::mem::offset_of!(
-        wlr_linux_drm_syncobj_surface_v1_state__bindgen_ty_1,
-        release_point
-    )
-        - 16usize];
-    ["Offset of field: wlr_linux_drm_syncobj_surface_v1_state__bindgen_ty_1::release_merger"][::std::mem::offset_of!(
-        wlr_linux_drm_syncobj_surface_v1_state__bindgen_ty_1,
-        release_merger
-    )
-        - 24usize];
-};
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_linux_drm_syncobj_surface_v1_state"]
-        [::std::mem::size_of::<wlr_linux_drm_syncobj_surface_v1_state>() - 48usize];
+        [::std::mem::size_of::<wlr_linux_drm_syncobj_surface_v1_state>() - 32usize];
     ["Alignment of wlr_linux_drm_syncobj_surface_v1_state"]
         [::std::mem::align_of::<wlr_linux_drm_syncobj_surface_v1_state>() - 8usize];
     ["Offset of field: wlr_linux_drm_syncobj_surface_v1_state::acquire_timeline"]
         [::std::mem::offset_of!(wlr_linux_drm_syncobj_surface_v1_state, acquire_timeline) - 0usize];
     ["Offset of field: wlr_linux_drm_syncobj_surface_v1_state::acquire_point"]
         [::std::mem::offset_of!(wlr_linux_drm_syncobj_surface_v1_state, acquire_point) - 8usize];
-    ["Offset of field: wlr_linux_drm_syncobj_surface_v1_state::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_linux_drm_syncobj_surface_v1_state, WLR_PRIVATE) - 16usize];
+    ["Offset of field: wlr_linux_drm_syncobj_surface_v1_state::release_timeline"][::std::mem::offset_of!(
+        wlr_linux_drm_syncobj_surface_v1_state,
+        release_timeline
+    ) - 16usize];
+    ["Offset of field: wlr_linux_drm_syncobj_surface_v1_state::release_point"]
+        [::std::mem::offset_of!(wlr_linux_drm_syncobj_surface_v1_state, release_point) - 24usize];
 };
 #[repr(C)]
 pub struct wlr_linux_drm_syncobj_manager_v1 {
@@ -13431,15 +12132,6 @@ unsafe extern "C" {
     pub fn wlr_linux_drm_syncobj_v1_state_signal_release_with_buffer(
         state: *mut wlr_linux_drm_syncobj_surface_v1_state,
         buffer: *mut wlr_buffer,
-    ) -> bool;
-}
-unsafe extern "C" {
-    #[doc = " Register a release point for buffer usage.\n\n This function may be called multiple times for the same commit. The client's\n release point will be signalled when all registered points are signalled, and\n a new buffer has been committed.\n\n Because the given release point may not be materialized, a wl_event_loop must\n be supplied to schedule a wait internally, if needed"]
-    pub fn wlr_linux_drm_syncobj_v1_state_add_release_point(
-        state: *mut wlr_linux_drm_syncobj_surface_v1_state,
-        release_timeline: *mut wlr_drm_syncobj_timeline,
-        release_point: u64,
-        event_loop: *mut wl_event_loop,
     ) -> bool;
 }
 #[doc = " An output layer.\n\n Output layers are displayed between the output primary buffer (see\n wlr_output_attach_buffer()) and the cursor buffer. They can offload some\n rendering work to the backend.\n\n To configure output layers, callers should call wlr_output_layer_create() to\n create layers, attach struct wlr_output_layer_state onto\n struct wlr_output_state via wlr_output_state_set_layers() to describe their new\n state, and commit the output via wlr_output_commit_state().\n\n Backends may have arbitrary limitations when it comes to displaying output\n layers. Backends indicate whether or not a layer can be displayed via\n wlr_output_layer_state.accepted after wlr_output_test_state() or\n wlr_output_commit_state() is called. Compositors using the output layers API\n directly are expected to setup layers, call wlr_output_test_state(), paint\n the layers that the backend rejected with the renderer, then call\n wlr_output_commit_state().\n\n Callers are responsible for disabling output layers when they need the full\n output contents to be composited onto a single buffer, e.g. during screen\n capture.\n\n Callers must always include the state for all layers on output test/commit."]
@@ -14028,12 +12720,15 @@ unsafe extern "C" {
     pub fn wlr_output_swapchain_manager_finish(manager: *mut wlr_output_swapchain_manager);
 }
 impl zwp_pointer_constraints_v1_lifetime {
+    #[doc = " the pointer constraint is defunct once deactivated\n\n A oneshot pointer constraint will never reactivate once it has\n been deactivated. See the corresponding deactivation event\n (wp_locked_pointer.unlocked and wp_confined_pointer.unconfined)\n for details."]
     pub const ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT: zwp_pointer_constraints_v1_lifetime =
         zwp_pointer_constraints_v1_lifetime(1);
+    #[doc = " the pointer constraint may reactivate\n\n A persistent pointer constraint may again reactivate once it\n has been deactivated. See the corresponding deactivation event\n (wp_locked_pointer.unlocked and wp_confined_pointer.unconfined)\n for details."]
     pub const ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT: zwp_pointer_constraints_v1_lifetime =
         zwp_pointer_constraints_v1_lifetime(2);
 }
 #[repr(transparent)]
+#[doc = " @ingroup iface_zwp_pointer_constraints_v1\n constraint lifetime\n\n These values represent different lifetime semantics. They are passed\n as arguments to the factory requests to specify how the constraint\n lifetimes should be managed."]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct zwp_pointer_constraints_v1_lifetime(pub ::std::os::raw::c_uint);
 impl wlr_pointer_constraint_v1_type {
@@ -15029,8 +13724,6 @@ pub struct wlr_scene {
     pub outputs: wl_list,
     pub linux_dmabuf_v1: *mut wlr_linux_dmabuf_v1,
     pub gamma_control_manager_v1: *mut wlr_gamma_control_manager_v1,
-    pub color_manager_v1: *mut wlr_color_manager_v1,
-    pub restack_xwayland_surfaces: bool,
     pub WLR_PRIVATE: wlr_scene__bindgen_ty_1,
 }
 #[repr(C)]
@@ -15038,7 +13731,6 @@ pub struct wlr_scene__bindgen_ty_1 {
     pub linux_dmabuf_v1_destroy: wl_listener,
     pub gamma_control_manager_v1_destroy: wl_listener,
     pub gamma_control_manager_v1_set_gamma: wl_listener,
-    pub color_manager_v1_destroy: wl_listener,
     pub debug_damage_option: wlr_scene_debug_damage_option,
     pub direct_scanout: bool,
     pub calculate_visibility: bool,
@@ -15046,8 +13738,7 @@ pub struct wlr_scene__bindgen_ty_1 {
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_scene__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_scene__bindgen_ty_1>() - 104usize];
+    ["Size of wlr_scene__bindgen_ty_1"][::std::mem::size_of::<wlr_scene__bindgen_ty_1>() - 80usize];
     ["Alignment of wlr_scene__bindgen_ty_1"]
         [::std::mem::align_of::<wlr_scene__bindgen_ty_1>() - 8usize];
     ["Offset of field: wlr_scene__bindgen_ty_1::linux_dmabuf_v1_destroy"]
@@ -15060,20 +13751,18 @@ const _: () = {
         wlr_scene__bindgen_ty_1,
         gamma_control_manager_v1_set_gamma
     ) - 48usize];
-    ["Offset of field: wlr_scene__bindgen_ty_1::color_manager_v1_destroy"]
-        [::std::mem::offset_of!(wlr_scene__bindgen_ty_1, color_manager_v1_destroy) - 72usize];
     ["Offset of field: wlr_scene__bindgen_ty_1::debug_damage_option"]
-        [::std::mem::offset_of!(wlr_scene__bindgen_ty_1, debug_damage_option) - 96usize];
+        [::std::mem::offset_of!(wlr_scene__bindgen_ty_1, debug_damage_option) - 72usize];
     ["Offset of field: wlr_scene__bindgen_ty_1::direct_scanout"]
-        [::std::mem::offset_of!(wlr_scene__bindgen_ty_1, direct_scanout) - 100usize];
+        [::std::mem::offset_of!(wlr_scene__bindgen_ty_1, direct_scanout) - 76usize];
     ["Offset of field: wlr_scene__bindgen_ty_1::calculate_visibility"]
-        [::std::mem::offset_of!(wlr_scene__bindgen_ty_1, calculate_visibility) - 101usize];
+        [::std::mem::offset_of!(wlr_scene__bindgen_ty_1, calculate_visibility) - 77usize];
     ["Offset of field: wlr_scene__bindgen_ty_1::highlight_transparent_region"]
-        [::std::mem::offset_of!(wlr_scene__bindgen_ty_1, highlight_transparent_region) - 102usize];
+        [::std::mem::offset_of!(wlr_scene__bindgen_ty_1, highlight_transparent_region) - 78usize];
 };
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_scene"][::std::mem::size_of::<wlr_scene>() - 280usize];
+    ["Size of wlr_scene"][::std::mem::size_of::<wlr_scene>() - 240usize];
     ["Alignment of wlr_scene"][::std::mem::align_of::<wlr_scene>() - 8usize];
     ["Offset of field: wlr_scene::tree"][::std::mem::offset_of!(wlr_scene, tree) - 0usize];
     ["Offset of field: wlr_scene::outputs"][::std::mem::offset_of!(wlr_scene, outputs) - 128usize];
@@ -15081,12 +13770,8 @@ const _: () = {
         [::std::mem::offset_of!(wlr_scene, linux_dmabuf_v1) - 144usize];
     ["Offset of field: wlr_scene::gamma_control_manager_v1"]
         [::std::mem::offset_of!(wlr_scene, gamma_control_manager_v1) - 152usize];
-    ["Offset of field: wlr_scene::color_manager_v1"]
-        [::std::mem::offset_of!(wlr_scene, color_manager_v1) - 160usize];
-    ["Offset of field: wlr_scene::restack_xwayland_surfaces"]
-        [::std::mem::offset_of!(wlr_scene, restack_xwayland_surfaces) - 168usize];
     ["Offset of field: wlr_scene::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_scene, WLR_PRIVATE) - 176usize];
+        [::std::mem::offset_of!(wlr_scene, WLR_PRIVATE) - 160usize];
 };
 #[doc = " A scene-graph node displaying a single surface."]
 #[repr(C)]
@@ -15100,6 +13785,8 @@ pub struct wlr_scene_surface__bindgen_ty_1 {
     pub clip: wlr_box,
     pub addon: wlr_addon,
     pub outputs_update: wl_listener,
+    pub output_enter: wl_listener,
+    pub output_leave: wl_listener,
     pub output_sample: wl_listener,
     pub frame_done: wl_listener,
     pub surface_destroy: wl_listener,
@@ -15108,7 +13795,7 @@ pub struct wlr_scene_surface__bindgen_ty_1 {
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_scene_surface__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_scene_surface__bindgen_ty_1>() - 168usize];
+        [::std::mem::size_of::<wlr_scene_surface__bindgen_ty_1>() - 216usize];
     ["Alignment of wlr_scene_surface__bindgen_ty_1"]
         [::std::mem::align_of::<wlr_scene_surface__bindgen_ty_1>() - 8usize];
     ["Offset of field: wlr_scene_surface__bindgen_ty_1::clip"]
@@ -15117,18 +13804,22 @@ const _: () = {
         [::std::mem::offset_of!(wlr_scene_surface__bindgen_ty_1, addon) - 16usize];
     ["Offset of field: wlr_scene_surface__bindgen_ty_1::outputs_update"]
         [::std::mem::offset_of!(wlr_scene_surface__bindgen_ty_1, outputs_update) - 48usize];
+    ["Offset of field: wlr_scene_surface__bindgen_ty_1::output_enter"]
+        [::std::mem::offset_of!(wlr_scene_surface__bindgen_ty_1, output_enter) - 72usize];
+    ["Offset of field: wlr_scene_surface__bindgen_ty_1::output_leave"]
+        [::std::mem::offset_of!(wlr_scene_surface__bindgen_ty_1, output_leave) - 96usize];
     ["Offset of field: wlr_scene_surface__bindgen_ty_1::output_sample"]
-        [::std::mem::offset_of!(wlr_scene_surface__bindgen_ty_1, output_sample) - 72usize];
+        [::std::mem::offset_of!(wlr_scene_surface__bindgen_ty_1, output_sample) - 120usize];
     ["Offset of field: wlr_scene_surface__bindgen_ty_1::frame_done"]
-        [::std::mem::offset_of!(wlr_scene_surface__bindgen_ty_1, frame_done) - 96usize];
+        [::std::mem::offset_of!(wlr_scene_surface__bindgen_ty_1, frame_done) - 144usize];
     ["Offset of field: wlr_scene_surface__bindgen_ty_1::surface_destroy"]
-        [::std::mem::offset_of!(wlr_scene_surface__bindgen_ty_1, surface_destroy) - 120usize];
+        [::std::mem::offset_of!(wlr_scene_surface__bindgen_ty_1, surface_destroy) - 168usize];
     ["Offset of field: wlr_scene_surface__bindgen_ty_1::surface_commit"]
-        [::std::mem::offset_of!(wlr_scene_surface__bindgen_ty_1, surface_commit) - 144usize];
+        [::std::mem::offset_of!(wlr_scene_surface__bindgen_ty_1, surface_commit) - 192usize];
 };
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_scene_surface"][::std::mem::size_of::<wlr_scene_surface>() - 184usize];
+    ["Size of wlr_scene_surface"][::std::mem::size_of::<wlr_scene_surface>() - 232usize];
     ["Alignment of wlr_scene_surface"][::std::mem::align_of::<wlr_scene_surface>() - 8usize];
     ["Offset of field: wlr_scene_surface::buffer"]
         [::std::mem::offset_of!(wlr_scene_surface, buffer) - 0usize];
@@ -15180,40 +13871,17 @@ const _: () = {
 pub struct wlr_scene_output_sample_event {
     pub output: *mut wlr_scene_output,
     pub direct_scanout: bool,
-    pub release_timeline: *mut wlr_drm_syncobj_timeline,
-    pub release_point: u64,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_scene_output_sample_event"]
-        [::std::mem::size_of::<wlr_scene_output_sample_event>() - 32usize];
+        [::std::mem::size_of::<wlr_scene_output_sample_event>() - 16usize];
     ["Alignment of wlr_scene_output_sample_event"]
         [::std::mem::align_of::<wlr_scene_output_sample_event>() - 8usize];
     ["Offset of field: wlr_scene_output_sample_event::output"]
         [::std::mem::offset_of!(wlr_scene_output_sample_event, output) - 0usize];
     ["Offset of field: wlr_scene_output_sample_event::direct_scanout"]
         [::std::mem::offset_of!(wlr_scene_output_sample_event, direct_scanout) - 8usize];
-    ["Offset of field: wlr_scene_output_sample_event::release_timeline"]
-        [::std::mem::offset_of!(wlr_scene_output_sample_event, release_timeline) - 16usize];
-    ["Offset of field: wlr_scene_output_sample_event::release_point"]
-        [::std::mem::offset_of!(wlr_scene_output_sample_event, release_point) - 24usize];
-};
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_scene_frame_done_event {
-    pub output: *mut wlr_scene_output,
-    pub when: timespec,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_scene_frame_done_event"]
-        [::std::mem::size_of::<wlr_scene_frame_done_event>() - 24usize];
-    ["Alignment of wlr_scene_frame_done_event"]
-        [::std::mem::align_of::<wlr_scene_frame_done_event>() - 8usize];
-    ["Offset of field: wlr_scene_frame_done_event::output"]
-        [::std::mem::offset_of!(wlr_scene_frame_done_event, output) - 0usize];
-    ["Offset of field: wlr_scene_frame_done_event::when"]
-        [::std::mem::offset_of!(wlr_scene_frame_done_event, when) - 8usize];
 };
 #[doc = " A scene-graph node displaying a buffer"]
 #[repr(C)]
@@ -15222,7 +13890,7 @@ pub struct wlr_scene_buffer {
     pub buffer: *mut wlr_buffer,
     pub events: wlr_scene_buffer__bindgen_ty_1,
     pub point_accepts_input: wlr_scene_buffer_point_accepts_input_func_t,
-    #[doc = " The output that the largest area of this buffer is displayed on.\n This may be NULL if the buffer is not currently displayed on any\n outputs."]
+    #[doc = " The output that the largest area of this buffer is displayed on.\n This may be NULL if the buffer is not currently displayed on any\n outputs. This is the output that should be used for frame callbacks,\n presentation feedback, etc."]
     pub primary_output: *mut wlr_scene_output,
     pub opacity: f32,
     pub filter_mode: wlr_scale_filter_mode,
@@ -15231,10 +13899,6 @@ pub struct wlr_scene_buffer {
     pub dst_height: ::std::os::raw::c_int,
     pub transform: wl_output_transform,
     pub opaque_region: pixman_region32_t,
-    pub transfer_function: wlr_color_transfer_function,
-    pub primaries: wlr_color_named_primaries,
-    pub color_encoding: wlr_color_encoding,
-    pub color_range: wlr_color_range,
     pub WLR_PRIVATE: wlr_scene_buffer__bindgen_ty_2,
 }
 #[repr(C)]
@@ -15315,7 +13979,7 @@ const _: () = {
 };
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_scene_buffer"][::std::mem::size_of::<wlr_scene_buffer>() - 456usize];
+    ["Size of wlr_scene_buffer"][::std::mem::size_of::<wlr_scene_buffer>() - 440usize];
     ["Alignment of wlr_scene_buffer"][::std::mem::align_of::<wlr_scene_buffer>() - 8usize];
     ["Offset of field: wlr_scene_buffer::node"]
         [::std::mem::offset_of!(wlr_scene_buffer, node) - 0usize];
@@ -15341,16 +14005,8 @@ const _: () = {
         [::std::mem::offset_of!(wlr_scene_buffer, transform) - 264usize];
     ["Offset of field: wlr_scene_buffer::opaque_region"]
         [::std::mem::offset_of!(wlr_scene_buffer, opaque_region) - 272usize];
-    ["Offset of field: wlr_scene_buffer::transfer_function"]
-        [::std::mem::offset_of!(wlr_scene_buffer, transfer_function) - 296usize];
-    ["Offset of field: wlr_scene_buffer::primaries"]
-        [::std::mem::offset_of!(wlr_scene_buffer, primaries) - 300usize];
-    ["Offset of field: wlr_scene_buffer::color_encoding"]
-        [::std::mem::offset_of!(wlr_scene_buffer, color_encoding) - 304usize];
-    ["Offset of field: wlr_scene_buffer::color_range"]
-        [::std::mem::offset_of!(wlr_scene_buffer, color_range) - 308usize];
     ["Offset of field: wlr_scene_buffer::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_scene_buffer, WLR_PRIVATE) - 312usize];
+        [::std::mem::offset_of!(wlr_scene_buffer, WLR_PRIVATE) - 296usize];
 };
 #[doc = " A viewport for an output in the scene-graph"]
 #[repr(C)]
@@ -15387,10 +14043,6 @@ pub struct wlr_scene_output__bindgen_ty_2 {
     pub prev_scanout: bool,
     pub gamma_lut_changed: bool,
     pub gamma_lut: *mut wlr_gamma_control_v1,
-    pub gamma_lut_color_transform: *mut wlr_color_transform,
-    pub prev_gamma_lut_color_transform: *mut wlr_color_transform,
-    pub prev_supplied_color_transform: *mut wlr_color_transform,
-    pub combined_color_transform: *mut wlr_color_transform,
     pub output_commit: wl_listener,
     pub output_damage: wl_listener,
     pub output_needs_frame: wl_listener,
@@ -15398,13 +14050,11 @@ pub struct wlr_scene_output__bindgen_ty_2 {
     pub render_list: wl_array,
     pub in_timeline: *mut wlr_drm_syncobj_timeline,
     pub in_point: u64,
-    pub out_timeline: *mut wlr_drm_syncobj_timeline,
-    pub out_point: u64,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_scene_output__bindgen_ty_2"]
-        [::std::mem::size_of::<wlr_scene_output__bindgen_ty_2>() - 216usize];
+        [::std::mem::size_of::<wlr_scene_output__bindgen_ty_2>() - 168usize];
     ["Alignment of wlr_scene_output__bindgen_ty_2"]
         [::std::mem::align_of::<wlr_scene_output__bindgen_ty_2>() - 8usize];
     ["Offset of field: wlr_scene_output__bindgen_ty_2::pending_commit_damage"]
@@ -15421,47 +14071,26 @@ const _: () = {
         [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, gamma_lut_changed) - 27usize];
     ["Offset of field: wlr_scene_output__bindgen_ty_2::gamma_lut"]
         [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, gamma_lut) - 32usize];
-    ["Offset of field: wlr_scene_output__bindgen_ty_2::gamma_lut_color_transform"][::std::mem::offset_of!(
-        wlr_scene_output__bindgen_ty_2,
-        gamma_lut_color_transform
-    ) - 40usize];
-    ["Offset of field: wlr_scene_output__bindgen_ty_2::prev_gamma_lut_color_transform"][::std::mem::offset_of!(
-        wlr_scene_output__bindgen_ty_2,
-        prev_gamma_lut_color_transform
-    )
-        - 48usize];
-    ["Offset of field: wlr_scene_output__bindgen_ty_2::prev_supplied_color_transform"][::std::mem::offset_of!(
-        wlr_scene_output__bindgen_ty_2,
-        prev_supplied_color_transform
-    ) - 56usize];
-    ["Offset of field: wlr_scene_output__bindgen_ty_2::combined_color_transform"][::std::mem::offset_of!(
-        wlr_scene_output__bindgen_ty_2,
-        combined_color_transform
-    ) - 64usize];
     ["Offset of field: wlr_scene_output__bindgen_ty_2::output_commit"]
-        [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, output_commit) - 72usize];
+        [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, output_commit) - 40usize];
     ["Offset of field: wlr_scene_output__bindgen_ty_2::output_damage"]
-        [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, output_damage) - 96usize];
+        [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, output_damage) - 64usize];
     ["Offset of field: wlr_scene_output__bindgen_ty_2::output_needs_frame"]
-        [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, output_needs_frame) - 120usize];
+        [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, output_needs_frame) - 88usize];
     ["Offset of field: wlr_scene_output__bindgen_ty_2::damage_highlight_regions"][::std::mem::offset_of!(
         wlr_scene_output__bindgen_ty_2,
         damage_highlight_regions
-    ) - 144usize];
+    ) - 112usize];
     ["Offset of field: wlr_scene_output__bindgen_ty_2::render_list"]
-        [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, render_list) - 160usize];
+        [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, render_list) - 128usize];
     ["Offset of field: wlr_scene_output__bindgen_ty_2::in_timeline"]
-        [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, in_timeline) - 184usize];
+        [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, in_timeline) - 152usize];
     ["Offset of field: wlr_scene_output__bindgen_ty_2::in_point"]
-        [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, in_point) - 192usize];
-    ["Offset of field: wlr_scene_output__bindgen_ty_2::out_timeline"]
-        [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, out_timeline) - 200usize];
-    ["Offset of field: wlr_scene_output__bindgen_ty_2::out_point"]
-        [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, out_point) - 208usize];
+        [::std::mem::offset_of!(wlr_scene_output__bindgen_ty_2, in_point) - 160usize];
 };
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_scene_output"][::std::mem::size_of::<wlr_scene_output>() - 344usize];
+    ["Size of wlr_scene_output"][::std::mem::size_of::<wlr_scene_output>() - 296usize];
     ["Alignment of wlr_scene_output"][::std::mem::align_of::<wlr_scene_output>() - 8usize];
     ["Offset of field: wlr_scene_output::output"]
         [::std::mem::offset_of!(wlr_scene_output, output) - 0usize];
@@ -15627,13 +14256,6 @@ unsafe extern "C" {
     );
 }
 unsafe extern "C" {
-    #[doc = " Handles color_management_v1 feedback for all surfaces in the scene.\n\n Asserts that a struct wlr_color_manager_v1 hasn't already been set for the scene."]
-    pub fn wlr_scene_set_color_manager_v1(
-        scene: *mut wlr_scene,
-        manager: *mut wlr_color_manager_v1,
-    );
-}
-unsafe extern "C" {
     #[doc = " Add a node displaying nothing but its children."]
     pub fn wlr_scene_tree_create(parent: *mut wlr_scene_tree) -> *mut wlr_scene_tree;
 }
@@ -15661,13 +14283,6 @@ unsafe extern "C" {
     pub fn wlr_scene_surface_try_from_buffer(
         scene_buffer: *mut wlr_scene_buffer,
     ) -> *mut wlr_scene_surface;
-}
-unsafe extern "C" {
-    #[doc = " Call wlr_surface_send_frame_done() if the surface is visible."]
-    pub fn wlr_scene_surface_send_frame_done(
-        scene_surface: *mut wlr_scene_surface,
-        when: *const timespec,
-    );
 }
 unsafe extern "C" {
     #[doc = " Add a node displaying a solid-colored rectangle to the scene-graph.\n\n The color argument must be a premultiplied color value."]
@@ -15782,34 +14397,10 @@ unsafe extern "C" {
     );
 }
 unsafe extern "C" {
-    pub fn wlr_scene_buffer_set_transfer_function(
-        scene_buffer: *mut wlr_scene_buffer,
-        transfer_function: wlr_color_transfer_function,
-    );
-}
-unsafe extern "C" {
-    pub fn wlr_scene_buffer_set_primaries(
-        scene_buffer: *mut wlr_scene_buffer,
-        primaries: wlr_color_named_primaries,
-    );
-}
-unsafe extern "C" {
-    pub fn wlr_scene_buffer_set_color_encoding(
-        scene_buffer: *mut wlr_scene_buffer,
-        encoding: wlr_color_encoding,
-    );
-}
-unsafe extern "C" {
-    pub fn wlr_scene_buffer_set_color_range(
-        scene_buffer: *mut wlr_scene_buffer,
-        range: wlr_color_range,
-    );
-}
-unsafe extern "C" {
     #[doc = " Calls the buffer's frame_done signal."]
     pub fn wlr_scene_buffer_send_frame_done(
         scene_buffer: *mut wlr_scene_buffer,
-        event: *mut wlr_scene_frame_done_event,
+        now: *mut timespec,
     );
 }
 unsafe extern "C" {
@@ -15835,7 +14426,6 @@ unsafe extern "C" {
 #[derive(Debug, Copy, Clone)]
 pub struct wlr_scene_output_state_options {
     pub timer: *mut wlr_scene_timer,
-    #[doc = " Color transform to apply before the output's color transform. Cannot be\n used when the output has a non-NULL image description set."]
     pub color_transform: *mut wlr_color_transform,
     #[doc = " Allows use of a custom swapchain. This can be useful when trying out an\n output configuration. The swapchain dimensions must match the respective\n wlr_output_state or output size if not specified."]
     pub swapchain: *mut wlr_swapchain,
@@ -15956,7 +14546,6 @@ unsafe extern "C" {
         drag_icon: *mut wlr_drag_icon,
     ) -> *mut wlr_scene_tree;
 }
-#[doc = " Deprecated: this protocol is deprecated and superseded by ext-image-copy-capture-v1.\n The implementation will be dropped in a future wlroots version.\n\n Consider using `wlr_ext_image_capture_source_v1` instead."]
 #[repr(C)]
 pub struct wlr_screencopy_manager_v1 {
     pub global: *mut wl_global,
@@ -16860,12 +15449,15 @@ unsafe extern "C" {
     pub fn wlr_subcompositor_create(display: *mut wl_display) -> *mut wlr_subcompositor;
 }
 impl zwp_tablet_pad_v2_button_state {
+    #[doc = " the button is not pressed"]
     pub const ZWP_TABLET_PAD_V2_BUTTON_STATE_RELEASED: zwp_tablet_pad_v2_button_state =
         zwp_tablet_pad_v2_button_state(0);
+    #[doc = " the button is pressed"]
     pub const ZWP_TABLET_PAD_V2_BUTTON_STATE_PRESSED: zwp_tablet_pad_v2_button_state =
         zwp_tablet_pad_v2_button_state(1);
 }
 #[repr(transparent)]
+#[doc = " @ingroup iface_zwp_tablet_pad_v2\n physical button state\n\n Describes the physical state of a button that caused the button\n event."]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct zwp_tablet_pad_v2_button_state(pub ::std::os::raw::c_uint);
 #[repr(C)]
@@ -17650,12 +16242,15 @@ unsafe extern "C" {
     ) -> bool;
 }
 impl wp_tearing_control_v1_presentation_hint {
+    #[doc = " tearing-free presentation\n\n The content of this surface is meant to be synchronized to the\n vertical blanking period. This should not result in visible\n tearing and may result in a delay before a surface commit is\n presented."]
     pub const WP_TEARING_CONTROL_V1_PRESENTATION_HINT_VSYNC:
         wp_tearing_control_v1_presentation_hint = wp_tearing_control_v1_presentation_hint(0);
+    #[doc = " asynchronous presentation\n\n The content of this surface is meant to be presented with\n minimal latency and tearing is acceptable."]
     pub const WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC:
         wp_tearing_control_v1_presentation_hint = wp_tearing_control_v1_presentation_hint(1);
 }
 #[repr(transparent)]
+#[doc = " @ingroup iface_wp_tearing_control_v1\n presentation hint values\n\n This enum provides information for if submitted frames from the client\n may be presented with tearing."]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct wp_tearing_control_v1_presentation_hint(pub ::std::os::raw::c_uint);
 #[repr(C)]
@@ -17962,7 +16557,7 @@ pub struct wlr_text_input_manager_v3 {
 }
 #[repr(C)]
 pub struct wlr_text_input_manager_v3__bindgen_ty_1 {
-    pub new_text_input: wl_signal,
+    pub text_input: wl_signal,
     pub destroy: wl_signal,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
@@ -17971,8 +16566,8 @@ const _: () = {
         [::std::mem::size_of::<wlr_text_input_manager_v3__bindgen_ty_1>() - 32usize];
     ["Alignment of wlr_text_input_manager_v3__bindgen_ty_1"]
         [::std::mem::align_of::<wlr_text_input_manager_v3__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_text_input_manager_v3__bindgen_ty_1::new_text_input"]
-        [::std::mem::offset_of!(wlr_text_input_manager_v3__bindgen_ty_1, new_text_input) - 0usize];
+    ["Offset of field: wlr_text_input_manager_v3__bindgen_ty_1::text_input"]
+        [::std::mem::offset_of!(wlr_text_input_manager_v3__bindgen_ty_1, text_input) - 0usize];
     ["Offset of field: wlr_text_input_manager_v3__bindgen_ty_1::destroy"]
         [::std::mem::offset_of!(wlr_text_input_manager_v3__bindgen_ty_1, destroy) - 16usize];
 };
@@ -18249,50 +16844,28 @@ pub struct wlr_virtual_keyboard_v1 {
     pub seat: *mut wlr_seat,
     pub has_keymap: bool,
     pub link: wl_list,
-    pub WLR_PRIVATE: wlr_virtual_keyboard_v1__bindgen_ty_1,
 }
-#[repr(C)]
-pub struct wlr_virtual_keyboard_v1__bindgen_ty_1 {
-    pub seat_destroy: wl_listener,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_virtual_keyboard_v1__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_virtual_keyboard_v1__bindgen_ty_1>() - 24usize];
-    ["Alignment of wlr_virtual_keyboard_v1__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_virtual_keyboard_v1__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_virtual_keyboard_v1__bindgen_ty_1::seat_destroy"]
-        [::std::mem::offset_of!(wlr_virtual_keyboard_v1__bindgen_ty_1, seat_destroy) - 0usize];
-};
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_virtual_keyboard_v1"]
-        [::std::mem::size_of::<wlr_virtual_keyboard_v1>() - 448usize];
+        [::std::mem::size_of::<wlr_virtual_keyboard_v1>() - 416usize];
     ["Alignment of wlr_virtual_keyboard_v1"]
         [::std::mem::align_of::<wlr_virtual_keyboard_v1>() - 8usize];
     ["Offset of field: wlr_virtual_keyboard_v1::keyboard"]
         [::std::mem::offset_of!(wlr_virtual_keyboard_v1, keyboard) - 0usize];
     ["Offset of field: wlr_virtual_keyboard_v1::resource"]
-        [::std::mem::offset_of!(wlr_virtual_keyboard_v1, resource) - 384usize];
+        [::std::mem::offset_of!(wlr_virtual_keyboard_v1, resource) - 376usize];
     ["Offset of field: wlr_virtual_keyboard_v1::seat"]
-        [::std::mem::offset_of!(wlr_virtual_keyboard_v1, seat) - 392usize];
+        [::std::mem::offset_of!(wlr_virtual_keyboard_v1, seat) - 384usize];
     ["Offset of field: wlr_virtual_keyboard_v1::has_keymap"]
-        [::std::mem::offset_of!(wlr_virtual_keyboard_v1, has_keymap) - 400usize];
+        [::std::mem::offset_of!(wlr_virtual_keyboard_v1, has_keymap) - 392usize];
     ["Offset of field: wlr_virtual_keyboard_v1::link"]
-        [::std::mem::offset_of!(wlr_virtual_keyboard_v1, link) - 408usize];
-    ["Offset of field: wlr_virtual_keyboard_v1::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_virtual_keyboard_v1, WLR_PRIVATE) - 424usize];
+        [::std::mem::offset_of!(wlr_virtual_keyboard_v1, link) - 400usize];
 };
 unsafe extern "C" {
     pub fn wlr_virtual_keyboard_manager_v1_create(
         display: *mut wl_display,
     ) -> *mut wlr_virtual_keyboard_manager_v1;
-}
-unsafe extern "C" {
-    #[doc = " Get the struct wlr_virtual_keyboard_v1 corresponding to a zwp_virtual_keyboard_v1 resource.\n\n Asserts that the resource is a valid zwp_virtual_keyboard_v1 resource created by wlroots.\n\n Returns NULL if the resource is inert."]
-    pub fn wlr_virtual_keyboard_v1_from_resource(
-        resource: *mut wl_resource,
-    ) -> *mut wlr_virtual_keyboard_v1;
 }
 unsafe extern "C" {
     pub fn wlr_input_device_get_virtual_keyboard(
@@ -18410,7 +16983,7 @@ unsafe extern "C" {
         display: *mut wl_display,
     ) -> *mut wlr_virtual_pointer_manager_v1;
 }
-#[doc = " A still cursor image.\n\n The buffer contains pixels laid out in a packed DRM_FORMAT_ARGB8888 format."]
+#[doc = " A still cursor image.\n\n The buffer contains pixels layed out in a packed DRM_FORMAT_ARGB8888 format."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct wlr_xcursor_image {
@@ -18420,25 +16993,10 @@ pub struct wlr_xcursor_image {
     pub hotspot_y: u32,
     pub delay: u32,
     pub buffer: *mut u8,
-    pub WLR_PRIVATE: wlr_xcursor_image__bindgen_ty_1,
-}
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_xcursor_image__bindgen_ty_1 {
-    pub readonly_buffer: *mut wlr_readonly_data_buffer,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_xcursor_image__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_xcursor_image__bindgen_ty_1>() - 8usize];
-    ["Alignment of wlr_xcursor_image__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_xcursor_image__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_xcursor_image__bindgen_ty_1::readonly_buffer"]
-        [::std::mem::offset_of!(wlr_xcursor_image__bindgen_ty_1, readonly_buffer) - 0usize];
-};
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_xcursor_image"][::std::mem::size_of::<wlr_xcursor_image>() - 40usize];
+    ["Size of wlr_xcursor_image"][::std::mem::size_of::<wlr_xcursor_image>() - 32usize];
     ["Alignment of wlr_xcursor_image"][::std::mem::align_of::<wlr_xcursor_image>() - 8usize];
     ["Offset of field: wlr_xcursor_image::width"]
         [::std::mem::offset_of!(wlr_xcursor_image, width) - 0usize];
@@ -18452,8 +17010,6 @@ const _: () = {
         [::std::mem::offset_of!(wlr_xcursor_image, delay) - 16usize];
     ["Offset of field: wlr_xcursor_image::buffer"]
         [::std::mem::offset_of!(wlr_xcursor_image, buffer) - 24usize];
-    ["Offset of field: wlr_xcursor_image::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_xcursor_image, WLR_PRIVATE) - 32usize];
 };
 #[doc = " A cursor.\n\n If the cursor is animated, it may contain more than a single image."]
 #[repr(C)]
@@ -18518,10 +17074,6 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[doc = " Find the frame for a given elapsed time in a cursor animation.\n\n This function converts a timestamp (in ms) to a cursor image index."]
     pub fn wlr_xcursor_frame(cursor: *mut wlr_xcursor, time: u32) -> ::std::os::raw::c_int;
-}
-unsafe extern "C" {
-    #[doc = " Get a struct wlr_buffer from a cursor image."]
-    pub fn wlr_xcursor_image_get_buffer(image: *mut wlr_xcursor_image) -> *mut wlr_buffer;
 }
 unsafe extern "C" {
     #[doc = " Get the name of the resize cursor for the given edges."]
@@ -18802,22 +17354,30 @@ impl xdg_positioner_gravity {
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct xdg_positioner_gravity(pub ::std::os::raw::c_uint);
 impl xdg_positioner_constraint_adjustment {
+    #[doc = " don't move the child surface when constrained\n\n Don't alter the surface position even if it is constrained on\n some axis, for example partially outside the edge of an output."]
     pub const XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_NONE: xdg_positioner_constraint_adjustment =
         xdg_positioner_constraint_adjustment(0);
+    #[doc = " move along the x axis until unconstrained\n\n Slide the surface along the x axis until it is no longer\n constrained.\n\n First try to slide towards the direction of the gravity on the x\n axis until either the edge in the opposite direction of the\n gravity is unconstrained or the edge in the direction of the\n gravity is constrained.\n\n Then try to slide towards the opposite direction of the gravity\n on the x axis until either the edge in the direction of the\n gravity is unconstrained or the edge in the opposite direction\n of the gravity is constrained."]
     pub const XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_X: xdg_positioner_constraint_adjustment =
         xdg_positioner_constraint_adjustment(1);
+    #[doc = " move along the y axis until unconstrained\n\n Slide the surface along the y axis until it is no longer\n constrained.\n\n First try to slide towards the direction of the gravity on the y\n axis until either the edge in the opposite direction of the\n gravity is unconstrained or the edge in the direction of the\n gravity is constrained.\n\n Then try to slide towards the opposite direction of the gravity\n on the y axis until either the edge in the direction of the\n gravity is unconstrained or the edge in the opposite direction\n of the gravity is constrained."]
     pub const XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_SLIDE_Y: xdg_positioner_constraint_adjustment =
         xdg_positioner_constraint_adjustment(2);
+    #[doc = " invert the anchor and gravity on the x axis\n\n Invert the anchor and gravity on the x axis if the surface is\n constrained on the x axis. For example, if the left edge of the\n surface is constrained, the gravity is 'left' and the anchor is\n 'left', change the gravity to 'right' and the anchor to 'right'.\n\n If the adjusted position also ends up being constrained, the\n resulting position of the flip_x adjustment will be the one\n before the adjustment."]
     pub const XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_FLIP_X: xdg_positioner_constraint_adjustment =
         xdg_positioner_constraint_adjustment(4);
+    #[doc = " invert the anchor and gravity on the y axis\n\n Invert the anchor and gravity on the y axis if the surface is\n constrained on the y axis. For example, if the bottom edge of\n the surface is constrained, the gravity is 'bottom' and the\n anchor is 'bottom', change the gravity to 'top' and the anchor\n to 'top'.\n\n The adjusted position is calculated given the original anchor\n rectangle and offset, but with the new flipped anchor and\n gravity values.\n\n If the adjusted position also ends up being constrained, the\n resulting position of the flip_y adjustment will be the one\n before the adjustment."]
     pub const XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_FLIP_Y: xdg_positioner_constraint_adjustment =
         xdg_positioner_constraint_adjustment(8);
+    #[doc = " horizontally resize the surface\n\n Resize the surface horizontally so that it is completely\n unconstrained."]
     pub const XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_RESIZE_X: xdg_positioner_constraint_adjustment =
         xdg_positioner_constraint_adjustment(16);
+    #[doc = " vertically resize the surface\n\n Resize the surface vertically so that it is completely\n unconstrained."]
     pub const XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_RESIZE_Y: xdg_positioner_constraint_adjustment =
         xdg_positioner_constraint_adjustment(32);
 }
 #[repr(transparent)]
+#[doc = " @ingroup iface_xdg_positioner\n constraint adjustments\n\n The constraint adjustment value define ways the compositor will adjust\n the position of the surface, if the unadjusted position would result\n in the surface being partly constrained.\n\n Whether a surface is considered 'constrained' is left to the compositor\n to determine. For example, the surface may be partly outside the\n compositor's defined 'work area', thus necessitating the child surface's\n position be adjusted until it is entirely inside the work area.\n\n The adjustments can be combined, according to a defined precedence: 1)\n Flip, 2) Slide, 3) Resize."]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct xdg_positioner_constraint_adjustment(pub ::std::os::raw::c_uint);
 #[repr(C)]
@@ -19179,7 +17739,6 @@ pub struct wlr_xdg_toplevel_state {
     pub activated: bool,
     pub suspended: bool,
     pub tiled: u32,
-    pub constrained: u32,
     pub width: i32,
     pub height: i32,
     pub max_width: i32,
@@ -19189,7 +17748,7 @@ pub struct wlr_xdg_toplevel_state {
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_xdg_toplevel_state"][::std::mem::size_of::<wlr_xdg_toplevel_state>() - 40usize];
+    ["Size of wlr_xdg_toplevel_state"][::std::mem::size_of::<wlr_xdg_toplevel_state>() - 36usize];
     ["Alignment of wlr_xdg_toplevel_state"]
         [::std::mem::align_of::<wlr_xdg_toplevel_state>() - 4usize];
     ["Offset of field: wlr_xdg_toplevel_state::maximized"]
@@ -19204,20 +17763,18 @@ const _: () = {
         [::std::mem::offset_of!(wlr_xdg_toplevel_state, suspended) - 4usize];
     ["Offset of field: wlr_xdg_toplevel_state::tiled"]
         [::std::mem::offset_of!(wlr_xdg_toplevel_state, tiled) - 8usize];
-    ["Offset of field: wlr_xdg_toplevel_state::constrained"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_state, constrained) - 12usize];
     ["Offset of field: wlr_xdg_toplevel_state::width"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_state, width) - 16usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel_state, width) - 12usize];
     ["Offset of field: wlr_xdg_toplevel_state::height"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_state, height) - 20usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel_state, height) - 16usize];
     ["Offset of field: wlr_xdg_toplevel_state::max_width"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_state, max_width) - 24usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel_state, max_width) - 20usize];
     ["Offset of field: wlr_xdg_toplevel_state::max_height"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_state, max_height) - 28usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel_state, max_height) - 24usize];
     ["Offset of field: wlr_xdg_toplevel_state::min_width"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_state, min_width) - 32usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel_state, min_width) - 28usize];
     ["Offset of field: wlr_xdg_toplevel_state::min_height"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_state, min_height) - 36usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel_state, min_height) - 32usize];
 };
 impl wlr_xdg_toplevel_wm_capabilities {
     pub const WLR_XDG_TOPLEVEL_WM_CAPABILITIES_WINDOW_MENU: wlr_xdg_toplevel_wm_capabilities =
@@ -19252,7 +17809,6 @@ pub struct wlr_xdg_toplevel_configure {
     pub activated: bool,
     pub suspended: bool,
     pub tiled: u32,
-    pub constrained: u32,
     pub width: i32,
     pub height: i32,
     pub bounds: wlr_xdg_toplevel_configure__bindgen_ty_1,
@@ -19278,7 +17834,7 @@ const _: () = {
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_xdg_toplevel_configure"]
-        [::std::mem::size_of::<wlr_xdg_toplevel_configure>() - 40usize];
+        [::std::mem::size_of::<wlr_xdg_toplevel_configure>() - 36usize];
     ["Alignment of wlr_xdg_toplevel_configure"]
         [::std::mem::align_of::<wlr_xdg_toplevel_configure>() - 4usize];
     ["Offset of field: wlr_xdg_toplevel_configure::fields"]
@@ -19295,16 +17851,14 @@ const _: () = {
         [::std::mem::offset_of!(wlr_xdg_toplevel_configure, suspended) - 8usize];
     ["Offset of field: wlr_xdg_toplevel_configure::tiled"]
         [::std::mem::offset_of!(wlr_xdg_toplevel_configure, tiled) - 12usize];
-    ["Offset of field: wlr_xdg_toplevel_configure::constrained"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_configure, constrained) - 16usize];
     ["Offset of field: wlr_xdg_toplevel_configure::width"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_configure, width) - 20usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel_configure, width) - 16usize];
     ["Offset of field: wlr_xdg_toplevel_configure::height"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_configure, height) - 24usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel_configure, height) - 20usize];
     ["Offset of field: wlr_xdg_toplevel_configure::bounds"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_configure, bounds) - 28usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel_configure, bounds) - 24usize];
     ["Offset of field: wlr_xdg_toplevel_configure::wm_capabilities"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_configure, wm_capabilities) - 36usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel_configure, wm_capabilities) - 32usize];
 };
 #[repr(C)]
 pub struct wlr_xdg_toplevel_requested {
@@ -19421,7 +17975,7 @@ const _: () = {
 };
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_xdg_toplevel"][::std::mem::size_of::<wlr_xdg_toplevel>() - 424usize];
+    ["Size of wlr_xdg_toplevel"][::std::mem::size_of::<wlr_xdg_toplevel>() - 416usize];
     ["Alignment of wlr_xdg_toplevel"][::std::mem::align_of::<wlr_xdg_toplevel>() - 8usize];
     ["Offset of field: wlr_xdg_toplevel::resource"]
         [::std::mem::offset_of!(wlr_xdg_toplevel, resource) - 0usize];
@@ -19432,19 +17986,19 @@ const _: () = {
     ["Offset of field: wlr_xdg_toplevel::current"]
         [::std::mem::offset_of!(wlr_xdg_toplevel, current) - 24usize];
     ["Offset of field: wlr_xdg_toplevel::pending"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel, pending) - 64usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel, pending) - 60usize];
     ["Offset of field: wlr_xdg_toplevel::scheduled"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel, scheduled) - 104usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel, scheduled) - 96usize];
     ["Offset of field: wlr_xdg_toplevel::requested"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel, requested) - 144usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel, requested) - 136usize];
     ["Offset of field: wlr_xdg_toplevel::title"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel, title) - 184usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel, title) - 176usize];
     ["Offset of field: wlr_xdg_toplevel::app_id"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel, app_id) - 192usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel, app_id) - 184usize];
     ["Offset of field: wlr_xdg_toplevel::events"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel, events) - 200usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel, events) - 192usize];
     ["Offset of field: wlr_xdg_toplevel::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel, WLR_PRIVATE) - 360usize];
+        [::std::mem::offset_of!(wlr_xdg_toplevel, WLR_PRIVATE) - 352usize];
 };
 #[repr(C)]
 pub struct wlr_xdg_surface_configure {
@@ -19784,13 +18338,6 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[doc = " Request that this toplevel consider itself suspended or not\n suspended. Returns the associated configure serial."]
     pub fn wlr_xdg_toplevel_set_suspended(toplevel: *mut wlr_xdg_toplevel, suspended: bool) -> u32;
-}
-unsafe extern "C" {
-    #[doc = " Request that this toplevel consider itself constrained and doesn't attempt to\n resize from some edges. `constrained_edges` is a bitfield of enum wlr_edges.\n Returns the associated configure serial."]
-    pub fn wlr_xdg_toplevel_set_constrained(
-        toplevel: *mut wlr_xdg_toplevel,
-        constrained_edges: u32,
-    ) -> u32;
 }
 unsafe extern "C" {
     #[doc = " Request that this toplevel closes."]
@@ -21063,108 +19610,6 @@ unsafe extern "C" {
     #[doc = " Unreference an icon. When the icon reference count reaches 0, it is destroyed."]
     pub fn wlr_xdg_toplevel_icon_v1_unref(icon: *mut wlr_xdg_toplevel_icon_v1);
 }
-#[repr(C)]
-pub struct wlr_xdg_toplevel_tag_manager_v1 {
-    pub global: *mut wl_global,
-    pub events: wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_1,
-    pub WLR_PRIVATE: wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_2,
-}
-#[repr(C)]
-pub struct wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_1 {
-    pub set_tag: wl_signal,
-    pub set_description: wl_signal,
-    pub destroy: wl_signal,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_1>() - 48usize];
-    ["Alignment of wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_1>() - 8usize];
-    ["Offset of field: wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_1::set_tag"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_1, set_tag) - 0usize];
-    ["Offset of field: wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_1::set_description"][::std::mem::offset_of!(
-        wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_1,
-        set_description
-    )
-        - 16usize];
-    ["Offset of field: wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_1::destroy"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_1, destroy) - 32usize];
-};
-#[repr(C)]
-pub struct wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_2 {
-    pub display_destroy: wl_listener,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_2"]
-        [::std::mem::size_of::<wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_2>() - 24usize];
-    ["Alignment of wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_2"]
-        [::std::mem::align_of::<wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_2>() - 8usize];
-    ["Offset of field: wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_2::display_destroy"][::std::mem::offset_of!(
-        wlr_xdg_toplevel_tag_manager_v1__bindgen_ty_2,
-        display_destroy
-    ) - 0usize];
-};
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_xdg_toplevel_tag_manager_v1"]
-        [::std::mem::size_of::<wlr_xdg_toplevel_tag_manager_v1>() - 80usize];
-    ["Alignment of wlr_xdg_toplevel_tag_manager_v1"]
-        [::std::mem::align_of::<wlr_xdg_toplevel_tag_manager_v1>() - 8usize];
-    ["Offset of field: wlr_xdg_toplevel_tag_manager_v1::global"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_tag_manager_v1, global) - 0usize];
-    ["Offset of field: wlr_xdg_toplevel_tag_manager_v1::events"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_tag_manager_v1, events) - 8usize];
-    ["Offset of field: wlr_xdg_toplevel_tag_manager_v1::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_tag_manager_v1, WLR_PRIVATE) - 56usize];
-};
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_xdg_toplevel_tag_manager_v1_set_tag_event {
-    pub toplevel: *mut wlr_xdg_toplevel,
-    pub tag: *const ::std::os::raw::c_char,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_xdg_toplevel_tag_manager_v1_set_tag_event"]
-        [::std::mem::size_of::<wlr_xdg_toplevel_tag_manager_v1_set_tag_event>() - 16usize];
-    ["Alignment of wlr_xdg_toplevel_tag_manager_v1_set_tag_event"]
-        [::std::mem::align_of::<wlr_xdg_toplevel_tag_manager_v1_set_tag_event>() - 8usize];
-    ["Offset of field: wlr_xdg_toplevel_tag_manager_v1_set_tag_event::toplevel"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_tag_manager_v1_set_tag_event, toplevel) - 0usize];
-    ["Offset of field: wlr_xdg_toplevel_tag_manager_v1_set_tag_event::tag"]
-        [::std::mem::offset_of!(wlr_xdg_toplevel_tag_manager_v1_set_tag_event, tag) - 8usize];
-};
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_xdg_toplevel_tag_manager_v1_set_description_event {
-    pub toplevel: *mut wlr_xdg_toplevel,
-    pub description: *const ::std::os::raw::c_char,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_xdg_toplevel_tag_manager_v1_set_description_event"]
-        [::std::mem::size_of::<wlr_xdg_toplevel_tag_manager_v1_set_description_event>() - 16usize];
-    ["Alignment of wlr_xdg_toplevel_tag_manager_v1_set_description_event"]
-        [::std::mem::align_of::<wlr_xdg_toplevel_tag_manager_v1_set_description_event>() - 8usize];
-    ["Offset of field: wlr_xdg_toplevel_tag_manager_v1_set_description_event::toplevel"][::std::mem::offset_of!(
-        wlr_xdg_toplevel_tag_manager_v1_set_description_event,
-        toplevel
-    )
-        - 0usize];
-    ["Offset of field: wlr_xdg_toplevel_tag_manager_v1_set_description_event::description"][::std::mem::offset_of!(
-        wlr_xdg_toplevel_tag_manager_v1_set_description_event,
-        description
-    )
-        - 8usize];
-};
-unsafe extern "C" {
-    pub fn wlr_xdg_toplevel_tag_manager_v1_create(
-        display: *mut wl_display,
-        version: u32,
-    ) -> *mut wlr_xdg_toplevel_tag_manager_v1;
-}
 impl wlr_log_importance {
     pub const WLR_SILENT: wlr_log_importance = wlr_log_importance(0);
     pub const WLR_ERROR: wlr_log_importance = wlr_log_importance(1);
@@ -21260,15 +19705,6 @@ unsafe extern "C" {
         x: *mut ::std::os::raw::c_int,
         y: *mut ::std::os::raw::c_int,
     );
-}
-unsafe extern "C" {
-    pub fn wlr_version_get_major() -> ::std::os::raw::c_int;
-}
-unsafe extern "C" {
-    pub fn wlr_version_get_minor() -> ::std::os::raw::c_int;
-}
-unsafe extern "C" {
-    pub fn wlr_version_get_micro() -> ::std::os::raw::c_int;
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -21460,41 +19896,6 @@ impl xcb_stack_mode_t {
 pub struct xcb_stack_mode_t(pub ::std::os::raw::c_uint);
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct xcb_get_property_reply_t {
-    pub response_type: u8,
-    pub format: u8,
-    pub sequence: u16,
-    pub length: u32,
-    pub type_: xcb_atom_t,
-    pub bytes_after: u32,
-    pub value_len: u32,
-    pub pad0: [u8; 12usize],
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of xcb_get_property_reply_t"]
-        [::std::mem::size_of::<xcb_get_property_reply_t>() - 32usize];
-    ["Alignment of xcb_get_property_reply_t"]
-        [::std::mem::align_of::<xcb_get_property_reply_t>() - 4usize];
-    ["Offset of field: xcb_get_property_reply_t::response_type"]
-        [::std::mem::offset_of!(xcb_get_property_reply_t, response_type) - 0usize];
-    ["Offset of field: xcb_get_property_reply_t::format"]
-        [::std::mem::offset_of!(xcb_get_property_reply_t, format) - 1usize];
-    ["Offset of field: xcb_get_property_reply_t::sequence"]
-        [::std::mem::offset_of!(xcb_get_property_reply_t, sequence) - 2usize];
-    ["Offset of field: xcb_get_property_reply_t::length"]
-        [::std::mem::offset_of!(xcb_get_property_reply_t, length) - 4usize];
-    ["Offset of field: xcb_get_property_reply_t::type_"]
-        [::std::mem::offset_of!(xcb_get_property_reply_t, type_) - 8usize];
-    ["Offset of field: xcb_get_property_reply_t::bytes_after"]
-        [::std::mem::offset_of!(xcb_get_property_reply_t, bytes_after) - 12usize];
-    ["Offset of field: xcb_get_property_reply_t::value_len"]
-        [::std::mem::offset_of!(xcb_get_property_reply_t, value_len) - 16usize];
-    ["Offset of field: xcb_get_property_reply_t::pad0"]
-        [::std::mem::offset_of!(xcb_get_property_reply_t, pad0) - 20usize];
-};
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
 pub struct xcb_ewmh_wm_strut_partial_t {
     pub left: u32,
     pub right: u32,
@@ -21539,23 +19940,6 @@ const _: () = {
         [::std::mem::offset_of!(xcb_ewmh_wm_strut_partial_t, bottom_start_x) - 40usize];
     ["Offset of field: xcb_ewmh_wm_strut_partial_t::bottom_end_x"]
         [::std::mem::offset_of!(xcb_ewmh_wm_strut_partial_t, bottom_end_x) - 44usize];
-};
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct xcb_ewmh_get_wm_icon_reply_t {
-    pub num_icons: ::std::os::raw::c_uint,
-    pub _reply: *mut xcb_get_property_reply_t,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of xcb_ewmh_get_wm_icon_reply_t"]
-        [::std::mem::size_of::<xcb_ewmh_get_wm_icon_reply_t>() - 16usize];
-    ["Alignment of xcb_ewmh_get_wm_icon_reply_t"]
-        [::std::mem::align_of::<xcb_ewmh_get_wm_icon_reply_t>() - 8usize];
-    ["Offset of field: xcb_ewmh_get_wm_icon_reply_t::num_icons"]
-        [::std::mem::offset_of!(xcb_ewmh_get_wm_icon_reply_t, num_icons) - 0usize];
-    ["Offset of field: xcb_ewmh_get_wm_icon_reply_t::_reply"]
-        [::std::mem::offset_of!(xcb_ewmh_get_wm_icon_reply_t, _reply) - 8usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -21666,6 +20050,7 @@ pub struct wlr_xwayland {
     pub own_server: bool,
     pub xwm: *mut wlr_xwm,
     pub shell_v1: *mut wlr_xwayland_shell_v1,
+    pub cursor: *mut wlr_xwayland_cursor,
     pub display_name: *const ::std::os::raw::c_char,
     pub wl_display: *mut wl_display,
     pub compositor: *mut wlr_compositor,
@@ -21705,55 +20090,32 @@ const _: () = {
 };
 #[repr(C)]
 pub struct wlr_xwayland__bindgen_ty_2 {
-    pub cursor_buffer: *mut wlr_buffer,
-    pub cursor_hotspot: wlr_xwayland__bindgen_ty_2__bindgen_ty_1,
     pub server_start: wl_listener,
     pub server_ready: wl_listener,
     pub server_destroy: wl_listener,
     pub seat_destroy: wl_listener,
     pub shell_destroy: wl_listener,
 }
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_xwayland__bindgen_ty_2__bindgen_ty_1 {
-    pub x: i32,
-    pub y: i32,
-}
-#[allow(clippy::unnecessary_operation, clippy::identity_op)]
-const _: () = {
-    ["Size of wlr_xwayland__bindgen_ty_2__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_xwayland__bindgen_ty_2__bindgen_ty_1>() - 8usize];
-    ["Alignment of wlr_xwayland__bindgen_ty_2__bindgen_ty_1"]
-        [::std::mem::align_of::<wlr_xwayland__bindgen_ty_2__bindgen_ty_1>() - 4usize];
-    ["Offset of field: wlr_xwayland__bindgen_ty_2__bindgen_ty_1::x"]
-        [::std::mem::offset_of!(wlr_xwayland__bindgen_ty_2__bindgen_ty_1, x) - 0usize];
-    ["Offset of field: wlr_xwayland__bindgen_ty_2__bindgen_ty_1::y"]
-        [::std::mem::offset_of!(wlr_xwayland__bindgen_ty_2__bindgen_ty_1, y) - 4usize];
-};
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_xwayland__bindgen_ty_2"]
-        [::std::mem::size_of::<wlr_xwayland__bindgen_ty_2>() - 136usize];
+        [::std::mem::size_of::<wlr_xwayland__bindgen_ty_2>() - 120usize];
     ["Alignment of wlr_xwayland__bindgen_ty_2"]
         [::std::mem::align_of::<wlr_xwayland__bindgen_ty_2>() - 8usize];
-    ["Offset of field: wlr_xwayland__bindgen_ty_2::cursor_buffer"]
-        [::std::mem::offset_of!(wlr_xwayland__bindgen_ty_2, cursor_buffer) - 0usize];
-    ["Offset of field: wlr_xwayland__bindgen_ty_2::cursor_hotspot"]
-        [::std::mem::offset_of!(wlr_xwayland__bindgen_ty_2, cursor_hotspot) - 8usize];
     ["Offset of field: wlr_xwayland__bindgen_ty_2::server_start"]
-        [::std::mem::offset_of!(wlr_xwayland__bindgen_ty_2, server_start) - 16usize];
+        [::std::mem::offset_of!(wlr_xwayland__bindgen_ty_2, server_start) - 0usize];
     ["Offset of field: wlr_xwayland__bindgen_ty_2::server_ready"]
-        [::std::mem::offset_of!(wlr_xwayland__bindgen_ty_2, server_ready) - 40usize];
+        [::std::mem::offset_of!(wlr_xwayland__bindgen_ty_2, server_ready) - 24usize];
     ["Offset of field: wlr_xwayland__bindgen_ty_2::server_destroy"]
-        [::std::mem::offset_of!(wlr_xwayland__bindgen_ty_2, server_destroy) - 64usize];
+        [::std::mem::offset_of!(wlr_xwayland__bindgen_ty_2, server_destroy) - 48usize];
     ["Offset of field: wlr_xwayland__bindgen_ty_2::seat_destroy"]
-        [::std::mem::offset_of!(wlr_xwayland__bindgen_ty_2, seat_destroy) - 88usize];
+        [::std::mem::offset_of!(wlr_xwayland__bindgen_ty_2, seat_destroy) - 72usize];
     ["Offset of field: wlr_xwayland__bindgen_ty_2::shell_destroy"]
-        [::std::mem::offset_of!(wlr_xwayland__bindgen_ty_2, shell_destroy) - 112usize];
+        [::std::mem::offset_of!(wlr_xwayland__bindgen_ty_2, shell_destroy) - 96usize];
 };
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_xwayland"][::std::mem::size_of::<wlr_xwayland>() - 280usize];
+    ["Size of wlr_xwayland"][::std::mem::size_of::<wlr_xwayland>() - 272usize];
     ["Alignment of wlr_xwayland"][::std::mem::align_of::<wlr_xwayland>() - 8usize];
     ["Offset of field: wlr_xwayland::server"]
         [::std::mem::offset_of!(wlr_xwayland, server) - 0usize];
@@ -21762,20 +20124,22 @@ const _: () = {
     ["Offset of field: wlr_xwayland::xwm"][::std::mem::offset_of!(wlr_xwayland, xwm) - 16usize];
     ["Offset of field: wlr_xwayland::shell_v1"]
         [::std::mem::offset_of!(wlr_xwayland, shell_v1) - 24usize];
+    ["Offset of field: wlr_xwayland::cursor"]
+        [::std::mem::offset_of!(wlr_xwayland, cursor) - 32usize];
     ["Offset of field: wlr_xwayland::display_name"]
-        [::std::mem::offset_of!(wlr_xwayland, display_name) - 32usize];
+        [::std::mem::offset_of!(wlr_xwayland, display_name) - 40usize];
     ["Offset of field: wlr_xwayland::wl_display"]
-        [::std::mem::offset_of!(wlr_xwayland, wl_display) - 40usize];
+        [::std::mem::offset_of!(wlr_xwayland, wl_display) - 48usize];
     ["Offset of field: wlr_xwayland::compositor"]
-        [::std::mem::offset_of!(wlr_xwayland, compositor) - 48usize];
-    ["Offset of field: wlr_xwayland::seat"][::std::mem::offset_of!(wlr_xwayland, seat) - 56usize];
+        [::std::mem::offset_of!(wlr_xwayland, compositor) - 56usize];
+    ["Offset of field: wlr_xwayland::seat"][::std::mem::offset_of!(wlr_xwayland, seat) - 64usize];
     ["Offset of field: wlr_xwayland::events"]
-        [::std::mem::offset_of!(wlr_xwayland, events) - 64usize];
+        [::std::mem::offset_of!(wlr_xwayland, events) - 72usize];
     ["Offset of field: wlr_xwayland::user_event_handler"]
-        [::std::mem::offset_of!(wlr_xwayland, user_event_handler) - 128usize];
-    ["Offset of field: wlr_xwayland::data"][::std::mem::offset_of!(wlr_xwayland, data) - 136usize];
+        [::std::mem::offset_of!(wlr_xwayland, user_event_handler) - 136usize];
+    ["Offset of field: wlr_xwayland::data"][::std::mem::offset_of!(wlr_xwayland, data) - 144usize];
     ["Offset of field: wlr_xwayland::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_xwayland, WLR_PRIVATE) - 144usize];
+        [::std::mem::offset_of!(wlr_xwayland, WLR_PRIVATE) - 152usize];
 };
 impl wlr_xwayland_surface_decorations {
     pub const WLR_XWAYLAND_SURFACE_DECORATIONS_ALL: wlr_xwayland_surface_decorations =
@@ -21860,6 +20224,7 @@ pub struct wlr_xwayland_surface {
     pub role: *mut ::std::os::raw::c_char,
     pub startup_id: *mut ::std::os::raw::c_char,
     pub pid: pid_t,
+    pub has_utf8_title: bool,
     pub children: wl_list,
     pub parent: *mut wlr_xwayland_surface,
     pub parent_link: wl_list,
@@ -21918,13 +20283,11 @@ pub struct wlr_xwayland_surface__bindgen_ty_1 {
     pub set_startup_id: wl_signal,
     pub set_window_type: wl_signal,
     pub set_hints: wl_signal,
-    pub set_size_hints: wl_signal,
     pub set_decorations: wl_signal,
     pub set_strut_partial: wl_signal,
     pub set_override_redirect: wl_signal,
     pub set_geometry: wl_signal,
     pub set_opacity: wl_signal,
-    pub set_icon: wl_signal,
     pub focus_in: wl_signal,
     pub grab_focus: wl_signal,
     pub map_request: wl_signal,
@@ -21933,7 +20296,7 @@ pub struct wlr_xwayland_surface__bindgen_ty_1 {
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of wlr_xwayland_surface__bindgen_ty_1"]
-        [::std::mem::size_of::<wlr_xwayland_surface__bindgen_ty_1>() - 576usize];
+        [::std::mem::size_of::<wlr_xwayland_surface__bindgen_ty_1>() - 544usize];
     ["Alignment of wlr_xwayland_surface__bindgen_ty_1"]
         [::std::mem::align_of::<wlr_xwayland_surface__bindgen_ty_1>() - 8usize];
     ["Offset of field: wlr_xwayland_surface__bindgen_ty_1::destroy"]
@@ -21991,30 +20354,26 @@ const _: () = {
         [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, set_window_type) - 368usize];
     ["Offset of field: wlr_xwayland_surface__bindgen_ty_1::set_hints"]
         [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, set_hints) - 384usize];
-    ["Offset of field: wlr_xwayland_surface__bindgen_ty_1::set_size_hints"]
-        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, set_size_hints) - 400usize];
     ["Offset of field: wlr_xwayland_surface__bindgen_ty_1::set_decorations"]
-        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, set_decorations) - 416usize];
+        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, set_decorations) - 400usize];
     ["Offset of field: wlr_xwayland_surface__bindgen_ty_1::set_strut_partial"]
-        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, set_strut_partial) - 432usize];
+        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, set_strut_partial) - 416usize];
     ["Offset of field: wlr_xwayland_surface__bindgen_ty_1::set_override_redirect"][::std::mem::offset_of!(
         wlr_xwayland_surface__bindgen_ty_1,
         set_override_redirect
-    ) - 448usize];
+    ) - 432usize];
     ["Offset of field: wlr_xwayland_surface__bindgen_ty_1::set_geometry"]
-        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, set_geometry) - 464usize];
+        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, set_geometry) - 448usize];
     ["Offset of field: wlr_xwayland_surface__bindgen_ty_1::set_opacity"]
-        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, set_opacity) - 480usize];
-    ["Offset of field: wlr_xwayland_surface__bindgen_ty_1::set_icon"]
-        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, set_icon) - 496usize];
+        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, set_opacity) - 464usize];
     ["Offset of field: wlr_xwayland_surface__bindgen_ty_1::focus_in"]
-        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, focus_in) - 512usize];
+        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, focus_in) - 480usize];
     ["Offset of field: wlr_xwayland_surface__bindgen_ty_1::grab_focus"]
-        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, grab_focus) - 528usize];
+        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, grab_focus) - 496usize];
     ["Offset of field: wlr_xwayland_surface__bindgen_ty_1::map_request"]
-        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, map_request) - 544usize];
+        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, map_request) - 512usize];
     ["Offset of field: wlr_xwayland_surface__bindgen_ty_1::ping_timeout"]
-        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, ping_timeout) - 560usize];
+        [::std::mem::offset_of!(wlr_xwayland_surface__bindgen_ty_1, ping_timeout) - 528usize];
 };
 #[repr(C)]
 pub struct wlr_xwayland_surface__bindgen_ty_2 {
@@ -22043,7 +20402,7 @@ const _: () = {
 };
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
-    ["Size of wlr_xwayland_surface"][::std::mem::size_of::<wlr_xwayland_surface>() - 992usize];
+    ["Size of wlr_xwayland_surface"][::std::mem::size_of::<wlr_xwayland_surface>() - 960usize];
     ["Alignment of wlr_xwayland_surface"][::std::mem::align_of::<wlr_xwayland_surface>() - 8usize];
     ["Offset of field: wlr_xwayland_surface::window_id"]
         [::std::mem::offset_of!(wlr_xwayland_surface, window_id) - 0usize];
@@ -22087,6 +20446,8 @@ const _: () = {
         [::std::mem::offset_of!(wlr_xwayland_surface, startup_id) - 168usize];
     ["Offset of field: wlr_xwayland_surface::pid"]
         [::std::mem::offset_of!(wlr_xwayland_surface, pid) - 176usize];
+    ["Offset of field: wlr_xwayland_surface::has_utf8_title"]
+        [::std::mem::offset_of!(wlr_xwayland_surface, has_utf8_title) - 180usize];
     ["Offset of field: wlr_xwayland_surface::children"]
         [::std::mem::offset_of!(wlr_xwayland_surface, children) - 184usize];
     ["Offset of field: wlr_xwayland_surface::parent"]
@@ -22144,9 +20505,9 @@ const _: () = {
     ["Offset of field: wlr_xwayland_surface::events"]
         [::std::mem::offset_of!(wlr_xwayland_surface, events) - 320usize];
     ["Offset of field: wlr_xwayland_surface::data"]
-        [::std::mem::offset_of!(wlr_xwayland_surface, data) - 896usize];
+        [::std::mem::offset_of!(wlr_xwayland_surface, data) - 864usize];
     ["Offset of field: wlr_xwayland_surface::WLR_PRIVATE"]
-        [::std::mem::offset_of!(wlr_xwayland_surface, WLR_PRIVATE) - 904usize];
+        [::std::mem::offset_of!(wlr_xwayland_surface, WLR_PRIVATE) - 872usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -22250,7 +20611,10 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn wlr_xwayland_set_cursor(
         wlr_xwayland: *mut wlr_xwayland,
-        buffer: *mut wlr_buffer,
+        pixels: *mut u8,
+        stride: u32,
+        width: u32,
+        height: u32,
         hotspot_x: i32,
         hotspot_y: i32,
     );
@@ -22368,13 +20732,6 @@ unsafe extern "C" {
         workareas: *const wlr_box,
         num_workareas: usize,
     );
-}
-unsafe extern "C" {
-    #[doc = " Fetches the icon set via the _NET_WM_ICON property.\n\n Returns true on success. The caller is responsible for freeing the reply\n using xcb_ewmh_get_wm_icon_reply_wipe()."]
-    pub fn wlr_xwayland_surface_fetch_icon(
-        xsurface: *const wlr_xwayland_surface,
-        icon_reply: *mut xcb_ewmh_get_wm_icon_reply_t,
-    ) -> bool;
 }
 unsafe extern "C" {
     #[doc = " Get the XCB connection of the XWM.\n\n The connection is only valid after wlr_xwayland.events.ready, and becomes\n invalid on wlr_xwayland_server.events.destroy. In that case, NULL is\n returned."]
@@ -22529,16 +20886,16 @@ const _: () = {
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct wlr_ext_image_copy_capture_session_v1 {
+    pub _address: u8,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct wlr_linux_dmabuf_feedback_v1_compiled {
     pub _address: u8,
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct wlr_drm_syncobj_merger {
-    pub _address: u8,
-}
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct wlr_readonly_data_buffer {
+pub struct wlr_xwayland_cursor {
     pub _address: u8,
 }

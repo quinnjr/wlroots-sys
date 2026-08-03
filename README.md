@@ -4,7 +4,7 @@ Rust bindings to [wlroots](https://gitlab.freedesktop.org/wlroots/wlroots).
 
 | Crate | Description |
 |---|---|
-| [`crates/wlr-sys`](crates/wlr-sys) | Raw FFI bindings to wlroots 0.20 |
+| [`crates/wlr-sys`](crates/wlr-sys) | Raw FFI bindings to wlroots 0.19 |
 
 A safe wrapper crate (`wlr`) will be added here as a second workspace member.
 Keeping both in one workspace means the wrapper cannot drift from the bindings it
@@ -18,7 +18,7 @@ Each crate's minor version tracks the wlroots minor version — see
 ## Quick start
 
 ```sh
-# Requires wlroots 0.20 + headers, libclang, and wayland-scanner.
+# Requires wlroots 0.19 + headers, libclang, and wayland-scanner.
 cargo test --workspace
 cargo run -p wlr-sys --example headless
 ```

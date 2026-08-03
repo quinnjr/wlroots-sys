@@ -33,7 +33,7 @@ either.
 `links = "wlroots"` is deliberately **not** version-suffixed and must stay that
 way: cargo enforces one package per `links` value, and that is precisely what
 stops a graph from containing two `wlr-sys` minors — which would otherwise link
-`libwlroots-0.20.so` and `libwlroots-0.21.so` together, where identical symbol
+`libwlroots-0.19.so` and `libwlroots-0.21.so` together, where identical symbol
 names bind to whichever wins interposition and struct offsets silently disagree.
 
 Verify with:

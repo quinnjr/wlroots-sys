@@ -1,6 +1,6 @@
 //! Build script for `wlr-sys`.
 //!
-//! Locates wlroots 0.20 via pkg-config, reconciles the crate's Cargo features
+//! Locates wlroots 0.19 via pkg-config, reconciles the crate's Cargo features
 //! against the subsystems the installed library was actually compiled with,
 //! generates whichever protocol server headers wlroots' public headers `#include`
 //! but do not ship, and runs bindgen over the result.
@@ -21,12 +21,12 @@ use std::process::Command;
 /// `sed 's/0.20/0.21/'` produced `range_version("0.21".."0.21")` — an empty
 /// range that rejects every installed wlroots, with no occurrence of the
 /// searched string to reveal it.
-const WLROOTS_MINOR: &str = "0.20";
-const WLROOTS_NEXT_MINOR: &str = "0.21";
+const WLROOTS_MINOR: &str = "0.19";
+const WLROOTS_NEXT_MINOR: &str = "0.20";
 
 /// The pkg-config module name. wlroots embeds its minor version here because it
-/// has no stable ABI: `libwlroots-0.20.so` and `libwlroots-0.21.so` coexist.
-const WLROOTS_PC: &str = concat!("wlroots-", "0.20");
+/// has no stable ABI: `libwlroots-0.19.so` and `libwlroots-0.20.so` coexist.
+const WLROOTS_PC: &str = concat!("wlroots-", "0.19");
 
 /// Cfg names referenced outside the `SUBSYSTEMS` table. Hoisted so a rename in
 /// the table is a compile error here rather than a silently-stopped match — the
@@ -40,7 +40,7 @@ struct Subsystem {
     /// Cargo feature that requests it, or `None` for detect-only subsystems that
     /// gate no public header and are surfaced purely as a `cfg`.
     feature: Option<&'static str>,
-    /// The `have_*` variable in `wlroots-0.20.pc`.
+    /// The `have_*` variable in `wlroots-0.19.pc`.
     pc_var: &'static str,
     /// The `cfg` emitted when the subsystem is both requested and available.
     cfg: &'static str,
@@ -437,9 +437,9 @@ fn probe_wlroots() -> pkg_config::Library {
                 None => panic!(
                     "could not find `{WLROOTS_PC}` via pkg-config.\n\
                      Install wlroots {WLROOTS_MINOR} and its development headers:\n  \
-                     Arch:   pacman -S wlroots0.20\n  \
+                     Ubuntu: apt install libwlroots-0.19-dev\n  \
                      Fedora: dnf install wlroots-devel\n  \
-                     Debian: apt install libwlroots-0.20-dev\n\
+                     Arch:   pacman -S wlroots0.19\n\
                      If it is installed somewhere unusual, set PKG_CONFIG_PATH.\n\n\
                      pkg-config said: {err}"
                 ),
@@ -496,7 +496,7 @@ fn probe_include_paths(name: &str, requested_by: Option<&str>) -> Vec<String> {
     }
 }
 
-/// Read a `have_*` flag out of `wlroots-0.20.pc`.
+/// Read a `have_*` flag out of `wlroots-0.19.pc`.
 ///
 /// `pkg-config-rs` exposes only the `-D` defines from `Cflags`, not arbitrary
 /// `.pc` variables, so this goes through its `get_variable` helper. That matters
@@ -563,10 +563,13 @@ fn required_protocols(include_dir: &Path) -> BTreeSet<String> {
                 };
                 // Only generated protocol headers; anything else quoted is
                 // wlroots-internal and would already be installed beside it.
-                if let Some(stem) = name.strip_suffix("-protocol.h")
-                    && !include_dir.join(name).is_file()
-                {
-                    needed.insert(stem.to_owned());
+                //
+                // Written as nested `if`s rather than a let-chain: let-chains
+                // need Rust 1.88, above this crate's declared MSRV.
+                if let Some(stem) = name.strip_suffix("-protocol.h") {
+                    if !include_dir.join(name).is_file() {
+                        needed.insert(stem.to_owned());
+                    }
                 }
             }
         }
