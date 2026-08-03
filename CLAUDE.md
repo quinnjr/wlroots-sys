@@ -24,7 +24,7 @@ cargo clippy --workspace --all-targets    # CI runs this under RUSTFLAGS=-D warn
 cargo doc -p wlr-sys --no-deps            # CI runs this under RUSTDOCFLAGS=-D warnings
 ```
 
-Requires wlroots 0.15 + headers (`wlroots.pc`), `libclang`, and the
+Requires wlroots 0.15 + headers (`wlroots-0.20.pc`), `libclang`, and the
 `wayland-scanner` binary. Arch is currently the only distro packaging wlroots
 0.15.
 
@@ -170,13 +170,17 @@ struct layout; the tests above cover what layout checks cannot.
 
 ## Conventions
 
-**MSRV is 1.85** (`rust-version` in the workspace manifest) and it is a published
+**MSRV is 1.88** (`rust-version` in the workspace manifest) and it is a published
 promise. The host toolchain is newer, so post-1.85 syntax compiles locally and
-fails only in the `msrv` CI job — let-chains (`if let … && …`, stable in 1.88)
-have already slipped through once. Check with:
+fails only in the `msrv` CI job. Two things have already gone wrong here:
+let-chains (stable in 1.88) slipped past local builds, and a *declared* MSRV of
+1.85 turned out to be unachievable for consumers because `bindgen` → `which` →
+`home` needs 1.88 — our own CI missed that because the repo has an untracked
+`Cargo.lock` and a fresh consumer resolve has none. When changing the MSRV,
+verify against a real consumer, not just this workspace. Check with:
 
 ```sh
-cargo +1.85 check --workspace --all-features
+cargo +1.88 check --workspace --all-features
 ```
 
 
@@ -191,7 +195,7 @@ them reintroduces real bugs.
 Version bumps touch ~8 files and have a known trap (the `range_version` upper
 bound is a separate constant on purpose). Follow `docs/RELEASING.md`.
 
-Within a wlroots minor, the hand-written API is **frozen** — `0.15.0 → 0.15.1` is
+Within a wlroots minor, the hand-written API is **frozen** — `0.20.0 → 0.20.1` is
 an automatic upgrade for consumers, so there is no version in which to break
 `wl_list_iter`, the macros, the feature names, the cfg names, the
 `DEP_WLROOTS_*` keys, or the blocklist. Those wait for the next wlroots minor.
