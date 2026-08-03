@@ -2,8 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [wlroots-0.15]
+    branches: ['support/wlroots-0.15']
   pull_request:
+    branches: ['support/wlroots-0.15']
 
 # This job builds PR code, and building Rust means executing build.rs. It needs
 # to read the repo and nothing else.
