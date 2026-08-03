@@ -33,3 +33,8 @@ feature flags, and how the crate interoperates with the wayland-rs ecosystem.
 ## License
 
 MIT.
+
+## Contributing
+
+This repo follows git-flow with long-lived `support/*` branches per wlroots
+minor. See [CONTRIBUTING.md](CONTRIBUTING.md).
