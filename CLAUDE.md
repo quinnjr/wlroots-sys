@@ -170,6 +170,16 @@ struct layout; the tests above cover what layout checks cannot.
 
 ## Conventions
 
+**MSRV is 1.85** (`rust-version` in the workspace manifest) and it is a published
+promise. The host toolchain is newer, so post-1.85 syntax compiles locally and
+fails only in the `msrv` CI job — let-chains (`if let … && …`, stable in 1.88)
+have already slipped through once. Check with:
+
+```sh
+cargo +1.85 check --workspace --all-features
+```
+
+
 `crates/wlr-sys/README.md` **is** the crate's rustdoc (`#![doc = include_str!]`).
 Editing it changes published documentation, and a broken link or an untagged code
 fence there breaks the doc build.
