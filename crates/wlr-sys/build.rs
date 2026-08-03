@@ -537,13 +537,10 @@ fn required_protocols(include_dir: &Path) -> BTreeSet<String> {
                 };
                 // Only generated protocol headers; anything else quoted is
                 // wlroots-internal and would already be installed beside it.
-                //
-                // Written as nested `if`s rather than a let-chain: let-chains
-                // need Rust 1.88, above this crate's declared MSRV of 1.85.
-                if let Some(stem) = name.strip_suffix("-protocol.h") {
-                    if !include_dir.join(name).is_file() {
-                        needed.insert(stem.to_owned());
-                    }
+                if let Some(stem) = name.strip_suffix("-protocol.h")
+                    && !include_dir.join(name).is_file()
+                {
+                    needed.insert(stem.to_owned());
                 }
             }
         }
