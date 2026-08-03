@@ -12,7 +12,7 @@ ARG UBUNTU_REF=24.04
 FROM ubuntu:${UBUNTU_REF}
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG RUST_VERSION=1.85.0
+ARG RUST_VERSION=1.88.0
 # 22.04 and 24.04 ship an unversioned `libwlroots-dev`; 26.04 versioned it as
 # `libwlroots-0.19-dev`. Passed in rather than guessed, so a rename is a build
 # argument change and not a silent fallback to the wrong wlroots.
@@ -30,7 +30,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libxcb-render0-dev libxcb-res0-dev libxcb-xfixes0-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# rustup rather than the distro rustc: 22.04 ships 1.75, below this crate's MSRV.
+# rustup rather than the distro rustc: even 26.04's is below this crate's MSRV,
+# and 1.88 is what `bindgen -> which -> home` requires of a fresh resolve.
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
 # rustfmt is not optional here: bindgen formats its output only when rustfmt is
 # on PATH, so a container without it produces a 1 MB single-line bindings.rs that
