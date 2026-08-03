@@ -1,0 +1,50 @@
+[package]
+name = "wlr-sys"
+version = "0.20.0"
+description = "Raw FFI bindings to wlroots 0.20"
+keywords = ["wayland", "wlroots", "compositor", "ffi", "bindings"]
+categories = ["external-ffi-bindings", "gui"]
+readme = "README.md"
+links = "wlroots-0.20"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = [
+    "xwayland",
+    "drm-backend",
+    "x11-backend",
+    "libinput-backend",
+    "gles2-renderer",
+    "session",
+    "color-management",
+]
+
+# Each feature binds the matching wlroots subsystem, but only if the installed
+# library reports it as available via its pkg-config `have_*` variable.
+xwayland = []
+drm-backend = []
+x11-backend = []
+libinput-backend = ["dep:input-sys"]
+gles2-renderer = []
+# Not enabled by default: requires the Vulkan headers (`vulkan-headers` on Arch,
+# `libvulkan-dev` on Debian) to be installed, which wlroots itself does not pull in.
+vulkan-renderer = []
+session = []
+color-management = []
+
+[dependencies]
+libc = "0.2"
+wayland-sys = { version = "0.31", features = ["server"] }
+xkbcommon-sys = "1.4"
+
+# Only pulled in by `libinput-backend`: input-sys emits an unconditional
+# `#[link(name = "input")]`, so depending on it otherwise would link libinput
+# into compositors that never touch the libinput backend.
+input-sys = { version = "1.19", optional = true }
+
+[build-dependencies]
+bindgen = "0.72"
+pkg-config = "0.3"

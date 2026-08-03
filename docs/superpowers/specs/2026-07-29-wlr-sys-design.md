@@ -1,8 +1,12 @@
 # `wlr-sys` — raw FFI bindings to wlroots 0.20
 
 **Date:** 2026-07-29
-**Status:** Approved
+**Status:** Implemented
 **Repo:** `wlroots-sys` (directory/remote name unchanged)
+
+> Implementation notes are folded into the sections below. Where building the
+> crate proved a design assumption wrong, the section says so and states what was
+> done instead. See [Deviations found during implementation](#deviations-found-during-implementation).
 
 ## Purpose
 
@@ -33,6 +37,14 @@ Header scan for bindgen hazards came back clean:
 
 Consequently **no C shim is required** — the crate has no `cc` build dependency.
 
+Two things the header scan did *not* predict, both found when the headers were
+first compiled:
+
+- Every wlroots header still `#error`s without **`-DWLR_USE_UNSTABLE`** in 0.20.
+- `wlr/types/wlr_layer_shell_v1.h` and `wlr/types/wlr_output_power_management_v1.h`
+  `#include` **generated `wlr-protocols` headers that wlroots never installs**.
+  See [Vendored protocols](#vendored-protocols).
+
 ## Architecture
 
 ### Repository structure
@@ -44,14 +56,20 @@ wlroots-sys/
 │   └── wlr-sys/
 │       ├── Cargo.toml
 │       ├── build.rs
-│       └── src/
-│           ├── lib.rs          include!(bindings.rs), re-exports, module wiring
-│           ├── list.rs         wl_list iteration + container_of!
-│           └── signal.rs       wl_signal_init/add/get/emit_mutable
-├── examples/
-│   └── headless.rs
+│       ├── README.md
+│       ├── src/
+│       │   ├── lib.rs          include!(bindings.rs), re-exports, module wiring
+│       │   ├── list.rs         wl_list iteration + container_of!
+│       │   └── signal.rs       wl_signal_init/add/get/emit_mutable
+│       ├── protocol/           vendored wlr-protocols XML
+│       ├── tests/              link.rs, signal.rs
+│       └── examples/headless.rs
+├── .github/workflows/ci.yml
 └── docs/superpowers/specs/
 ```
+
+(`examples/` and `tests/` live inside the crate, not at the repo root — cargo
+only discovers them per-package.)
 
 `crates/wlr/` (the safe wrapper) is added later as a second workspace member.
 Lockstep versioning and a single CI keep the wrapper from drifting from the
@@ -127,22 +145,53 @@ corresponding `have_*` is `true`.
 Emit `cargo::rustc-check-cfg=cfg(wlr_has_*)` for every cfg in the table above,
 then `cargo::rustc-cfg=wlr_has_*` for each enabled one.
 
-### 4. Synthesize `$OUT_DIR/wrapper.h`
+Implementation detail: the `have_*` values are read by shelling out to
+`pkg-config --variable=`, because `pkg-config-rs` exposes only `-D` defines from
+`Cflags`, not arbitrary `.pc` variables.
 
-A single generated header containing `#include <wlr/...>` lines for all ~123
-headers, with the subsystem-specific ones gated by the step-3 decisions.
+### 4. Vendored protocols
 
-### 5. Run bindgen
+`wlr/types/wlr_layer_shell_v1.h` and `wlr/types/wlr_output_power_management_v1.h`
+`#include "wlr-layer-shell-unstable-v1-protocol.h"` and
+`"wlr-output-power-management-unstable-v1-protocol.h"`. Those headers are
+generated during the wlroots build and are **never installed**, so the public
+headers cannot be compiled as shipped.
+
+The crate vendors the two XML files from
+[wlr-protocols](https://gitlab.freedesktop.org/wlroots/wlr-protocols) under
+`protocol/` and regenerates the headers into `$OUT_DIR/protocol-include` with
+`wayland-scanner server-header`. This makes the `wayland-scanner` binary a
+build-time host requirement, alongside `libclang`.
+
+### 5. Synthesize `$OUT_DIR/wrapper.h`
+
+A single generated header containing `#include <wlr/...>` lines. The header list
+is produced by **scanning `<includedir>/wlroots-0.20/wlr/**/*.h`** rather than
+hardcoding, so a 0.20.x patch release that adds a header is picked up without
+touching this crate; the subsystem-specific ones are then subtracted per step 3.
+122 of the 123 headers are bound in the default configuration (`render/vulkan.h`
+is the exception — see Features).
+
+### 6. Run bindgen
 
 One bindgen invocation over `wrapper.h`:
 
+- **Clang args:** `-DWLR_USE_UNSTABLE` (still mandatory in 0.20), the wlroots
+  include paths, `$OUT_DIR/protocol-include`, and include paths probed from
+  `egl` plus whatever the enabled subsystems need (`glesv2`, `vulkan`,
+  `libinput`, `xcb`). EGL is unconditional because `wlr/render/egl.h` is.
 - **Allowlist:** `wlr_.*`, `WLR_.*` (types, functions, and vars)
 - **Blocklist:** external types, re-imported per the type-interop table below
-- **Enum style:** `--default-enum-style=rust_non_exhaustive` — safe here because
-  the header scan found no bitfields
-- **Layout tests:** ON (see Testing)
-- **Rerun triggers:** `rerun-if-changed` on the wlroots include directory and
-  `rerun-if-env-changed=PKG_CONFIG_PATH`
+- **Enum style:** `newtype`, **not** `rust_non_exhaustive` as originally
+  specified. The absence of C bitfields does not make a Rust `enum` safe here:
+  wlroots has bitmask enums (`wlr_edges`, `wlr_output_state_field`) whose values
+  routinely fall outside the declared variants, and materialising one of those as
+  a Rust `enum` is UB. A newtype keeps the type distinction without the claim.
+- **Layout assertions:** ON. bindgen 0.72 emits these as `const _` blocks, so
+  they are checked at **compile** time on every build, not as `#[test]`s.
+- **Rerun triggers:** `rerun-if-changed` on the wlroots include directory, the
+  vendored protocol XML, and `build.rs`; `rerun-if-env-changed` on
+  `PKG_CONFIG_PATH` and `PKG_CONFIG_SYSROOT_DIR`
 
 Output goes to `$OUT_DIR/bindings.rs`; `lib.rs` `include!`s it into a private
 module and re-exports flat, matching how C code uses wlroots (one namespace, no
@@ -157,38 +206,60 @@ so `wlr-sys` types are compatible with wayland-rs and the rest of the ecosystem.
 | Types | Crate | Version |
 |---|---|---|
 | `wl_display`, `wl_client`, `wl_resource`, `wl_listener`, `wl_signal`, `wl_list`, `wl_array`, `wl_event_loop` | `wayland-sys` (`server` feature) | 0.31 |
-| `drmModeModeInfo`, DRM format/modifier types | `drm-sys` | 0.8 |
 | `xkb_keymap`, `xkb_state`, `xkb_context`, `xkb_mod_mask_t` | `xkbcommon-sys` | 1.4 |
-| `libinput_device` and other `libinput_*` | `input-sys` | 1.19 |
+| `libinput_device` and other `libinput_*` | `input-sys` (optional) | 1.19 |
 | `size_t`, `timespec`, `dev_t`, `clockid_t` | `libc` | 0.2 |
+
+The blocklist is an explicit name list, **not** a `wl_.*` regex: the core
+protocol enums (`wl_output_transform`, `wl_seat_capability`, `wl_shm_format`, …)
+are not provided by `wayland-sys` and must be generated locally.
+
+`input-sys` is an **optional** dependency gated behind `libinput-backend`,
+because it emits an unconditional `#[link(name = "input")]` and would otherwise
+link libinput into compositors that never touch that backend.
 
 `libseat` types appear only as opaque pointers in `backend/session.h`, so no
 `libseat-sys` dependency is needed.
 
-### Deviation: pixman types are generated locally
+### Deviation: pixman and `drmModeModeInfo` are generated locally
 
-pixman is **not** blocklisted. `pixman-sys` is at 0.1.0 and unmaintained, while
-`pixman_region32_t` is embedded **by value** in `wlr_surface` and damage-tracking
-structs — a stale layout there is silent memory corruption, not a compile error.
-bindgen already sees the pixman headers through wlroots' own `-I` flags, so
-`pixman_region32_t` and `pixman_image_t` are generated inside `wlr-sys`.
+Two type families are **not** blocklisted. In both cases a mismatched layout
+would be silent memory corruption rather than a compile error, and no maintained
+crate offers a type whose identity can be verified:
 
-**Accepted cost:** the safe `wlr` wrapper cannot pass a `pixman` crate region
-directly to wlroots without a transmute. Revisit if `pixman-sys` becomes
-actively maintained.
+- **pixman.** `pixman-sys` is at 0.1.0 and unmaintained, while
+  `pixman_region32_t` is embedded **by value** in `wlr_surface` and
+  damage-tracking structs.
+- **`drmModeModeInfo`.** This was specified as coming from `drm-sys`, but that
+  crate generates only the kernel uAPI header and exposes `drm_mode_modeinfo`.
+  wlroots uses libdrm's *userspace* struct from `<xf86drmMode.h>`. They are
+  distinct types that happen to agree on layout; equating them would be a claim
+  this crate cannot check. **The `drm-sys` dependency was therefore dropped
+  entirely** — it had no other use.
+
+bindgen already sees both sets of headers through wlroots' own `-I` flags.
+
+**Accepted cost:** the safe `wlr` wrapper cannot pass a `pixman` crate region or
+a `drm-sys` mode straight to wlroots without a cast. Revisit if `pixman-sys`
+becomes actively maintained or a crate binds `xf86drmMode.h`.
 
 ## Hand-written support modules
 
 ### `src/signal.rs`
 
-`wl_signal_init`, `wl_signal_add`, `wl_signal_get`, and `wl_signal_emit_mutable`
-are `static inline` in `wayland-server-core.h` — **no symbol exists to link
-against**, and `wayland-sys` does not provide them. wlroots' entire event model
-is `wl_signal_add(&thing->events.destroy, &my_listener)`, so the crate is
-unusable without them.
+`wl_signal_init`, `wl_signal_add` and `wl_signal_get` are `static inline` in
+`wayland-server-core.h` — **no symbol exists to link against**. wlroots' entire
+event model is `wl_signal_add(&thing->events.destroy, &my_listener)`, so the
+crate is unusable without them.
 
-Reimplemented in Rust against `wl_list_init`/`wl_list_insert`/`wl_list_remove`,
-which *are* real exported symbols in `libwayland-server`.
+Correction to the original plan: `wayland-sys` **does** already reimplement those
+three in Rust, in its `server::signal` module. `wlr-sys` re-exports them rather
+than duplicating the work, so callers need one import.
+
+`wl_signal_emit_mutable` — the emit function wlroots itself uses, and the only
+one safe when a handler unlinks a listener — is genuinely missing: it is a real
+exported symbol in libwayland-server 1.22+, but `wayland-sys` does not declare
+it. `wlr-sys` declares it in an `extern` block.
 
 ### `src/list.rs`
 
@@ -208,12 +279,19 @@ and documents passing a null callback; formatting is the safe wrapper's problem.
 ```toml
 [features]
 default = ["xwayland", "drm-backend", "x11-backend", "libinput-backend",
-           "gles2-renderer", "vulkan-renderer", "session", "color-management"]
+           "gles2-renderer", "session", "color-management"]
 ```
 
-Defaults match a stock distro build (all ten `have_*` are `true` on the target
-machine), so the common case works with no configuration. Minimal consumers use
-`default-features = false`.
+Defaults match a stock distro build, so the common case works with no
+configuration. Minimal consumers use `default-features = false`.
+
+`vulkan-renderer` was **removed from the defaults**: `wlr/render/vulkan.h`
+includes `<vulkan/vulkan_core.h>`, and the Vulkan headers are a separate package
+(`vulkan-headers`, `libvulkan-dev`) that wlroots does not pull in. Leaving it on
+by default would break the build on any machine with wlroots but not those
+headers — including the development machine this was written on. Same reasoning
+applies to `gles2-renderer` (`<GLES2/gl2.h>`), but mesa supplies those headers as
+a wlroots dependency in practice, so it stays on.
 
 ## Error handling
 
@@ -221,22 +299,33 @@ machine), so the common case works with no configuration. Minimal consumers use
 |---|---|
 | wlroots not installed | Hard build error naming pkg-config package + distro packages |
 | Wrong wlroots minor installed | Hard build error naming the matching `wlr-sys` version |
-| Feature enabled, `have_*` false | `cargo::warning`, feature silently disabled |
+| Feature enabled, `have_*` false | `cargo::warning`, feature disabled |
 | libclang missing | bindgen's own error; README documents the requirement |
+| `wayland-scanner` missing | Build error naming the distro packages |
+
+All three build-script paths were exercised against doctored `.pc` files and
+produce the intended message.
 
 ## Testing
 
-1. **bindgen layout tests** — generated `__bindgen_test_layout_*` tests run under
-   `cargo test`. This is the primary safety net for the type-interop table: if
-   `wayland-sys`'s `wl_list` layout ever diverged, every `wlr_*` struct embedding
-   it fails loudly instead of corrupting memory.
-2. **`tests/link.rs`** — calls `wlr_version_get_major/minor/micro` and asserts
-   `0` / `20` / any. Proves the linked `.so` matches the headers bindgen read.
-3. **`examples/headless.rs`** — `wl_display_create` → `wlr_headless_backend_create`
+1. **bindgen layout assertions** — 687 of them, emitted as `const _` blocks and
+   therefore checked at **compile** time on every build (bindgen 0.72 no longer
+   generates `__bindgen_test_layout_*` runtime tests). This is the primary safety
+   net for the type-interop table: if `wayland-sys`'s `wl_list` layout ever
+   diverged, every `wlr_*` struct embedding it fails to compile instead of
+   corrupting memory.
+2. **`tests/link.rs`** — asserts `wlr_version_get_major/minor` agree with the
+   `WLR_VERSION_*` constants bindgen lifted from the headers. Proves the linked
+   `.so` matches the headers bindgen read.
+3. **`tests/signal.rs`** — exercises the hand-written code that no generated
+   assertion covers: signal delivery to multiple listeners, `wl_signal_get`,
+   `wl_list` iteration order, and `container_of!` against `offset_of!`.
+4. **`examples/headless.rs`** — `wl_display_create` → `wlr_headless_backend_create`
    → `wlr_backend_start` → one event-loop dispatch → teardown. End-to-end smoke
    test requiring no GPU and no seat.
-4. **CI** — GitHub Actions on an Arch container (currently the only distro
-   shipping wlroots 0.20): `fmt`, `clippy`, `test`, run the example.
+5. **CI** — GitHub Actions on an Arch container (currently the only distro
+   shipping wlroots 0.20): `fmt`, `clippy` (incl. `--features vulkan-renderer`),
+   a `--no-default-features` build, `test`, and running the example.
 
 ## Out of scope (YAGNI)
 
@@ -245,7 +334,9 @@ machine), so the common case works with no configuration. Minimal consumers use
 - Multi-version support (0.19 / 0.21 / auto-detection)
 - Any safe abstraction in `wlr-sys`: no `Drop`, no traits, no lifetimes — raw
   pointers only
-- Wayland protocol code generation
+- Wayland protocol code generation *beyond* the two `wlr-protocols` server
+  headers wlroots' own public headers require (see step 4). No Rust-side protocol
+  bindings are generated.
 
 ## Accepted consequences
 
@@ -256,6 +347,29 @@ the same applies to the `wlr` wrapper unless it is `cfg`-guarded. This was chose
 knowingly over a committed-fallback `bindings.rs`; documentation is generated
 locally with `cargo doc`.
 
-**libclang is a hard build dependency** for every consumer of the crate.
+**libclang and `wayland-scanner` are hard build dependencies** for every consumer
+of the crate.
 
 **Consumers must have wlroots 0.20 installed.** There is no fallback path.
+
+## Deviations found during implementation
+
+Each is explained in context above; collected here for review.
+
+| # | Spec said | Reality | Resolution |
+|---|---|---|---|
+| 1 | Headers compile as shipped | Every header `#error`s without `-DWLR_USE_UNSTABLE` | Added to clang args |
+| 2 | No protocol codegen needed | Two public headers include uninstalled `wlr-protocols` headers | Vendored the XML, run `wayland-scanner` at build time |
+| 3 | `drmModeModeInfo` from `drm-sys` | `drm-sys` exposes only the kernel uAPI `drm_mode_modeinfo` | Generate locally; `drm-sys` dependency dropped |
+| 4 | `input-sys` a plain dependency | It emits an unconditional `#[link(name = "input")]` | Made optional, gated on `libinput-backend` |
+| 5 | Reimplement `wl_signal_*` in Rust | `wayland-sys` already has init/add/get | Re-export those; declare only `wl_signal_emit_mutable` |
+| 6 | Enum style `rust_non_exhaustive` | wlroots has bitmask enums; a Rust `enum` would be UB | Use `newtype` |
+| 7 | Layout tests run under `cargo test` | bindgen 0.72 emits `const _` assertions | Checked at compile time instead — strictly better |
+| 8 | `vulkan-renderer` on by default | Vulkan headers are a separate package wlroots does not require | Moved out of `default`; covered explicitly in CI |
+| 9 | `color-management` gates a header | `wlr/render/color.h` is always bindable | Feature retained, but emits only the `cfg` |
+
+### Not verified locally
+
+`--features vulkan-renderer` has **not** been built on the development machine:
+the Vulkan headers are not installed there. The CI job installs `vulkan-headers`
+and clippy-checks that feature, so the first real verification happens on CI.

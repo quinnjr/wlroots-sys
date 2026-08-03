@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    # Arch is currently the only distro shipping wlroots 0.20.
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Syu --noconfirm \
+            git rust clang pkgconf \
+            wlroots0.20 wayland wayland-protocols \
+            libxkbcommon libinput libdrm pixman mesa vulkan-headers
+
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain and wlroots version
+        run: |
+          cargo --version
+          rustc --version
+          pkg-config --modversion wlroots-0.20
+
+      - run: cargo fmt --all --check
+
+      - run: cargo clippy --workspace --all-targets
+
+      # The Vulkan renderer needs the separate vulkan-headers package, so it is
+      # off by default; CI installs them and covers it explicitly.
+      - run: cargo clippy -p wlr-sys --all-targets --features vulkan-renderer
+
+      - run: cargo build -p wlr-sys --no-default-features
+
+      - run: cargo test --workspace
+
+      - run: cargo run -p wlr-sys --example headless
