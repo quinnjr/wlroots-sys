@@ -1,6 +1,6 @@
 [package]
 name = "wlr-sys"
-version = "0.17.0"
+version = "0.17.1"
 description = "Raw FFI bindings to wlroots 0.17"
 keywords = ["wayland", "wlroots", "compositor", "ffi", "bindings"]
 categories = ["external-ffi-bindings", "gui"]
