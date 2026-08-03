@@ -54,11 +54,16 @@ docker run --rm -v "$PWD:/src" -w /src -e CARGO_TARGET_DIR=/tmp/t \
 The model does not require it, but if you have `git-flow` installed:
 
 ```sh
-git flow init -d          # accepts the defaults below
+git flow init -d
+git config gitflow.prefix.versiontag v   # the one non-default setting
 ```
 
-The defaults match this repo: production `main`, development `develop`, prefixes
-`feature/`, `release/`, `hotfix/`, `support/`, and version tag prefix `v`.
+The defaults match this repo — production `main`, development `develop`,
+prefixes `feature/`, `release/`, `hotfix/`, `support/` — except the version tag
+prefix, which `git flow init -d` leaves empty while our tags are `vX.Y.Z`.
+
+Note this config lives in `.git/config` and is not shared, so each clone sets it
+independently. Nothing depends on the tool; the branch names are the contract.
 
 ## Before opening a PR
 
