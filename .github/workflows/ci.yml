@@ -5,24 +5,36 @@ on:
     branches: [main, develop]
   pull_request:
 
+# This job builds PR code, and building Rust means executing build.rs. It needs
+# to read the repo and nothing else.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
 
 jobs:
   test:
-    # Arch is currently the only distro shipping wlroots 0.20.
+    # Arch is currently the only distro shipping wlroots 0.20. That also makes
+    # this workflow unpinnable in one respect: `pacman -Syu` against a rolling
+    # distro pulls whatever rustc and wlroots are current, so a new clippy lint
+    # or a wlroots patch can redden an unrelated PR. Accepted deliberately —
+    # `-D warnings` is therefore scoped to the lint steps rather than global, so
+    # upstream lint churn cannot fail `build` and `test` too.
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
       - name: Install dependencies
         run: |
+          # Refresh the keyring first: a stale one in the base image is the
+          # classic `pacman -Syu` container failure.
+          pacman -Sy --noconfirm archlinux-keyring
           pacman -Syu --noconfirm \
             git rust clang pkgconf \
             wlroots0.20 wayland wayland-protocols \
             libxkbcommon libinput libdrm pixman mesa vulkan-headers
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Show toolchain and wlroots version
         run: |
@@ -30,16 +42,88 @@ jobs:
           rustc --version
           pkg-config --modversion wlroots-0.20
 
+      - name: Verify vendored protocol XML is unmodified
+        working-directory: crates/wlr-sys/protocol
+        run: sha256sum -c SHA256SUMS
+
+      # --- default features -------------------------------------------------
       - run: cargo fmt --all --check
 
       - run: cargo clippy --workspace --all-targets
-
-      # The Vulkan renderer needs the separate vulkan-headers package, so it is
-      # off by default; CI installs them and covers it explicitly.
-      - run: cargo clippy -p wlr-sys --all-targets --features vulkan-renderer
-
-      - run: cargo build -p wlr-sys --no-default-features
+        env:
+          RUSTFLAGS: -D warnings
 
       - run: cargo test --workspace
 
+      # The README is the crate's rustdoc (`#![doc = include_str!(...)]`), so a
+      # broken link or fence in it breaks documentation builds.
+      - run: cargo doc -p wlr-sys --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
       - run: cargo run -p wlr-sys --example headless
+
+      # --- non-default feature sets ----------------------------------------
+      # `cargo test`, not `cargo build`: the latter never compiles tests/, which
+      # is where the type-identity and subsystem-symbol safety nets live.
+      - run: cargo test -p wlr-sys --no-default-features
+
+      # Mixed sets, which all-on/all-off never reach. `drm-backend` alone
+      # exercises the transitive `wlr/backend/session.h` include; `libinput-backend`
+      # alone exercises the optional input-sys dependency and its blocklist
+      # extension — the path tests/interop.rs guards.
+      - run: cargo test -p wlr-sys --no-default-features --features drm-backend
+      - run: cargo test -p wlr-sys --no-default-features --features libinput-backend
+
+      - run: cargo test -p wlr-sys --features vulkan-renderer
+      - run: cargo clippy -p wlr-sys --all-targets --all-features
+        env:
+          RUSTFLAGS: -D warnings
+
+      # src/signal.rs declares wl_signal_emit_mutable itself and build.rs puts
+      # -lwayland-server on the link line so that declaration resolves no matter
+      # how wayland-sys was configured. `dlopen` removes wayland-sys's #[link],
+      # so this job is the only thing that proves that claim.
+      - run: cargo test -p wlr-sys --features wayland-sys/dlopen
+
+      # --- release hygiene --------------------------------------------------
+      - name: docs.rs fallback still builds
+        run: cargo doc -p wlr-sys --no-deps --all-features
+        env:
+          DOCS_RS: 1
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Committed bindings snapshot is current
+        run: |
+          cargo build -p wlr-sys --all-features
+          latest=$(ls -t target/debug/build/wlr-sys-*/out/bindings.rs | head -1)
+          diff -u crates/wlr-sys/prebuilt/bindings-docsrs.rs "$latest" || {
+            echo "::error::prebuilt/bindings-docsrs.rs is stale; see docs/RELEASING.md"
+            exit 1
+          }
+
+      # Builds from a clean extraction, which is where a missing protocol/*.xml
+      # or an include_str! escaping the package root first shows up. A published
+      # version can only be yanked, never replaced.
+      - run: cargo package -p wlr-sys --allow-dirty
+
+  msrv:
+    # rust-version in Cargo.toml is a published promise; nothing else checks it.
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Syu --noconfirm \
+            git rustup clang pkgconf \
+            wlroots0.20 wayland wayland-protocols \
+            libxkbcommon libinput libdrm pixman mesa vulkan-headers
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install the declared MSRV
+        run: |
+          msrv=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)
+          echo "MSRV is $msrv"
+          rustup toolchain install "$msrv" --profile minimal
+          rustup default "$msrv"
+      - run: cargo check --workspace --all-features

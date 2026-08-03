@@ -12,10 +12,8 @@ wraps — which matters, because wlroots breaks its API every minor release.
 
 ## Versioning
 
-Each crate's **minor version tracks the wlroots minor version**: `wlr-sys 0.20.x`
-binds wlroots 0.20.x and rejects anything else at build time. wlroots has no
-stable ABI and ships a version-suffixed soname, so there is no way for one
-release to span minors.
+Each crate's minor version tracks the wlroots minor version — see
+[`crates/wlr-sys/README.md`](crates/wlr-sys/README.md#versioning).
 
 ## Quick start
 

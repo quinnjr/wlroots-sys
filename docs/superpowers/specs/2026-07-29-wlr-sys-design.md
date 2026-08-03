@@ -1,12 +1,20 @@
 # `wlr-sys` — raw FFI bindings to wlroots 0.20
 
 **Date:** 2026-07-29
-**Status:** Implemented
+**Status:** Implemented — **historical record, not maintained**
 **Repo:** `wlroots-sys` (directory/remote name unchanged)
 
-> Implementation notes are folded into the sections below. Where building the
-> crate proved a design assumption wrong, the section says so and states what was
-> done instead. See [Deviations found during implementation](#deviations-found-during-implementation).
+> This is a dated design document plus the deviations found while building it.
+> It is deliberately frozen: the measurements in it (header counts, assertion
+> counts, pkg-config spawn counts) were taken on one machine on one day and are
+> invalidated by any wlroots patch, bindgen bump, or feature change.
+>
+> **For current behaviour see [`crates/wlr-sys/README.md`](../../../crates/wlr-sys/README.md)
+> (which is also the crate's rustdoc), the doc comments in `build.rs`, and
+> [`docs/RELEASING.md`](../../RELEASING.md).** Several decisions recorded here
+> were subsequently revised — notably the `links` value, the `color-management`
+> feature, and how subsystem detection reaches downstream crates. Where this
+> document and the README disagree, the README is right.
 
 ## Purpose
 
@@ -62,7 +70,7 @@ wlroots-sys/
 │       │   ├── list.rs         wl_list iteration + container_of!
 │       │   └── signal.rs       wl_signal_init/add/get/emit_mutable
 │       ├── protocol/           vendored wlr-protocols XML
-│       ├── tests/              link.rs, signal.rs
+│       ├── tests/              interop.rs, link.rs, signal.rs
 │       └── examples/headless.rs
 ├── .github/workflows/ci.yml
 └── docs/superpowers/specs/
@@ -93,7 +101,7 @@ the bindings from coexisting in one dependency graph.
 
 ## `build.rs`
 
-Five steps, in order.
+Six steps, in order.
 
 ### 1. Probe
 
@@ -141,6 +149,13 @@ corresponding `have_*` is `true`.
   (say) Xwayland degrades the build instead of breaking it.
 - Feature disabled → not bound regardless of library support. Keeps bindgen
   output and compile time down for minimal consumers.
+
+One documented exception to the "iff": `wlr/backend/drm.h` and
+`wlr/backend/libinput.h` both `#include <wlr/backend/session.h>`, so that header
+is bound transitively whenever either backend is on, even if the `session`
+feature is off. The `wlr_has_session` cfg still follows the strict rule, so with
+`--no-default-features --features drm-backend` the `wlr_session_*` symbols are
+declared while the cfg is absent. Downstream code should gate on the cfg.
 
 Emit `cargo::rustc-check-cfg=cfg(wlr_has_*)` for every cfg in the table above,
 then `cargo::rustc-cfg=wlr_has_*` for each enabled one.
@@ -190,8 +205,10 @@ One bindgen invocation over `wrapper.h`:
 - **Layout assertions:** ON. bindgen 0.72 emits these as `const _` blocks, so
   they are checked at **compile** time on every build, not as `#[test]`s.
 - **Rerun triggers:** `rerun-if-changed` on the wlroots include directory, the
-  vendored protocol XML, and `build.rs`; `rerun-if-env-changed` on
-  `PKG_CONFIG_PATH` and `PKG_CONFIG_SYSROOT_DIR`
+  vendored protocol XML, and `build.rs`. The pkg-config env vars need no explicit
+  `rerun-if-env-changed`: `pkg-config-rs` already emits them (verified — it
+  emits `PKG_CONFIG_PATH` 10× and `PKG_CONFIG_SYSROOT_DIR` 15× per build, plus
+  the target-suffixed variants).
 
 Output goes to `$OUT_DIR/bindings.rs`; `lib.rs` `include!`s it into a private
 module and re-exports flat, matching how C code uses wlroots (one namespace, no
@@ -308,32 +325,44 @@ produce the intended message.
 
 ## Testing
 
-1. **bindgen layout assertions** — 687 of them, emitted as `const _` blocks and
-   therefore checked at **compile** time on every build (bindgen 0.72 no longer
-   generates `__bindgen_test_layout_*` runtime tests). This is the primary safety
-   net for the type-interop table: if `wayland-sys`'s `wl_list` layout ever
-   diverged, every `wlr_*` struct embedding it fails to compile instead of
-   corrupting memory.
-2. **`tests/link.rs`** — asserts `wlr_version_get_major/minor` agree with the
-   `WLR_VERSION_*` constants bindgen lifted from the headers. Proves the linked
-   `.so` matches the headers bindgen read.
-3. **`tests/signal.rs`** — exercises the hand-written code that no generated
-   assertion covers: signal delivery to multiple listeners, `wl_signal_get`,
-   `wl_list` iteration order, and `container_of!` against `offset_of!`.
-4. **`examples/headless.rs`** — `wl_display_create` → `wlr_headless_backend_create`
+1. **bindgen layout assertions** — several hundred (648–688 depending on the
+   feature set), emitted as `const _` blocks and therefore checked at **compile**
+   time on every build (bindgen 0.72 no longer generates
+   `__bindgen_test_layout_*` runtime tests). This is the primary safety net for
+   *layout*: if `wayland-sys`'s `wl_list` layout ever diverged, every `wlr_*`
+   struct embedding it fails to compile instead of corrupting memory.
+2. **`tests/interop.rs`** — the safety net for type *identity*, which layout
+   assertions cannot provide. A name missing from a blocklist makes bindgen
+   generate a local duplicate that silently shadows the glob import, and
+   everything still compiles; this is how `libinput_tablet_tool` escaped. The
+   test coerces real wlroots functions to signatures written in the ecosystem
+   crates' types, so a re-shadowing breaks the build.
+3. **`tests/link.rs`** — asserts `wlr_version_get_major/minor/micro` agree with
+   the `WLR_VERSION_*` constants bindgen lifted from the headers. Proves the
+   linked `.so` matches the headers bindgen read, down to the patch version —
+   wlroots offers no ABI guarantee across patch releases either.
+4. **`tests/signal.rs`** — exercises the hand-written code that no generated
+   assertion covers: signal delivery order across multiple listeners,
+   `wl_signal_get`, `wl_list` iteration order, removal of the current element
+   mid-iteration, and `container_of!` against `offset_of!`.
+5. **`examples/headless.rs`** — `wl_display_create` → `wlr_headless_backend_create`
    → `wlr_backend_start` → one event-loop dispatch → teardown. End-to-end smoke
    test requiring no GPU and no seat.
-5. **CI** — GitHub Actions on an Arch container (currently the only distro
+6. **CI** — GitHub Actions on an Arch container (currently the only distro
    shipping wlroots 0.20): `fmt`, `clippy` (incl. `--features vulkan-renderer`),
-   a `--no-default-features` build, `test`, and running the example.
+   a `--no-default-features` build, `test`, `cargo doc` under
+   `-D warnings` (the README *is* the rustdoc), a mixed-feature matrix that
+   exercises the transitive `session.h` path, and running the example.
 
 ## Out of scope (YAGNI)
 
 - Vendored meson/ninja build of wlroots
 - `dlopen`-based loading
 - Multi-version support (0.19 / 0.21 / auto-detection)
-- Any safe abstraction in `wlr-sys`: no `Drop`, no traits, no lifetimes — raw
-  pointers only
+- Any safe abstraction in `wlr-sys`: no `Drop`, no lifetimes, and no trait that
+  imposes a safety invariant — raw pointers only. (`wl_list_iter` implements
+  `Iterator`, but its `Item` is `*mut T`, its only constructor is `unsafe`, and
+  no safe handle escapes, so it adds no invariant.)
 - Wayland protocol code generation *beyond* the two `wlr-protocols` server
   headers wlroots' own public headers require (see step 4). No Rust-side protocol
   bindings are generated.
@@ -368,8 +397,9 @@ Each is explained in context above; collected here for review.
 | 8 | `vulkan-renderer` on by default | Vulkan headers are a separate package wlroots does not require | Moved out of `default`; covered explicitly in CI |
 | 9 | `color-management` gates a header | `wlr/render/color.h` is always bindable | Feature retained, but emits only the `cfg` |
 
-### Not verified locally
+### Verification status
 
-`--features vulkan-renderer` has **not** been built on the development machine:
-the Vulkan headers are not installed there. The CI job installs `vulkan-headers`
-and clippy-checks that feature, so the first real verification happens on CI.
+All nine deviations and every feature combination have been exercised locally,
+including `--features vulkan-renderer` after installing the `vulkan-headers`
+package: 123 headers bound instead of 122, 13 Vulkan symbols generated, and
+`wlr_has_vulkan_renderer` emitted.

@@ -4,39 +4,45 @@ version = "0.20.0"
 description = "Raw FFI bindings to wlroots 0.20"
 keywords = ["wayland", "wlroots", "compositor", "ffi", "bindings"]
 categories = ["external-ffi-bindings", "gui"]
-readme = "README.md"
-links = "wlroots-0.20"
+documentation = "https://github.com/quinnjr/wlroots-sys"
+# Names the native library *family*, deliberately without the version. Cargo
+# enforces at most one package per `links` value, so this is what rejects a
+# graph containing two wlr-sys minors — which would otherwise link
+# libwlroots-0.20.so and libwlroots-0.21.so together, where identical symbol
+# names bind to whichever wins interposition and struct offsets silently
+# disagree. A version-suffixed value would permit exactly that.
+links = "wlroots"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
 [features]
+# Row order matches SUBSYSTEMS in build.rs. Keep them in sync.
 default = [
-    "xwayland",
     "drm-backend",
     "x11-backend",
     "libinput-backend",
-    "gles2-renderer",
     "session",
-    "color-management",
+    "gles2-renderer",
+    "xwayland",
 ]
 
 # Each feature binds the matching wlroots subsystem, but only if the installed
 # library reports it as available via its pkg-config `have_*` variable.
-xwayland = []
-drm-backend = []
+drm-backend = ["session"]
 x11-backend = []
-libinput-backend = ["dep:input-sys"]
-gles2-renderer = []
-# Not enabled by default: requires the Vulkan headers (`vulkan-headers` on Arch,
-# `libvulkan-dev` on Debian) to be installed, which wlroots itself does not pull in.
-vulkan-renderer = []
+# `wlr/backend/drm.h` and `wlr/backend/libinput.h` both include
+# `wlr/backend/session.h`, so both backends imply `session`. Without this the
+# session symbols would be bound while `wlr_has_session` stayed unset.
+libinput-backend = ["dep:input-sys", "session"]
 session = []
-color-management = []
+gles2-renderer = []
+# Off by default; see README.md "Features" for why.
+vulkan-renderer = []
+xwayland = []
 
 [dependencies]
-libc = "0.2"
 wayland-sys = { version = "0.31", features = ["server"] }
 xkbcommon-sys = "1.4"
 
@@ -48,3 +54,8 @@ input-sys = { version = "1.19", optional = true }
 [build-dependencies]
 bindgen = "0.72"
 pkg-config = "0.3"
+
+[package.metadata.docs.rs]
+# docs.rs has no wlroots installation, so build.rs falls back to the committed
+# `prebuilt/bindings-docsrs.rs` when DOCS_RS is set. See build.rs.
+all-features = true

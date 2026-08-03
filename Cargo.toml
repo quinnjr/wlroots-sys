@@ -5,5 +5,5 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/JosephRQuinn/wlroots-sys"
+repository = "https://github.com/quinnjr/wlroots-sys"
 rust-version = "1.85"
