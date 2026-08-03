@@ -75,6 +75,13 @@ differences already surveyed during the `wlr-sys` backfill:
 | Vulkan renderer | absent | present | present | present |
 | Colour management | absent | absent | present | present |
 | pkg-config module | `wlroots` | `wlroots` | `wlroots-0.19` | `wlroots-0.20` |
+| Output commit | `wlr_output_commit` | both | `wlr_output_commit_state` | `wlr_output_commit_state` |
+
+The commit row is the **first confirmed `compat` entry**, found while writing the
+implementation plan: wlroots replaced the implicit pending-state model with an
+explicit `wlr_output_state`, so 0.15 has only `wlr_output_commit`, 0.19+ have only
+`wlr_output_commit_state`, and 0.17 carries both during the transition. `compat`
+builds 0.17 with the newer path, so three of four versions share one code path.
 
 If `compat` starts sprawling beyond adapters of this kind, that is the signal the
 boundary was drawn in the wrong place — not a reason to add more adapters.
