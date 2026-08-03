@@ -32,9 +32,9 @@ use std::os::raw::c_char;
 
 // --- wayland-sys -----------------------------------------------------------
 
+// 0.15's `wlr_compositor_create` predates the `version` parameter added later.
 const WL_DISPLAY: unsafe extern "C" fn(
     *mut wayland_sys::server::wl_display,
-    u32,
     *mut wlr_sys::wlr_renderer,
 ) -> *mut wlr_sys::wlr_compositor = wlr_sys::wlr_compositor_create;
 
@@ -47,9 +47,10 @@ const WL_RESOURCE: unsafe extern "C" fn(
     *mut wayland_sys::server::wl_resource,
 ) -> *mut wlr_sys::wlr_surface = wlr_sys::wlr_surface_from_resource;
 
-const WL_EVENT_LOOP: unsafe extern "C" fn(
-    *mut wayland_sys::server::wl_event_loop,
-) -> *mut wlr_sys::wlr_backend = wlr_sys::wlr_headless_backend_create;
+// No `wl_event_loop` coercion: wlroots 0.15 constructors take a `wl_display`,
+// and nothing in its public API accepts a `wl_event_loop`. The type stays
+// blocklisted so it cannot be locally regenerated; there is simply no signature
+// to pin it against until 0.19.
 
 const SEAT_NAME: unsafe extern "C" fn(
     *mut wayland_sys::server::wl_display,
@@ -93,11 +94,9 @@ const LIBINPUT_DEVICE: unsafe extern "C" fn(
     *mut wlr_sys::wlr_input_device,
 ) -> *mut input_sys::libinput_device = wlr_sys::wlr_libinput_get_device_handle;
 
-/// The regression this whole file exists for.
-#[cfg(wlr_has_libinput_backend)]
-const LIBINPUT_TABLET_TOOL: unsafe extern "C" fn(
-    *mut wlr_sys::wlr_tablet_tool,
-) -> *mut input_sys::libinput_tablet_tool = wlr_sys::wlr_libinput_get_tablet_tool_handle;
+// `wlr_libinput_get_tablet_tool_handle` does not exist in wlroots 0.15; it was
+// added in 0.20. `libinput_tablet_tool` stays blocklisted (harmlessly: nothing
+// in 0.15's headers reaches it), but there is no signature to pin it against.
 
 // --- deliberately local ----------------------------------------------------
 

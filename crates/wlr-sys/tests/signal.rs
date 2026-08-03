@@ -13,9 +13,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use wayland_sys::common::wl_list;
 use wayland_sys::server::{wl_listener, wl_signal};
-use wlr_sys::{
-    container_of, wl_list_for_each, wl_signal_add, wl_signal_emit_mutable, wl_signal_init,
-};
+use wlr_sys::{container_of, wl_list_for_each, wl_signal_add, wl_signal_emit, wl_signal_init};
 
 /// Monotonic tick, so each handler invocation can record when it ran relative
 /// to the others.
@@ -103,8 +101,8 @@ fn signal_delivers_to_listeners_in_order() {
         wl_signal_add(&raw mut signal, &raw mut first.listener);
         wl_signal_add(&raw mut signal, &raw mut second.listener);
 
-        wl_signal_emit_mutable(&raw mut signal, (&raw mut data).cast::<c_void>());
-        wl_signal_emit_mutable(&raw mut signal, (&raw mut data).cast::<c_void>());
+        wl_signal_emit(&raw mut signal, (&raw mut data).cast::<c_void>());
+        wl_signal_emit(&raw mut signal, (&raw mut data).cast::<c_void>());
 
         // Unlink before the listeners are freed, exactly as a compositor must.
         ffi_wl_list_remove(&raw mut first.listener.link);

@@ -1,6 +1,6 @@
 //! Build script for `wlr-sys`.
 //!
-//! Locates wlroots 0.20 via pkg-config, reconciles the crate's Cargo features
+//! Locates wlroots 0.15 via pkg-config, reconciles the crate's Cargo features
 //! against the subsystems the installed library was actually compiled with,
 //! generates whichever protocol server headers wlroots' public headers `#include`
 //! but do not ship, and runs bindgen over the result.
@@ -21,12 +21,17 @@ use std::process::Command;
 /// `sed 's/0.20/0.21/'` produced `range_version("0.21".."0.21")` — an empty
 /// range that rejects every installed wlroots, with no occurrence of the
 /// searched string to reveal it.
-const WLROOTS_MINOR: &str = "0.20";
-const WLROOTS_NEXT_MINOR: &str = "0.21";
+const WLROOTS_MINOR: &str = "0.15";
+const WLROOTS_NEXT_MINOR: &str = "0.16";
 
-/// The pkg-config module name. wlroots embeds its minor version here because it
-/// has no stable ABI: `libwlroots-0.20.so` and `libwlroots-0.21.so` coexist.
-const WLROOTS_PC: &str = concat!("wlroots-", "0.20");
+/// The pkg-config module name.
+///
+/// wlroots only began version-suffixing this at 0.19; 0.15 ships a bare
+/// `wlroots.pc`, so two wlroots versions cannot coexist on such a system and the
+/// module name carries no version information. The `range_version` check in
+/// `probe_wlroots` is therefore the only thing standing between this crate and a
+/// wrong-ABI build.
+const WLROOTS_PC: &str = "wlroots";
 
 /// Cfg names referenced outside the `SUBSYSTEMS` table. Hoisted so a rename in
 /// the table is a compile error here rather than a silently-stopped match — the
@@ -40,7 +45,7 @@ struct Subsystem {
     /// Cargo feature that requests it, or `None` for detect-only subsystems that
     /// gate no public header and are surfaced purely as a `cfg`.
     feature: Option<&'static str>,
-    /// The `have_*` variable in `wlroots-0.20.pc`.
+    /// The `have_*` variable in `wlroots.pc`.
     pc_var: &'static str,
     /// The `cfg` emitted when the subsystem is both requested and available.
     cfg: &'static str,
@@ -73,66 +78,35 @@ const SUBSYSTEMS: &[Subsystem] = &[
         extra_pc: &["libinput"],
     },
     Subsystem {
-        feature: Some("session"),
-        pc_var: "have_session",
-        cfg: "wlr_has_session",
-        headers: &["wlr/backend/session.h"],
-        extra_pc: &[],
-    },
-    Subsystem {
         feature: Some("gles2-renderer"),
         pc_var: "have_gles2_renderer",
         cfg: "wlr_has_gles2_renderer",
         headers: &["wlr/render/gles2.h"],
         extra_pc: &["glesv2"],
     },
-    Subsystem {
-        feature: Some("vulkan-renderer"),
-        pc_var: "have_vulkan_renderer",
-        cfg: "wlr_has_vulkan_renderer",
-        headers: &["wlr/render/vulkan.h"],
-        extra_pc: &["vulkan"],
-    },
+    // 0.15's Xwayland support is a single flat header; the `wlr/xwayland/`
+    // directory (server.h, shell.h, xwayland.h) arrived later.
     Subsystem {
         feature: Some("xwayland"),
         pc_var: "have_xwayland",
         cfg: "wlr_has_xwayland",
-        headers: &[
-            "wlr/xwayland.h",
-            "wlr/xwayland/server.h",
-            "wlr/xwayland/shell.h",
-            "wlr/xwayland/xwayland.h",
-        ],
+        headers: &["wlr/xwayland.h"],
         extra_pc: &["xcb"],
     },
-    // Detect-only: these gate no public header, so they get no Cargo feature.
-    // `wlr/render/color.h` is always bindable — `have_color_management` only
-    // reports whether ICC support was compiled in. Giving it a feature would
-    // have made the cfg suppressible on a machine where the capability is
-    // genuinely present, i.e. a knob whose only reachable states are "correct"
-    // and "lying".
-    Subsystem {
-        feature: None,
-        pc_var: "have_color_management",
-        cfg: "wlr_has_color_management",
-        headers: &[],
-        extra_pc: &[],
-    },
-    Subsystem {
-        feature: None,
-        pc_var: "have_gbm_allocator",
-        cfg: "wlr_has_gbm_allocator",
-        headers: &[],
-        extra_pc: &[],
-    },
-    Subsystem {
-        feature: None,
-        pc_var: "have_udmabuf_allocator",
-        cfg: "wlr_has_udmabuf_allocator",
-        headers: &[],
-        extra_pc: &[],
-    },
 ];
+
+// Subsystems deliberately absent from the table above, and why:
+//
+// * `session` — `wlr/backend/session.h` exists in 0.15 but there is no
+//   `have_session` flag, because the session backend was not optional yet. The
+//   header is therefore bound unconditionally and no `wlr_has_session` cfg is
+//   emitted. Making it a feature would let a consumer switch off a subsystem
+//   wlroots does not actually allow switching off.
+// * `vulkan-renderer` — `have_vulkan_renderer` exists and Ubuntu 22.04 reports
+//   it **false**, and `wlr/render/vulkan.h` is not installed at all. The Vulkan
+//   renderer landed in 0.16.
+// * `gbm-allocator`, `udmabuf-allocator`, `color-management` — all 0.19-era
+//   flags with no 0.15 equivalent.
 
 /// Types blocklisted in bindgen and re-imported from `wayland-sys`, so that
 /// `wl_display`, `wl_listener` and friends are the *same* Rust types here as in
@@ -255,7 +229,7 @@ fn main() {
 
     let mut enabled = reconcile_subsystems();
     let enabled_cfgs = std::mem::take(&mut enabled.cfgs);
-    let mut gated_headers = std::mem::take(&mut enabled.headers);
+    let gated_headers = std::mem::take(&mut enabled.headers);
     clang_args.extend(std::mem::take(&mut enabled.includes));
 
     // `wlr/backend/drm.h` and `wlr/backend/libinput.h` both include
@@ -263,9 +237,9 @@ fn main() {
     // features therefore imply `session` (see Cargo.toml), so reaching here with
     // either enabled guarantees the session subsystem was reconciled too — the
     // cfg and the bound symbols cannot disagree.
-    if enabled_cfgs.contains(&CFG_DRM_BACKEND) || enabled_cfgs.contains(&CFG_LIBINPUT_BACKEND) {
-        gated_headers.insert("wlr/backend/session.h");
-    }
+    // Not gated on this branch: 0.15 has no `have_session` flag because the
+    // session backend was not optional yet, so the header is always bound.
+    let _ = (CFG_DRM_BACKEND, CFG_LIBINPUT_BACKEND);
 
     emit_subsystem_metadata(&enabled_cfgs);
 
@@ -437,7 +411,7 @@ fn probe_wlroots() -> pkg_config::Library {
                 None => panic!(
                     "could not find `{WLROOTS_PC}` via pkg-config.\n\
                      Install wlroots {WLROOTS_MINOR} and its development headers:\n  \
-                     Arch:   pacman -S wlroots0.20\n  \
+                     Ubuntu: apt install libwlroots-dev\n  \
                      Fedora: dnf install wlroots-devel\n  \
                      Debian: apt install libwlroots-0.20-dev\n\
                      If it is installed somewhere unusual, set PKG_CONFIG_PATH.\n\n\
@@ -496,7 +470,7 @@ fn probe_include_paths(name: &str, requested_by: Option<&str>) -> Vec<String> {
     }
 }
 
-/// Read a `have_*` flag out of `wlroots-0.20.pc`.
+/// Read a `have_*` flag out of `wlroots.pc`.
 ///
 /// `pkg-config-rs` exposes only the `-D` defines from `Cflags`, not arbitrary
 /// `.pc` variables, so this goes through its `get_variable` helper. That matters
@@ -770,6 +744,13 @@ fn generate_bindings(wrapper: &Path, clang_args: &[String], out_dir: &Path, bind
             is_bitfield: false,
             is_global: false,
         })
+        // wlroots 0.15 declares both `enum wlr_xwayland_icccm_input_model` and a
+        // function of that name. C keeps tags and ordinary identifiers in
+        // separate namespaces; Rust does not, and the newtype style emits a
+        // tuple struct whose constructor collides with the extern fn. A
+        // constified module keeps the constants while occupying only the type
+        // namespace. wlroots renamed the function after 0.17.
+        .constified_enum_module("wlr_xwayland_icccm_input_model")
         // Layout assertions are this crate's primary safety net for the
         // blocklisted ecosystem types — pin the default so an upgrade cannot
         // silently drop them.

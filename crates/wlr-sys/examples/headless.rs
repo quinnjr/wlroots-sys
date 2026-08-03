@@ -3,7 +3,8 @@
 //!
 //! This exercises the parts of the crate that compile-time layout assertions
 //! cannot: that the symbols actually resolve at link time, that `wl_display`
-//! from `wayland-sys` really is the type wlroots expects, and that the wlroots
+//! from `wayland-sys` really is the type wlroots expects (0.15 constructors
+//! take the display directly), and that the wlroots
 //! event-loop plumbing works against a real libwayland. It needs no GPU, no
 //! seat, and no running compositor.
 //!
@@ -39,7 +40,7 @@ fn main() {
 
         // The headless backend renders nowhere and drives itself, which is what
         // makes it usable in CI.
-        let backend = wlr_sys::wlr_headless_backend_create(event_loop);
+        let backend = wlr_sys::wlr_headless_backend_create(display);
         assert!(!backend.is_null(), "wlr_headless_backend_create failed");
 
         assert!(

@@ -1,24 +1,24 @@
 # wlr-sys
 
-Raw FFI bindings to [wlroots](https://gitlab.freedesktop.org/wlroots/wlroots) 0.20.
+Raw FFI bindings to [wlroots](https://gitlab.freedesktop.org/wlroots/wlroots) 0.15.
 
 This crate exposes wlroots exactly as C sees it — raw pointers, no lifetimes, no
 `Drop`, no safety. Safe abstractions belong in a wrapper crate layered on top.
 
 ## Versioning
 
-**The crate's minor version tracks the wlroots minor version.** `wlr-sys 0.20.x`
-binds wlroots 0.20.x, and nothing else. wlroots has no stable ABI and ships a
-version-suffixed soname (`libwlroots-0.20.so`), so a build against a different
+**The crate's minor version tracks the wlroots minor version.** `wlr-sys 0.15.x`
+binds wlroots 0.15.x, and nothing else. wlroots has no stable ABI and ships a
+version-suffixed soname (`libwlroots.so`), so a build against a different
 minor is rejected up front rather than miscompiling silently.
 
 Two consequences worth knowing before you depend on this crate:
 
 - **Within a minor, the hand-written API is frozen.** Under cargo's 0.x rules
-  `0.20.0 → 0.20.1` is an automatic upgrade, so there is no version in which to
+  `0.15.0 → 0.15.1` is an automatic upgrade, so there is no version in which to
   make a breaking change to `wl_list_iter`, the macros, the feature names, the
   cfg names, or the type blocklist. Those changes wait for the next wlroots minor.
-- **The bound API is whatever your wlroots 0.20.x exposes.** `build.rs` scans the
+- **The bound API is whatever your wlroots 0.15.x exposes.** `build.rs` scans the
   installed include tree, so code using a symbol added in a wlroots patch release
   will not compile for users on an older patch — with a plain "cannot find
   function" and no hint that the patch level is the cause.
@@ -27,7 +27,7 @@ Two consequences worth knowing before you depend on this crate:
 
 | Requirement | Why |
 |---|---|
-| wlroots 0.20.x + headers (`wlroots-0.20.pc`) | The library being bound |
+| wlroots 0.15.x + headers (`wlroots.pc`) | The library being bound |
 | `libclang` | bindgen runs at build time |
 | `wayland-scanner` | Regenerates two protocol headers wlroots does not install |
 
@@ -177,7 +177,7 @@ it would fail to compile.
 |---|---|
 | `tests/interop.rs` | wlroots' API really speaks `wayland-sys` / `xkbcommon-sys` / `input-sys` types, not local look-alikes |
 | `tests/subsystems.rs` | When a `wlr_has_*` cfg is set, that subsystem's symbols were actually bound |
-| `tests/link.rs` | The linked `libwlroots-0.20.so` matches the headers bindgen read, down to the patch version |
+| `tests/link.rs` | The linked `libwlroots.so` matches the headers bindgen read, down to the patch version |
 | `tests/signal.rs` | Hand-written `wl_signal` / `wl_list` / `container_of!` against real libwayland |
 | `examples/headless.rs` | End-to-end backend bring-up and teardown; needs no GPU or seat |
 

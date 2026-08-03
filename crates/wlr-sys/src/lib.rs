@@ -16,7 +16,7 @@ pub mod list;
 pub mod signal;
 
 pub use list::wl_list_iter;
-pub use signal::{wl_signal_add, wl_signal_emit_mutable, wl_signal_get, wl_signal_init};
+pub use signal::{wl_signal_add, wl_signal_emit, wl_signal_get, wl_signal_init};
 
 // Re-exported so downstream crates can name the shared ecosystem types without
 // depending on each `-sys` crate directly.
@@ -57,7 +57,17 @@ mod ecosystem {
 
 pub use ecosystem::*;
 
+// All of these concern bindgen's output, not hand-written code, which is why
+// they sit on the module rather than the crate: `list.rs` and `signal.rs` keep
+// full lint coverage.
+//
+// 0.15's headers use flexible array members, so bindgen emits its
+// `__IncompleteArrayField` helpers — whose bodies call `slice::from_raw_parts`
+// inside an `unsafe fn` without an inner block, an error under edition 2024. The
+// generated renderer vtable also trips `type_complexity`.
 #[allow(clippy::missing_safety_doc)]
+#[allow(clippy::type_complexity)]
+#[allow(unsafe_op_in_unsafe_fn)]
 // wlroots' own doc comments carry bare URLs, which bindgen copies verbatim.
 #[allow(rustdoc::bare_urls)]
 mod bindings {
