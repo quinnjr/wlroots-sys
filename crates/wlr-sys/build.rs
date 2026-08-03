@@ -2,8 +2,8 @@
 //!
 //! Locates wlroots 0.20 via pkg-config, reconciles the crate's Cargo features
 //! against the subsystems the installed library was actually compiled with,
-//! generates the two `wlr-protocols` server headers that wlroots' public headers
-//! `#include` but do not ship, and runs bindgen over the result.
+//! generates whichever protocol server headers wlroots' public headers `#include`
+//! but do not ship, and runs bindgen over the result.
 
 use std::collections::BTreeSet;
 use std::env;
@@ -34,17 +34,6 @@ const WLROOTS_PC: &str = concat!("wlroots-", "0.20");
 /// blocklist, and both fail silently when a string comparison stops matching.
 const CFG_DRM_BACKEND: &str = "wlr_has_drm_backend";
 const CFG_LIBINPUT_BACKEND: &str = "wlr_has_libinput_backend";
-
-/// Protocol XMLs vendored under `protocol/`, from the `wlr-protocols` repository.
-///
-/// wlroots' installed headers `#include "wlr-layer-shell-unstable-v1-protocol.h"`
-/// and `#include "wlr-output-power-management-unstable-v1-protocol.h"`, but those
-/// generated headers are private to the wlroots build and are never installed.
-/// We regenerate them with `wayland-scanner` into `OUT_DIR`.
-const PROTOCOLS: &[&str] = &[
-    "wlr-layer-shell-unstable-v1",
-    "wlr-output-power-management-unstable-v1",
-];
 
 /// A wlroots compile-time subsystem.
 struct Subsystem {
@@ -253,10 +242,7 @@ fn main() {
         .probe("wayland-server")
         .expect("wlr-sys requires wayland-server; it is a hard dependency of wlroots itself");
 
-    for proto in PROTOCOLS {
-        println!("cargo::rerun-if-changed=protocol/{proto}.xml");
-    }
-    let protocol_dir = generate_protocol_headers(&out_dir);
+    let protocol_dir = generate_protocol_headers(&out_dir, &include_dir);
 
     let mut clang_args: Vec<String> = vec![
         "-DWLR_USE_UNSTABLE".to_owned(),
@@ -539,10 +525,102 @@ fn have_flag(var: &str) -> bool {
     }
 }
 
-/// Run `wayland-scanner server-header` over the vendored wlr-protocols XMLs.
-fn generate_protocol_headers(out_dir: &Path) -> PathBuf {
+/// Every `#include "…-protocol.h"` the installed wlroots headers make that is
+/// not itself installed.
+///
+/// wlroots' public headers include generated protocol headers that its build
+/// keeps private, so they must be regenerated here. Which ones, and how many,
+/// varies sharply by wlroots version — 0.20 needs 2, but 0.19 needs 10 and 0.17
+/// needs 9 — so this discovers them from the headers rather than hardcoding a
+/// list. That keeps one code path working across the versions this crate is
+/// backfilled to, and picks up additions in a patch release for free.
+fn required_protocols(include_dir: &Path) -> BTreeSet<String> {
+    let mut needed = BTreeSet::new();
+    let mut stack = vec![include_dir.join("wlr")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push(path);
+                continue;
+            }
+            if path.extension() != Some(OsStr::new("h")) {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            for line in text.lines() {
+                let line = line.trim_start();
+                let Some(rest) = line.strip_prefix("#include \"") else {
+                    continue;
+                };
+                let Some(name) = rest.split('"').next() else {
+                    continue;
+                };
+                // Only generated protocol headers; anything else quoted is
+                // wlroots-internal and would already be installed beside it.
+                if let Some(stem) = name.strip_suffix("-protocol.h")
+                    && !include_dir.join(name).is_file()
+                {
+                    needed.insert(stem.to_owned());
+                }
+            }
+        }
+    }
+    needed
+}
+
+/// Locate the XML defining `protocol`.
+///
+/// Checked in order: the crate's vendored `protocol/` directory, which holds the
+/// two `wlr-protocols` files that ship nowhere else; then the system
+/// `wayland-protocols` data directory, which supplies everything else wlroots
+/// references (`xdg-shell`, `tablet-v2`, `cursor-shape-v1`, …) and is laid out
+/// in `stable/`, `staging/` and `unstable/` subdirectories.
+fn find_protocol_xml(protocol: &str, vendored: &Path, wayland_protocols: Option<&Path>) -> PathBuf {
+    let local = vendored.join(format!("{protocol}.xml"));
+    if local.is_file() {
+        return local;
+    }
+    if let Some(root) = wayland_protocols {
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    stack.push(path);
+                } else if path.file_name() == Some(OsStr::new(&format!("{protocol}.xml"))) {
+                    return path;
+                }
+            }
+        }
+    }
+    panic!(
+        "{WLROOTS_PC}'s headers include `{protocol}-protocol.h`, which wlroots does not \
+         install, and no `{protocol}.xml` was found in {} or in the wayland-protocols data \
+         directory ({}).\n\
+         If this is a wlr-protocols file, vendor it under `protocol/` and record it in \
+         protocol/PROVENANCE.md; otherwise install the `wayland-protocols` development \
+         package.",
+        vendored.display(),
+        wayland_protocols
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "not found".to_owned()),
+    )
+}
+
+/// Run `wayland-scanner server-header` over every protocol wlroots needs.
+fn generate_protocol_headers(out_dir: &Path, include_dir: &Path) -> PathBuf {
     let dir = out_dir.join("protocol-include");
-    fs::create_dir_all(&dir).expect("failed to create protocol include dir");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
 
     // The `.pc` supplies an absolute path on every normal install. Reject a
     // relative one: `Command::new` would resolve it against the build script's
@@ -554,9 +632,23 @@ fn generate_protocol_headers(out_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| "wayland-scanner".to_owned());
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR unset"));
+    let vendored = manifest_dir.join("protocol");
+    let wayland_protocols = pkg_config::get_variable("wayland-protocols", "pkgdatadir")
+        .ok()
+        .map(PathBuf::from);
 
-    for proto in PROTOCOLS {
-        let xml = manifest_dir.join("protocol").join(format!("{proto}.xml"));
+    let protocols = required_protocols(include_dir);
+    assert!(
+        !protocols.is_empty(),
+        "no generated protocol headers were found to be required by {WLROOTS_PC}'s headers. \
+         That has never been true of any wlroots version this crate supports, so the scan in \
+         `required_protocols` is probably looking in the wrong place: {}",
+        include_dir.display()
+    );
+
+    for proto in &protocols {
+        let xml = find_protocol_xml(proto, &vendored, wayland_protocols.as_deref());
+        println!("cargo::rerun-if-changed={}", xml.display());
         let header = dir.join(format!("{proto}-protocol.h"));
         let status = Command::new(&scanner)
             .arg("server-header")

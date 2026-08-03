@@ -1,0 +1,41 @@
+# Build environment for wlr-sys against the wlroots a given Ubuntu ships.
+#
+# Ubuntu pins a different wlroots minor per release, and wlroots breaks ABI on
+# every minor, so each release needs its own wlr-sys minor:
+#
+#   22.04 jammy    -> wlroots 0.15
+#   24.04 noble    -> wlroots 0.17
+#   26.04 resolute -> wlroots 0.19
+#
+# Pin by digest in CI; UBUNTU_REF is a tag here for local iteration.
+ARG UBUNTU_REF=24.04
+FROM ubuntu:${UBUNTU_REF}
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG RUST_VERSION=1.85.0
+# 22.04 and 24.04 ship an unversioned `libwlroots-dev`; 26.04 versioned it as
+# `libwlroots-0.19-dev`. Passed in rather than guessed, so a rename is a build
+# argument change and not a silent fallback to the wrong wlroots.
+ARG WLROOTS_DEV_PKG=libwlroots-dev
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl build-essential pkg-config \
+      libclang-dev clang \
+      ${WLROOTS_DEV_PKG} \
+      libwayland-dev wayland-protocols \
+      libxkbcommon-dev libinput-dev libdrm-dev libpixman-1-dev \
+      libegl1-mesa-dev libgles2-mesa-dev \
+      libvulkan-dev libxcb1-dev \
+      libxcb-composite0-dev libxcb-ewmh-dev libxcb-icccm4-dev \
+      libxcb-render0-dev libxcb-res0-dev libxcb-xfixes0-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# rustup rather than the distro rustc: 22.04 ships 1.75, below this crate's MSRV.
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path \
+      --profile minimal --default-toolchain ${RUST_VERSION} \
+    && chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+
+WORKDIR /src
+COPY containers/survey.sh /usr/local/bin/wlroots-survey
+CMD ["/usr/local/bin/wlroots-survey"]
