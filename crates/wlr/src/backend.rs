@@ -25,7 +25,7 @@
 //!    calling [`Backend::run`].
 //! 3. Nothing in a callback may unwind. A panic escaping an `extern "C"` fn has
 //!    aborted the process since Rust 1.81, so the code reached from one avoids
-//!    panicking paths where the condition is recoverable; see [`ensure_id`].
+//!    panicking paths where the condition is recoverable; see [`ensure_id_raw`].
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -38,7 +38,7 @@ use crate::dispatch::{Dispatcher, Event};
 use crate::id::{SourceId, attach_id, find_id};
 use crate::{
     Display, Error, EventLoop, Handlers, LoopHandler, Output, OutputHandler, OutputId, Result,
-    Runtime, sys,
+    Runtime, Toplevel, ToplevelId, sys,
 };
 
 /// A wlroots backend.
@@ -297,6 +297,13 @@ struct Session<'r, S> {
     dispatcher: Dispatcher<S>,
     outputs: RefCell<HashMap<OutputId, OutputEntry>>,
 
+    /// This run's listeners on every live toplevel: the id addon is what
+    /// resolves an event back to a [`ToplevelId`], and these are what keep
+    /// the callbacks that read it linked. Removed, and so unlinked, from
+    /// `on_toplevel_destroy` — before the toplevel is freed, mirroring
+    /// `outputs` above.
+    toplevels: RefCell<HashMap<ToplevelId, ToplevelListeners>>,
+
     /// The runtime this run is serving, borrowed for the call.
     ///
     /// Borrowed rather than cloned so that `Session`'s lifetime, and the
@@ -318,6 +325,20 @@ struct Session<'r, S> {
 struct OutputEntry {
     raw: *mut sys::wlr_output,
     _frame: Registration,
+    _destroy: Registration,
+}
+
+/// One live toplevel's listeners: the surface's commit/map/unmap and the
+/// toplevel's own set_title/destroy. Field order is not load-bearing here —
+/// unlike [`OutputEntry`], nothing here owns the `Bound` any of the others
+/// recover their session from — but all five must drop, and so unlink, as
+/// part of removing the entry, which happens while the toplevel is still
+/// alive.
+struct ToplevelListeners {
+    _commit: Registration,
+    _map: Registration,
+    _unmap: Registration,
+    _set_title: Registration,
     _destroy: Registration,
 }
 
@@ -550,6 +571,7 @@ impl<'d> Backend<'d> {
                 deliver: deliver::<S>,
                 should_stop: never_stop::<S>,
                 register_sources: no_fd_sources::<S>,
+                register_extra: no_extra::<S>,
             },
         )
     }
@@ -616,6 +638,7 @@ impl<'d> Backend<'d> {
                 deliver: deliver_all::<S>,
                 should_stop: should_stop_of::<S>,
                 register_sources: Backend::register_fd_sources::<S>,
+                register_extra: Backend::register_toplevel_shell::<S>,
             },
         )
     }
@@ -646,6 +669,7 @@ impl<'d> Backend<'d> {
         let session = Session {
             dispatcher: Dispatcher::new(&raw mut *state),
             outputs: RefCell::new(HashMap::new()),
+            toplevels: RefCell::new(HashMap::new()),
             runtime,
             deliver: hooks.deliver,
         };
@@ -680,6 +704,11 @@ impl<'d> Backend<'d> {
         // named binding rather than `_`: binding to `_` would drop the vector
         // — and so remove every source — at the end of this statement.
         let _sources = (hooks.register_sources)(self, runtime, &session)?;
+
+        // Same reasoning as `_sources`, for whatever `run_all` needs beyond
+        // fd sources — today just the xdg shell's `new_toplevel` listener,
+        // registered only if `create_xdg_shell` was called before this run.
+        let _extra = (hooks.register_extra)(self, runtime, &session)?;
 
         // Only now, with the listeners in place. `wlr_backend_start` announces
         // the backend's existing outputs synchronously, so starting before this
@@ -784,6 +813,36 @@ impl<'d> Backend<'d> {
         }
         Ok(out)
     }
+
+    /// Link the xdg shell's `new_toplevel` listener, if
+    /// [`Runtime::create_xdg_shell`](crate::Runtime::create_xdg_shell) was
+    /// called before this run. Returns an empty vec otherwise — a consumer
+    /// who never creates a shell gets no toplevels, which is not an error.
+    fn register_toplevel_shell<S: Handlers>(
+        &self,
+        runtime: &Runtime,
+        session: &Session<'_, S>,
+    ) -> Result<Vec<Registration>> {
+        let Some(shell) = runtime.xdg_shell_ptr() else {
+            return Ok(Vec::new());
+        };
+        // SAFETY: `create_xdg_shell` returned a non-null `wlr_xdg_shell`
+        // owned by the display, which this call requires to outlive it (see
+        // `run_all`'s own doc); `session` is a local that never moves again
+        // for the rest of `run_inner`, so the erased pointer stays valid for
+        // as long as this registration lives. No liveness flag is needed:
+        // the shell's owner (the display) cannot predecease this call.
+        let registration = unsafe {
+            Registration::link(
+                &raw mut (*shell.as_ptr()).events.new_toplevel,
+                on_new_toplevel::<S>,
+                (session as *const Session<'_, S>).cast::<()>(),
+                std::ptr::null(),
+                None,
+            )
+        };
+        Ok(vec![registration])
+    }
 }
 
 /// How long [`Backend::run_all`] keeps dispatching.
@@ -802,11 +861,11 @@ pub enum Until {
     Stop,
 }
 
-/// The three callbacks `run_inner` needs but cannot choose itself, bundled so
-/// `run_inner` takes one struct instead of three trailing `fn` parameters
-/// (which is what it used to do, and what tripped `clippy::too_many_arguments`
-/// — a real signal here, not noise to silence: three unrelated callbacks are
-/// easy to pass in the wrong order, and a named field cannot be).
+/// The callbacks `run_inner` needs but cannot choose itself, bundled so
+/// `run_inner` takes one struct instead of trailing `fn` parameters (which is
+/// what it used to do, and what tripped `clippy::too_many_arguments` — a real
+/// signal here, not noise to silence: unrelated callbacks are easy to pass in
+/// the wrong order, and a named field cannot be).
 ///
 /// See `run_inner`'s own doc comment for why these are parameters at all
 /// rather than being chosen inside it.
@@ -826,6 +885,13 @@ struct RunHooks<'d, S> {
     /// that may not hold for a pointer this field was never shown.
     should_stop: unsafe fn(*mut S) -> bool,
     register_sources: fn(&Backend<'d>, &Runtime, &Session<'_, S>) -> Result<Vec<FdRegistration>>,
+
+    /// Whatever `run_all` needs registered beyond fd sources — the xdg
+    /// shell's `new_toplevel` listener today, the seat and the backend's own
+    /// `new_input` in later releases. `run`'s slot registers nothing, for the
+    /// same reason `register_sources`'s does not: `run`'s bound is
+    /// `OutputHandler`, which cannot instantiate a `Handlers`-bound callback.
+    register_extra: fn(&Backend<'d>, &Runtime, &Session<'_, S>) -> Result<Vec<Registration>>,
 }
 
 /// One boxed fd-source registration: the `wl_event_source` libwayland handed
@@ -931,6 +997,16 @@ fn no_fd_sources<S>(
     Ok(Vec::new())
 }
 
+/// `run`'s `register_extra` slot: for the same reason as `no_fd_sources`,
+/// there is nothing to register.
+fn no_extra<S>(
+    _backend: &Backend<'_>,
+    _runtime: &Runtime,
+    _session: &Session<'_, S>,
+) -> Result<Vec<Registration>> {
+    Ok(Vec::new())
+}
+
 /// Delivery for `run_all`: every event kind, including the ones `deliver`
 /// (which is bound only by `OutputHandler`) cannot route.
 fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) {
@@ -948,7 +1024,35 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
                 .runtime
                 .with_fd(id, |fd| state.fd_ready(id, fd, readiness));
         }
+        Event::NewToplevel(id) => with_toplevel(session, id, |t| state.new_toplevel(t)),
+        Event::ToplevelInitialCommit(id) => with_toplevel(session, id, |t| state.initial_commit(t)),
+        Event::ToplevelMapped(id) => with_toplevel(session, id, |t| state.mapped(t)),
+        Event::ToplevelUnmapped(id) => state.unmapped(id),
+        Event::ToplevelTitleChanged(id) => with_toplevel(session, id, |t| state.title_changed(t)),
+        Event::ToplevelDestroyed(id) => state.toplevel_destroyed(id),
     }
+}
+
+/// Borrow the toplevel `id` names, if this runtime still knows of one.
+///
+/// The table borrow is released before `f` runs: a handler can re-enter
+/// wlroots (staging a configure, say), which can fire a signal, which can
+/// take the borrow mutably.
+///
+/// The same obligation `with_output` carries applies here and is worth
+/// restating: `f` must not be able to reach anything that frees the toplevel
+/// mid-call. `Toplevel` exposes `id`, `title`, `app_id` and `pid`, none of
+/// which can; whoever adds a method that can owes this line an answer,
+/// because the handle would name freed memory for the rest of `f`.
+fn with_toplevel<S>(session: &Session<'_, S>, id: ToplevelId, f: impl FnOnce(&Toplevel<'_>)) {
+    let Some(entry) = session.runtime.toplevel_entry(id) else { return };
+    // SAFETY: an entry is removed by `on_toplevel_destroy`, which wlroots runs
+    // before it frees the toplevel, so a present entry names a live one. The
+    // handle is created and dropped inside this call, so it cannot outlive
+    // the handler `f` passes it to, and `f` cannot drive the loop (the
+    // dispatcher's handler flag is set for exactly this window).
+    let toplevel = unsafe { Toplevel::from_raw_with_id(entry.raw.as_ptr(), id) };
+    f(&toplevel);
 }
 
 /// # Safety
@@ -998,11 +1102,15 @@ unsafe fn bound_of(l: *mut sys::wl_listener) -> *mut Bound {
 /// semantically correct answer: an id is meant to be stable for the object's
 /// whole life, so "already has one" is a satisfied postcondition, not a fault.
 ///
+/// Returns the bare `u64` rather than a typed id, so both [`OutputId`] and
+/// [`crate::ToplevelId`] can share one implementation instead of each having
+/// its own copy of this logic.
+///
 /// # Safety
 ///
 /// `set` must point at an initialised `wlr_addon_set` belonging to a live
 /// object.
-unsafe fn ensure_id(set: *mut sys::wlr_addon_set) -> OutputId {
+unsafe fn ensure_id_raw(set: *mut sys::wlr_addon_set) -> u64 {
     // SAFETY: the caller's guarantee is exactly what both calls below require.
     // `attach_id`'s additional precondition — that no id addon is attached yet
     // — is discharged by the `find_id` check immediately preceding it, and
@@ -1013,13 +1121,13 @@ unsafe fn ensure_id(set: *mut sys::wlr_addon_set) -> OutputId {
     // (deliberately not `debug_assert!`, since it is a safety net on a
     // `pub(crate)` unsafe fn, not merely a debugging aid), so the `None` arm
     // below costs two walks rather than one. Left as-is rather than factored
-    // into an unchecked variant: this is the output-announcement path, not
-    // the frame path, so the cost is small and bounded by output count, and
+    // into an unchecked variant: this is the object-announcement path, not
+    // the frame path, so the cost is small and bounded by object count, and
     // it is not worth a second entry point to `attach_id` for it.
     unsafe {
         match find_id(set.cast_const()) {
-            Some(id) => OutputId(id),
-            None => OutputId(attach_id(set)),
+            Some(id) => id,
+            None => attach_id(set),
         }
     }
 }
@@ -1059,7 +1167,7 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
         let output = data.cast::<sys::wlr_output>();
 
         // Give the output an identity before anyone can ask for one.
-        let id = ensure_id(&raw mut (*output).addons);
+        let id = OutputId(ensure_id_raw(&raw mut (*output).addons));
 
         // `(*bound).session` is forwarded verbatim rather than re-derived, so
         // these two callbacks are instantiated at the `S` that pointer already
@@ -1169,6 +1277,246 @@ unsafe extern "C" fn on_output_destroy<S: OutputHandler>(
     }
 }
 
+/// A client created a toplevel. Give it an id and a scene tree before anyone
+/// is told about it.
+unsafe extern "C" fn on_new_toplevel<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener
+    // `register_toplevel_shell` linked into `wlr_xdg_shell.events.new_toplevel`,
+    // whose `session` is the `*const Session<'_, S>` paired with this
+    // instantiation. The signal carries a `*mut wlr_xdg_toplevel`, live and
+    // fully initialised — its `base` and `base->surface` included — at the
+    // point wlroots announces it.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let toplevel = data.cast::<sys::wlr_xdg_toplevel>();
+        let base = (*toplevel).base;
+        if base.is_null() {
+            return;
+        }
+        let surface = (*base).surface;
+        if surface.is_null() {
+            return;
+        }
+
+        // The id lives on the surface's addon set, which is the only one that
+        // exists here and the one that dies with the toplevel.
+        let id = ToplevelId(ensure_id_raw(&raw mut (*surface).addons));
+
+        // No scene to insert into if `init_graphics` was never called —
+        // possible if a consumer creates the shell without it, and not this
+        // callback's mistake to recover from. Drop the announcement rather
+        // than dereference a null tree.
+        let Some(scene) = (*session).runtime.scene_ptr() else { return };
+
+        // Insert into the scene before the handler runs, so that a handler
+        // positioning the window by id finds a node to position.
+        let tree = sys::wlr_scene_xdg_surface_create(&raw mut (*scene.as_ptr()).tree, base);
+        let Some(tree) = NonNull::new(tree) else { return };
+        let Some(raw) = NonNull::new(toplevel) else { return };
+
+        // Five listeners, all with a null liveness flag: each is dropped from
+        // inside the destroy emission, while the object is still alive, which
+        // is a stronger guarantee than any flag (see `Registration::drop`).
+        let commit = Registration::link(
+            &raw mut (*surface).events.commit,
+            on_surface_commit::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            None,
+        );
+        let map = Registration::link(
+            &raw mut (*surface).events.map,
+            on_toplevel_map::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            None,
+        );
+        let unmap = Registration::link(
+            &raw mut (*surface).events.unmap,
+            on_toplevel_unmap::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            None,
+        );
+        let set_title = Registration::link(
+            &raw mut (*toplevel).events.set_title,
+            on_toplevel_set_title::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            None,
+        );
+        let destroy = Registration::link(
+            &raw mut (*toplevel).events.destroy,
+            on_toplevel_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            None,
+        );
+
+        // The registrations own the callbacks' backing memory, so they live in
+        // the session's table alongside the entry, and are dropped when it is
+        // removed. The `Bound`s carry no id — the callbacks recover it from
+        // the surface's addon set, which is where `ensure_id_raw` put it,
+        // because `Bound::id` is typed as `Option<OutputId>` and widening a
+        // published private field's type is churn for no gain.
+        let displaced = (*session).toplevels.borrow_mut().insert(
+            id,
+            ToplevelListeners {
+                _commit: commit,
+                _map: map,
+                _unmap: unmap,
+                _set_title: set_title,
+                _destroy: destroy,
+            },
+        );
+        drop(displaced);
+
+        (*session).runtime.record_toplevel(id, raw, tree);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::NewToplevel(id), deliver);
+    }
+}
+
+/// Recover the [`ToplevelId`] a surface's id addon carries, if any.
+///
+/// # Safety
+///
+/// `surface` must be a live `wlr_surface` with an initialised addon set.
+unsafe fn toplevel_id_of_surface(surface: *mut sys::wlr_surface) -> Option<ToplevelId> {
+    // SAFETY: the caller guarantees the surface is live.
+    unsafe { find_id(&raw const (*surface).addons).map(ToplevelId) }
+}
+
+unsafe extern "C" fn on_surface_commit<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_toplevel` into this surface's `events.commit`
+    // and unlinked (from `on_toplevel_destroy`) before the surface is freed;
+    // `data` is the `wlr_surface`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let surface = data.cast::<sys::wlr_surface>();
+        let Some(id) = toplevel_id_of_surface(surface) else { return };
+        let Some(entry) = (*session).runtime.toplevel_entry(id) else { return };
+        let base = (*entry.raw.as_ptr()).base;
+        if base.is_null() || !(*base).initial_commit {
+            return;
+        }
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::ToplevelInitialCommit(id), deliver);
+
+        // xdg-shell requires an answer to the first commit. The handler may
+        // already have staged one through `Runtime::set_toplevel_*`, in which
+        // case wlroots coalesces this into that same configure; if it staged
+        // nothing, this is what stops the client waiting forever.
+        sys::wlr_xdg_surface_schedule_configure(base);
+    }
+}
+
+unsafe extern "C" fn on_toplevel_map<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_surface_commit`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = toplevel_id_of_surface(data.cast::<sys::wlr_surface>()) else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::ToplevelMapped(id), deliver);
+    }
+}
+
+unsafe extern "C" fn on_toplevel_unmap<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as above.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = toplevel_id_of_surface(data.cast::<sys::wlr_surface>()) else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::ToplevelUnmapped(id), deliver);
+    }
+}
+
+unsafe extern "C" fn on_toplevel_set_title<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked into `wlr_xdg_toplevel.events.set_title`, whose data is
+    // the `wlr_xdg_toplevel` itself.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let toplevel = data.cast::<sys::wlr_xdg_toplevel>();
+        let base = (*toplevel).base;
+        if base.is_null() {
+            return;
+        }
+        let Some(id) = toplevel_id_of_surface((*base).surface) else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::ToplevelTitleChanged(id), deliver);
+    }
+}
+
+/// A toplevel is about to be freed. Forget it *now*, whatever the handler does.
+unsafe extern "C" fn on_toplevel_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_toplevel_set_title`; the toplevel is still alive for
+    // the duration of the emission.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let toplevel = data.cast::<sys::wlr_xdg_toplevel>();
+        let base = (*toplevel).base;
+        if base.is_null() {
+            return;
+        }
+        let Some(id) = toplevel_id_of_surface((*base).surface) else { return };
+
+        // Both tables are cleared before the event is emitted, and that
+        // ordering is the whole soundness argument for deferral: a destroy
+        // queued behind a running handler is delivered long after wlroots
+        // freed the object, so a lookup at delivery time would resolve the id
+        // to freed memory. Clearing here means it simply misses.
+        //
+        // Removing the entry drops its five registrations, one of which owns
+        // this very `Bound`. `wl_signal_emit_mutable` advances past the
+        // firing listener before calling us, so that is what it exists to
+        // tolerate; `bound` is dangling from here on and is not touched again.
+        (*session).runtime.forget_toplevel(id);
+        let listeners = (*session).toplevels.borrow_mut().remove(&id);
+        drop(listeners);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::ToplevelDestroyed(id), deliver);
+    }
+}
+
 /// Borrow the output `id` names, if this session still knows of one.
 ///
 /// The registry borrow is released before `f` runs: a handler can re-enter
@@ -1226,6 +1574,15 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         // unreachable!() because this is on the path from an `extern "C"`
         // frame, where a panic aborts the process.
         Event::FdReady(..) => {}
+        // Unreachable: `run` never registers an xdg shell, so it cannot
+        // produce one of these either. Dropped for the same reason as
+        // `FdReady` above.
+        Event::NewToplevel(..)
+        | Event::ToplevelInitialCommit(..)
+        | Event::ToplevelMapped(..)
+        | Event::ToplevelUnmapped(..)
+        | Event::ToplevelTitleChanged(..)
+        | Event::ToplevelDestroyed(..) => {}
     }
 }
 
@@ -1632,6 +1989,7 @@ mod tests {
             let session = Session {
                 dispatcher: Dispatcher::new(state),
                 outputs: RefCell::new(HashMap::new()),
+                toplevels: RefCell::new(HashMap::new()),
                 runtime: &runtime,
                 deliver: deliver::<Recorder>,
             };
@@ -1799,6 +2157,7 @@ mod tests {
             // the state alongside, rather than going through `emit`.
             dispatcher: Dispatcher::new(std::ptr::null_mut()),
             outputs: RefCell::new(HashMap::new()),
+            toplevels: RefCell::new(HashMap::new()),
             runtime: &runtime,
             deliver: deliver::<Recorder>,
         };

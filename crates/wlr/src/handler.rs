@@ -4,7 +4,7 @@
 //! every handler as `&mut S`. Every method is defaulted, so a consumer
 //! implements only what they use.
 
-use crate::{Output, OutputId};
+use crate::{Output, OutputId, Toplevel, ToplevelId};
 
 /// Output lifecycle and frame events.
 ///
@@ -136,16 +136,75 @@ pub trait LoopHandler {
 
 /// xdg-shell toplevel lifecycle.
 ///
-/// **Declared with no methods in 0.20.1 on purpose.** [`Handlers`] lists this
-/// as a supertrait from the first release so that the list itself can freeze:
-/// adding a supertrait later would stop every existing consumer's state from
-/// satisfying `Handlers` (a fully-defaulted trait still needs an explicit
-/// `impl`), whereas adding a *defaulted method* to a trait that already exists
-/// is not a breaking change. The methods arrive in 0.20.2.
+/// Declared with no methods in 0.20.1 so that [`Handlers`]' supertrait list
+/// could freeze from the first release; these methods were added in 0.20.2,
+/// which is additive because they are all defaulted. An
+/// `impl ToplevelHandler for MyState {}` written against 0.20.1 still
+/// compiles unchanged.
 ///
-/// Write `impl wlr::ToplevelHandler for MyState {}` now and it keeps
-/// compiling, unchanged, when they do.
-pub trait ToplevelHandler {}
+/// # Panics
+///
+/// As for [`OutputHandler`]: every method runs underneath an `extern "C"`
+/// frame, so a panic escaping one aborts the process.
+pub trait ToplevelHandler {
+    /// A client created a toplevel. It is **not** mapped yet and has no
+    /// buffer: nothing about its size or content is known, and the client is
+    /// waiting for a configure.
+    ///
+    /// Record [`Toplevel::id`] here; the handle is valid only for this call.
+    fn new_toplevel(&mut self, toplevel: &Toplevel<'_>) {
+        let _ = toplevel;
+    }
+
+    /// The client committed for the first time, which is where xdg-shell
+    /// requires the compositor to answer with a configure.
+    ///
+    /// Stage whatever you want in that configure —
+    /// [`Runtime::set_toplevel_size`](crate::Runtime::set_toplevel_size) and
+    /// its siblings — and this crate sends it once this method returns. If
+    /// you stage nothing, the client is still configured (with its own
+    /// preferred size), because a client that is never configured never maps
+    /// and the symptom is an invisible window rather than an error.
+    fn initial_commit(&mut self, toplevel: &Toplevel<'_>) {
+        let _ = toplevel;
+    }
+
+    /// The toplevel has a buffer and should be displayed.
+    ///
+    /// The crate has already inserted it into the scene graph by this point,
+    /// so positioning it here takes effect on the first frame it appears in.
+    fn mapped(&mut self, toplevel: &Toplevel<'_>) {
+        let _ = toplevel;
+    }
+
+    /// The toplevel should not be displayed any more — a null buffer, or the
+    /// role object going away. Only the id, because the handle may already be
+    /// unusable.
+    ///
+    /// **Not** the same as destruction: a toplevel can be unmapped and mapped
+    /// again, keeping its id.
+    fn unmapped(&mut self, id: ToplevelId) {
+        let _ = id;
+    }
+
+    /// The client sent `set_title`.
+    fn title_changed(&mut self, toplevel: &Toplevel<'_>) {
+        let _ = toplevel;
+    }
+
+    /// The toplevel is gone. Only the id is passed, because there is no
+    /// longer an object to borrow.
+    ///
+    /// **`id` may be one you were never told about**, for the same reason
+    /// [`OutputHandler::destroyed`] documents: an announcement that arrived
+    /// while another handler was running is queued, and a toplevel created
+    /// and destroyed inside that window produces a destroy with no preceding
+    /// `new_toplevel`. Write this so an unknown id is harmless — `remove` on
+    /// a map, never indexing.
+    fn toplevel_destroyed(&mut self, id: ToplevelId) {
+        let _ = id;
+    }
+}
 
 /// Seat, keyboard and pointer input.
 ///

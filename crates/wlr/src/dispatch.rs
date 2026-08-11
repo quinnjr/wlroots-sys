@@ -44,7 +44,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
-use crate::OutputId;
+use crate::{OutputId, ToplevelId};
 
 /// An event awaiting delivery.
 ///
@@ -60,6 +60,13 @@ pub(crate) enum Event {
     /// [`Readiness`](crate::Readiness) so the enum stays `Copy` and `Eq`
     /// without exporting a public type into a private one.
     FdReady(crate::SourceId, u32),
+
+    NewToplevel(ToplevelId),
+    ToplevelInitialCommit(ToplevelId),
+    ToplevelMapped(ToplevelId),
+    ToplevelUnmapped(ToplevelId),
+    ToplevelTitleChanged(ToplevelId),
+    ToplevelDestroyed(ToplevelId),
 }
 
 thread_local! {

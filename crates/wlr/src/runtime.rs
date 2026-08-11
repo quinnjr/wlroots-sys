@@ -35,7 +35,7 @@ use std::rc::Rc;
 
 use crate::id::{SourceId, next_id};
 use crate::scene::RectId;
-use crate::{Backend, Display, Error, Interest, Output, Result, sys};
+use crate::{Backend, Display, Error, Interest, Output, Result, ToplevelId, sys};
 
 /// A declared fd source: the descriptor, what it wants, and its id.
 ///
@@ -70,6 +70,26 @@ pub(crate) struct RuntimeInner {
     pub(crate) graphics: RefCell<Option<Graphics>>,
 
     pub(crate) rects: RefCell<HashMap<RectId, NonNull<sys::wlr_scene_rect>>>,
+
+    /// The xdg shell, once created. `Option` because a consumer that only
+    /// wants a scene never makes one, and because a second one would
+    /// advertise a second `xdg_wm_base` global.
+    pub(crate) xdg_shell: RefCell<Option<NonNull<sys::wlr_xdg_shell>>>,
+
+    /// Every live toplevel: the role object, its scene tree, and the surface
+    /// its id addon lives on.
+    pub(crate) toplevels: RefCell<HashMap<ToplevelId, ToplevelEntry>>,
+
+    /// Reverse lookup for the scene hit test, which finds a `wlr_scene_tree`
+    /// and has to name the toplevel it belongs to. Keyed by the tree pointer
+    /// because that is what `wlr_scene_node_at` walks back to.
+    pub(crate) tree_to_toplevel: RefCell<HashMap<usize, ToplevelId>>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ToplevelEntry {
+    pub(crate) raw: NonNull<sys::wlr_xdg_toplevel>,
+    pub(crate) tree: NonNull<sys::wlr_scene_tree>,
 }
 
 /// The scene graph, output layout, renderer and allocator — everything
@@ -154,6 +174,9 @@ impl Runtime {
                 sources: RefCell::new(Vec::new()),
                 graphics: RefCell::new(None),
                 rects: RefCell::new(HashMap::new()),
+                xdg_shell: RefCell::new(None),
+                toplevels: RefCell::new(HashMap::new()),
+                tree_to_toplevel: RefCell::new(HashMap::new()),
             }),
         })
     }
@@ -511,6 +534,179 @@ impl Runtime {
     /// take this same `RefCell` mutably.
     fn rect_ptr(&self, id: RectId) -> Option<NonNull<sys::wlr_scene_rect>> {
         self.inner.rects.borrow().get(&id).copied()
+    }
+
+    /// Advertise `xdg_wm_base` at `version`.
+    ///
+    /// Registration of the `new_toplevel` listener happens inside
+    /// [`Backend::run_all`](crate::Backend::run_all) and lives for that call,
+    /// so creating the shell after a run has started has no effect until the
+    /// next one — the same rule fd sources follow, and for the same reason.
+    ///
+    /// `version` is a parameter rather than fixed because a compositor
+    /// deliberately advertising an older xdg-shell (to work around a client)
+    /// is a real thing to want; pass 6 unless you know otherwise.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] if a shell already exists on this runtime;
+    /// [`Error::Create`] if wlroots could not create it.
+    pub fn create_xdg_shell(&self, display: &Display, version: u32) -> Result<()> {
+        if self.inner.xdg_shell.borrow().is_some() {
+            return Err(Error::Operation("Runtime::create_xdg_shell called twice"));
+        }
+        // SAFETY: `display` is live for the call; the returned shell is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_xdg_shell_create(display.as_ptr(), version) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_xdg_shell_create"))?;
+        *self.inner.xdg_shell.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    pub(crate) fn xdg_shell_ptr(&self) -> Option<NonNull<sys::wlr_xdg_shell>> {
+        *self.inner.xdg_shell.borrow()
+    }
+
+    /// The scene's root tree, for the callbacks in `backend.rs` that insert a
+    /// toplevel into it.
+    ///
+    /// `None` if [`init_graphics`](Runtime::init_graphics) has not run.
+    /// Nothing stops a consumer calling
+    /// [`create_xdg_shell`](Runtime::create_xdg_shell) without ever calling
+    /// `init_graphics` — the two are independent — and `on_new_toplevel` runs
+    /// underneath an `extern "C"` frame reached the moment a client connects
+    /// and creates a surface, which a consumer's own mistake does not
+    /// prevent. So this reports absence rather than panicking, and the
+    /// caller drops the announcement instead of aborting the process for it.
+    pub(crate) fn scene_ptr(&self) -> Option<NonNull<sys::wlr_scene>> {
+        self.inner.graphics.borrow().as_ref().map(|g| g.scene)
+    }
+
+    /// Record a newly-announced toplevel under `id`, in both the id table and
+    /// the tree-to-id reverse lookup.
+    pub(crate) fn record_toplevel(
+        &self,
+        id: ToplevelId,
+        raw: NonNull<sys::wlr_xdg_toplevel>,
+        tree: NonNull<sys::wlr_scene_tree>,
+    ) {
+        self.inner.toplevels.borrow_mut().insert(id, ToplevelEntry { raw, tree });
+        self.inner.tree_to_toplevel.borrow_mut().insert(tree.as_ptr() as usize, id);
+    }
+
+    /// Remove `id` from both tables. Called from `on_toplevel_destroy` before
+    /// the toplevel is freed.
+    pub(crate) fn forget_toplevel(&self, id: ToplevelId) {
+        let entry = self.inner.toplevels.borrow_mut().remove(&id);
+        if let Some(entry) = entry {
+            self.inner.tree_to_toplevel.borrow_mut().remove(&(entry.tree.as_ptr() as usize));
+        }
+    }
+
+    /// The entry `id` names, with the borrow released before returning — the
+    /// caller then re-enters wlroots, which can emit a signal, which can take
+    /// this same `RefCell` mutably.
+    pub(crate) fn toplevel_entry(&self, id: ToplevelId) -> Option<ToplevelEntry> {
+        self.inner.toplevels.borrow().get(&id).copied()
+    }
+
+    /// Stage a size on the toplevel's next configure, in **content**
+    /// (client-owned) pixels.
+    ///
+    /// Staged, not sent: wlroots coalesces every state change made in one
+    /// event-loop turn into a single configure, so setting a size, an
+    /// activation and a maximized flag in the same handler produces one
+    /// configure carrying all three rather than three configures.
+    ///
+    /// `None` if this runtime has no live toplevel with that id.
+    pub fn set_toplevel_size(&self, id: ToplevelId, width: i32, height: i32) -> Option<()> {
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: an entry is removed by the destroy callback, which wlroots
+        // runs before it frees the toplevel, so a present entry names a live
+        // one. `wlr_xdg_toplevel_set_size` only writes pending state.
+        unsafe { sys::wlr_xdg_toplevel_set_size(entry.raw.as_ptr(), width, height) };
+        Some(())
+    }
+
+    /// Stage the `activated` state — the one a client renders its own title
+    /// bar and focus ring from. `None` for an unknown id.
+    pub fn set_toplevel_activated(&self, id: ToplevelId, activated: bool) -> Option<()> {
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: as for `set_toplevel_size`.
+        unsafe { sys::wlr_xdg_toplevel_set_activated(entry.raw.as_ptr(), activated) };
+        Some(())
+    }
+
+    /// Stage the `maximized` state. `None` for an unknown id.
+    pub fn set_toplevel_maximized(&self, id: ToplevelId, maximized: bool) -> Option<()> {
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: as above.
+        unsafe { sys::wlr_xdg_toplevel_set_maximized(entry.raw.as_ptr(), maximized) };
+        Some(())
+    }
+
+    /// Stage the `fullscreen` state. `None` for an unknown id.
+    pub fn set_toplevel_fullscreen(&self, id: ToplevelId, fullscreen: bool) -> Option<()> {
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: as above.
+        unsafe { sys::wlr_xdg_toplevel_set_fullscreen(entry.raw.as_ptr(), fullscreen) };
+        Some(())
+    }
+
+    /// Move the toplevel's scene node. Coordinates are the scene's, which for
+    /// a single output at the layout origin are the output's own.
+    ///
+    /// This is a compositor-side move only: it repositions what is drawn and
+    /// where the pointer hit test finds it, and sends the client nothing (a
+    /// client does not know where it is, by design in xdg-shell).
+    ///
+    /// `None` for an unknown id.
+    pub fn set_toplevel_position(&self, id: ToplevelId, x: i32, y: i32) -> Option<()> {
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: the tree is created by this crate when the toplevel is
+        // announced and destroyed with it, so a present entry names a live
+        // tree.
+        unsafe { sys::wlr_scene_node_set_position(&raw mut (*entry.tree.as_ptr()).node, x, y) };
+        Some(())
+    }
+
+    /// Show or hide the toplevel's scene node.
+    ///
+    /// Hiding is not unmapping: the client keeps its buffer and its configure
+    /// state, it is simply not drawn and not hit-tested. That is what a
+    /// window on an inactive workspace needs.
+    ///
+    /// `None` for an unknown id.
+    pub fn set_toplevel_visible(&self, id: ToplevelId, visible: bool) -> Option<()> {
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: as for `set_toplevel_position`.
+        unsafe { sys::wlr_scene_node_set_enabled(&raw mut (*entry.tree.as_ptr()).node, visible) };
+        Some(())
+    }
+
+    /// Raise the toplevel above every sibling in the scene. `None` for an
+    /// unknown id.
+    pub fn raise_toplevel(&self, id: ToplevelId) -> Option<()> {
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: as above.
+        unsafe { sys::wlr_scene_node_raise_to_top(&raw mut (*entry.tree.as_ptr()).node) };
+        Some(())
+    }
+
+    /// Ask the client to close.
+    ///
+    /// A request, not a destruction: a well-behaved client may prompt the
+    /// user and decline. The toplevel goes away — and
+    /// [`ToplevelHandler::toplevel_destroyed`](crate::ToplevelHandler::toplevel_destroyed)
+    /// fires — only if and when the client actually destroys it.
+    ///
+    /// `None` for an unknown id.
+    pub fn close_toplevel(&self, id: ToplevelId) -> Option<()> {
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: as for `set_toplevel_size`; this only sends a protocol
+        // event and cannot free the toplevel synchronously.
+        unsafe { sys::wlr_xdg_toplevel_send_close(entry.raw.as_ptr()) };
+        Some(())
     }
 }
 
