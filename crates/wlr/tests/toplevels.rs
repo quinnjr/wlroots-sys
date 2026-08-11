@@ -47,11 +47,12 @@ impl wlr::ToplevelHandler for App {
 ///
 /// `Backend::autocreate` reads `WLR_BACKENDS` via `getenv`, and libtest runs
 /// `#[test]` functions on parallel threads by default, so an unguarded
-/// `setenv` racing another thread's `getenv` is undefined behaviour. This
-/// file has three tests but only one (below) calls `autocreate`, so there is
-/// only one caller to serialise against itself — the `Once` is what makes
-/// that true even if a fourth, `autocreate`-calling test is added later
-/// without updating this comment. See `fd_sources.rs`'s sibling copy of this
+/// `setenv` racing another thread's `getenv` is undefined behaviour. Two of
+/// this file's three tests call `autocreate` (both need a real backend to
+/// get past `init_graphics`, which `create_xdg_shell` now requires) and both
+/// call this first, so the `Once` is what serialises them against each other
+/// — and against a future fourth caller, without anyone needing to update
+/// this comment when one is added. See `fd_sources.rs`'s sibling copy of this
 /// helper for the fuller argument; this crate's own unit tests
 /// (`src/interest.rs`) carry a third copy, for the identical reason each
 /// integration test binary is a separate process with its own environment.
@@ -104,12 +105,30 @@ fn an_xdg_shell_can_be_created_and_a_run_survives_it() {
 
 #[test]
 fn creating_the_shell_twice_is_refused_rather_than_leaking_a_second_global() {
+    headless_env();
+
     let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = wlr::Runtime::new().expect("runtime");
+    // `create_xdg_shell` now refuses before `init_graphics` (see its own
+    // doc), so this is required to reach the "twice" case at all.
+    runtime.init_graphics(&display, &backend).expect("graphics");
     runtime.create_xdg_shell(&display, 6).expect("first");
     assert!(
         matches!(runtime.create_xdg_shell(&display, 6), Err(wlr::Error::Operation(_))),
         "a second xdg_wm_base global would make the compositor advertise two"
+    );
+}
+
+#[test]
+fn creating_the_shell_before_init_graphics_is_refused_rather_than_hanging_every_client() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    assert!(
+        matches!(runtime.create_xdg_shell(&display, 6), Err(wlr::Error::Operation(_))),
+        "a shell with nowhere to put a toplevel in the scene must be refused \
+         at setup time, not leave every client hanging on an unanswered \
+         initial commit"
     );
 }
 

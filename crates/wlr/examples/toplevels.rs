@@ -15,7 +15,6 @@ struct App {
     runtime: wlr::Runtime,
     placed: HashMap<wlr::ToplevelId, (i32, i32)>,
     next: (i32, i32),
-    frames: u32,
 }
 
 impl wlr::SeatHandler for App {}
@@ -37,7 +36,6 @@ impl wlr::OutputHandler for App {
 
     fn frame(&mut self, output: &wlr::Output<'_>) {
         let _ = self.runtime.commit_output(output);
-        self.frames += 1;
     }
 }
 
@@ -69,6 +67,14 @@ impl wlr::ToplevelHandler for App {
         println!("mapped {:?} title={:?}", id, toplevel.title());
     }
 
+    fn title_changed(&mut self, toplevel: &wlr::Toplevel<'_>) {
+        println!("title changed {:?} title={:?}", toplevel.id(), toplevel.title());
+    }
+
+    fn unmapped(&mut self, id: wlr::ToplevelId) {
+        println!("unmapped {id:?}");
+    }
+
     fn toplevel_destroyed(&mut self, id: wlr::ToplevelId) {
         // `remove`, not indexing: this id may be one we were never told about.
         self.placed.remove(&id);
@@ -93,7 +99,6 @@ fn main() -> wlr::Result<()> {
         runtime: runtime.clone(),
         placed: HashMap::new(),
         next: (40, 40),
-        frames: 0,
     };
     backend.run_all(&display, &mut app, &runtime, wlr::Until::Stop)?;
     Ok(())

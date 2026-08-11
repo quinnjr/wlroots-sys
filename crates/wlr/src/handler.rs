@@ -161,10 +161,18 @@ pub trait ToplevelHandler {
     ///
     /// Stage whatever you want in that configure —
     /// [`Runtime::set_toplevel_size`](crate::Runtime::set_toplevel_size) and
-    /// its siblings — and this crate sends it once this method returns. If
-    /// you stage nothing, the client is still configured (with its own
-    /// preferred size), because a client that is never configured never maps
-    /// and the symptom is an invisible window rather than an error.
+    /// its siblings — and this crate schedules it right after this event is
+    /// delivered. "Schedules", not "sends": the configure goes out from an
+    /// idle source, not synchronously from inside this call, and — under
+    /// deferral, if this event was queued behind a handler already running —
+    /// the schedule can be requested before this method actually runs,
+    /// rather than strictly after it returns. Either way the client ends up
+    /// configured, which is the guarantee that matters: if you stage nothing,
+    /// it is configured with its own preferred size, because a client that is
+    /// never configured never maps and the symptom is an invisible window
+    /// rather than an error. What is not guaranteed under deferral is that
+    /// the *first* configure a client sees necessarily carries whatever this
+    /// method goes on to stage.
     fn initial_commit(&mut self, toplevel: &Toplevel<'_>) {
         let _ = toplevel;
     }

@@ -83,6 +83,14 @@ pub(crate) struct RuntimeInner {
     /// Reverse lookup for the scene hit test, which finds a `wlr_scene_tree`
     /// and has to name the toplevel it belongs to. Keyed by the tree pointer
     /// because that is what `wlr_scene_node_at` walks back to.
+    ///
+    /// Write-only in this release: `record_toplevel`/`forget_toplevel`/
+    /// `clear_toplevels` keep it in step with `toplevels`, but nothing reads
+    /// it yet — no hit test exists until the seat task (0.20.3) adds pointer
+    /// input and needs to turn a `wlr_scene_node_at` result back into a
+    /// `ToplevelId`. Kept in step with `toplevels` from this release rather
+    /// than added alongside the hit test itself, so a toplevel announced
+    /// under 0.20.2 is already indexed when 0.20.3 starts reading this table.
     pub(crate) tree_to_toplevel: RefCell<HashMap<usize, ToplevelId>>,
 }
 
@@ -538,6 +546,13 @@ impl Runtime {
 
     /// Advertise `xdg_wm_base` at `version`.
     ///
+    /// **Call [`init_graphics`](Runtime::init_graphics) first.** A shell
+    /// created before graphics exist would leave every toplevel a client
+    /// creates with nowhere in the scene to go — `on_new_toplevel` cannot
+    /// answer with a configure, and a client that is never configured never
+    /// maps, so the visible symptom is a hung client rather than an error.
+    /// This is checked and refused below rather than left as a silent trap.
+    ///
     /// Registration of the `new_toplevel` listener happens inside
     /// [`Backend::run_all`](crate::Backend::run_all) and lives for that call,
     /// so creating the shell after a run has started has no effect until the
@@ -549,11 +564,17 @@ impl Runtime {
     ///
     /// # Errors
     ///
-    /// [`Error::Operation`] if a shell already exists on this runtime;
-    /// [`Error::Create`] if wlroots could not create it.
+    /// [`Error::Operation`] if a shell already exists on this runtime, or if
+    /// [`init_graphics`](Runtime::init_graphics) has not run yet;
+    /// [`Error::Create`] if wlroots could not create the shell.
     pub fn create_xdg_shell(&self, display: &Display, version: u32) -> Result<()> {
         if self.inner.xdg_shell.borrow().is_some() {
             return Err(Error::Operation("Runtime::create_xdg_shell called twice"));
+        }
+        if self.inner.graphics.borrow().is_none() {
+            return Err(Error::Operation(
+                "Runtime::create_xdg_shell before init_graphics",
+            ));
         }
         // SAFETY: `display` is live for the call; the returned shell is owned
         // by the display and destroyed with it, so this crate never frees it.
@@ -610,6 +631,25 @@ impl Runtime {
         self.inner.toplevels.borrow().get(&id).copied()
     }
 
+    /// Drop every toplevel this runtime knows of, without touching wlroots.
+    ///
+    /// Called once, by `backend.rs`'s `run_inner`, when the `run_all` call
+    /// that populated these tables returns — on every exit path, including
+    /// an early `?` return or a panic (see that call site's own doc for why).
+    /// Toplevel ids are only meaningful for the call that announced them:
+    /// the per-toplevel destroy listener that would otherwise remove a stale
+    /// entry is itself torn down with that call's `Session`, the same rule
+    /// already documented for outputs ("outputs announced during one `run`
+    /// are not re-announced by the next one"). Without this, a consumer who
+    /// kept a `Runtime` clone and drove `EventLoop::dispatch` after `run_all`
+    /// returned could see a client destroy its toplevel, then call a by-id
+    /// mutator that resolves the now-stale entry and dereferences memory
+    /// wlroots already freed.
+    pub(crate) fn clear_toplevels(&self) {
+        self.inner.toplevels.borrow_mut().clear();
+        self.inner.tree_to_toplevel.borrow_mut().clear();
+    }
+
     /// Stage a size on the toplevel's next configure, in **content**
     /// (client-owned) pixels.
     ///
@@ -618,7 +658,15 @@ impl Runtime {
     /// activation and a maximized flag in the same handler produces one
     /// configure carrying all three rather than three configures.
     ///
-    /// `None` if this runtime has no live toplevel with that id.
+    /// `None` if this runtime has no live toplevel with that id. **A
+    /// `ToplevelId` is only good for the [`Backend::run_all`](crate::Backend::run_all)
+    /// call that announced it** — every mutator on this page shares that
+    /// rule. The table this and every sibling mutator below reads is cleared
+    /// when that call returns, the same way an [`OutputId`](crate::OutputId)
+    /// stops resolving to anything once its announcing `run` has returned,
+    /// so an id kept past that point — even one whose client is still
+    /// connected — reports `None` here rather than resolving to a stale
+    /// pointer.
     pub fn set_toplevel_size(&self, id: ToplevelId, width: i32, height: i32) -> Option<()> {
         let entry = self.toplevel_entry(id)?;
         // SAFETY: an entry is removed by the destroy callback, which wlroots
@@ -629,7 +677,8 @@ impl Runtime {
     }
 
     /// Stage the `activated` state — the one a client renders its own title
-    /// bar and focus ring from. `None` for an unknown id.
+    /// bar and focus ring from. `None` for an unknown id — including a stale
+    /// one; see `set_toplevel_size`'s doc.
     pub fn set_toplevel_activated(&self, id: ToplevelId, activated: bool) -> Option<()> {
         let entry = self.toplevel_entry(id)?;
         // SAFETY: as for `set_toplevel_size`.
@@ -637,7 +686,8 @@ impl Runtime {
         Some(())
     }
 
-    /// Stage the `maximized` state. `None` for an unknown id.
+    /// Stage the `maximized` state. `None` for an unknown or stale id; see
+    /// `set_toplevel_size`'s doc.
     pub fn set_toplevel_maximized(&self, id: ToplevelId, maximized: bool) -> Option<()> {
         let entry = self.toplevel_entry(id)?;
         // SAFETY: as above.
@@ -645,7 +695,8 @@ impl Runtime {
         Some(())
     }
 
-    /// Stage the `fullscreen` state. `None` for an unknown id.
+    /// Stage the `fullscreen` state. `None` for an unknown or stale id; see
+    /// `set_toplevel_size`'s doc.
     pub fn set_toplevel_fullscreen(&self, id: ToplevelId, fullscreen: bool) -> Option<()> {
         let entry = self.toplevel_entry(id)?;
         // SAFETY: as above.
@@ -660,7 +711,7 @@ impl Runtime {
     /// where the pointer hit test finds it, and sends the client nothing (a
     /// client does not know where it is, by design in xdg-shell).
     ///
-    /// `None` for an unknown id.
+    /// `None` for an unknown or stale id; see `set_toplevel_size`'s doc.
     pub fn set_toplevel_position(&self, id: ToplevelId, x: i32, y: i32) -> Option<()> {
         let entry = self.toplevel_entry(id)?;
         // SAFETY: the tree is created by this crate when the toplevel is
@@ -676,7 +727,7 @@ impl Runtime {
     /// state, it is simply not drawn and not hit-tested. That is what a
     /// window on an inactive workspace needs.
     ///
-    /// `None` for an unknown id.
+    /// `None` for an unknown or stale id; see `set_toplevel_size`'s doc.
     pub fn set_toplevel_visible(&self, id: ToplevelId, visible: bool) -> Option<()> {
         let entry = self.toplevel_entry(id)?;
         // SAFETY: as for `set_toplevel_position`.
@@ -685,7 +736,7 @@ impl Runtime {
     }
 
     /// Raise the toplevel above every sibling in the scene. `None` for an
-    /// unknown id.
+    /// unknown or stale id; see `set_toplevel_size`'s doc.
     pub fn raise_toplevel(&self, id: ToplevelId) -> Option<()> {
         let entry = self.toplevel_entry(id)?;
         // SAFETY: as above.
@@ -700,7 +751,7 @@ impl Runtime {
     /// [`ToplevelHandler::toplevel_destroyed`](crate::ToplevelHandler::toplevel_destroyed)
     /// fires — only if and when the client actually destroys it.
     ///
-    /// `None` for an unknown id.
+    /// `None` for an unknown or stale id; see `set_toplevel_size`'s doc.
     pub fn close_toplevel(&self, id: ToplevelId) -> Option<()> {
         let entry = self.toplevel_entry(id)?;
         // SAFETY: as for `set_toplevel_size`; this only sends a protocol
@@ -751,5 +802,36 @@ mod tests {
         let clone = rt.clone();
         let id = rt.add_fd(pipe_read_end(), Interest::READABLE);
         assert!(clone.with_fd(id, |_| ()).is_some());
+    }
+
+    /// The primitive `backend.rs`'s `ToplevelTableGuard` calls when a run
+    /// returns: everything a run recorded must stop resolving.
+    ///
+    /// This cannot be exercised against a real `wlr_xdg_toplevel` without a
+    /// live client (see the crate's own integration test's doc for why), but
+    /// `record_toplevel`/`toplevel_entry`/`clear_toplevels` never dereference
+    /// the pointers they store — they only insert, look up and clear by
+    /// `ToplevelId` — so a dangling `NonNull` exercises the real code path
+    /// exactly as a live one would, without wlroots in the loop at all.
+    #[test]
+    fn clear_toplevels_makes_every_recorded_id_resolve_to_nothing() {
+        let rt = Runtime::new().expect("runtime");
+        let id = ToplevelId(next_id());
+        let raw = NonNull::<sys::wlr_xdg_toplevel>::dangling();
+        let tree = NonNull::<sys::wlr_scene_tree>::dangling();
+
+        rt.record_toplevel(id, raw, tree);
+        assert!(
+            rt.toplevel_entry(id).is_some(),
+            "record_toplevel must make the id resolve"
+        );
+
+        rt.clear_toplevels();
+        assert!(
+            rt.toplevel_entry(id).is_none(),
+            "clear_toplevels must make every previously-recorded id miss, \
+             the same outcome an id from a run that has already returned \
+             must produce"
+        );
     }
 }

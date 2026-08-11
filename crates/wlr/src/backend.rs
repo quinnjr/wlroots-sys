@@ -150,6 +150,24 @@ struct Bound {
     /// pointer to an output wlroots is about to free — the single failure this
     /// whole design exists to prevent.
     id: Option<OutputId>,
+
+    /// The toplevel this listener belongs to, for the five per-toplevel
+    /// listeners `on_new_toplevel` links; `None` for every other listener in
+    /// this file.
+    ///
+    /// This is what makes `on_toplevel_map`, `on_toplevel_unmap`,
+    /// `on_toplevel_set_title` and `on_toplevel_destroy` sound at all: wlroots
+    /// 0.20 emits `wlr_surface.events.map`/`.unmap` and
+    /// `wlr_xdg_toplevel.events.set_title`/`.destroy` with a **null** `data`
+    /// argument (confirmed against the C sources — `wlr_compositor.c` and
+    /// `wlr_xdg_toplevel.c`), so a callback that read the id out of `data`
+    /// would dereference a null pointer on the first real client. `Bound` is
+    /// private to this module, so widening it with a second id field costs
+    /// nothing outside it — unlike `Bound::id`, which stays `Option<OutputId>`
+    /// rather than being generalised, because every output-side call site
+    /// still wants that exact type and a shared enum would cost every one of
+    /// them a match arm for a case that can never apply to it.
+    toplevel: Option<ToplevelId>,
 }
 
 // `bound_of`'s cast is sound only while `listener` is `Bound`'s first field, at
@@ -188,6 +206,7 @@ impl Registration {
         session: *const (),
         alive: *const Cell<bool>,
         id: Option<OutputId>,
+        toplevel: Option<ToplevelId>,
     ) -> Self {
         let mut bound = Box::new(Bound {
             listener: sys::wl_listener {
@@ -202,6 +221,7 @@ impl Registration {
             session,
             alive,
             id,
+            toplevel,
         });
 
         // SAFETY: the caller guarantees `signal` is an initialised `wl_signal`,
@@ -342,6 +362,20 @@ struct ToplevelListeners {
     _destroy: Registration,
 }
 
+/// Clears `Runtime`'s toplevel tables when the `run_inner` call holding this
+/// guard returns, on every exit path. See `Runtime::clear_toplevels`'s own
+/// doc for why a `ToplevelId` must not outlive the `run_all` call that
+/// announced it, and `run_inner`'s call site for why this is a `Drop` guard
+/// rather than a statement at the end of the function (an early `?` return
+/// would skip it).
+struct ToplevelTableGuard<'r>(&'r Runtime);
+
+impl Drop for ToplevelTableGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear_toplevels();
+    }
+}
+
 thread_local! {
     /// Set while a [`Backend::run`] call is on the stack.
     ///
@@ -427,6 +461,7 @@ impl<'d> Backend<'d> {
                 on_backend_destroy,
                 std::ptr::null(),
                 &raw const *alive,
+                None,
                 None,
             )
         };
@@ -674,6 +709,18 @@ impl<'d> Backend<'d> {
             deliver: hooks.deliver,
         };
 
+        // Clears `runtime`'s toplevel tables on every exit from this
+        // function — normal return, an early `?`, or a panic — because the
+        // per-toplevel destroy listener that would otherwise keep them
+        // truthful is itself torn down with `session` at the end of this
+        // call (see `Runtime::clear_toplevels`'s own doc for the hazard this
+        // closes: a `ToplevelId` resolving to memory wlroots already freed,
+        // reachable once this function has returned). Declared before the
+        // registrations below so it drops *after* they do, though nothing
+        // here depends on that relative order — clearing the table touches
+        // no signal and nothing any `Registration::drop` reads.
+        let _toplevel_table_guard = ToplevelTableGuard(runtime);
+
         // Declared after `session`, so it drops — and therefore decides
         // about unlinking — while the session it names is still alive. Bound
         // to a named `_new_output` rather than to `_`, which would drop it at
@@ -696,6 +743,7 @@ impl<'d> Backend<'d> {
                 on_new_output::<S>,
                 (&raw const session).cast::<()>(),
                 &raw const *self.alive,
+                None,
                 None,
             )
         };
@@ -838,6 +886,7 @@ impl<'d> Backend<'d> {
                 on_new_toplevel::<S>,
                 (session as *const Session<'_, S>).cast::<()>(),
                 std::ptr::null(),
+                None,
                 None,
             )
         };
@@ -1178,6 +1227,7 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
             (*bound).session,
             std::ptr::null(),
             Some(id),
+            None,
         );
         let destroy = Registration::link(
             &raw mut (*output).events.destroy,
@@ -1185,6 +1235,7 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
             (*bound).session,
             std::ptr::null(),
             Some(id),
+            None,
         );
 
         // Registered before the handler is told, so that a handler asking about
@@ -1321,12 +1372,25 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
         // Five listeners, all with a null liveness flag: each is dropped from
         // inside the destroy emission, while the object is still alive, which
         // is a stronger guarantee than any flag (see `Registration::drop`).
+        //
+        // Every one of them carries `id` in its own `Bound::toplevel` rather
+        // than recovering it from `data` at callback time: wlroots emits
+        // `wlr_surface.events.map`/`.unmap` and
+        // `wlr_xdg_toplevel.events.set_title`/`.destroy` with a **null**
+        // `data` argument (confirmed against the 0.20 C sources), so a
+        // callback that read the id out of `data` would dereference a null
+        // pointer on the first real client. Only `commit` (which does carry
+        // the surface) and `on_new_toplevel` itself (which carries the
+        // toplevel) get to use `data` for identity; the other four use the
+        // `Bound` instead. See `Bound::toplevel`'s own doc for the fuller
+        // argument.
         let commit = Registration::link(
             &raw mut (*surface).events.commit,
             on_surface_commit::<S>,
             (*bound).session,
             std::ptr::null(),
             None,
+            Some(id),
         );
         let map = Registration::link(
             &raw mut (*surface).events.map,
@@ -1334,6 +1398,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             (*bound).session,
             std::ptr::null(),
             None,
+            Some(id),
         );
         let unmap = Registration::link(
             &raw mut (*surface).events.unmap,
@@ -1341,6 +1406,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             (*bound).session,
             std::ptr::null(),
             None,
+            Some(id),
         );
         let set_title = Registration::link(
             &raw mut (*toplevel).events.set_title,
@@ -1348,6 +1414,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             (*bound).session,
             std::ptr::null(),
             None,
+            Some(id),
         );
         let destroy = Registration::link(
             &raw mut (*toplevel).events.destroy,
@@ -1355,6 +1422,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             (*bound).session,
             std::ptr::null(),
             None,
+            Some(id),
         );
 
         // The registrations own the callbacks' backing memory, so they live in
@@ -1427,13 +1495,21 @@ unsafe extern "C" fn on_surface_commit<S: Handlers>(
 
 unsafe extern "C" fn on_toplevel_map<S: Handlers>(
     l: *mut sys::wl_listener,
-    data: *mut std::ffi::c_void,
+    _data: *mut std::ffi::c_void,
 ) {
-    // SAFETY: as for `on_surface_commit`.
+    // SAFETY: linked by `on_new_toplevel` into this surface's `events.map`.
+    // `_data` is deliberately unused: wlroots 0.20 emits `wlr_surface.events.
+    // map` with a **null** `data` argument (`wlr_compositor.c`), so the id
+    // must come from `Bound::toplevel`, which `on_new_toplevel` set at link
+    // time — see that field's own doc for the full argument.
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
-        let Some(id) = toplevel_id_of_surface(data.cast::<sys::wlr_surface>()) else { return };
+        // Cannot be `None`: `on_new_toplevel` is the only site that installs
+        // this callback and it always supplies a toplevel id. Handled rather
+        // than unwrapped because this is an `extern "C"` frame, where a
+        // panic aborts.
+        let Some(id) = (*bound).toplevel else { return };
         let deliver = (*session).deliver;
         (*session)
             .dispatcher
@@ -1443,13 +1519,14 @@ unsafe extern "C" fn on_toplevel_map<S: Handlers>(
 
 unsafe extern "C" fn on_toplevel_unmap<S: Handlers>(
     l: *mut sys::wl_listener,
-    data: *mut std::ffi::c_void,
+    _data: *mut std::ffi::c_void,
 ) {
-    // SAFETY: as above.
+    // SAFETY: as for `on_toplevel_map` — `wlr_surface.events.unmap` is the
+    // other signal `wlr_compositor.c` emits with a null `data`.
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
-        let Some(id) = toplevel_id_of_surface(data.cast::<sys::wlr_surface>()) else { return };
+        let Some(id) = (*bound).toplevel else { return };
         let deliver = (*session).deliver;
         (*session)
             .dispatcher
@@ -1459,19 +1536,16 @@ unsafe extern "C" fn on_toplevel_unmap<S: Handlers>(
 
 unsafe extern "C" fn on_toplevel_set_title<S: Handlers>(
     l: *mut sys::wl_listener,
-    data: *mut std::ffi::c_void,
+    _data: *mut std::ffi::c_void,
 ) {
-    // SAFETY: linked into `wlr_xdg_toplevel.events.set_title`, whose data is
-    // the `wlr_xdg_toplevel` itself.
+    // SAFETY: linked by `on_new_toplevel` into `wlr_xdg_toplevel.events.
+    // set_title`. `_data` is deliberately unused: wlroots 0.20 emits this
+    // signal with a **null** `data` argument (`wlr_xdg_toplevel.c`), so the
+    // id must come from `Bound::toplevel` rather than from `data`.
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
-        let toplevel = data.cast::<sys::wlr_xdg_toplevel>();
-        let base = (*toplevel).base;
-        if base.is_null() {
-            return;
-        }
-        let Some(id) = toplevel_id_of_surface((*base).surface) else { return };
+        let Some(id) = (*bound).toplevel else { return };
         let deliver = (*session).deliver;
         (*session)
             .dispatcher
@@ -1482,19 +1556,17 @@ unsafe extern "C" fn on_toplevel_set_title<S: Handlers>(
 /// A toplevel is about to be freed. Forget it *now*, whatever the handler does.
 unsafe extern "C" fn on_toplevel_destroy<S: Handlers>(
     l: *mut sys::wl_listener,
-    data: *mut std::ffi::c_void,
+    _data: *mut std::ffi::c_void,
 ) {
-    // SAFETY: as for `on_toplevel_set_title`; the toplevel is still alive for
-    // the duration of the emission.
+    // SAFETY: linked by `on_new_toplevel` into `wlr_xdg_toplevel.events.
+    // destroy`; the toplevel is still alive for the duration of the
+    // emission. `_data` is deliberately unused: wlroots 0.20 emits this
+    // signal with a **null** `data` argument too (`wlr_xdg_toplevel.c`), so
+    // — as for `on_toplevel_set_title` — the id comes from `Bound::toplevel`.
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
-        let toplevel = data.cast::<sys::wlr_xdg_toplevel>();
-        let base = (*toplevel).base;
-        if base.is_null() {
-            return;
-        }
-        let Some(id) = toplevel_id_of_surface((*base).surface) else { return };
+        let Some(id) = (*bound).toplevel else { return };
 
         // Both tables are cleared before the event is emitted, and that
         // ordering is the whole soundness argument for deferral: a destroy
@@ -1664,6 +1736,7 @@ mod tests {
                 std::ptr::null(),
                 &raw const (*hp).alive,
                 None,
+                None,
             );
             assert!(is_linked(hp, noop), "link must register the listener");
 
@@ -1690,7 +1763,8 @@ mod tests {
         fn link_then_fail(signal: *mut sys::wl_signal, alive: *const Cell<bool>) -> Result<()> {
             // SAFETY: the caller owns a live signal and flag that both outlive
             // this call.
-            let _reg = unsafe { Registration::link(signal, noop, std::ptr::null(), alive, None) };
+            let _reg =
+                unsafe { Registration::link(signal, noop, std::ptr::null(), alive, None, None) };
             failing_dispatch()?;
             Ok(())
         }
@@ -1728,6 +1802,7 @@ mod tests {
                 noop,
                 std::ptr::null(),
                 &raw const (*hp).alive,
+                None,
                 None,
             );
             let linked_next = (*hp).signal.listener_list.next;
@@ -1772,6 +1847,7 @@ mod tests {
                 on_backend_destroy,
                 std::ptr::null(),
                 &raw const (*hp).alive,
+                None,
                 None,
             );
             assert!((*hp).alive.get(), "the flag starts set");
@@ -2003,6 +2079,7 @@ mod tests {
                 on_new_output::<Recorder>,
                 (&raw const session).cast::<()>(),
                 &raw const (*hp).alive,
+                None,
                 None,
             );
 
