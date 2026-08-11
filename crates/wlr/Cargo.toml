@@ -24,3 +24,9 @@ wlr-sys = { version = "0.20", path = "../wlr-sys" }
 
 [dev-dependencies]
 trybuild = "1.0"
+# Asserts the `!Send`/`!Sync` premise the thread-local dispatch guard rests on.
+# A negative trait bound cannot be written directly, and the obvious
+# alternative — a `trybuild` fixture — pins rustc's *diagnostic text*, which
+# varies with whether `rust-src` is installed. That made the fixture pass
+# locally and fail in CI's container. This asserts the property itself.
+static_assertions = "1.1"
