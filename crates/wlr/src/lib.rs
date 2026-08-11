@@ -6,10 +6,12 @@
 pub(crate) mod sys;
 
 mod dispatch;
+mod display;
 mod error;
 mod id;
 mod output;
 
+pub use display::{Display, EventLoop};
 pub use error::{Error, Result};
 pub use id::OutputId;
 pub use output::Output;
