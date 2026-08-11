@@ -476,10 +476,14 @@ impl<'d> Backend<'d> {
     /// Never directly, but a panic escaping one of `state`'s handler methods
     /// aborts the process; see [`OutputHandler`]'s own documentation.
     ///
-    /// Handlers are installed for the duration of this call only, so an output
-    /// announced during one call is not announced again by the next: wlroots
-    /// offers no way to enumerate a backend's existing outputs, so there is
-    /// nothing to replay from. In practice that means one `run`.
+    /// Handlers are installed for the duration of this call only: the `frame`
+    /// and `destroy` listeners for every output announced during it live in a
+    /// `Session` local to the call, and unlink when that `Session` drops at
+    /// the end of it. A later `run` does not relink them — and
+    /// `ensure_started` short-circuits once the backend has started, so
+    /// nothing re-announces those outputs either — so no further event,
+    /// including `destroyed`, is ever delivered for an output announced by an
+    /// earlier `run`. In practice that means one `run`.
     ///
     /// # Errors
     ///
@@ -499,7 +503,9 @@ impl<'d> Backend<'d> {
     /// would also install a second `new_output` listener and duplicate every
     /// announcement, but that is only the visible symptom.)
     ///
-    /// [`Error::Operation`] if starting the backend fails.
+    /// [`Error::Operation`] if `wlr_backend_start` fails, or if a dispatch
+    /// turn's `wl_event_loop_dispatch` fails; the two are distinguished by the
+    /// error's payload but not by which variant is returned.
     pub fn run<S: OutputHandler>(&self, state: &mut S, iterations: u32) -> Result<()> {
         alive_or_err(&self.alive)?;
         // Taken before anything else is built, so a refused re-entry perturbs
@@ -624,6 +630,14 @@ unsafe fn ensure_id(set: *mut sys::wlr_addon_set) -> OutputId {
     // — is discharged by the `find_id` check immediately preceding it, and
     // nothing can attach one in between: wlroots' event loop, and therefore
     // every caller of this function, is single-threaded.
+    //
+    // `attach_id` re-walks the addon list itself, via its own `assert!`
+    // (deliberately not `debug_assert!`, since it is a safety net on a
+    // `pub(crate)` unsafe fn, not merely a debugging aid), so the `None` arm
+    // below costs two walks rather than one. Left as-is rather than factored
+    // into an unchecked variant: this is the output-announcement path, not
+    // the frame path, so the cost is small and bounded by output count, and
+    // it is not worth a second entry point to `attach_id` for it.
     unsafe {
         match find_id(set.cast_const()) {
             Some(id) => OutputId(id),
@@ -640,7 +654,7 @@ unsafe extern "C" fn on_backend_destroy(l: *mut sys::wl_listener, _data: *mut st
     //
     // Nothing here can unwind: a `Cell<bool>` write has no failure mode and
     // calls no user code, which matters because this is an `extern "C"` frame.
-    // In particular `dispatcher` is never read, so its being null is fine.
+    // In particular `session` is never read, so its being null is fine.
     unsafe {
         let bound = bound_of(l);
         (*(*bound).alive).set(false);
@@ -810,7 +824,7 @@ fn with_output<S>(session: &Session<S>, id: OutputId, f: impl FnOnce(&Output<'_>
     // output down mid-call — owes this line an answer, because that route
     // bypasses the flag entirely: the handle would still name freed memory for
     // the rest of `f`, and no re-lookup here can help, because `f` holds it.
-    let output = unsafe { Output::from_raw(raw) };
+    let output = unsafe { Output::from_raw_with_id(raw, id) };
     f(&output);
 }
 
@@ -898,7 +912,7 @@ mod tests {
 
         // SAFETY: `hp` is a live, exclusively-derived pointer to the boxed
         // harness, whose signal and flag both outlive the registration. `noop`
-        // never touches the `Bound`, so a null dispatcher is fine.
+        // never touches the `Bound`, so a null session is fine.
         unsafe {
             assert!(!is_linked(hp, noop), "a fresh signal has no listeners");
 

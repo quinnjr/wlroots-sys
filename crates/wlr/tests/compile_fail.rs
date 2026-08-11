@@ -51,3 +51,13 @@ fn from_raw_is_not_reachable_outside_the_crate() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/output_from_raw_is_private.rs");
 }
+
+/// Pins the unstated assumption `dispatch.rs`'s thread-local `IN_HANDLER`
+/// guard rests on: `Display`, `EventLoop`, `Backend` and `Output` must all be
+/// `!Send`, or a handler could move one to another thread and find the flag
+/// clear there. See the fixture's own doc comment for the full argument.
+#[test]
+fn thread_scoped_types_are_not_send() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/thread_scoped_types_are_not_send.rs");
+}

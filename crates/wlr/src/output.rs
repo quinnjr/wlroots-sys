@@ -16,9 +16,19 @@ use crate::id::{OutputId, find_id};
 use crate::{Error, Result, sys};
 
 /// A wlroots output, borrowed for the duration of a handler call.
-#[repr(transparent)]
+///
+/// Not `#[repr(transparent)]`: this holds the output's id alongside the raw
+/// pointer, cached at construction time, so [`id`](Output::id) is a field
+/// read rather than an FFI round trip through `wlr_addon_find` on every call.
+/// The dispatcher already has the id at construction time (it used it to look
+/// this output up in the registry), so [`from_raw_with_id`](Output::from_raw_with_id)
+/// lets it hand that value straight to the handle instead of making `id()`
+/// re-derive it later — which matters because handlers are expected to call
+/// `id()` on essentially every event. `id` is private, so this is not a
+/// source-breaking change to the public API.
 pub struct Output<'h> {
     raw: NonNull<sys::wlr_output>,
+    id: Option<OutputId>,
     _scope: PhantomData<&'h ()>,
 }
 
@@ -33,9 +43,43 @@ impl<'h> Output<'h> {
     /// absence (it panics rather than reading invalid memory), so attaching
     /// one is a correctness concern for callers of `id`, not a soundness
     /// precondition of this constructor.
+    ///
+    /// The id is not cached by this constructor — it is looked up (and can
+    /// panic) the first time [`id`](Output::id) is called. Callers that
+    /// already know the id should use [`from_raw_with_id`](Output::from_raw_with_id)
+    /// instead, which avoids both the lookup and the possibility of that
+    /// panic.
+    ///
+    /// Dispatch no longer calls this directly (it uses `from_raw_with_id`,
+    /// which it already has the id for); it stays `pub(crate)` and exercised
+    /// because `output.rs`'s own tests need a constructor that does *not*
+    /// pre-attach an id, to cover the panicking path in [`id`](Output::id).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) unsafe fn from_raw(raw: *mut sys::wlr_output) -> Output<'h> {
         Output {
             raw: NonNull::new(raw).expect("wlroots handed us a null output"),
+            id: None,
+            _scope: PhantomData,
+        }
+    }
+
+    /// Wrap a raw output for the duration of a handler call, attaching an
+    /// already-known id.
+    ///
+    /// This is what dispatch uses: it resolves the [`OutputId`] to look the
+    /// output up in the session registry, and can hand that same value
+    /// straight to the handle instead of making [`id`](Output::id) re-derive
+    /// it later through `wlr_addon_find`.
+    ///
+    /// # Safety
+    ///
+    /// Same as [`from_raw`](Output::from_raw): `raw` must be a live
+    /// `wlr_output`, and the returned handle must not outlive the callback it
+    /// was created for.
+    pub(crate) unsafe fn from_raw_with_id(raw: *mut sys::wlr_output, id: OutputId) -> Output<'h> {
+        Output {
+            raw: NonNull::new(raw).expect("wlroots handed us a null output"),
+            id: Some(id),
             _scope: PhantomData,
         }
     }
@@ -44,10 +88,17 @@ impl<'h> Output<'h> {
     ///
     /// # Panics
     ///
-    /// Panics if no id addon is attached. Unreachable for a handle a handler
-    /// was given: every output this crate hands out has had an id attached
-    /// when wlroots announced it, before any handler could see it.
+    /// Panics if no id addon is attached and this handle was built by
+    /// [`from_raw`](Output::from_raw) rather than
+    /// [`from_raw_with_id`](Output::from_raw_with_id). Unreachable for a
+    /// handle a handler was given: dispatch always uses
+    /// `from_raw_with_id`, and every output this crate hands out has had an
+    /// id attached when wlroots announced it, before any handler could see
+    /// it.
     pub fn id(&self) -> OutputId {
+        if let Some(id) = self.id {
+            return id;
+        }
         // SAFETY: the handle's lifetime guarantees the output is live.
         let id = unsafe { find_id(&raw const (*self.raw.as_ptr()).addons) };
         OutputId(id.expect(

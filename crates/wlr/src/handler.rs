@@ -67,11 +67,19 @@ pub trait OutputHandler {
     /// object to borrow.
     ///
     /// **`id` may be one you were never told about.** This is delivered
-    /// unconditionally, whereas [`new_output`](OutputHandler::new_output) is
-    /// dropped when the output dies before it can be delivered — so an output
-    /// created and destroyed while another handler was running produces a
-    /// `destroyed` with no preceding `new_output`. That falls out of ids
-    /// outliving objects on purpose, and it is not going to change.
+    /// unconditionally *within the `run` that announced the output*, whereas
+    /// [`new_output`](OutputHandler::new_output) is dropped when the output
+    /// dies before it can be delivered — so an output created and destroyed
+    /// while another handler was running produces a `destroyed` with no
+    /// preceding `new_output`. That falls out of ids outliving objects on
+    /// purpose, and it is not going to change.
+    ///
+    /// The "within the `run`" qualifier is not decorative: an output
+    /// announced by one call to `Backend::run` gets no further events at all
+    /// — `destroyed` included — once that call returns. Its registration
+    /// lives with that call and is torn down with it, and nothing re-creates
+    /// it on a later `run`, so an output that dies after its announcing
+    /// `run` has returned never produces a `destroyed` here.
     ///
     /// Write this method so an unknown id is harmless. `remove` on a map that
     /// has no such key is fine; indexing it is not, and a panic here **aborts

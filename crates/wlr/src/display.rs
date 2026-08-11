@@ -179,11 +179,20 @@ mod tests {
 
     /// A display always has an event loop, and `event_loop` hands back a
     /// usable pointer to it rather than the display's own.
+    ///
+    /// Compares the two pointers directly rather than just asserting
+    /// non-nullness: `EventLoop::raw` is a `NonNull`, so a non-nullness check
+    /// alone is statically incapable of failing and would test nothing about
+    /// the "rather than the display's own" half of the claim above.
     #[test]
     fn a_display_yields_a_non_null_event_loop() {
         let display = Display::new().expect("wl_display_create failed");
         let loop_ = display.event_loop();
-        assert!(!loop_.as_ptr().is_null());
+        assert_ne!(
+            loop_.as_ptr().cast::<std::ffi::c_void>(),
+            display.raw.as_ptr().cast::<std::ffi::c_void>(),
+            "event_loop() must return the loop's own pointer, not the display's"
+        );
     }
 
     /// Dispatching outside any handler must work — this is the path

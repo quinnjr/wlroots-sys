@@ -119,9 +119,9 @@ drawn in the wrong place, not a reason to let the signature drift.
 ## 2. Handles are borrow-scoped and unforgeable
 
 ```rust
-#[repr(transparent)]
 pub struct Output<'h> {
     raw: NonNull<sys::wlr_output>,
+    id: Option<OutputId>,
     _scope: PhantomData<&'h ()>,
 }
 ```
@@ -129,6 +129,13 @@ pub struct Output<'h> {
 The lifetime is bound to the dispatch call. The constructor is `pub(crate)`, so a
 consumer cannot manufacture one — a `&Output` that escapes a handler is a
 **compile error**, not a documented rule.
+
+Not `#[repr(transparent)]`: `id` caches the `OutputId` dispatch already resolved
+to look the output up in the session registry, so `Output::id` is a field read
+rather than an `wlr_addon_find` walk repeated on every call — the ergonomic this
+crate is built around, since consumers key their own state by id on essentially
+every event. `id` is private, so adding it does not affect the frozen public
+API.
 
 Long-lived state belongs to the consumer, keyed by ID:
 

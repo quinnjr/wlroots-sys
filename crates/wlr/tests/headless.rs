@@ -25,7 +25,6 @@ struct App {
     new_output_calls: u32,
 
     frames: u32,
-    frames_for_unknown_outputs: u32,
     destroyed: Vec<wlr::OutputId>,
 }
 
@@ -36,10 +35,7 @@ impl wlr::OutputHandler for App {
             .insert(output.id(), output.name().unwrap_or_default());
     }
 
-    fn frame(&mut self, output: &wlr::Output<'_>) {
-        if !self.outputs.contains_key(&output.id()) {
-            self.frames_for_unknown_outputs += 1;
-        }
+    fn frame(&mut self, _output: &wlr::Output<'_>) {
         self.frames += 1;
     }
 
@@ -88,11 +84,14 @@ fn headless_backend_announces_an_output_exactly_once() {
          string: {:?}",
         app.outputs
     );
+    // `frame` naming an output the handler was never told about is covered
+    // where it can actually be exercised — `backend.rs`'s
+    // `an_event_for_an_unknown_output_is_dropped_rather_than_delivered` — not
+    // here: nothing in this test can make that happen (there is only ever one
+    // output, and it is always announced before any frame could name it), so
+    // an assertion for it here would be unfalsifiable rather than merely
+    // redundant.
     assert_eq!(app.frames, 0, "nothing enabled the output, so no frames");
-    assert_eq!(
-        app.frames_for_unknown_outputs, 0,
-        "every frame must name an output the handler was told about first"
-    );
     assert!(app.destroyed.is_empty(), "nothing destroyed the output");
 
     let after_first_run = app.new_output_calls;
@@ -113,5 +112,34 @@ fn headless_backend_announces_an_output_exactly_once() {
         app.new_output_calls, after_first_run,
         "a second run must not re-start the backend and re-announce outputs \
          that were already announced"
+    );
+    // The larger consequence, per `Backend::run`'s own doc comment: the
+    // `frame`/`destroy` listeners for an output announced during one `run`
+    // live in a `Session` local to that call and unlink when it returns, and
+    // `ensure_started` short-circuits on the second `run`, so nothing
+    // re-registers them. The output announced above therefore gets *no*
+    // further event at all from this second `run` — including `destroyed`.
+    //
+    // This asserts only the half that is reachable here: nothing arrived.
+    // Proving the stronger claim — that the output really would have produced
+    // a `frame` or `destroy` had the listeners still been live — is not
+    // possible against a real headless backend with this crate's current
+    // public surface: a headless output only emits `frame` once enabled with
+    // a mode, and there is no exposed way to force that or to destroy an
+    // output from safe `wlr` code. That half of the property is instead
+    // covered directly, against a bare `wl_signal`, by `backend.rs`'s own
+    // `a_frame_signal_reaches_the_frame_handler` and
+    // `a_destroyed_output_is_forgotten_before_the_handler_is_told`.
+    assert_eq!(
+        app.frames, 0,
+        "an output announced by an earlier run must not gain a frame \
+         listener that a later run's dispatching could fire"
+    );
+    assert!(
+        app.destroyed.is_empty(),
+        "an output announced by an earlier run must not gain a destroy \
+         listener either — its listeners unlinked with that run's Session, \
+         and the second run's ensure_started short-circuit means nothing \
+         re-registers them"
     );
 }

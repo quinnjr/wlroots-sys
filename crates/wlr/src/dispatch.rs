@@ -78,6 +78,14 @@ thread_local! {
 /// happens to hold. So the handle's lifetime cannot be the whole argument, and
 /// this flag supplies the rest: while it is set, the event loop refuses to be
 /// driven, so no wlroots code that could free a live handle's object runs.
+///
+/// The other half of the argument is that the flag is thread-local: it only
+/// closes this hole because `Display`, `EventLoop`, `Backend`, and `Output`
+/// are all `!Send`/`!Sync`, so a handler cannot move one to another thread
+/// and find the flag clear there. That currently holds incidentally, from
+/// `NonNull` and `PhantomData<&Display>` fields, not from any explicit
+/// assertion on those types besides the compile-time check pinning it
+/// elsewhere in the crate.
 pub(crate) fn in_handler() -> bool {
     IN_HANDLER.get()
 }
@@ -177,7 +185,12 @@ impl<S> Dispatcher<S> {
         // SAFETY: the flag above guarantees no other `&mut S` is live for the
         // duration of this call (any reentrant `emit` sees the flag set and
         // queues instead of calling `deliver`), and the caller guarantees the
-        // pointer is valid.
+        // pointer is valid. `in_dispatch` only excludes a reentrant call on
+        // *this* `Dispatcher`; it is a per-dispatcher `Cell` and a second
+        // `Dispatcher<S>` built over the same `*mut S` would not consult it.
+        // What excludes that case is this call's own `# Safety` clause above
+        // (no live aliasing `&mut S`), which `Backend::run`'s `ReentryGuard`
+        // discharges by refusing a second concurrent `run`.
         unsafe { deliver(ctx, &mut *self.state, ev) };
 
         // Drain whatever the handler queued. `pop_front` borrows only for the
