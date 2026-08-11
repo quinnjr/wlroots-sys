@@ -5,14 +5,18 @@
 
 pub(crate) mod sys;
 
+mod backend;
 mod dispatch;
 mod display;
 mod error;
+mod handler;
 mod id;
 mod output;
 
+pub use backend::Backend;
 pub use display::{Display, EventLoop};
 pub use error::{Error, Result};
+pub use handler::OutputHandler;
 pub use id::OutputId;
 pub use output::Output;
 

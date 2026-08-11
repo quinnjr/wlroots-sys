@@ -5,16 +5,6 @@
 //! monotonic id is attached to the C object with `wlr_addon`, wlroots' own
 //! mechanism for data whose lifetime is bound to an object. wlroots runs our
 //! destructor at exactly the right moment, so nothing has to be swept.
-//!
-//! `attach_id` and `find_id` have no callers outside this module's tests yet —
-//! `Output` (Task 5) and its constructors (Task 7/8) are what will wire them
-//! up — so the module is expected to be dead code for now rather than muted
-//! item-by-item. `expect` (rather than `allow`) makes the compiler flag this
-//! attribute itself as unnecessary the moment those callers land, so it is
-//! self-deleting on schedule. Scoped to `not(test)`: the test module is
-//! itself a caller, so under `cfg(test)` nothing is dead and an unconditional
-//! `expect` would warn as unfulfilled there instead.
-#![cfg_attr(not(test), expect(dead_code))]
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};

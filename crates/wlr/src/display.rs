@@ -111,11 +111,6 @@ pub struct EventLoop<'d> {
 }
 
 impl<'d> EventLoop<'d> {
-    // Unused outside this module's tests until the dispatch-time constructors
-    // that call this for real are wired up; `expect` (rather than `allow`)
-    // makes the compiler flag this attribute itself as unnecessary the
-    // moment those callers land.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn as_ptr(&self) -> *mut sys::wl_event_loop {
         self.raw.as_ptr()
     }
