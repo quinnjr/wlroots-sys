@@ -1,0 +1,32 @@
+[package]
+name = "wlr"
+# The minor tracks the wlroots minor this branch binds, which is what README.md
+# tells consumers and how `wlr-sys` is versioned. Not a semver-from-zero
+# sequence: publishing a 0.1.0 would make that promise false on the first
+# release and leave no way back to 0.15 without an unexplained jump.
+version = "0.15.0"
+description = "Safe bindings to wlroots"
+keywords = ["wayland", "wlroots", "compositor"]
+categories = ["api-bindings", "gui"]
+readme = "README.md"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# This branch binds wlroots 0.15, so it names the workspace member directly.
+# A `version` alone would resolve the published copy instead, putting two
+# packages with `links = "wlroots"` in the graph and breaking the whole
+# workspace. Every other wlroots minor lives on its own branch, each with its
+# own `wlr` minor — cargo cannot resolve a manifest listing two of them.
+wlr-sys = { version = "0.15", path = "../wlr-sys" }
+
+[dev-dependencies]
+trybuild = "1.0"
+# Asserts the `!Send`/`!Sync` premise the thread-local dispatch guard rests on.
+# A negative trait bound cannot be written directly, and the obvious
+# alternative — a `trybuild` fixture — pins rustc's *diagnostic text*, which
+# varies with whether `rust-src` is installed. That made the fixture pass
+# locally and fail in CI's container. This asserts the property itself.
+static_assertions = "1.1"

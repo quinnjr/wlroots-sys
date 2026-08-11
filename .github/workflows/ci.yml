@@ -68,6 +68,14 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      # `wlr` too, and not only for symmetry: its rustdoc is the crate's front
+      # page and its `pub(crate)` constructors are easy to link to by accident
+      # from public docs, which `-D warnings` rejects and nothing else catches.
+      # Three such links reached a release branch before this step existed.
+      - run: cargo doc -p wlr --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
       - run: cargo run -p wlr-sys --example headless
 
       # --- non-default feature sets ----------------------------------------
