@@ -22,8 +22,11 @@ impl Display {
         // bare name, so this glob import is load-bearing there; its `dlopen`
         // expansion instead goes through a function-pointer table on the handle
         // and never references the name, so the same import is unused there.
-        // `allow` (not `expect`) because the reverse would fire in the default,
-        // non-`dlopen` build, where the import genuinely is used — don't
+        // `allow` (not `expect`) because the non-`dlopen` build is the default —
+        // the one `cargo test`, `cargo clippy`, and CI's primary lint gate all
+        // exercise — and the import genuinely is used there. `expect` would
+        // break that everyday build, and it would fail as a plain, unrelated-
+        // looking lint diagnostic with no pointer back to this comment. Do not
         // "upgrade" this to `expect`.
         #[allow(unused_imports)]
         use sys::wayland_sys::server::*;
