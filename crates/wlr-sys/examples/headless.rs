@@ -13,7 +13,18 @@
 
 use wayland_sys::ffi_dispatch;
 // Glob-imported because `ffi_dispatch!` calls these as bare names when
-// `wayland-sys` is linked directly rather than dlopen'd.
+// `wayland-sys` is linked directly rather than dlopen'd. Under `dlopen` the
+// macro goes through the handle's function table instead and the glob becomes
+// unused, so the import is load-bearing in one configuration and dead in the
+// other.
+//
+// `allow`, not `expect`, and do not "upgrade" it: linking directly is the
+// *default* configuration — what every ordinary `cargo build`/`test`/`clippy`
+// run and CI's main lint gate compile. There the import is genuinely used and
+// no lint fires, so an `expect` would go unfulfilled and break the everyday
+// build. It would also fail as an unrelated-looking diagnostic rather than
+// pointing back here.
+#[allow(unused_imports)]
 use wayland_sys::server::*;
 
 fn main() {
