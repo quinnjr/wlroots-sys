@@ -289,8 +289,11 @@ unsafe fn ffi_wl_list_remove(link: *mut wl_list) {
     use wayland_sys::ffi_dispatch;
     // Load-bearing without `dlopen`, where `ffi_dispatch!` calls `wl_list_remove`
     // as a bare name; unused with it, where the call goes through the handle's
-    // function table. `allow`, not `expect` — `expect` would fire in the default
-    // build, where the import is genuinely used.
+    // function table. `allow`, not `expect`, and do not "upgrade" it: the
+    // non-`dlopen` build is the default one CI and every ordinary `cargo test`
+    // runs, and there the import is used and no lint fires — so an `expect`
+    // would go unfulfilled and break the everyday build. Same reasoning as
+    // `examples/headless.rs`, which explains it at length.
     #[allow(unused_imports)]
     use wayland_sys::server::*;
     unsafe {
