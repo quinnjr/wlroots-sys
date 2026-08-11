@@ -51,6 +51,24 @@ impl ToplevelId {
     pub fn dangling_for_test() -> ToplevelId {
         ToplevelId(u64::MAX)
     }
+
+    /// A distinct id no live toplevel can have, for testing.
+    ///
+    /// Ids issued to real toplevels come from a counter that starts at 1 and
+    /// increments, so no process will reach the top of the range; `n` picks
+    /// one of that reserved band. Public for the same reason
+    /// `dangling_for_test` is: the "unknown id is a miss, not a crash"
+    /// promise needs to be testable by consumers, and a compositor's own
+    /// tests need to drive their handler logic without a client -- and with
+    /// more than one dangling id in play at once, which a single fixed value
+    /// cannot give them.
+    ///
+    /// Callers wanting an id that also never collides with
+    /// [`dangling_for_test`](Self::dangling_for_test)'s must pass `n >= 1`:
+    /// `dangling_nth_for_test(0)` is `dangling_for_test()` itself.
+    pub fn dangling_nth_for_test(n: u64) -> ToplevelId {
+        ToplevelId(u64::MAX - n)
+    }
 }
 
 /// An xdg toplevel, borrowed for the duration of a handler call.
@@ -149,4 +167,48 @@ unsafe fn cstr_field(p: *mut std::os::raw::c_char) -> Option<String> {
     // SAFETY: the caller guarantees `p` is a live NUL-terminated string; this
     // copies it out and never frees it.
     Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ToplevelId;
+
+    /// Both test constructors sit at the top of the id space, which a
+    /// process-wide counter starting at 1 and only ever incrementing can
+    /// never reach -- so neither can collide with a real toplevel's id.
+    #[test]
+    fn test_constructors_never_collide_with_a_real_id() {
+        assert!(ToplevelId::dangling_for_test().0 > u32::MAX as u64);
+        for n in 1..=8 {
+            assert!(ToplevelId::dangling_nth_for_test(n).0 > u32::MAX as u64);
+        }
+    }
+
+    /// The whole point of `dangling_nth_for_test`: distinct `n` must produce
+    /// distinct ids, unlike `dangling_for_test`'s single fixed value.
+    ///
+    /// `n = 0` is excluded: `u64::MAX - 0` is `u64::MAX`, the same value
+    /// `dangling_for_test` returns, so callers wanting an id distinct from
+    /// every other test id (including `dangling_for_test`'s) must start `n`
+    /// at 1 -- which is what `ToplevelKey::for_test`'s consumers do.
+    #[test]
+    fn nth_for_test_is_distinguishable_by_n() {
+        let ids: Vec<ToplevelId> = (1..=8).map(ToplevelId::dangling_nth_for_test).collect();
+        for i in 0..ids.len() {
+            for j in 0..ids.len() {
+                assert_eq!(i == j, ids[i] == ids[j]);
+            }
+        }
+    }
+
+    /// `dangling_nth_for_test` (for `n >= 1`) must not collide with
+    /// `dangling_for_test` either, since a test might reasonably use both in
+    /// the same suite.
+    #[test]
+    fn nth_for_test_does_not_collide_with_dangling_for_test() {
+        let base = ToplevelId::dangling_for_test();
+        for n in 1..=8 {
+            assert_ne!(base, ToplevelId::dangling_nth_for_test(n));
+        }
+    }
 }

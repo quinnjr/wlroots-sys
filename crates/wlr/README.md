@@ -24,6 +24,21 @@ follows on the same branches, not because they are on crates.io yet.
 The API is held identical across all four, so once they ship, moving between
 them is a version change rather than a code change.
 
+## 0.20.3
+
+Testing utility, no protocol surface.
+
+- `ToplevelId::dangling_nth_for_test(n)`: like `dangling_for_test`, an id no
+  live toplevel can ever have, but distinguishable by `n` -- a consumer
+  driving handler logic for more than one toplevel without a real client
+  needs ids that compare unequal to each other, which a single fixed
+  dangling value can't give it. `n = 0` collides with `dangling_for_test`'s
+  value on purpose (both sit at the top of the same reserved id band); pass
+  `n >= 1` for an id distinct from that one too.
+
+The seat (`SeatHandler`'s methods) is still 0.20.1's empty trait; it did not
+land in this release and remains planned for a later 0.20.x.
+
 ## 0.20.2
 
 xdg-shell.
@@ -58,7 +73,8 @@ Event sources and the scene graph.
   stops when the consumer says so, and flushes clients every turn.
 - `ToplevelHandler` and `SeatHandler` are declared here with no methods, so
   that `Handlers`' supertrait list is fixed from the first release; their
-  methods arrive in 0.20.2 and 0.20.3 and are additive.
+  methods arrive additively in later 0.20.x releases (`ToplevelHandler`'s in
+  0.20.2; `SeatHandler`'s are still pending).
 - `RectId` and the `Runtime::*_rect` family — solid-colour scene nodes.
 - `Output::size`, `Output::schedule_frame`,
   `Output::enable_with_preferred_mode`, `Display::add_socket_auto`,
