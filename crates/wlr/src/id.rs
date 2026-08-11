@@ -61,6 +61,23 @@ static ID_ADDON_IMPL: AddonImpl = AddonImpl(sys::wlr_addon_interface {
 #[cfg(test)]
 static DESTROY_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Serialises every test that attaches or destroys an id addon.
+///
+/// [`DESTROY_COUNT`] is process-wide and the test below asserts a *delta* across
+/// its own work, so a second test destroying an id addon on another harness
+/// thread at the same moment would inflate that delta and fail it for the wrong
+/// reason. `backend.rs`'s delivery tests destroy id addons, so they take this
+/// lock too — the alternative is a suite that passes or fails by scheduling.
+#[cfg(test)]
+pub(crate) fn id_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A test that fails while holding this poisons it. The guarded data is `()`,
+    // so there is nothing that could have been left inconsistent, and refusing
+    // to run the remaining tests would turn one real failure into several
+    // spurious ones.
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Called by wlroots when the owning object is destroyed.
 unsafe extern "C" fn id_addon_destroy(addon: *mut sys::wlr_addon) {
     // SAFETY: wlroots only invokes this for addons we registered, all of which
@@ -151,6 +168,8 @@ mod tests {
     /// no display, backend or output — `wlr_addon_set_init` works on any set.
     #[test]
     fn ids_are_unique_stable_and_self_cleaning() {
+        let _serialised = id_test_lock();
+
         // SAFETY: `set` is a live, exclusively-owned value for this scope, and
         // is finished before it drops.
         unsafe {

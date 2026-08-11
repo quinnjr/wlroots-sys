@@ -19,8 +19,6 @@
 //! correct behaviour for real wlroots traffic (it is bounded by however many
 //! objects a compositor can actually destroy in a chain), not an oversight.
 
-#![cfg_attr(not(test), expect(dead_code))]
-
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
@@ -54,11 +52,25 @@ impl<S> Dispatcher<S> {
     }
 
     /// True while a handler is running.
+    ///
+    /// Nothing in the crate needs to ask outside tests — the queueing decision
+    /// is made inside [`Dispatcher::emit`], and `Backend::run`'s re-entry guard
+    /// is about a second *dispatcher* rather than a second event — so this is
+    /// dead code in a non-test build. `expect` rather than `allow`, so the
+    /// attribute itself is flagged the moment a caller appears.
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn is_dispatching(&self) -> bool {
         self.in_dispatch.get()
     }
 
     /// Deliver `ev`, or queue it if a handler is already running.
+    ///
+    /// `ctx` is whatever `deliver` needs besides the state — for this crate,
+    /// the table that turns an [`OutputId`] back into a live object. It is
+    /// threaded through rather than captured because `deliver` is a plain `fn`
+    /// pointer: the dispatcher stores no closure, so there is nothing for a
+    /// closure to borrow from and no lifetime to smuggle past `emit`'s
+    /// reentrancy guard.
     ///
     /// # Safety
     ///
@@ -73,7 +85,10 @@ impl<S> Dispatcher<S> {
     /// pointer, and any reentrant `emit` call (e.g. from inside `deliver`)
     /// must be made through that raw pointer, not through a reference derived
     /// from `S`.
-    pub(crate) unsafe fn emit(&self, ev: Event, deliver: fn(&mut S, Event)) {
+    ///
+    /// `ctx` is borrowed only for the call, so it may overlap this dispatcher —
+    /// both borrows are shared.
+    pub(crate) unsafe fn emit<C>(&self, ctx: &C, ev: Event, deliver: fn(&C, &mut S, Event)) {
         if self.in_dispatch.get() {
             self.deferred.borrow_mut().push_back(ev);
             return;
@@ -85,7 +100,7 @@ impl<S> Dispatcher<S> {
         // duration of this call (any reentrant `emit` sees the flag set and
         // queues instead of calling `deliver`), and the caller guarantees the
         // pointer is valid.
-        unsafe { deliver(&mut *self.state, ev) };
+        unsafe { deliver(ctx, &mut *self.state, ev) };
 
         // Drain whatever the handler queued. `pop_front` borrows only for the
         // statement, so a handler may queue more while we deliver.
@@ -94,7 +109,7 @@ impl<S> Dispatcher<S> {
             match next {
                 // SAFETY: as above — still inside the guarded region, so no
                 // other `&mut S` can be live.
-                Some(ev) => unsafe { deliver(&mut *self.state, ev) },
+                Some(ev) => unsafe { deliver(ctx, &mut *self.state, ev) },
                 None => break,
             }
         }
@@ -123,11 +138,11 @@ mod tests {
         dispatcher: *const Dispatcher<Recorder>,
     }
 
-    fn deliver(state: &mut Recorder, ev: Event) {
+    fn deliver(_ctx: &(), state: &mut Recorder, ev: Event) {
         state.seen.push(ev);
         if let Some(inner) = state.reenter_with.take() {
             // SAFETY: the dispatcher outlives the test body.
-            unsafe { (*state.dispatcher).emit(inner, deliver) };
+            unsafe { (*state.dispatcher).emit(&(), inner, deliver) };
         }
     }
 
@@ -151,7 +166,7 @@ mod tests {
 
         // SAFETY: `state` outlives `d` for the duration of this call, and is
         // reached only through `p`'s provenance from here on.
-        unsafe { d.emit(Event::OutputFrame(OutputId(1)), deliver) };
+        unsafe { d.emit(&(), Event::OutputFrame(OutputId(1)), deliver) };
 
         // `p`'s last use was inside `emit` above, so reading through the
         // original `state` binding here does not conflict with it.
@@ -179,8 +194,8 @@ mod tests {
 
         // SAFETY: as above.
         unsafe {
-            d.emit(Event::NewOutput(OutputId(7)), deliver);
-            d.emit(Event::OutputFrame(OutputId(7)), deliver);
+            d.emit(&(), Event::NewOutput(OutputId(7)), deliver);
+            d.emit(&(), Event::OutputFrame(OutputId(7)), deliver);
         }
 
         assert_eq!(
@@ -213,11 +228,11 @@ mod tests {
         dispatcher: *const Dispatcher<TracingRecorder>,
     }
 
-    fn tracing_deliver(state: &mut TracingRecorder, ev: Event) {
+    fn tracing_deliver(_ctx: &(), state: &mut TracingRecorder, ev: Event) {
         state.trace.push(Trace::Enter(ev));
         if let Some(inner) = state.reenter_with.take() {
             // SAFETY: the dispatcher outlives the test body.
-            unsafe { (*state.dispatcher).emit(inner, tracing_deliver) };
+            unsafe { (*state.dispatcher).emit(&(), inner, tracing_deliver) };
         }
         state.trace.push(Trace::Exit(ev));
     }
@@ -244,7 +259,7 @@ mod tests {
 
         // SAFETY: `state` outlives `d` for the duration of this call, and is
         // reached only through `p`'s provenance from here on.
-        unsafe { d.emit(Event::OutputFrame(OutputId(1)), tracing_deliver) };
+        unsafe { d.emit(&(), Event::OutputFrame(OutputId(1)), tracing_deliver) };
 
         assert_eq!(
             state.trace,

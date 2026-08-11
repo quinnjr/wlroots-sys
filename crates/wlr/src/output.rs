@@ -33,12 +33,6 @@ impl<'h> Output<'h> {
     /// absence (it panics rather than reading invalid memory), so attaching
     /// one is a correctness concern for callers of `id`, not a soundness
     /// precondition of this constructor.
-    ///
-    /// Unused outside this module's tests until the dispatch-time
-    /// constructors that call this for real are wired up; `expect` (rather
-    /// than `allow`) makes the compiler flag this attribute itself as
-    /// unnecessary the moment those callers land.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) unsafe fn from_raw(raw: *mut sys::wlr_output) -> Output<'h> {
         Output {
             raw: NonNull::new(raw).expect("wlroots handed us a null output"),
@@ -55,10 +49,9 @@ impl<'h> Output<'h> {
     ///
     /// # Panics
     ///
-    /// Panics if no id addon is attached. Nothing attaches one yet — that
-    /// wiring lands alongside the dispatch-time constructors that call
-    /// `Output::from_raw` for real. Until then this method is unreachable
-    /// from outside the crate's own tests.
+    /// Panics if no id addon is attached. Unreachable for a handle a handler
+    /// was given: every output this crate hands out has had an id attached
+    /// when wlroots announced it, before any handler could see it.
     pub fn id(&self) -> OutputId {
         // SAFETY: the handle's lifetime guarantees the output is live.
         let id = unsafe { find_id(&raw const (*self.raw.as_ptr()).addons) };

@@ -27,13 +27,14 @@
 //!    aborted the process since Rust 1.81, so the code reached from one avoids
 //!    panicking paths where the condition is recoverable; see [`ensure_id`].
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use crate::dispatch::{Dispatcher, Event};
 use crate::id::{attach_id, find_id};
-use crate::{Display, Error, EventLoop, OutputHandler, OutputId, Result, sys};
+use crate::{Display, Error, EventLoop, Output, OutputHandler, OutputId, Result, sys};
 
 /// A wlroots backend.
 ///
@@ -70,6 +71,14 @@ pub struct Backend<'d> {
     /// is no window in which it reads `true` for a freed backend.
     alive: Box<Cell<bool>>,
 
+    /// Whether `wlr_backend_start` has already been called.
+    ///
+    /// Not merely bookkeeping: wlroots documents that starting a backend "may
+    /// signal new_input or new_output immediately", and the headless backend
+    /// does exactly that — it announces every output it already has from inside
+    /// `wlr_backend_start`. Starting twice would announce them twice.
+    started: Cell<bool>,
+
     _loop: PhantomData<&'d ()>,
 }
 
@@ -81,25 +90,43 @@ pub struct Backend<'d> {
 /// Deliberately *not* generic over the handler state `S`. The destroy watch is
 /// created by [`Backend::autocreate`], which has no `S` to speak of, and making
 /// this type generic would force a second listener type and a second
-/// `Registration` to go with it. Instead `dispatcher` is type-erased and only
+/// `Registration` to go with it. Instead `session` is type-erased and only
 /// the notify function that installed it — which does know `S` — casts it back.
 #[repr(C)]
 struct Bound {
     listener: sys::wl_listener,
 
-    /// An erased `*const Dispatcher<S>`, or null for listeners that route no
+    /// An erased `*const Session<S>`, or null for listeners that route no
     /// events (the destroy watch).
     ///
     /// The obligation this creates is the same one [`bound_of`] already carried:
     /// a notify function must be paired with the `S` its `Bound` was built for.
-    /// It is discharged in exactly two places — `Backend::autocreate` pairs null
-    /// with [`on_backend_destroy`], which never reads it, and `Backend::run`
-    /// pairs a `*const Dispatcher<S>` with `on_new_output::<S>` for the same
-    /// `S`.
-    dispatcher: *const (),
+    /// Every site that creates one pairs the two in a single expression, so the
+    /// `S` cannot drift apart from the callback:
+    ///
+    /// * [`Backend::autocreate`] pairs null with [`on_backend_destroy`], which
+    ///   never reads it.
+    /// * [`Backend::run`] pairs its `*const Session<S>` with
+    ///   `on_new_output::<S>`.
+    /// * [`on_new_output`] — already instantiated at one `S` — forwards *its
+    ///   own* `session` to `on_frame::<S>` and `on_output_destroy::<S>` at the
+    ///   same `S`, so the pairing is inherited rather than re-derived.
+    session: *const (),
 
-    /// The owning [`Backend`]'s liveness flag; see [`Registration::drop`].
+    /// The liveness flag of whatever owns the signal this listener is linked
+    /// into, or null when that owner cannot die first; see
+    /// [`Registration::drop`].
     alive: *const Cell<bool>,
+
+    /// The output this listener belongs to, for the per-output listeners; `None`
+    /// for the two backend-level ones.
+    ///
+    /// Carried here rather than looked up from the output's addon set at
+    /// callback time so that delivery cannot depend on a lookup that might miss.
+    /// A miss in [`on_output_destroy`] would leave the registry holding a
+    /// pointer to an output wlroots is about to free — the single failure this
+    /// whole design exists to prevent.
+    id: Option<OutputId>,
 }
 
 // `bound_of`'s cast is sound only while `listener` is `Bound`'s first field, at
@@ -122,11 +149,11 @@ impl Registration {
     ///
     /// # Safety
     ///
-    /// * `signal` must point at an initialised `wl_signal` owned by the backend
-    ///   whose liveness `alive` tracks, and that backend must either outlive the
-    ///   returned `Registration` or clear `alive` before freeing itself.
-    /// * `alive` must outlive the returned `Registration`.
-    /// * `dispatcher` must be either null, or a `*const Dispatcher<S>` for the
+    /// * `signal` must point at an initialised `wl_signal` whose owner either
+    ///   outlives the returned `Registration` or clears `alive` before freeing
+    ///   itself. Passing null for `alive` asserts the former outright.
+    /// * `alive`, if non-null, must outlive the returned `Registration`.
+    /// * `session` must be either null, or a `*const Session<S>` for the
     ///   same `S` that `notify` casts it back to, valid for as long as the
     ///   returned `Registration` lives and satisfying `Dispatcher::emit`'s
     ///   contract for every call `notify` makes through it.
@@ -135,8 +162,9 @@ impl Registration {
     unsafe fn link(
         signal: *mut sys::wl_signal,
         notify: sys::wl_notify_func_t,
-        dispatcher: *const (),
+        session: *const (),
         alive: *const Cell<bool>,
+        id: Option<OutputId>,
     ) -> Self {
         let mut bound = Box::new(Bound {
             listener: sys::wl_listener {
@@ -148,8 +176,9 @@ impl Registration {
                 },
                 notify,
             },
-            dispatcher,
+            session,
             alive,
+            id,
         });
 
         // SAFETY: the caller guarantees `signal` is an initialised `wl_signal`,
@@ -164,12 +193,27 @@ impl Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        // SAFETY: `link` required `alive` to outlive this `Registration`, so it
-        // is live here. Only a shared read of a `Cell<bool>`, and every access
-        // to it is on the event loop's single thread.
-        let alive = unsafe { (*self.bound.alive).get() };
+        // A null flag means the signal's owner cannot predecease this
+        // registration, so there is nothing to consult. That is how the
+        // per-output listeners are registered, and it is a stronger claim than
+        // the flag rather than a weaker one: wlroots emits an output's
+        // `events.destroy` *before* it frees the output, and
+        // [`on_output_destroy`] drops these two registrations from inside that
+        // emission — so a per-output registration reaching this point at all
+        // proves its output is still alive. Reusing the *backend*'s flag here
+        // would be actively wrong: the multi-backend emits its own destroy
+        // before tearing its sub-backends (and so their outputs) down, so the
+        // flag can already read false while the output is very much alive and
+        // still needs unlinking from.
+        let owner_alive = self.bound.alive.is_null() || {
+            // SAFETY: `link` required a non-null `alive` to outlive this
+            // `Registration`, so it is live here. Only a shared read of a
+            // `Cell<bool>`, and every access to it is on the event loop's
+            // single thread.
+            unsafe { (*self.bound.alive).get() }
+        };
 
-        if !alive {
+        if !owner_alive {
             // The backend owning the signal was destroyed while this listener
             // was linked into it, so the neighbours this listener names are
             // freed and there is nothing valid to unlink from. Dropping the box
@@ -203,6 +247,88 @@ fn alive_or_err(alive: &Cell<bool>) -> Result<()> {
     }
 }
 
+/// Everything one [`Backend::run`] call owns and its callbacks reach.
+///
+/// The registry is the point of it. A deferred [`Event`] carries an
+/// [`OutputId`] rather than a pointer, because the object may be destroyed
+/// between queueing and delivery — so delivery has to turn the id back into a
+/// pointer, and that is only sound if a destroyed output cannot still be found
+/// here. [`on_output_destroy`] removes the entry synchronously, from inside the
+/// emission wlroots performs *before* freeing the output, so a lookup after
+/// destruction misses and the event is dropped.
+///
+/// Owned by `run` rather than by the [`Backend`], and that is forced rather than
+/// chosen: the per-output listeners in an entry must call handlers on `S`, and
+/// `S` is chosen per `run` call. A registry outliving the call would outlive the
+/// `Dispatcher<S>` and the `&mut S` its listeners name, and any output signal
+/// firing afterwards — a consumer driving [`crate::EventLoop::dispatch`]
+/// themselves is enough — would dereference both. A process-wide or
+/// thread-local registry has the same defect and adds another: two backends, or
+/// two successive `run` calls, would share one table and hand out each other's
+/// outputs.
+///
+/// The visible cost is that outputs announced during one `run` are not
+/// re-announced by the next one; wlroots offers no way to enumerate a backend's
+/// existing outputs, so there is nothing to replay from.
+struct Session<S> {
+    dispatcher: Dispatcher<S>,
+    outputs: RefCell<HashMap<OutputId, OutputEntry>>,
+}
+
+/// One live output, and this session's listeners on it.
+///
+/// Field order is load-bearing in the same way [`Backend`]'s is: the two
+/// registrations must drop — and so unlink from the output's signals — as part
+/// of removing the entry, which happens while the output is still alive.
+struct OutputEntry {
+    raw: *mut sys::wlr_output,
+    _frame: Registration,
+    _destroy: Registration,
+}
+
+thread_local! {
+    /// Set while a [`Backend::run`] call is on the stack.
+    ///
+    /// Thread-scoped rather than a field of the [`Backend`], because the hazard
+    /// is two dispatchers over one `&mut S` and nothing ties the second `run` to
+    /// the same backend: a handler holding a `&Backend` for a *different*
+    /// backend reaches it just as easily, and the aliasing is identical. A
+    /// per-backend flag would miss that. Thread-scoped is as wide as this can
+    /// usefully go — wlroots' event loop is single-threaded, and two threads
+    /// each driving their own display are genuinely independent.
+    static RUNNING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Marks [`Backend::run`] as being on the stack, and clears the mark on the way
+/// out — including the `?` paths, which is why it is a guard and not a pair of
+/// assignments.
+struct ReentryGuard {
+    /// Nothing to hold; the field exists only so the guard cannot be
+    /// constructed without going through [`ReentryGuard::acquire`].
+    _private: (),
+}
+
+impl ReentryGuard {
+    fn acquire() -> Result<Self> {
+        RUNNING.with(|running| {
+            if running.get() {
+                return Err(Error::Reentrant("Backend::run"));
+            }
+            running.set(true);
+            Ok(ReentryGuard { _private: () })
+        })
+    }
+}
+
+impl Drop for ReentryGuard {
+    fn drop(&mut self) {
+        // Only ever reached for a guard that `acquire` handed out, so this
+        // never clears a flag it did not set: the failing path returns before
+        // constructing one.
+        RUNNING.with(|running| running.set(false));
+    }
+}
+
 impl<'d> Backend<'d> {
     /// Create whichever backend suits the environment.
     pub fn autocreate(loop_: &EventLoop<'d>) -> Result<Self> {
@@ -229,13 +355,15 @@ impl<'d> Backend<'d> {
         // the `Backend` returned below does not move the flag, and the
         // `_death_watch` field is declared before `alive` so it drops — and so
         // reads the flag — while the flag is still there. `on_backend_destroy`
-        // never reads `dispatcher`, so null is the honest value for it.
+        // never reads `session` or `id`, so null and `None` are the honest
+        // values for them.
         let death_watch = unsafe {
             Registration::link(
                 &raw mut (*raw.as_ptr()).events.destroy,
                 on_backend_destroy,
                 std::ptr::null(),
                 &raw const *alive,
+                None,
             )
         };
 
@@ -243,11 +371,27 @@ impl<'d> Backend<'d> {
             raw,
             _death_watch: death_watch,
             alive,
+            started: Cell::new(false),
             _loop: PhantomData,
         })
     }
 
-    /// Start the backend. New outputs are announced after this returns.
+    /// Start the backend.
+    ///
+    /// Calling this is optional: [`Backend::run`] starts the backend itself if
+    /// it is not started yet, and that — not this — is the way to see the
+    /// outputs a backend already has. wlroots' own header warns that starting
+    /// "may signal new_input or new_output immediately", and it means it: the
+    /// headless backend announces every output it holds from *inside*
+    /// `wlr_backend_start`. Since handlers are installed by `run`, a
+    /// `start(); run();` sequence installs them one call too late and never
+    /// hears about those outputs.
+    ///
+    /// So this is for a consumer driving [`crate::EventLoop::dispatch`]
+    /// themselves, who has no handlers for the announcement to reach anyway.
+    /// Starting twice is prevented rather than merely discouraged — the second
+    /// start would re-announce every existing output — so calling this and then
+    /// `run` is harmless apart from the missed announcements.
     ///
     /// # Errors
     ///
@@ -255,6 +399,9 @@ impl<'d> Backend<'d> {
     /// [`Backend::run`].
     pub fn start(&self) -> Result<()> {
         alive_or_err(&self.alive)?;
+        if self.started.get() {
+            return Ok(());
+        }
 
         // SAFETY: `raw` is `NonNull`, is only ever set by `autocreate` from a
         // successful `wlr_backend_autocreate`, and is never reassigned — so the
@@ -269,16 +416,23 @@ impl<'d> Backend<'d> {
         // unplugged frees the backend independently of the display (see rule 2
         // in the module header).
         if unsafe { sys::wlr_backend_start(self.raw.as_ptr()) } {
+            self.started.set(true);
             Ok(())
         } else {
             Err(Error::Operation("wlr_backend_start"))
         }
     }
 
-    /// Wire up handlers and dispatch `iterations` turns of the event loop.
+    /// Wire up handlers, start the backend if it is not started yet, and
+    /// dispatch `iterations` turns of the event loop.
     ///
     /// Takes a count rather than blocking forever so tests terminate; a
     /// blocking loop belongs with signal handling in a later slice.
+    ///
+    /// Handlers are installed for the duration of this call only, so an output
+    /// announced during one call is not announced again by the next: wlroots
+    /// offers no way to enumerate a backend's existing outputs, so there is
+    /// nothing to replay from. In practice that means one `run`.
     ///
     /// # Errors
     ///
@@ -288,6 +442,17 @@ impl<'d> Backend<'d> {
     /// ordinary hardware event rather than a programming error. Once it
     /// happens, every later call on this `Backend` fails the same way; the
     /// value is inert and should be dropped.
+    ///
+    /// [`Error::Reentrant`] if called from inside one of its own handlers.
+    /// A consumer whose state holds a `&Backend` can reach this — nothing in
+    /// the signature stops them — and it has to be refused rather than
+    /// tolerated: a second `run` would build a second dispatcher over the same
+    /// `&mut S`, and two dispatchers cannot see each other's reentrancy
+    /// guard, so the `&mut S` the outer call is holding would be aliased. (It
+    /// would also install a second `new_output` listener and duplicate every
+    /// announcement, but that is only the visible symptom.)
+    ///
+    /// [`Error::Operation`] if starting the backend fails.
     pub fn run<S: OutputHandler>(
         &self,
         display: &Display,
@@ -295,14 +460,21 @@ impl<'d> Backend<'d> {
         iterations: u32,
     ) -> Result<()> {
         alive_or_err(&self.alive)?;
+        // Taken before anything else is built, so a refused re-entry perturbs
+        // nothing at all — in particular it does not register a listener or
+        // start the backend on its way to returning the error.
+        let _reentry = ReentryGuard::acquire()?;
 
         // `state` is consumed into a raw pointer here and never touched as a
         // reference again for the rest of this function, so no `&mut S` is live
         // while a callback delivers through the dispatcher.
-        let dispatcher = Dispatcher::new(&raw mut *state);
+        let session = Session {
+            dispatcher: Dispatcher::new(&raw mut *state),
+            outputs: RefCell::new(HashMap::new()),
+        };
 
-        // Declared after `dispatcher`, so it drops — and therefore decides
-        // about unlinking — while the dispatcher it names is still alive. Bound
+        // Declared after `session`, so it drops — and therefore decides
+        // about unlinking — while the session it names is still alive. Bound
         // to a named `_new_output` rather than to `_`, which would drop it at
         // the end of its own statement and unregister before the loop ran.
         //
@@ -311,18 +483,25 @@ impl<'d> Backend<'d> {
         // to outlive this registration, because the destroy watch installed in
         // `autocreate` clears `self.alive` before wlroots frees it. That flag
         // lives in a box owned by `self`, which outlives this call. `S` never
-        // learns of the dispatcher, so nothing can hold a reference to it
-        // across `emit` — the aliasing condition `Dispatcher::emit` requires —
-        // and `on_new_output::<S>` casts the erased pointer back to the very
-        // `Dispatcher<S>` paired with it here.
+        // learns of the session, so nothing can hold a reference to it across
+        // `emit` — the aliasing condition `Dispatcher::emit` requires — and
+        // `on_new_output::<S>` casts the erased pointer back to the very
+        // `Session<S>` paired with it here. `session` is a local that is never
+        // moved after this point, so the address stays valid for the call.
         let _new_output = unsafe {
             Registration::link(
                 &raw mut (*self.raw.as_ptr()).events.new_output,
                 on_new_output::<S>,
-                (&raw const dispatcher).cast::<()>(),
+                (&raw const session).cast::<()>(),
                 &raw const *self.alive,
+                None,
             )
         };
+
+        // Only now, with the listener in place. `wlr_backend_start` announces
+        // the backend's existing outputs synchronously, so starting before this
+        // point would emit them into an empty signal; see [`Backend::start`].
+        self.start()?;
 
         let loop_ = display.event_loop();
         for _ in 0..iterations {
@@ -424,34 +603,148 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
 ) {
     // SAFETY: wlroots invokes this only for the listener `Backend::run` linked
     // into `events.new_output`, which is the `listener` field of a live `Bound`
-    // whose `dispatcher` was paired with this very instantiation — same `S` —
-    // and is valid for as long as that registration exists. The `new_output`
-    // signal carries a `*mut wlr_output`, so the cast of `data` matches what
-    // wlroots documents it to pass.
+    // whose `session` was paired with this very instantiation — same `S` — and
+    // is valid for as long as that registration exists. The `new_output` signal
+    // carries a `*mut wlr_output`, so the cast of `data` matches what wlroots
+    // documents it to pass, and the output is live and fully initialised at the
+    // point wlroots announces it — including its addon set and its own signals.
+    // The two registrations below name that output's signals and are dropped
+    // while it is still alive (in `on_output_destroy`, or with the session at
+    // the end of `run`), which is what lets them pass a null liveness flag.
     unsafe {
         let bound = bound_of(l);
-        let dispatcher = (*bound).dispatcher.cast::<Dispatcher<S>>();
+        let session = (*bound).session.cast::<Session<S>>();
         let output = data.cast::<sys::wlr_output>();
 
         // Give the output an identity before anyone can ask for one.
         let id = ensure_id(&raw mut (*output).addons);
 
-        (*dispatcher).emit(Event::NewOutput(id), deliver::<S>);
+        // `(*bound).session` is forwarded verbatim rather than re-derived, so
+        // these two callbacks are instantiated at the `S` that pointer already
+        // belongs to — the pairing `Bound::session` documents.
+        let frame = Registration::link(
+            &raw mut (*output).events.frame,
+            on_frame::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            Some(id),
+        );
+        let destroy = Registration::link(
+            &raw mut (*output).events.destroy,
+            on_output_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            Some(id),
+        );
+
+        // Registered before the handler is told, so that a handler asking about
+        // this output — or anything deferred behind it — can resolve the id.
+        // The borrow ends with the statement, before any handler runs.
+        (*session).outputs.borrow_mut().insert(
+            id,
+            OutputEntry {
+                raw: output,
+                _frame: frame,
+                _destroy: destroy,
+            },
+        );
+
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::NewOutput(id), deliver::<S>);
     }
 }
 
+unsafe extern "C" fn on_frame<S: OutputHandler>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener `on_new_output` linked
+    // into an output's `events.frame`, which is the `listener` field of a live
+    // `Bound` — live because the registration owning it is removed from the
+    // session's registry, and so unlinked from this signal, before the output
+    // is freed. Its `session` is the same erased `*const Session<S>` that
+    // `on_new_output::<S>` was itself paired with.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<S>>();
+        // Cannot be `None`: `on_new_output` is the only site that installs this
+        // callback and it always supplies an id. Handled rather than unwrapped
+        // because this is an `extern "C"` frame, where a panic aborts.
+        let Some(id) = (*bound).id else { return };
+
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::OutputFrame(id), deliver::<S>);
+    }
+}
+
+/// An output is about to be freed. Forget it *now*, whatever the handler does.
+unsafe extern "C" fn on_output_destroy<S: OutputHandler>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_frame` — wlroots invokes this only for the listener
+    // `on_new_output` linked into this output's `events.destroy`, and the
+    // output is still alive for the duration of the emission.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<S>>();
+        let Some(id) = (*bound).id else { return };
+
+        // Both values this frame still needs have been copied out of `*bound`
+        // above, because the next statement frees it: removing the entry drops
+        // its two registrations, one of which owns this very `Bound`. Unlinking
+        // the currently-firing listener is what `wl_signal_emit_mutable`
+        // exists to tolerate — it advances its cursor past this listener before
+        // calling us — so the emission walking the rest of the list is
+        // unaffected. `bound` is dangling from here on and is not touched again.
+        //
+        // This happens before the event is emitted rather than in `deliver`,
+        // and that ordering is the whole soundness argument for deferral: an
+        // `OutputDestroyed` arriving while a handler is already running gets
+        // queued, and wlroots frees the output long before the queue drains. If
+        // the entry were removed at delivery time, any event queued behind it
+        // — including this output's own `NewOutput` — would resolve the id to a
+        // freed output. Removing it here means the lookup simply misses.
+        let entry = (*session).outputs.borrow_mut().remove(&id);
+        drop(entry);
+
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::OutputDestroyed(id), deliver::<S>);
+    }
+}
+
+/// Borrow the output `id` names, if this session still knows of one.
+///
+/// The registry borrow is released before `f` runs: a handler can re-enter
+/// wlroots (committing an output, say), which can fire a signal, which can take
+/// the borrow mutably.
+fn with_output<S>(session: &Session<S>, id: OutputId, f: impl FnOnce(&Output<'_>)) {
+    let raw = session.outputs.borrow().get(&id).map(|entry| entry.raw);
+    let Some(raw) = raw else { return };
+
+    // SAFETY: an entry is removed by `on_output_destroy`, which wlroots runs
+    // from `events.destroy` before it frees the output, so a present entry
+    // names a live output. The handle is created and dropped inside this call,
+    // so it cannot outlive the handler `f` passes it to.
+    let output = unsafe { Output::from_raw(raw) };
+    f(&output);
+}
+
 /// Route an event to the matching handler method.
-fn deliver<S: OutputHandler>(state: &mut S, ev: Event) {
+///
+/// Ids are resolved here rather than carried as handles, which is what makes
+/// deferral sound: an output destroyed between queueing and delivery is simply
+/// absent from the registry and the event is dropped.
+fn deliver<S: OutputHandler>(session: &Session<S>, state: &mut S, ev: Event) {
     match ev {
-        Event::NewOutput(id) | Event::OutputFrame(id) => {
-            // Incomplete on purpose. Re-resolving from an id is what makes
-            // deferral safe — an object destroyed between queueing and
-            // delivery simply is not found — so these arms wait on the
-            // id-to-output registry that the output-registration slice adds.
-            // Until then a `NewOutput`/`OutputFrame` event is accepted and
-            // dropped rather than delivered.
-            let _ = id;
-        }
+        Event::NewOutput(id) => with_output(session, id, |output| state.new_output(output)),
+        Event::OutputFrame(id) => with_output(session, id, |output| state.frame(output)),
+        // No resolution to do, and nothing to drop the event for: the id
+        // outlives the object on purpose, and the handler is told about the
+        // destruction even though nothing is left to hand it.
         Event::OutputDestroyed(id) => state.destroyed(id),
     }
 }
@@ -459,6 +752,7 @@ fn deliver<S: OutputHandler>(state: &mut S, ev: Event) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::alloc::{Layout, alloc_zeroed, dealloc};
 
     /// A listener that is never emitted to by most of these tests; they
     /// exercise linking and unlinking, not delivery.
@@ -532,6 +826,7 @@ mod tests {
                 noop,
                 std::ptr::null(),
                 &raw const (*hp).alive,
+                None,
             );
             assert!(is_linked(hp, noop), "link must register the listener");
 
@@ -558,7 +853,7 @@ mod tests {
         fn link_then_fail(signal: *mut sys::wl_signal, alive: *const Cell<bool>) -> Result<()> {
             // SAFETY: the caller owns a live signal and flag that both outlive
             // this call.
-            let _reg = unsafe { Registration::link(signal, noop, std::ptr::null(), alive) };
+            let _reg = unsafe { Registration::link(signal, noop, std::ptr::null(), alive, None) };
             failing_dispatch()?;
             Ok(())
         }
@@ -596,6 +891,7 @@ mod tests {
                 noop,
                 std::ptr::null(),
                 &raw const (*hp).alive,
+                None,
             );
             let linked_next = (*hp).signal.listener_list.next;
             assert_ne!(
@@ -639,6 +935,7 @@ mod tests {
                 on_backend_destroy,
                 std::ptr::null(),
                 &raw const (*hp).alive,
+                None,
             );
             assert!((*hp).alive.get(), "the flag starts set");
 
@@ -684,6 +981,355 @@ mod tests {
             alive_or_err(&alive),
             Err(Error::Operation("wlr_backend_start")),
             "and is not reported as a C call that failed, since none was made"
+        );
+    }
+
+    /// A `run` already on the stack must refuse a second one.
+    ///
+    /// Reachable from safe code: `run` takes `&self`, `&Backend` is `Copy`, and
+    /// a handler's state may hold one — so a handler can call `run` again. Two
+    /// `run`s means two [`Dispatcher`]s over one `&mut S`, and neither can see
+    /// the other's reentrancy guard, so the aliasing the guard exists to
+    /// prevent happens anyway.
+    #[test]
+    fn a_second_run_is_refused_while_the_first_is_on_the_stack() {
+        let outer = ReentryGuard::acquire().expect("the first run may proceed");
+        assert_eq!(
+            ReentryGuard::acquire().err(),
+            Some(Error::Reentrant("Backend::run")),
+            "a run entered from inside a handler must be refused, and named as \
+             re-entry rather than as a C call that failed"
+        );
+
+        drop(outer);
+        assert!(
+            ReentryGuard::acquire().is_ok(),
+            "a completed run must leave the next one free to start"
+        );
+    }
+
+    /// The guard has to survive the `?` paths too — `run` returns early on a
+    /// failed start and on every dispatch turn — or one error would lock the
+    /// backend out of ever running again.
+    #[test]
+    fn an_early_return_releases_the_re_entry_guard() {
+        fn acquire_then_fail() -> Result<()> {
+            let _guard = ReentryGuard::acquire()?;
+            Err(Error::Operation("simulated failure"))
+        }
+
+        assert!(acquire_then_fail().is_err());
+        assert!(
+            ReentryGuard::acquire().is_ok(),
+            "the guard must clear the flag on the early-return path, or one \
+             failed run would lock the backend out of ever running again"
+        );
+    }
+
+    /// A zeroed, heap-allocated `wlr_output` with its addon set and the two
+    /// signals this crate listens on initialised; freed on drop.
+    ///
+    /// Allocated rather than `std::mem::zeroed`-ed for the reason `output.rs`'s
+    /// copy documents: `wlr_output` embeds `wl_listener`s whose bare function
+    /// pointers are UB to *materialise* as a zero value, so the bytes are only
+    /// ever touched through a raw pointer.
+    struct ScratchOutput(*mut sys::wlr_output);
+
+    impl ScratchOutput {
+        fn new() -> Self {
+            let layout = Layout::new::<sys::wlr_output>();
+            // SAFETY: `wlr_output` has fields, so the layout is non-zero-sized
+            // and `alloc_zeroed` returns either null (checked) or a suitably
+            // aligned, zeroed allocation of exactly that size.
+            let ptr = unsafe { alloc_zeroed(layout) }.cast::<sys::wlr_output>();
+            assert!(!ptr.is_null(), "allocation failed");
+            // SAFETY: `ptr` is a fresh, exclusively-owned, zeroed allocation
+            // sized for a whole `wlr_output`, so all three of these fields are
+            // in bounds; each initialiser writes only the `wl_list` fields it
+            // owns. The allocation does not move again, which matters because
+            // `wl_signal_init` makes each list head point at itself.
+            unsafe {
+                sys::wlr_addon_set_init(&raw mut (*ptr).addons);
+                sys::wl_signal_init(&raw mut (*ptr).events.frame);
+                sys::wl_signal_init(&raw mut (*ptr).events.destroy);
+            }
+            Self(ptr)
+        }
+    }
+
+    impl Drop for ScratchOutput {
+        fn drop(&mut self) {
+            // SAFETY: the addon set was initialised in `new`, so finishing it
+            // undoes exactly that — and runs the id addon's destroy hook, which
+            // is why every test using this type holds `id_test_lock`.
+            unsafe { sys::wlr_addon_set_finish(&raw mut (*self.0).addons) };
+            // SAFETY: allocated by `alloc_zeroed` with this same layout in
+            // `new`, and not used again after this point.
+            unsafe { dealloc(self.0.cast::<u8>(), Layout::new::<sys::wlr_output>()) };
+        }
+    }
+
+    /// Whether `signal` has no listeners left.
+    ///
+    /// # Safety
+    ///
+    /// `signal` must point at an initialised `wl_signal`.
+    unsafe fn signal_is_empty(signal: *mut sys::wl_signal) -> bool {
+        // SAFETY: the caller guarantees the head is initialised, and a `wl_list`
+        // head is empty exactly when it points at itself. Only the head is read;
+        // nothing walks into a listener.
+        unsafe { (*signal).listener_list.next.cast_const() == &raw const (*signal).listener_list }
+    }
+
+    /// A handler state that records what it was told, and can be asked to
+    /// destroy an output from inside `new_output`.
+    #[derive(Default)]
+    struct Recorder {
+        new_outputs: Vec<OutputId>,
+        names: Vec<Option<String>>,
+        frames: Vec<OutputId>,
+        destroyed: Vec<OutputId>,
+
+        /// If set, `new_output` emits this output's `destroy` signal — standing
+        /// in for wlroots destroying an output from underneath a handler, which
+        /// is the case deferral exists for.
+        destroy_from_new_output: Option<*mut sys::wlr_output>,
+
+        /// Whether the output's `frame` listener had already been unlinked by
+        /// the time that destroy emission returned.
+        frame_unlinked_during_destroy: Option<bool>,
+    }
+
+    impl OutputHandler for Recorder {
+        fn new_output(&mut self, output: &Output<'_>) {
+            self.new_outputs.push(output.id());
+            self.names.push(output.name());
+
+            if let Some(out) = self.destroy_from_new_output.take() {
+                // SAFETY: `out` is the live `ScratchOutput` the enclosing test
+                // owns, and its `destroy` signal was initialised there. wlroots
+                // passes the output as the destroy signal's data, so this
+                // mirrors what it does. `on_output_destroy` unlinks itself from
+                // this very list, which `wl_signal_emit_mutable` tolerates.
+                unsafe {
+                    sys::wl_signal_emit_mutable(&raw mut (*out).events.destroy, out.cast());
+                    self.frame_unlinked_during_destroy =
+                        Some(signal_is_empty(&raw mut (*out).events.frame));
+                }
+            }
+        }
+
+        fn frame(&mut self, output: &Output<'_>) {
+            self.frames.push(output.id());
+        }
+
+        fn destroyed(&mut self, id: OutputId) {
+            self.destroyed.push(id);
+        }
+    }
+
+    /// Drive `on_new_output` for `output` exactly as wlroots would, then hand
+    /// the resulting session and the output's new id to `body`.
+    ///
+    /// # Safety
+    ///
+    /// `state` and `output` must point at a live `Recorder` and a live
+    /// `wlr_output` (addon set and both signals initialised) that outlive the
+    /// call, and `state` must not be aliased by any live reference.
+    unsafe fn announce(
+        state: *mut Recorder,
+        output: *mut sys::wlr_output,
+        body: impl FnOnce(&Session<Recorder>, OutputId),
+    ) {
+        // SAFETY: the caller's guarantees are what `Dispatcher::emit` and
+        // `Registration::link` require. `session` is a local that never moves
+        // after its address is taken, and the harness signal and its flag both
+        // outlive the registration below. `Session<Recorder>` is not reachable
+        // from `Recorder`, so no reference to it can be live across `emit`.
+        unsafe {
+            let session = Session {
+                dispatcher: Dispatcher::new(state),
+                outputs: RefCell::new(HashMap::new()),
+            };
+            let mut h = Harness::new();
+            let hp = &raw mut *h;
+
+            // Declared after `session`, so it unlinks while the session it
+            // names is still alive — the ordering `run` uses.
+            let _reg = Registration::link(
+                &raw mut (*hp).signal,
+                on_new_output::<Recorder>,
+                (&raw const session).cast::<()>(),
+                &raw const (*hp).alive,
+                None,
+            );
+
+            sys::wl_signal_emit_mutable(&raw mut (*hp).signal, output.cast());
+
+            let id = find_id(&raw const (*output).addons)
+                .map(OutputId)
+                .expect("on_new_output must attach an id before announcing");
+            body(&session, id);
+        }
+    }
+
+    /// The announcement path end to end: an id is attached, the output is
+    /// registered, both per-output listeners are linked, and the handler gets a
+    /// working handle rather than the event being dropped.
+    #[test]
+    fn announcing_an_output_registers_it_and_delivers_a_handle() {
+        let _serialised = crate::id::id_test_lock();
+
+        let out = ScratchOutput::new();
+        let mut state = Recorder::default();
+        // One pointer, derived once and used throughout, so the intrusive
+        // structures below keep a single provenance; see `dispatch::tests`.
+        let p = &raw mut state;
+
+        // SAFETY: `p` and `out.0` are live for the whole call and `state` is
+        // reached only through `p` from here on.
+        unsafe {
+            announce(p, out.0, |session, id| {
+                assert_eq!(
+                    (*p).new_outputs,
+                    vec![id],
+                    "the handler must be told about the output, with the id \
+                     that was attached to it"
+                );
+                assert_eq!(
+                    (*p).names,
+                    vec![None],
+                    "the handle must be usable, not merely present"
+                );
+                assert_eq!(
+                    session.outputs.borrow().get(&id).map(|entry| entry.raw),
+                    Some(out.0),
+                    "the id must resolve back to this output, or nothing \
+                     deferred could ever be delivered"
+                );
+                assert!(
+                    !signal_is_empty(&raw mut (*out.0).events.frame),
+                    "the frame listener must be linked"
+                );
+                assert!(
+                    !signal_is_empty(&raw mut (*out.0).events.destroy),
+                    "the destroy listener must be linked"
+                );
+            });
+        }
+    }
+
+    /// The frame path. wlroots' `frame` signal carries no data, so this also
+    /// pins that the id comes from the listener rather than from the callback's
+    /// arguments.
+    #[test]
+    fn a_frame_signal_reaches_the_frame_handler() {
+        let _serialised = crate::id::id_test_lock();
+
+        let out = ScratchOutput::new();
+        let mut state = Recorder::default();
+        let p = &raw mut state;
+
+        // SAFETY: as above; the frame signal was initialised by `ScratchOutput`
+        // and its only listener is the one `on_new_output` linked.
+        unsafe {
+            announce(p, out.0, |_session, id| {
+                sys::wl_signal_emit_mutable(&raw mut (*out.0).events.frame, std::ptr::null_mut());
+                assert_eq!(
+                    (*p).frames,
+                    vec![id],
+                    "a frame must reach the handler, naming the output it is for"
+                );
+            });
+        }
+    }
+
+    /// The property the whole deferral design rests on: an output is forgotten
+    /// *during* its destroy emission, not when the resulting event is
+    /// delivered.
+    ///
+    /// The two are indistinguishable when nothing is deferred, so this destroys
+    /// the output from inside `new_output` — exactly the reentrant case — which
+    /// queues `OutputDestroyed` behind the running handler. wlroots frees the
+    /// output as soon as the emission returns, long before that queue drains,
+    /// so an implementation that unregistered at delivery time would hold a
+    /// pointer to freed memory in between. `frame_unlinked_during_destroy` is
+    /// what tells the two apart: it reads the output's `frame` listener list
+    /// the instant the emission returns, and it can only be empty if the
+    /// registry entry — which owns that listener — was already gone.
+    #[test]
+    fn a_destroyed_output_is_forgotten_before_the_handler_is_told() {
+        let _serialised = crate::id::id_test_lock();
+
+        let out = ScratchOutput::new();
+        let mut state = Recorder::default();
+        let p = &raw mut state;
+
+        // SAFETY: as above. The write goes through `p` rather than through
+        // `state` so that deriving `p` stays the last thing to touch `state`.
+        unsafe {
+            (*p).destroy_from_new_output = Some(out.0);
+
+            announce(p, out.0, |session, id| {
+                assert_eq!(
+                    (*p).frame_unlinked_during_destroy,
+                    Some(true),
+                    "the output must be unregistered synchronously, inside its \
+                     destroy emission — wlroots frees it as soon as that \
+                     returns"
+                );
+                assert!(
+                    session.outputs.borrow().is_empty(),
+                    "and the registry must be left with nothing to resolve"
+                );
+                assert_eq!(
+                    (*p).destroyed,
+                    vec![id],
+                    "the handler is still told, by id, once the outer handler \
+                     has returned"
+                );
+                assert_eq!(
+                    (*p).new_outputs,
+                    vec![id],
+                    "and the announcement it was destroyed from arrived first"
+                );
+                assert!(
+                    signal_is_empty(&raw mut (*out.0).events.destroy),
+                    "the destroy listener must unlink itself too, since \
+                     wlroots is about to free the list it is in"
+                );
+            });
+        }
+    }
+
+    /// The other half of the same property: once the entry is gone, an event
+    /// still naming it resolves to nothing and is dropped, rather than
+    /// dereferencing a freed output or panicking out of a dispatch.
+    #[test]
+    fn an_event_for_an_unknown_output_is_dropped_rather_than_delivered() {
+        let mut state = Recorder::default();
+        let ghost = OutputId(u64::MAX);
+        let session: Session<Recorder> = Session {
+            // Never dereferenced: these tests call `deliver` directly and pass
+            // the state alongside, rather than going through `emit`.
+            dispatcher: Dispatcher::new(std::ptr::null_mut()),
+            outputs: RefCell::new(HashMap::new()),
+        };
+
+        deliver(&session, &mut state, Event::NewOutput(ghost));
+        deliver(&session, &mut state, Event::OutputFrame(ghost));
+        assert!(
+            state.new_outputs.is_empty() && state.frames.is_empty(),
+            "an event naming an output the registry has forgotten must be \
+             dropped, since there is no object left to borrow"
+        );
+
+        deliver(&session, &mut state, Event::OutputDestroyed(ghost));
+        assert_eq!(
+            state.destroyed,
+            vec![ghost],
+            "destruction is the one event that needs no object, so it is \
+             delivered even though the lookup would miss"
         );
     }
 }

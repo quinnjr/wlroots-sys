@@ -26,6 +26,20 @@ pub enum Error {
     ///
     /// The payload is the C type name of the object that died, not a function.
     Destroyed(&'static str),
+
+    /// The named entry point was called while an outer call to it was still
+    /// running, and refused rather than proceeding.
+    ///
+    /// wlroots emits signals synchronously from inside its own API calls, so a
+    /// handler runs *underneath* the call that is dispatching it. An entry point
+    /// that sets up per-call state a handler can reach cannot tolerate a second
+    /// copy of that state existing at the same time, so it reports this instead.
+    ///
+    /// The payload is the Rust entry point that was re-entered — no C function
+    /// was called, so naming one would be the invented detail this module's own
+    /// docs argue against, and it is not [`Error::Operation`] for the same
+    /// reason.
+    Reentrant(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -33,6 +47,7 @@ impl fmt::Display for Error {
         match self {
             Error::Create(op) | Error::Operation(op) => write!(f, "{op} failed"),
             Error::Destroyed(what) => write!(f, "{what} was destroyed"),
+            Error::Reentrant(what) => write!(f, "{what} was called re-entrantly"),
         }
     }
 }
@@ -60,6 +75,20 @@ mod tests {
         let destroyed = Error::Destroyed("wlr_backend");
         assert_eq!(destroyed.to_string(), "wlr_backend was destroyed");
         assert_ne!(destroyed, Error::Operation("wlr_backend_start"));
+    }
+
+    /// Re-entry is neither a failed C call nor a dead object: a consumer that
+    /// gets this one has a structural mistake in their handler, and retrying
+    /// the same call from the same place will fail identically.
+    #[test]
+    fn reentrancy_is_distinguishable_from_the_other_failures() {
+        let reentrant = Error::Reentrant("Backend::run");
+        assert_eq!(
+            reentrant.to_string(),
+            "Backend::run was called re-entrantly"
+        );
+        assert_ne!(reentrant, Error::Operation("wlr_backend_start"));
+        assert_ne!(reentrant, Error::Destroyed("wlr_backend"));
     }
 
     #[test]
