@@ -5,6 +5,10 @@
 
 pub(crate) mod sys;
 
+mod error;
+
+pub use error::{Error, Result};
+
 /// The wlroots version this build of `wlr` binds, as `(major, minor)`.
 ///
 /// Read from `wlr-sys`'s own header constants rather than from this crate's
