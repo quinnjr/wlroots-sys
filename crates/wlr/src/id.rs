@@ -8,9 +8,13 @@
 //!
 //! `attach_id` and `find_id` have no callers outside this module's tests yet —
 //! `Output` (Task 5) and its constructors (Task 7/8) are what will wire them
-//! up — so the module is allowed to be dead code for now rather than muted
-//! item-by-item.
-#![allow(dead_code)]
+//! up — so the module is expected to be dead code for now rather than muted
+//! item-by-item. `expect` (rather than `allow`) makes the compiler flag this
+//! attribute itself as unnecessary the moment those callers land, so it is
+//! self-deleting on schedule. Scoped to `not(test)`: the test module is
+//! itself a caller, so under `cfg(test)` nothing is dead and an unconditional
+//! `expect` would warn as unfulfilled there instead.
+#![cfg_attr(not(test), expect(dead_code))]
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,20 +25,32 @@ use crate::sys;
 ///
 /// Storable, comparable and hashable — unlike a handle, which cannot escape the
 /// handler it was passed to. Ids are never reused within a process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+///
+/// Deliberately does not derive `PartialOrd`/`Ord`: an opaque id ordering
+/// silently promises creation-order semantics no consumer asked for, and the
+/// hand-written API is frozen within a wlroots minor (see `CLAUDE.md`), so a
+/// derive added here could not be withdrawn before 0.21. Adding it later is
+/// non-breaking; the reversible direction is to leave it out for now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OutputId(pub(crate) u64);
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Our addon payload: a `wlr_addon` header followed by the id.
 ///
-/// `#[repr(C)]` with the addon first so `container_of!` can recover the payload
-/// from the `*mut wlr_addon` wlroots hands to the destroy hook.
+/// `#[repr(C)]` with the addon first so `id_addon_from_raw` can recover the
+/// payload from the `*mut wlr_addon` wlroots hands to the destroy hook via a
+/// zero-offset cast. Enforced below by `const _`, since the cast itself
+/// cannot detect a future field reordering.
 #[repr(C)]
 struct IdAddon {
     addon: sys::wlr_addon,
     id: u64,
 }
+
+// `id_addon_from_raw`'s cast is sound only while `addon` is `IdAddon`'s first
+// field, at offset 0. This fails to compile if that ever stops being true.
+const _: () = assert!(std::mem::offset_of!(IdAddon, addon) == 0);
 
 /// `wlr_addon_interface` holds raw pointers, so it is not `Sync` by default.
 /// Wrapping it lets us hold one immutable instance for the process.
@@ -49,25 +65,34 @@ static ID_ADDON_IMPL: AddonImpl = AddonImpl(sys::wlr_addon_interface {
     destroy: Some(id_addon_destroy),
 });
 
+/// Test-only witness that `id_addon_destroy` actually ran and freed its
+/// `Box`. Production builds have no way to observe that beyond "did not
+/// crash"; this gives the test something to assert on.
+#[cfg(test)]
+static DESTROY_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Called by wlroots when the owning object is destroyed.
 unsafe extern "C" fn id_addon_destroy(addon: *mut sys::wlr_addon) {
     // SAFETY: wlroots only invokes this for addons we registered, all of which
     // are the `addon` field of a boxed `IdAddon`.
     unsafe {
-        let payload: *mut IdAddon = wlr_sys_container_of(addon);
+        let payload: *mut IdAddon = id_addon_from_raw(addon);
         sys::wlr_addon_finish(addon);
         drop(Box::from_raw(payload));
     }
+    #[cfg(test)]
+    DESTROY_COUNT.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Recover the `IdAddon` from its embedded `wlr_addon`.
+/// Downcast `addon` to the `IdAddon` that embeds it.
 ///
-/// A local helper rather than `wlr-sys`'s `container_of!`, because the macro is
-/// exported from whichever versioned crate is selected and this keeps the
-/// version-specific path out of the call site.
-unsafe fn wlr_sys_container_of(addon: *mut sys::wlr_addon) -> *mut IdAddon {
-    // SAFETY: `addon` points at the `addon` field of a live `IdAddon`, which is
-    // `#[repr(C)]` with that field first, so the offset is zero.
+/// A plain pointer cast, not offset arithmetic: valid only while `addon` is
+/// `IdAddon`'s first `#[repr(C)]` field (offset 0), which is checked at
+/// compile time by the `const _` assertion next to the struct definition.
+unsafe fn id_addon_from_raw(addon: *mut sys::wlr_addon) -> *mut IdAddon {
+    // SAFETY: `addon` points at the `addon` field of a live `IdAddon`, and
+    // that field is at offset 0 (enforced by the `const _` assertion above),
+    // so the cast recovers the enclosing `IdAddon` exactly.
     addon.cast::<IdAddon>()
 }
 
@@ -124,7 +149,7 @@ pub(crate) unsafe fn find_id(set: *const sys::wlr_addon_set) -> Option<u64> {
         if addon.is_null() {
             return None;
         }
-        Some((*wlr_sys_container_of(addon)).id)
+        Some((*id_addon_from_raw(addon)).id)
     }
 }
 
@@ -157,9 +182,27 @@ mod tests {
             let b = attach_id(&raw mut other);
             assert_ne!(a, b, "ids are unique across objects");
 
+            let destroyed_before = DESTROY_COUNT.load(Ordering::Relaxed);
+
             // Finishing the set runs our destroy hook and frees the addon.
             sys::wlr_addon_set_finish(&raw mut set);
+            // `wlr_addon_finish` does a `wl_list_remove`, which leaves a
+            // finished set a valid, walkable, empty list head — so this
+            // lookup is safe and proves the destroy hook unlinked the addon
+            // rather than merely "the process did not crash".
+            assert_eq!(
+                find_id(&raw const set),
+                None,
+                "the destroy hook unlinked the addon"
+            );
+
             sys::wlr_addon_set_finish(&raw mut other);
+
+            assert_eq!(
+                DESTROY_COUNT.load(Ordering::Relaxed) - destroyed_before,
+                2,
+                "the destroy hook ran, and freed the Box, for both addons"
+            );
         }
     }
 }
