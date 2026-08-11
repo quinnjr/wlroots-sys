@@ -1,7 +1,10 @@
 # `wlr` — safe wrapper over `wlr-sys`
 
 **Date:** 2026-08-03
-**Status:** Approved, not yet implemented
+**Revised:** 2026-08-11 — version selection moved from cargo features to
+per-minor branches, after the feature approach was found unresolvable by cargo.
+See "Why not cargo features".
+**Status:** Approved, implementation in progress
 **Scope:** First of several specs. This one covers the core plus output bring-up.
 
 ## Purpose
@@ -31,41 +34,63 @@ that.
 `crates/wlr/` joins the existing workspace. The name `wlr` was verified available
 on crates.io on 2026-08-03.
 
-`wlr` supports several wlroots minors from one API. Because `wlr-sys` declares
-`links = "wlroots"`, **cargo rejects any dependency graph containing two
-`wlr-sys` minors**, so version selection must be a build-time choice inside
-`wlr` rather than parallel dependencies:
+`wlr` supports several wlroots minors from one API, and **version selection is a
+branch, not a feature**. Each long-lived branch carries a `wlr` whose minor
+tracks the wlroots minor it binds, mirroring `wlr-sys` exactly:
+
+| Branch | `wlr` | `wlr-sys` | wlroots | Distro |
+|---|---|---|---|---|
+| `develop` / `main` | 0.20.x | 0.20 | 0.20 | Arch |
+| `support/wlroots-0.19` | 0.19.x | 0.19 | 0.19 | Ubuntu 26.04 |
+| `support/wlroots-0.17` | 0.17.x | 0.17 | 0.17 | Ubuntu 24.04 |
+| `support/wlroots-0.15` | 0.15.x | 0.15 | 0.15 | Ubuntu 22.04 |
+
+A branch's manifest names exactly one `wlr-sys`:
 
 ```toml
-[features]
-default = ["wlroots-0-20"]
-wlroots-0-20 = ["dep:wlr-sys-020"]
-wlroots-0-19 = ["dep:wlr-sys-019"]
-wlroots-0-17 = ["dep:wlr-sys-017"]
-wlroots-0-15 = ["dep:wlr-sys-015"]
-
 [dependencies]
-wlr-sys-020 = { package = "wlr-sys", version = "0.20", optional = true }
-wlr-sys-019 = { package = "wlr-sys", version = "0.19", optional = true }
-wlr-sys-017 = { package = "wlr-sys", version = "0.17", optional = true }
-wlr-sys-015 = { package = "wlr-sys", version = "0.15", optional = true }
+wlr-sys = { version = "0.20", path = "../wlr-sys" }
 ```
 
-Enabling two features is rejected by cargo automatically, via the `links`
-collision. That is the misconfiguration being *impossible* rather than merely
-discouraged. A `compile_error!` covers the zero-feature case with a readable
-message, since cargo's own error there is unhelpful.
+Consumers select by version — `wlr = "0.19"` — and change a version string
+rather than their code, because the API is held source-stable across branches.
 
-Everything in the crate imports `crate::sys`, a module that re-exports whichever
-`wlr-sys` was selected. Version differences live in `crate::compat` **and nowhere
-else**. That module is the entire "versioned where not" surface; confining it is
-what keeps the ongoing cost visible instead of smeared across the crate.
+### Why not cargo features
+
+The obvious design is one published `wlr` with four mutually-exclusive version
+features, each gating an optional `wlr-sys`. **Cargo cannot resolve that
+manifest**, verified 2026-08-11 in a throwaway workspace: two optional
+`wlr-sys` deps at `^0.20` and `^0.19`, with only the 0.20 feature active, fail
+before anything compiles.
+
+```
+error: failed to select a version for `wlr-sys`.
+package `wlr-sys` links to the native library `wlroots`, but it conflicts
+with a previous package which links to `wlroots` as well
+```
+
+The `links` uniqueness check runs at **resolution**, across every dependency
+edge cargo must version-resolve for the lockfile — not across the edges the
+enabled features actually activate. Optional deps that are never enabled still
+collide.
+
+This is the same property `wlr-sys`'s unsuffixed `links` exists to provide, read
+one step further than the original design assumed: cargo rejects *listing* two
+minors, not merely *enabling* them. The guard intended to make the
+misconfiguration impossible makes the configuration impossible. Suffixing
+`links` per minor would restore the feature approach and is not an option — it
+would readmit precisely the ABI collision the unsuffixed value prevents.
 
 ### The compat boundary
 
-"Stable API where possible, versioned where not" is the option with a recurring
-cost: the boundary has to be relitigated on every wlroots release. Known
-differences already surveyed during the `wlr-sys` backfill:
+"Stable API where possible, versioned where not" survives the change, but its
+mechanism moves: differences between wlroots minors are reconciled by keeping
+each branch's public API identical, not by `#[cfg]` inside one crate. There is
+no `compat` module — a branch simply calls the wlroots function its own version
+has. The recurring cost is unchanged and still has to be relitigated on every
+wlroots release; what changes is that a divergence shows up as an API difference
+between branches, which the shared test suite catches, rather than as a `cfg`
+arm. Known differences already surveyed during the `wlr-sys` backfill:
 
 | Difference | 0.15 | 0.17 | 0.19 | 0.20 |
 |---|---|---|---|---|
@@ -77,14 +102,19 @@ differences already surveyed during the `wlr-sys` backfill:
 | pkg-config module | `wlroots` | `wlroots` | `wlroots-0.19` | `wlroots-0.20` |
 | Output commit | `wlr_output_commit` | both | `wlr_output_commit_state` | `wlr_output_commit_state` |
 
-The commit row is the **first confirmed `compat` entry**, found while writing the
+The commit row is the **first confirmed divergence**, found while writing the
 implementation plan: wlroots replaced the implicit pending-state model with an
 explicit `wlr_output_state`, so 0.15 has only `wlr_output_commit`, 0.19+ have only
-`wlr_output_commit_state`, and 0.17 carries both during the transition. `compat`
-builds 0.17 with the newer path, so three of four versions share one code path.
+`wlr_output_commit_state`, and 0.17 carries both during the transition. Under
+branch selection this is not a `cfg` arm: `develop` and the 0.19/0.17 branches
+call `wlr_output_commit_state`, the 0.15 branch calls `wlr_output_commit`, and
+`Output::commit` presents the same signature on all four.
 
-If `compat` starts sprawling beyond adapters of this kind, that is the signal the
-boundary was drawn in the wrong place — not a reason to add more adapters.
+The discipline the `compat` module was meant to enforce still applies —
+divergence must stay inside method bodies. The moment a difference reaches a
+public signature, consumers can no longer move between branches by changing a
+version string, which is the whole point. That is the signal the boundary was
+drawn in the wrong place, not a reason to let the signature drift.
 
 ## 2. Handles are borrow-scoped and unforgeable
 
@@ -206,7 +236,7 @@ The safety claim is tested as an invariant, not assumed:
 | `trybuild` compile-fail | `&Output` cannot escape a handler. The entire design rests on this. |
 | Reentrancy test | A handler destroying an output from inside `frame` defers correctly, and a deferred event for a destroyed object is dropped rather than delivered. |
 | Headless integration | Real backend, real frame, real teardown — mirroring `wlr-sys`'s `examples/headless.rs`. |
-| Version matrix in CI | The existing distro containers build `wlr` against each wlroots minor, so a version-selection or compat mistake fails on the affected distro. |
+| Version matrix in CI | Each branch's own distro container builds and tests that branch's `wlr`, so a divergence that reaches the public API fails on the affected branch. |
 
 ## 7. Scope
 
@@ -230,4 +260,5 @@ is one subsystem wide, rather than after four subsystems are built on it.
 | Per-object closures | Pushes `Rc<RefCell<..>>` into every consumer for shared state — surrenders the borrow-scoped model's main benefit immediately. |
 | Enum events from a queue | wlroots callbacks are synchronous and some must act before returning; queueing cannot express those faithfully. |
 | Panic on reentrancy | Sound, but turns a legitimate wlroots pattern into a runtime crash consumers must design around. |
-| One `wlr` minor per wlroots minor | Honest and cheap, but leaves consumers rewriting code per distro — the thing an ecosystem crate exists to prevent. |
+| One published `wlr` with mutually-exclusive version features | **Impossible.** Cargo's `links` check rejects the manifest at resolution, however few features are enabled. This was the original choice; see "Why not cargo features". |
+| Separate crate names per minor (`wlr-020`, `wlr-019`, …) | Resolves, but costs four crates.io names and four publishes per release, and consumers change an import path rather than a version string — worse ergonomics than branches for no extra capability. |
