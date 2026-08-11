@@ -24,9 +24,9 @@ cargo clippy --workspace --all-targets    # CI runs this under RUSTFLAGS=-D warn
 cargo doc -p wlr-sys --no-deps            # CI runs this under RUSTDOCFLAGS=-D warnings
 ```
 
-Requires wlroots 0.17 + headers (`wlroots-0.20.pc`), `libclang`, and the
-`wayland-scanner` binary. Arch is currently the only distro packaging wlroots
-0.17.
+Requires wlroots 0.17 + headers (`wlroots.pc`), `libclang`, and the
+`wayland-scanner` binary. Ubuntu 24.04 is the distro this branch targets; see
+`containers/` for the image CI and local verification use.
 
 ### Feature matrix
 
@@ -168,6 +168,27 @@ They are not redundant — each covers something the others structurally cannot:
 bindgen's own ~690 `const _` layout assertions run on every build and cover
 struct layout; the tests above cover what layout checks cannot.
 
+## Branching
+
+**This is a `support/*` branch, not `develop`.** It binds wlroots 0.17 and is
+long-lived: it is never merged into `develop`, because each line has a genuinely
+different subsystem table, a different pkg-config module, and different tests.
+PRs against this line target this branch.
+
+git-flow otherwise. `develop` is the integration branch for the newest wlroots
+minor; `main` carries only tagged releases.
+
+| Branch | wlroots | Distro |
+|---|---|---|
+| `develop` / `main` | 0.20 | Arch |
+| `support/wlroots-0.19` | 0.19 | Ubuntu 26.04 |
+| `support/wlroots-0.17` | 0.17 | Ubuntu 24.04 |
+| `support/wlroots-0.15` | 0.15 | Ubuntu 22.04 |
+
+Shared fixes are cherry-picked between lines, never merged, and must be
+re-verified in this branch's own container — the differences that bite are
+invisible on an Arch host. See `CONTRIBUTING.md`.
+
 ## Conventions
 
 **MSRV is 1.88** (`rust-version` in the workspace manifest) and it is a published
@@ -195,7 +216,7 @@ them reintroduces real bugs.
 Version bumps touch ~8 files and have a known trap (the `range_version` upper
 bound is a separate constant on purpose). Follow `docs/RELEASING.md`.
 
-Within a wlroots minor, the hand-written API is **frozen** — `0.20.0 → 0.20.1` is
+Within a wlroots minor, the hand-written API is **frozen** — `0.17.0 → 0.17.1` is
 an automatic upgrade for consumers, so there is no version in which to break
 `wl_list_iter`, the macros, the feature names, the cfg names, the
 `DEP_WLROOTS_*` keys, or the blocklist. Those wait for the next wlroots minor.
