@@ -112,6 +112,14 @@ impl Display {
     }
 
     /// The display's event loop.
+    ///
+    /// # Panics
+    ///
+    /// Panics if libwayland reports that this display has no event loop.
+    /// Unreachable in normal use: `wl_display_create` creates the loop and
+    /// libwayland never tears it down separately, so a null here would mean
+    /// libwayland broke its own contract. Threading it through a [`Result`]
+    /// every caller would have to unwrap would be the worse trade.
     pub fn event_loop(&self) -> EventLoop<'_> {
         use sys::wayland_sys::ffi_dispatch;
         // `allow`, not `expect`: unused only under the `dlopen` expansion of

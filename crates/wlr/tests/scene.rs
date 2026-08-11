@@ -42,6 +42,12 @@ impl wlr::OutputHandler for App {
             return;
         }
         self.sizes.push(output.size());
+        // The one-time kick `commit_output`'s doc points a consumer at, on
+        // the path it points them at it from. Exercised here rather than
+        // against a scratch output, because `wlr_output_schedule_frame`
+        // reaches into the backend behind the output and only a real one
+        // has that.
+        output.schedule_frame();
     }
 
     fn frame(&mut self, output: &wlr::Output<'_>) {

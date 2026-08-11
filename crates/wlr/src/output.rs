@@ -166,7 +166,8 @@ impl<'h> Output<'h> {
         }
     }
 
-    /// The output's current mode size in pixels, or `(0, 0)` before it has one.
+    /// The output's current mode size in pixels as `(width, height)`, or
+    /// `(0, 0)` before it has one.
     ///
     /// Reads `wlr_output.width`/`height`, which wlroots keeps in step with the
     /// committed mode, so this is the size the scene renders at rather than a
@@ -220,6 +221,29 @@ impl<'h> Output<'h> {
                 Err(Error::Operation("wlr_output_commit_state"))
             }
         }
+    }
+
+    /// Ask the backend for one more `frame` event on this output.
+    ///
+    /// The scene reschedules itself whenever it has new damage, so a
+    /// compositor whose content changes never needs this — see
+    /// [`Runtime::commit_output`](crate::Runtime::commit_output), which
+    /// deliberately does not reschedule on every commit. This is the one-time
+    /// kick for an output that has gone idle and needs to repaint anyway:
+    /// most notably straight after
+    /// [`Runtime::init_output`](crate::Runtime::init_output) on a backend
+    /// whose enable commit did not itself produce a frame.
+    ///
+    /// Infallible because `wlr_output_schedule_frame` returns nothing:
+    /// wlroots either has a frame pending already or asks the backend for
+    /// one, and reports neither back.
+    ///
+    /// Safe to call from inside a handler, including
+    /// [`OutputHandler::frame`](crate::OutputHandler::frame) — it only marks
+    /// the output, it does not dispatch.
+    pub fn schedule_frame(&self) {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        unsafe { sys::wlr_output_schedule_frame(self.raw.as_ptr()) };
     }
 
     /// The raw output, for the in-crate callers that pass it to wlroots.

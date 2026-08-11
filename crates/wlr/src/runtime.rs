@@ -367,8 +367,9 @@ impl Runtime {
     /// doc) exists to avoid. A consumer whose output has otherwise gone
     /// idle and needs a one-time kick — most notably right after
     /// [`init_output`](Runtime::init_output), to receive the very first
-    /// `frame` — calls `wlr_output_schedule_frame` themselves; this call
-    /// does not do it on their behalf on every commit.
+    /// `frame` — calls
+    /// [`Output::schedule_frame`](crate::Output::schedule_frame) themselves;
+    /// this call does not do it on their behalf on every commit.
     ///
     /// # Errors
     ///
