@@ -13,6 +13,11 @@
 //!    if it is gone.
 //! 2. Anything wlroots requires the compositor to complete *before* a callback
 //!    returns cannot be deferred. Those paths call handlers directly and say so.
+//!
+//! The drain loop below is intentionally unbounded: a handler that queues a
+//! new event on every delivery livelocks rather than terminating. That is the
+//! correct behaviour for real wlroots traffic (it is bounded by however many
+//! objects a compositor can actually destroy in a chain), not an oversight.
 
 #![cfg_attr(not(test), expect(dead_code))]
 
@@ -58,7 +63,16 @@ impl<S> Dispatcher<S> {
     /// # Safety
     ///
     /// The `*mut S` this dispatcher was built with must still be valid and must
-    /// not be aliased by any live reference.
+    /// not be aliased by any live reference. In particular, `S` must not own
+    /// this `Dispatcher` by value (e.g. `struct Compositor { dispatcher:
+    /// Dispatcher<Self>, .. }`): this call holds `&self` across
+    /// `deliver(&mut *self.state, ..)`, and if the dispatcher lives inside
+    /// `S` itself, that `&mut S` reborrows the very `&self` this call is
+    /// still holding, which is aliasing UB regardless of the reentrancy
+    /// guard. The dispatcher must be reachable from `S` only through a raw
+    /// pointer, and any reentrant `emit` call (e.g. from inside `deliver`)
+    /// must be made through that raw pointer, not through a reference derived
+    /// from `S`.
     pub(crate) unsafe fn emit(&self, ev: Event, deliver: fn(&mut S, Event)) {
         if self.in_dispatch.get() {
             self.deferred.borrow_mut().push_back(ev);
@@ -92,19 +106,26 @@ impl<S> Dispatcher<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::Cell;
 
     /// Records delivery order, and re-enters the dispatcher from inside a
     /// handler — exactly what wlroots does when a handler destroys an object.
+    ///
+    /// `reenter_with` is a `Cell`, not a `RefCell`: `Event` is `Copy` and
+    /// `Option<Event>` is `Default`, so `Cell::take` is a drop-in replacement
+    /// that never holds a borrow guard live across the reentrant `emit` call
+    /// below — a `RefCell`'s `RefMut` from `borrow_mut().take()` remains live
+    /// through the `if let` body in edition 2024 (rescoping only moved it
+    /// ahead of the `else` block), so the reentrant call would double-borrow.
     struct Recorder {
         seen: Vec<Event>,
-        reenter_with: RefCell<Option<Event>>,
+        reenter_with: Cell<Option<Event>>,
         dispatcher: *const Dispatcher<Recorder>,
     }
 
     fn deliver(state: &mut Recorder, ev: Event) {
         state.seen.push(ev);
-        if let Some(inner) = state.reenter_with.borrow_mut().take() {
+        if let Some(inner) = state.reenter_with.take() {
             // SAFETY: the dispatcher outlives the test body.
             unsafe { (*state.dispatcher).emit(inner, deliver) };
         }
@@ -114,15 +135,26 @@ mod tests {
     fn reentrant_events_are_deferred_until_the_outer_handler_returns() {
         let mut state = Recorder {
             seen: Vec::new(),
-            reenter_with: RefCell::new(Some(Event::OutputDestroyed(OutputId(2)))),
+            reenter_with: Cell::new(Some(Event::OutputDestroyed(OutputId(2)))),
             dispatcher: std::ptr::null(),
         };
-        let d = Dispatcher::new(&raw mut state);
-        state.dispatcher = &raw const d;
+        // A raw pointer taken once and used throughout: writing through
+        // `state.dispatcher = ..` directly (after already deriving `p`)
+        // would invalidate `p` under Stacked/Tree Borrows, which is exactly
+        // the aliasing hazard `emit`'s contract forbids. Going through `p`
+        // for the write keeps one consistent provenance for the whole test.
+        let p = &raw mut state;
+        let d = Dispatcher::new(p);
+        // SAFETY: `p` is a live, exclusively-derived pointer to `state`, and
+        // no reference to `state` exists at this point.
+        unsafe { (*p).dispatcher = &raw const d };
 
-        // SAFETY: `state` outlives `d` for the duration of this call.
+        // SAFETY: `state` outlives `d` for the duration of this call, and is
+        // reached only through `p`'s provenance from here on.
         unsafe { d.emit(Event::OutputFrame(OutputId(1)), deliver) };
 
+        // `p`'s last use was inside `emit` above, so reading through the
+        // original `state` binding here does not conflict with it.
         assert_eq!(
             state.seen,
             vec![
@@ -137,11 +169,13 @@ mod tests {
     fn non_reentrant_events_dispatch_immediately() {
         let mut state = Recorder {
             seen: Vec::new(),
-            reenter_with: RefCell::new(None),
+            reenter_with: Cell::new(None),
             dispatcher: std::ptr::null(),
         };
-        let d = Dispatcher::new(&raw mut state);
-        state.dispatcher = &raw const d;
+        let p = &raw mut state;
+        let d = Dispatcher::new(p);
+        // SAFETY: as in the test above.
+        unsafe { (*p).dispatcher = &raw const d };
 
         // SAFETY: as above.
         unsafe {
@@ -175,13 +209,13 @@ mod tests {
 
     struct TracingRecorder {
         trace: Vec<Trace>,
-        reenter_with: RefCell<Option<Event>>,
+        reenter_with: Cell<Option<Event>>,
         dispatcher: *const Dispatcher<TracingRecorder>,
     }
 
     fn tracing_deliver(state: &mut TracingRecorder, ev: Event) {
         state.trace.push(Trace::Enter(ev));
-        if let Some(inner) = state.reenter_with.borrow_mut().take() {
+        if let Some(inner) = state.reenter_with.take() {
             // SAFETY: the dispatcher outlives the test body.
             unsafe { (*state.dispatcher).emit(inner, tracing_deliver) };
         }
@@ -200,13 +234,16 @@ mod tests {
     fn reentrant_handler_fully_exits_before_the_deferred_handler_enters() {
         let mut state = TracingRecorder {
             trace: Vec::new(),
-            reenter_with: RefCell::new(Some(Event::OutputDestroyed(OutputId(2)))),
+            reenter_with: Cell::new(Some(Event::OutputDestroyed(OutputId(2)))),
             dispatcher: std::ptr::null(),
         };
-        let d = Dispatcher::new(&raw mut state);
-        state.dispatcher = &raw const d;
+        let p = &raw mut state;
+        let d = Dispatcher::new(p);
+        // SAFETY: as in the tests above.
+        unsafe { (*p).dispatcher = &raw const d };
 
-        // SAFETY: `state` outlives `d` for the duration of this call.
+        // SAFETY: `state` outlives `d` for the duration of this call, and is
+        // reached only through `p`'s provenance from here on.
         unsafe { d.emit(Event::OutputFrame(OutputId(1)), tracing_deliver) };
 
         assert_eq!(
