@@ -87,6 +87,18 @@ jobs:
       # so this job is the only thing that proves that claim.
       - run: cargo test -p wlr-sys --features wayland-sys/dlopen
 
+      # ...and the same configuration under -D warnings, which the line above
+      # does not do. `ffi_dispatch!` has two expansions: without `dlopen` it
+      # calls the symbol as a bare name, so the `wayland_sys::server::*` glob is
+      # required; with `dlopen` it goes through the handle's function table and
+      # the glob is unused. An import mandatory in one configuration is a lint
+      # error in the other, and until this step existed the two jobs never
+      # intersected — the lint job ran without `dlopen`, the `dlopen` job ran
+      # without the lint. Two such errors shipped in published releases.
+      - run: cargo clippy -p wlr-sys --all-targets --features wayland-sys/dlopen
+        env:
+          RUSTFLAGS: -D warnings
+
       # --- release hygiene --------------------------------------------------
       - name: docs.rs fallback still builds
         run: cargo doc -p wlr-sys --no-deps --all-features
