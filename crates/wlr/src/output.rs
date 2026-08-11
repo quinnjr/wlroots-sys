@@ -18,14 +18,13 @@ use crate::{Error, Result, sys};
 /// A wlroots output, borrowed for the duration of a handler call.
 ///
 /// Not `#[repr(transparent)]`: this holds the output's id alongside the raw
-/// pointer, cached at construction time, so [`id`](Output::id) is a field
+/// pointer, cached when the handle is built, so [`id`](Output::id) is a field
 /// read rather than an FFI round trip through `wlr_addon_find` on every call.
-/// The dispatcher already has the id at construction time (it used it to look
-/// this output up in the registry), so [`from_raw_with_id`](Output::from_raw_with_id)
-/// lets it hand that value straight to the handle instead of making `id()`
-/// re-derive it later — which matters because handlers are expected to call
-/// `id()` on essentially every event. `id` is private, so this is not a
-/// source-breaking change to the public API.
+/// Dispatch already knows the id — it used it to look this output up in the
+/// registry — so it hands that value straight to the handle instead of making
+/// `id()` re-derive it, which matters because keying your own state by id is
+/// the sanctioned pattern and so `id()` runs on essentially every event. The
+/// field is private, so carrying it is not a change to the public API.
 pub struct Output<'h> {
     raw: NonNull<sys::wlr_output>,
     id: Option<OutputId>,
@@ -88,13 +87,12 @@ impl<'h> Output<'h> {
     ///
     /// # Panics
     ///
-    /// Panics if no id addon is attached and this handle was built by
-    /// [`from_raw`](Output::from_raw) rather than
-    /// [`from_raw_with_id`](Output::from_raw_with_id). Unreachable for a
-    /// handle a handler was given: dispatch always uses
-    /// `from_raw_with_id`, and every output this crate hands out has had an
-    /// id attached when wlroots announced it, before any handler could see
-    /// it.
+    /// Panics if the output carries no id addon. Unreachable for a handle a
+    /// handler was given: dispatch caches the id into the handle when it
+    /// builds it, and every output this crate hands out had an id attached
+    /// when wlroots announced it, before any handler could see it. The panic
+    /// exists for the crate's own tests, which construct handles by a path
+    /// dispatch never uses.
     pub fn id(&self) -> OutputId {
         if let Some(id) = self.id {
             return id;
