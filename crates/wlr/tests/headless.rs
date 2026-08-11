@@ -1,4 +1,4 @@
-//! End-to-end: a headless backend announces an output.
+//! End-to-end: a headless backend announces an output, exactly once.
 //!
 //! This is the proof that the whole model works against real wlroots — handles,
 //! ids, dispatch and delivery together. It needs no GPU and no seat.
@@ -11,24 +11,35 @@
 
 use std::collections::HashMap;
 
+/// Note what none of these handlers do: panic. A handler runs underneath an
+/// `extern "C"` frame, so an `assert!` that fires takes the process down rather
+/// than failing a test — see `OutputHandler`'s own docs. Anything worth
+/// asserting is recorded here and checked once control is back in the test.
 #[derive(Default)]
 struct App {
     outputs: HashMap<wlr::OutputId, String>,
+
+    /// Counted separately from `outputs.len()`, which cannot see a duplicate:
+    /// an output announced twice carries the *same* [`wlr::OutputId`], so the
+    /// second insert overwrites the first and the map still holds one entry.
+    new_output_calls: u32,
+
     frames: u32,
+    frames_for_unknown_outputs: u32,
     destroyed: Vec<wlr::OutputId>,
 }
 
 impl wlr::OutputHandler for App {
     fn new_output(&mut self, output: &wlr::Output<'_>) {
+        self.new_output_calls += 1;
         self.outputs
             .insert(output.id(), output.name().unwrap_or_default());
     }
 
     fn frame(&mut self, output: &wlr::Output<'_>) {
-        assert!(
-            self.outputs.contains_key(&output.id()),
-            "frame for an output we were never told about"
-        );
+        if !self.outputs.contains_key(&output.id()) {
+            self.frames_for_unknown_outputs += 1;
+        }
         self.frames += 1;
     }
 
@@ -39,7 +50,7 @@ impl wlr::OutputHandler for App {
 }
 
 #[test]
-fn headless_backend_announces_an_output() {
+fn headless_backend_announces_an_output_exactly_once() {
     // wlroots reads both of these when the backend is created, so they have to
     // be in place before `autocreate`. Setting them here rather than relying on
     // the caller's environment keeps a plain `cargo test -p wlr` meaningful:
@@ -78,5 +89,29 @@ fn headless_backend_announces_an_output() {
         app.outputs
     );
     assert_eq!(app.frames, 0, "nothing enabled the output, so no frames");
+    assert_eq!(
+        app.frames_for_unknown_outputs, 0,
+        "every frame must name an output the handler was told about first"
+    );
     assert!(app.destroyed.is_empty(), "nothing destroyed the output");
+
+    let after_first_run = app.new_output_calls;
+    assert_eq!(
+        after_first_run, 1,
+        "the one headless output must be announced once, not repeatedly"
+    );
+
+    // The second run is what pins `ensure_started`'s idempotence, and it is the
+    // only thing that can. `wlr_backend_start` announces the outputs a backend
+    // already has, so a `run` that started the backend again would re-announce
+    // this one — and no assertion on `outputs` could tell: `ensure_id` is
+    // idempotent, so the duplicate carries the same id and collapses back into
+    // the same single map entry. Only the call count sees it.
+    backend.run(&display, &mut app, 2).expect("second run");
+
+    assert_eq!(
+        app.new_output_calls, after_first_run,
+        "a second run must not re-start the backend and re-announce outputs \
+         that were already announced"
+    );
 }

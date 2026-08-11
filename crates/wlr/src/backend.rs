@@ -376,28 +376,26 @@ impl<'d> Backend<'d> {
         })
     }
 
-    /// Start the backend.
+    /// Start the backend, at most once.
     ///
-    /// Calling this is optional: [`Backend::run`] starts the backend itself if
-    /// it is not started yet, and that — not this — is the way to see the
-    /// outputs a backend already has. wlroots' own header warns that starting
-    /// "may signal new_input or new_output immediately", and it means it: the
-    /// headless backend announces every output it holds from *inside*
-    /// `wlr_backend_start`. Since handlers are installed by `run`, a
-    /// `start(); run();` sequence installs them one call too late and never
-    /// hears about those outputs.
+    /// Deliberately **not** public, and that is a decision rather than an
+    /// oversight. wlroots' own header warns that starting "may signal new_input
+    /// or new_output immediately", and it means it: the headless backend
+    /// announces every output it already holds from *inside*
+    /// `wlr_backend_start`. Handlers are installed by [`Backend::run`], so a
+    /// consumer who could start the backend first would install them one call
+    /// too late and never hear about those outputs — and the symptom would be
+    /// silence, not an error. Only `run` may start the backend, so that
+    /// sequence cannot be written.
     ///
-    /// So this is for a consumer driving [`crate::EventLoop::dispatch`]
-    /// themselves, who has no handlers for the announcement to reach anyway.
-    /// Starting twice is prevented rather than merely discouraged — the second
-    /// start would re-announce every existing output — so calling this and then
-    /// `run` is harmless apart from the missed announcements.
+    /// Returning an error from a public `start` was the alternative and is
+    /// worse: it would make the *harmless* `start(); run();` fail loudly for
+    /// something `run` goes on to do correctly.
     ///
-    /// # Errors
-    ///
-    /// [`Error::Destroyed`] if the backend has already destroyed itself — see
-    /// [`Backend::run`].
-    pub fn start(&self) -> Result<()> {
+    /// The idempotence is load-bearing, not tidiness: a second
+    /// `wlr_backend_start` re-announces every existing output, so `run` called
+    /// twice would deliver a duplicate `new_output` for each.
+    fn ensure_started(&self) -> Result<()> {
         alive_or_err(&self.alive)?;
         if self.started.get() {
             return Ok(());
@@ -423,8 +421,13 @@ impl<'d> Backend<'d> {
         }
     }
 
-    /// Wire up handlers, start the backend if it is not started yet, and
-    /// dispatch `iterations` turns of the event loop.
+    /// Wire up handlers, start the backend, and dispatch `iterations` turns of
+    /// the event loop.
+    ///
+    /// This is the only thing that starts a backend, and it starts it *after*
+    /// installing handlers, because `wlr_backend_start` announces the outputs a
+    /// backend already has synchronously, before it returns. Starting is done
+    /// once however many times this is called.
     ///
     /// Takes a count rather than blocking forever so tests terminate; a
     /// blocking loop belongs with signal handling in a later slice.
@@ -500,8 +503,8 @@ impl<'d> Backend<'d> {
 
         // Only now, with the listener in place. `wlr_backend_start` announces
         // the backend's existing outputs synchronously, so starting before this
-        // point would emit them into an empty signal; see [`Backend::start`].
-        self.start()?;
+        // point would emit them into an empty signal; see `ensure_started`.
+        self.ensure_started()?;
 
         let loop_ = display.event_loop();
         for _ in 0..iterations {
@@ -729,6 +732,14 @@ fn with_output<S>(session: &Session<S>, id: OutputId, f: impl FnOnce(&Output<'_>
     // from `events.destroy` before it frees the output, so a present entry
     // names a live output. The handle is created and dropped inside this call,
     // so it cannot outlive the handler `f` passes it to.
+    //
+    // That premise is about the entry, not about the handle: it holds at the
+    // moment `raw` is read, and it is `f` that must not invalidate it. Nothing
+    // can today — `Output` exposes only `id`, `name` and `commit`, none of
+    // which can destroy an output. Whoever adds a method that *can* (a
+    // `destroy`, or anything that lets wlroots tear the output down mid-call)
+    // owes this line an answer: the handle would still name freed memory for
+    // the rest of `f`, and no re-lookup here can help, because `f` holds it.
     let output = unsafe { Output::from_raw(raw) };
     f(&output);
 }

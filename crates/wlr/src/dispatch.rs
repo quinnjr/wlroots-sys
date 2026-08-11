@@ -12,7 +12,18 @@
 //!    may be destroyed before delivery. Delivery re-resolves and drops silently
 //!    if it is gone.
 //! 2. Anything wlroots requires the compositor to complete *before* a callback
-//!    returns cannot be deferred. Those paths call handlers directly and say so.
+//!    returns is delivered late when it is deferred, and this crate has no
+//!    exemption for it. There is exactly one such path today —
+//!    [`crate::OutputHandler::frame`], which wlroots expects to render before
+//!    its emission returns — and it is deferred along with everything else.
+//!
+//!    That is forced, not a shortcut. The exemption would have to deliver
+//!    directly while a handler is running, which is precisely the second
+//!    `&mut S` this module exists to prevent; a rendering deadline does not
+//!    outrank undefined behaviour. So no never-deferred category exists here,
+//!    and none can be added without changing the model. `frame`'s own
+//!    documentation states the consequence for consumers, and any future path
+//!    with the same requirement inherits the same answer.
 //!
 //! The drain loop below is intentionally unbounded: a handler that queues a
 //! new event on every delivery livelocks rather than terminating. That is the
