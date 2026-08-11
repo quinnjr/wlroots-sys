@@ -14,7 +14,12 @@
 
 use wayland_sys::ffi_dispatch;
 // Glob-imported because `ffi_dispatch!` calls these as bare names when
-// `wayland-sys` is linked directly rather than dlopen'd.
+// `wayland-sys` is linked directly rather than dlopen'd. Under `dlopen` the
+// macro goes through the handle's function table instead and the glob becomes
+// unused, so the import is load-bearing in one configuration and dead in the
+// other. `allow`, not `expect`: `expect` would itself fire in the default build,
+// where the import really is used and no lint is emitted.
+#[allow(unused_imports)]
 use wayland_sys::server::*;
 
 fn main() {

@@ -287,6 +287,11 @@ fn listener_and_link_offsets_coincide_only_because_link_is_first() {
 /// same whether or not `wayland-sys` was built with `dlopen`.
 unsafe fn ffi_wl_list_remove(link: *mut wl_list) {
     use wayland_sys::ffi_dispatch;
+    // Load-bearing without `dlopen`, where `ffi_dispatch!` calls `wl_list_remove`
+    // as a bare name; unused with it, where the call goes through the handle's
+    // function table. `allow`, not `expect` — `expect` would fire in the default
+    // build, where the import is genuinely used.
+    #[allow(unused_imports)]
     use wayland_sys::server::*;
     unsafe {
         ffi_dispatch!(
