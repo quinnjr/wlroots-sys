@@ -39,6 +39,10 @@ pub enum Error {
     /// was called, so naming one would be the invented detail this module's own
     /// docs argue against, and it is not [`Error::Operation`] for the same
     /// reason.
+    ///
+    /// **The payload string is diagnostic, not contractual.** Match on the
+    /// variant, not its contents: which entry points refuse re-entry may grow,
+    /// and their names may be reworded, without that being a breaking change.
     Reentrant(&'static str),
 }
 

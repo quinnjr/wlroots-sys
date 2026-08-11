@@ -791,9 +791,11 @@ fn with_output<S>(session: &Session<S>, id: OutputId, f: impl FnOnce(&Output<'_>
     // The handle must also stay valid *for* the whole of `f`, which the entry
     // being present at this instant does not establish on its own — an output
     // is freed by wlroots, and wlroots only runs when something drives the
-    // event loop. So the invariant is: no wlroots code runs between here and
-    // `f` returning. Two facts together give it, and both are enforced rather
-    // than hoped for.
+    // event loop. So the invariant is: no wlroots code *that can destroy an
+    // output* runs between here and `f` returning. Stated that way on purpose —
+    // `f` can reach wlroots, via `Output::commit`; what it cannot reach is
+    // anything that frees the output. Two facts together give it, and both are
+    // enforced rather than hoped for.
     //
     // First, `f` cannot drive the loop. `Dispatcher::emit` sets the thread's
     // handler flag for exactly this window and `EventLoop::dispatch` refuses
