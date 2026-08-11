@@ -212,6 +212,28 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
+    /// The premise [`IN_HANDLER`] rests on, asserted rather than assumed.
+    ///
+    /// The guard is thread-scoped: [`crate::EventLoop::dispatch`] refuses while
+    /// a handler is on *this* thread's stack. A handler that could move an
+    /// `EventLoop` — or a `&Display` it could derive one from — to another
+    /// thread would find the flag clear there, dispatch freely, and free an
+    /// output this thread still holds a handle to, with no `unsafe` written.
+    ///
+    /// Today that cannot happen because every one of these types is `!Send`,
+    /// which falls out incidentally of holding a `NonNull` or a `PhantomData`
+    /// of one. Nothing else states it. A future field — an `Arc`, a plain
+    /// `usize` handle — or a well-meant `unsafe impl Send` would void the
+    /// entire guard in silence, and no other test would notice.
+    mod thread_scoped {
+        use static_assertions::assert_not_impl_any;
+
+        assert_not_impl_any!(crate::Display: Send, Sync);
+        assert_not_impl_any!(crate::EventLoop<'static>: Send, Sync);
+        assert_not_impl_any!(crate::Backend<'static>: Send, Sync);
+        assert_not_impl_any!(crate::Output<'static>: Send, Sync);
+    }
+
     /// Records delivery order, and re-enters the dispatcher from inside a
     /// handler — exactly what wlroots does when a handler destroys an object.
     ///
