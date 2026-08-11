@@ -54,6 +54,11 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
 
+      # Workspace-wide, so this already builds and tests `wlr` alongside
+      # `wlr-sys` — no separate `-p wlr` step is needed. `wlr` binds this
+      # branch's wlroots minor; older minors live on their own support/*
+      # branches, each running this same job against its own wlroots, since
+      # cargo cannot resolve a manifest listing two `wlr-sys` versions.
       - run: cargo test --workspace
 
       # The README is the crate's rustdoc (`#![doc = include_str!(...)]`), so a
@@ -120,6 +125,35 @@ jobs:
       # or an include_str! escaping the package root first shows up. A published
       # version can only be yanked, never replaced.
       - run: cargo package -p wlr-sys --allow-dirty
+
+  miri:
+    # Validates the reentrancy-deferring dispatcher in `wlr` under Miri, which
+    # caught a real harness bug during its development. Scoped to
+    # `dispatch::tests` deliberately and only that filter: those tests are pure
+    # Rust with no wlroots/libwayland calls. `id::tests`, `backend::tests`,
+    # `output::tests` and the integration tests all cross into FFI, which Miri
+    # cannot execute — widening this job to the full suite will fail it, not
+    # improve its coverage.
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Syu --noconfirm \
+            git rustup clang pkgconf \
+            wlroots0.20 wayland wayland-protocols \
+            libxkbcommon libinput libdrm pixman mesa vulkan-headers
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install nightly Miri
+        run: |
+          rustup toolchain install nightly --profile minimal --component miri
+      - run: cargo +nightly miri test -p wlr dispatch::tests
+      # Tree Borrows is the stricter, newer aliasing model; running both
+      # catches divergent verdicts that either model alone would miss.
+      - run: cargo +nightly miri test -p wlr dispatch::tests
+        env:
+          MIRIFLAGS: -Zmiri-tree-borrows
 
   msrv:
     # rust-version in Cargo.toml is a published promise; nothing else checks it.

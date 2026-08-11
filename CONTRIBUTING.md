@@ -74,6 +74,7 @@ but these are the ones worth running first:
 cargo fmt --all --check
 RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets
 cargo test --workspace
+cargo test -p wlr                              # the safe wrapper, this branch's wlroots
 cargo +1.88 check --workspace --all-features   # the declared MSRV
 ```
 
