@@ -18,6 +18,14 @@ impl Display {
     /// Create a display.
     pub fn new() -> Result<Self> {
         use sys::wayland_sys::ffi_dispatch;
+        // `ffi_dispatch!`'s non-`dlopen` expansion calls the wrapped function as a
+        // bare name, so this glob import is load-bearing there; its `dlopen`
+        // expansion instead goes through a function-pointer table on the handle
+        // and never references the name, so the same import is unused there.
+        // `allow` (not `expect`) because the reverse would fire in the default,
+        // non-`dlopen` build, where the import genuinely is used — don't
+        // "upgrade" this to `expect`.
+        #[allow(unused_imports)]
         use sys::wayland_sys::server::*;
 
         // SAFETY: no arguments, no preconditions. `ffi_dispatch!` so this links
@@ -35,6 +43,11 @@ impl Display {
     /// The display's event loop.
     pub fn event_loop(&self) -> EventLoop<'_> {
         use sys::wayland_sys::ffi_dispatch;
+        // `allow`, not `expect`: unused only under the `dlopen` expansion of
+        // `ffi_dispatch!`, which calls through a function-pointer table instead
+        // of the bare name this import brings into scope. See the identical
+        // comment on `Display::new` for the full explanation.
+        #[allow(unused_imports)]
         use sys::wayland_sys::server::*;
 
         // SAFETY: `self` is live, so its display is.
@@ -69,6 +82,11 @@ impl Display {
 impl Drop for Display {
     fn drop(&mut self) {
         use sys::wayland_sys::ffi_dispatch;
+        // `allow`, not `expect`: unused only under the `dlopen` expansion of
+        // `ffi_dispatch!`, which calls through a function-pointer table instead
+        // of the bare name this import brings into scope. See the identical
+        // comment on `Display::new` for the full explanation.
+        #[allow(unused_imports)]
         use sys::wayland_sys::server::*;
 
         // SAFETY: we own this display and destroy it exactly once, here, as
@@ -102,6 +120,11 @@ impl<'d> EventLoop<'d> {
     /// Dispatch pending events. `timeout_ms` of 0 returns immediately.
     pub fn dispatch(&self, timeout_ms: i32) -> Result<()> {
         use sys::wayland_sys::ffi_dispatch;
+        // `allow`, not `expect`: unused only under the `dlopen` expansion of
+        // `ffi_dispatch!`, which calls through a function-pointer table instead
+        // of the bare name this import brings into scope. See the identical
+        // comment on `Display::new` for the full explanation.
+        #[allow(unused_imports)]
         use sys::wayland_sys::server::*;
 
         // SAFETY: the borrow guarantees the display, and so the loop, is live.
