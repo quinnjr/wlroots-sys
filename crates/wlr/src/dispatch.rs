@@ -161,4 +161,63 @@ mod tests {
             "flag must be clear once dispatch unwinds"
         );
     }
+
+    /// A handler-entry/exit marker. Unlike a bare `Event` log, this can tell
+    /// deferred delivery apart from naive recursion: both produce the same
+    /// final *event* order at one level of reentrancy, but only naive
+    /// recursion nests an `Enter` inside another handler's `Enter`/`Exit`
+    /// pair.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Trace {
+        Enter(Event),
+        Exit(Event),
+    }
+
+    struct TracingRecorder {
+        trace: Vec<Trace>,
+        reenter_with: RefCell<Option<Event>>,
+        dispatcher: *const Dispatcher<TracingRecorder>,
+    }
+
+    fn tracing_deliver(state: &mut TracingRecorder, ev: Event) {
+        state.trace.push(Trace::Enter(ev));
+        if let Some(inner) = state.reenter_with.borrow_mut().take() {
+            // SAFETY: the dispatcher outlives the test body.
+            unsafe { (*state.dispatcher).emit(inner, tracing_deliver) };
+        }
+        state.trace.push(Trace::Exit(ev));
+    }
+
+    /// The load-bearing soundness test: proves the inner handler does not
+    /// start running until the outer handler has *fully exited*, not merely
+    /// that both events eventually appear in the right order. A dispatcher
+    /// that recursed into `deliver` directly (instead of deferring) would
+    /// produce `Enter(outer), Enter(inner), Exit(inner), Exit(outer)` here —
+    /// a nested pair, still with the events in the same final order as the
+    /// correct trace, which is exactly what the plain event-order test above
+    /// cannot distinguish.
+    #[test]
+    fn reentrant_handler_fully_exits_before_the_deferred_handler_enters() {
+        let mut state = TracingRecorder {
+            trace: Vec::new(),
+            reenter_with: RefCell::new(Some(Event::OutputDestroyed(OutputId(2)))),
+            dispatcher: std::ptr::null(),
+        };
+        let d = Dispatcher::new(&raw mut state);
+        state.dispatcher = &raw const d;
+
+        // SAFETY: `state` outlives `d` for the duration of this call.
+        unsafe { d.emit(Event::OutputFrame(OutputId(1)), tracing_deliver) };
+
+        assert_eq!(
+            state.trace,
+            vec![
+                Trace::Enter(Event::OutputFrame(OutputId(1))),
+                Trace::Exit(Event::OutputFrame(OutputId(1))),
+                Trace::Enter(Event::OutputDestroyed(OutputId(2))),
+                Trace::Exit(Event::OutputDestroyed(OutputId(2))),
+            ],
+            "the inner handler must not start until the outer handler has fully exited"
+        );
+    }
 }
