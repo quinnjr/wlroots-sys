@@ -1,0 +1,13 @@
+error[E0624]: associated function `from_raw_with_id` is private
+ --> tests/ui/toplevel_from_raw_is_private.rs:7:34
+  |
+7 |       let _ = Toplevel::<'static>::from_raw_with_id;
+  |                                    ^^^^^^^^^^^^^^^^ private associated function
+  |
+ ::: src/toplevel.rs
+  |
+  | /     pub(crate) unsafe fn from_raw_with_id(
+  | |         raw: *mut sys::wlr_xdg_toplevel,
+  | |         id: ToplevelId,
+  | |     ) -> Toplevel<'h> {
+  | |_____________________- private associated function defined here

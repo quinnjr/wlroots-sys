@@ -24,6 +24,28 @@ follows on the same branches, not because they are on crates.io yet.
 The API is held identical across all four, so once they ship, moving between
 them is a version change rather than a code change.
 
+## 0.20.2
+
+xdg-shell.
+
+- `ToplevelHandler` gains `new_toplevel`, `initial_commit`, `mapped`,
+  `unmapped`, `title_changed` and `toplevel_destroyed`. All defaulted, so an
+  empty impl written against 0.20.1 keeps compiling.
+- `Toplevel<'h>` and `ToplevelId`: borrow-scoped handle, storable id.
+- `Runtime::create_xdg_shell`, and the by-id operations —
+  `set_toplevel_size`, `set_toplevel_activated`, `set_toplevel_maximized`,
+  `set_toplevel_fullscreen`, `set_toplevel_position`, `set_toplevel_visible`,
+  `raise_toplevel`, `close_toplevel`.
+
+Toplevels are inserted into the scene graph by the library; the consumer
+positions them by id.
+
+Two ordering rules are worth reading before you write against this:
+`create_xdg_shell` requires `init_graphics` to have run (it returns
+`Error::Operation` rather than leaving you with clients that never map), and
+a `ToplevelId` resolves only for the `Backend::run_all` call that announced
+it — every by-id operation returns `None` for one held past that point.
+
 ## 0.20.1
 
 Event sources and the scene graph.

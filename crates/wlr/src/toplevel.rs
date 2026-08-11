@@ -34,7 +34,20 @@ impl ToplevelId {
     ///
     /// Public because "every by-id operation reports a miss rather than
     /// dereferencing" is a promise to consumers, and a promise nobody can
-    /// write a test for is not one.
+    /// write a test for is not one. It is also the *only* way to obtain a
+    /// `ToplevelId` outside a handler, the field being private — so hiding it
+    /// from the docs would leave the promise untestable in practice while
+    /// still freezing the function.
+    ///
+    /// That every by-id operation misses on this value is part of the frozen
+    /// contract, not an implementation accident: ids come from a process-wide
+    /// counter that starts at 1, only ever increments, and never reuses a
+    /// value, so `u64::MAX` cannot be handed to a real toplevel.
+    ///
+    /// Not for production code. An id from a real toplevel is the one
+    /// [`Toplevel::id`] returns, and it stops resolving once the
+    /// [`Backend::run_all`](crate::Backend::run_all) call that announced it
+    /// has returned — at which point it behaves exactly like this one.
     pub fn dangling_for_test() -> ToplevelId {
         ToplevelId(u64::MAX)
     }
