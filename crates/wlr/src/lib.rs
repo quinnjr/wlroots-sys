@@ -5,6 +5,7 @@
 
 pub(crate) mod sys;
 
+mod dispatch;
 mod error;
 mod id;
 
