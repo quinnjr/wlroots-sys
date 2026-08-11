@@ -703,10 +703,19 @@ impl<'d> Backend<'d> {
             // and silently spinning out the remaining iterations.
             alive_or_err(&self.alive)?;
 
-            // No handler is running at this point — `emit` clears its guard
-            // before returning — so `should_stop` (which derefs the pointer
-            // `Dispatcher::new` was given) sees no other `&mut S` live.
-            if (hooks.should_stop)(session.dispatcher.state_ptr()) {
+            // SAFETY: `session.dispatcher.state_ptr()` is the pointer `session`
+            // was built with above, from `&raw mut *state` — a live `&mut S`
+            // this call itself is still holding, so it is valid and
+            // non-dangling regardless of what `hooks.should_stop` does with
+            // it. No handler is running at this point — `Dispatcher::emit`
+            // clears its guard before returning, and the only calls into
+            // `emit` happen inside `loop_.dispatch` above, which has already
+            // returned — so `hooks.should_stop` (which derefs the pointer) is
+            // the sole reader here and sees no other `&mut S` live. This is
+            // the discharge site `state_ptr`'s own doc requires: the caller
+            // states, right here, why no handler is on the stack.
+            let stop = unsafe { (hooks.should_stop)(session.dispatcher.state_ptr()) };
+            if stop {
                 return Ok(());
             }
             if let Some(n) = remaining.as_mut() {
@@ -792,7 +801,19 @@ pub enum Until {
 /// rather than being chosen inside it.
 struct RunHooks<'d, S> {
     deliver: fn(&Session<'_, S>, &mut S, Event),
-    should_stop: fn(*mut S) -> bool,
+
+    /// # Safety
+    ///
+    /// The caller must pass a pointer that is valid to dereference as `&mut S`
+    /// for the duration of the call, and must not have any other live
+    /// reference to the same `S` at the time of the call — the same
+    /// obligation [`Dispatcher::state_ptr`] itself declines to discharge.
+    /// `unsafe fn` rather than a safe one taking the same pointer, precisely
+    /// so that obligation cannot be met silently: every caller of a value in
+    /// this field writes its own `unsafe` block and its own justification —
+    /// see `run_inner`'s call site — rather than inheriting one written here
+    /// that may not hold for a pointer this field was never shown.
+    should_stop: unsafe fn(*mut S) -> bool,
     register_sources: fn(&Backend<'d>, &Runtime, &Session<'_, S>) -> Result<Vec<FdRegistration>>,
 }
 
@@ -863,16 +884,28 @@ unsafe extern "C" fn on_fd_ready<S: Handlers>(
 /// Never stops a run. `run`'s `should_stop` slot: `run`'s bound is
 /// `OutputHandler`, which says nothing about `LoopHandler`, so there is no
 /// `S::should_stop` to call.
-fn never_stop<S>(_state: *mut S) -> bool {
+///
+/// # Safety
+///
+/// None beyond what [`RunHooks::should_stop`] documents — this particular
+/// implementation happens not to dereference `_state` at all, but it is
+/// `unsafe fn` because the *slot* is, and a safe body here would be a
+/// misleading precedent for the next fn written to fill it.
+unsafe fn never_stop<S>(_state: *mut S) -> bool {
     false
 }
 
 /// `run_all`'s `should_stop` slot, deferring to the handler's own answer.
-fn should_stop_of<S: LoopHandler>(state: *mut S) -> bool {
-    // SAFETY: `run_inner` calls this only between dispatch turns, with no
-    // handler on the stack — `Dispatcher::emit` clears its guard before
-    // returning — so no other `&mut S` can be live, and `state` is the
-    // pointer `Dispatcher::new` was given for this call.
+///
+/// # Safety
+///
+/// `state` must be valid to dereference as `&mut S` for the duration of this
+/// call, with no other live reference to the same `S` — see
+/// [`RunHooks::should_stop`]. This function only reborrows and calls through
+/// it; it does not, and cannot, establish that on its own.
+unsafe fn should_stop_of<S: LoopHandler>(state: *mut S) -> bool {
+    // SAFETY: the caller just discharged exactly this obligation, per this
+    // function's own `# Safety` section.
     unsafe { (*state).should_stop() }
 }
 
