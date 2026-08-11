@@ -44,6 +44,16 @@ pub enum Error {
     /// variant, not its contents: which entry points refuse re-entry may grow,
     /// and their names may be reworded, without that being a breaking change.
     Reentrant(&'static str),
+
+    /// Two values that had to name the same underlying object did not.
+    ///
+    /// Distinct from every other variant because no C call happened and
+    /// nothing died: the caller passed a [`Display`](crate::Display) that does
+    /// not own the [`Backend`](crate::Backend)'s event loop, which is a
+    /// programming mistake rather than a runtime condition. The payload is
+    /// the Rust entry point that refused, and it is diagnostic rather than
+    /// contractual — match on the variant, not its contents.
+    Mismatch(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -52,6 +62,7 @@ impl fmt::Display for Error {
             Error::Create(op) | Error::Operation(op) => write!(f, "{op} failed"),
             Error::Destroyed(what) => write!(f, "{what} was destroyed"),
             Error::Reentrant(what) => write!(f, "{what} was called re-entrantly"),
+            Error::Mismatch(what) => write!(f, "{what} was given mismatched arguments"),
         }
     }
 }
@@ -93,6 +104,17 @@ mod tests {
         );
         assert_ne!(reentrant, Error::Operation("wlr_backend_start"));
         assert_ne!(reentrant, Error::Destroyed("wlr_backend"));
+    }
+
+    /// A mismatch is neither a failed call, a dead object, nor re-entry: the
+    /// caller wired two values together that do not belong to each other.
+    #[test]
+    fn a_mismatch_is_distinguishable_from_every_other_failure() {
+        let m = Error::Mismatch("Backend::run_all");
+        assert_eq!(m.to_string(), "Backend::run_all was given mismatched arguments");
+        assert_ne!(m, Error::Operation("wlr_backend_start"));
+        assert_ne!(m, Error::Destroyed("wlr_backend"));
+        assert_ne!(m, Error::Reentrant("Backend::run"));
     }
 
     #[test]

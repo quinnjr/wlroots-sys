@@ -81,14 +81,18 @@ mod display;
 mod error;
 mod handler;
 mod id;
+mod interest;
 mod output;
+mod runtime;
 
-pub use backend::Backend;
+pub use backend::{Backend, Until};
 pub use display::{Display, EventLoop};
 pub use error::{Error, Result};
-pub use handler::OutputHandler;
-pub use id::OutputId;
+pub use handler::{FdHandler, Handlers, LoopHandler, OutputHandler, SeatHandler, ToplevelHandler};
+pub use id::{OutputId, SourceId};
+pub use interest::{Interest, Readiness};
 pub use output::Output;
+pub use runtime::Runtime;
 
 /// The wlroots version this build of `wlr` binds, as `(major, minor)`.
 ///

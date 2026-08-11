@@ -30,3 +30,7 @@ trybuild = "1.0"
 # varies with whether `rust-src` is installed. That made the fixture pass
 # locally and fail in CI's container. This asserts the property itself.
 static_assertions = "1.1"
+# Borrowed-fd I/O for the fd-source tests and examples. A dev-dependency
+# only: the crate itself never reads a consumer's fd, it only hands the
+# borrow to `FdHandler::fd_ready`.
+rustix = { version = "1", features = ["pipe", "std"] }

@@ -89,6 +89,87 @@ pub trait OutputHandler {
     }
 }
 
+/// File-descriptor source readiness.
+///
+/// # Panics
+///
+/// As for [`OutputHandler`]: this runs underneath an `extern "C"` frame, so a
+/// panic escaping it aborts the process.
+pub trait FdHandler {
+    /// `source` is ready.
+    ///
+    /// `fd` is the descriptor that was registered, borrowed for this call
+    /// only — the [`Runtime`](crate::Runtime) owns it and closes it when it
+    /// drops, so nothing here may close it or take ownership of it (do not
+    /// build a `File` from it; use a borrowing reader).
+    ///
+    /// Draining the fd is the implementor's job. libwayland's event loop is
+    /// level-triggered, so an implementor that reads nothing is called again
+    /// on the next turn, forever.
+    fn fd_ready(
+        &mut self,
+        source: crate::SourceId,
+        fd: std::os::fd::BorrowedFd<'_>,
+        readiness: crate::Readiness,
+    ) {
+        let _ = (source, fd, readiness);
+    }
+}
+
+/// Control over how long [`Backend::run_all`](crate::Backend::run_all) keeps
+/// dispatching.
+///
+/// Unlike every other trait here, this one is **not** called from C: `run_all`
+/// calls it between dispatch turns, with no handler on the stack. A panic here
+/// unwinds normally out of `run_all`. It is still the wrong place for one.
+pub trait LoopHandler {
+    /// Called once per dispatch turn, after that turn's events have been
+    /// delivered. Return `true` to end the run.
+    ///
+    /// Consulted under both [`Until::Turns`](crate::Until::Turns) and
+    /// [`Until::Stop`](crate::Until::Stop), so an early exit is always
+    /// available.
+    fn should_stop(&mut self) -> bool {
+        false
+    }
+}
+
+/// xdg-shell toplevel lifecycle.
+///
+/// **Declared with no methods in 0.20.1 on purpose.** [`Handlers`] lists this
+/// as a supertrait from the first release so that the list itself can freeze:
+/// adding a supertrait later would stop every existing consumer's state from
+/// satisfying `Handlers` (a fully-defaulted trait still needs an explicit
+/// `impl`), whereas adding a *defaulted method* to a trait that already exists
+/// is not a breaking change. The methods arrive in 0.20.2.
+///
+/// Write `impl wlr::ToplevelHandler for MyState {}` now and it keeps
+/// compiling, unchanged, when they do.
+pub trait ToplevelHandler {}
+
+/// Seat, keyboard and pointer input.
+///
+/// Declared with no methods in 0.20.1 for the same reason as
+/// [`ToplevelHandler`]; the methods arrive in 0.20.3.
+pub trait SeatHandler {}
+
+/// Every handler trait at once.
+///
+/// The bound on [`Backend::run_all`](crate::Backend::run_all), and
+/// blanket-implemented, so a consumer never writes `impl Handlers` — they
+/// implement whichever of the five traits they care about (all methods are
+/// defaulted, so an empty `impl` is enough for the rest) and this follows.
+///
+/// The blanket impl also means this trait cannot be implemented manually: any
+/// hand-written impl would overlap it. That is deliberate — it is what keeps
+/// the supertrait list, rather than each consumer's idea of it, the contract.
+pub trait Handlers: OutputHandler + ToplevelHandler + SeatHandler + FdHandler + LoopHandler {}
+
+impl<T> Handlers for T where
+    T: OutputHandler + ToplevelHandler + SeatHandler + FdHandler + LoopHandler
+{
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,5 +182,26 @@ mod tests {
     fn every_handler_method_is_defaulted() {
         fn accepts<S: OutputHandler>(_: &S) {}
         accepts(&Minimal);
+    }
+
+    /// A consumer implementing nothing at all must satisfy the whole set,
+    /// which is what makes `run_all` usable by an output-only consumer.
+    struct MinimalAll;
+    impl OutputHandler for MinimalAll {}
+    impl ToplevelHandler for MinimalAll {}
+    impl SeatHandler for MinimalAll {}
+    impl FdHandler for MinimalAll {}
+    impl LoopHandler for MinimalAll {}
+
+    #[test]
+    fn the_blanket_impl_covers_a_state_that_implements_every_trait_emptily() {
+        fn accepts<S: Handlers>(_: &S) {}
+        accepts(&MinimalAll);
+    }
+
+    #[test]
+    fn should_stop_defaults_to_never_stopping() {
+        let mut m = MinimalAll;
+        assert!(!m.should_stop());
     }
 }

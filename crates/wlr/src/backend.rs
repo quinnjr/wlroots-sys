@@ -30,12 +30,16 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::os::fd::AsRawFd;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::dispatch::{Dispatcher, Event};
-use crate::id::{attach_id, find_id};
-use crate::{Error, EventLoop, Output, OutputHandler, OutputId, Result, sys};
+use crate::id::{SourceId, attach_id, find_id};
+use crate::{
+    Display, Error, EventLoop, Handlers, LoopHandler, Output, OutputHandler, OutputId, Result,
+    Runtime, sys,
+};
 
 /// A wlroots backend.
 ///
@@ -289,9 +293,21 @@ fn alive_or_err(alive: &Cell<bool>) -> Result<()> {
 /// The visible cost is that outputs announced during one `run` are not
 /// re-announced by the next one; wlroots offers no way to enumerate a backend's
 /// existing outputs, so there is nothing to replay from.
-struct Session<S> {
+struct Session<'r, S> {
     dispatcher: Dispatcher<S>,
     outputs: RefCell<HashMap<OutputId, OutputEntry>>,
+
+    /// The runtime this run is serving, borrowed for the call.
+    ///
+    /// Borrowed rather than cloned so that `Session`'s lifetime, and the
+    /// registrations it owns, cannot outlive the `&Runtime` the caller passed
+    /// — the same argument that keeps the registry itself run-local.
+    runtime: &'r Runtime,
+
+    /// How this run routes an [`Event`]. Stored rather than chosen at the
+    /// callback, because `run` and `run_all` route differently and the
+    /// callbacks are shared.
+    deliver: fn(&Session<'r, S>, &mut S, Event),
 }
 
 /// One live output, and this session's listeners on it.
@@ -507,10 +523,110 @@ impl<'d> Backend<'d> {
     /// turn's `wl_event_loop_dispatch` fails; the two are distinguished by the
     /// error's payload but not by which variant is returned.
     pub fn run<S: OutputHandler>(&self, state: &mut S, iterations: u32) -> Result<()> {
+        // `run` predates `Runtime` and its signature is frozen at `S:
+        // OutputHandler`, so it makes a private, empty one: it declares no fd
+        // sources, `no_fd_sources` registers nothing from it, and `deliver`
+        // never reaches it for an output event. This is what lets one
+        // `Session` type, and one `run_inner`, serve both entry points
+        // without widening `run`'s own bound.
+        let runtime = Runtime::new()?;
+        self.run_inner::<S>(
+            None,
+            state,
+            &runtime,
+            Until::Turns(iterations),
+            RunHooks {
+                deliver: deliver::<S>,
+                should_stop: never_stop::<S>,
+                register_sources: no_fd_sources::<S>,
+            },
+        )
+    }
+
+    /// Wire up every handler trait, start the backend, and dispatch until
+    /// `until` says otherwise.
+    ///
+    /// The superset of [`run`](Backend::run): it delivers output events
+    /// identically, and additionally registers the [`Runtime`]'s fd sources —
+    /// and, from 0.20.2 and 0.20.3, its xdg shell and its seat — for the
+    /// duration of this call. Registration lives with the call and is torn
+    /// down when it returns, which is why the runtime holds *declarations*
+    /// and this holds the registrations.
+    ///
+    /// `display` must own this backend's event loop. Nothing in the type
+    /// system relates them, so it is checked: the alternative is dispatching
+    /// a different display's loop and flushing a different display's clients,
+    /// which produces silence rather than an error.
+    ///
+    /// Every turn ends with [`Display::flush_clients`], because a loop driven
+    /// through `wl_event_loop_dispatch` has nothing else that would.
+    ///
+    /// # Panics
+    ///
+    /// Never directly. A panic escaping one of `state`'s handler methods
+    /// aborts the process; see [`OutputHandler`]. A panic escaping
+    /// [`LoopHandler::should_stop`] unwinds normally, since that one is not
+    /// called from C.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Mismatch`] if `display` does not own this backend's loop.
+    /// [`Error::Destroyed`], [`Error::Reentrant`] and [`Error::Operation`]
+    /// exactly as [`run`](Backend::run) documents them.
+    pub fn run_all<S: Handlers>(
+        &self,
+        display: &Display,
+        state: &mut S,
+        runtime: &Runtime,
+        until: Until,
+    ) -> Result<()> {
+        use sys::wayland_sys::ffi_dispatch;
+        #[allow(unused_imports)]
+        use sys::wayland_sys::server::*;
+
+        // SAFETY: `display` is live for the call.
+        let their_loop = unsafe {
+            ffi_dispatch!(
+                sys::wayland_sys::server::wayland_server_handle(),
+                wl_display_get_event_loop,
+                display.as_ptr()
+            )
+        };
+        if their_loop != self.loop_.as_ptr() {
+            return Err(Error::Mismatch("Backend::run_all"));
+        }
+
+        self.run_inner::<S>(
+            Some(display),
+            state,
+            runtime,
+            until,
+            RunHooks {
+                deliver: deliver_all::<S>,
+                should_stop: should_stop_of::<S>,
+                register_sources: Backend::register_fd_sources::<S>,
+            },
+        )
+    }
+
+    /// The body both entry points share.
+    ///
+    /// `hooks` bundles what `run` and `run_all` cannot share directly:
+    /// `run`'s bound is `OutputHandler` and `run_all`'s is `Handlers`, so one
+    /// function cannot name `S::should_stop` or instantiate a
+    /// `Handlers`-bound callback without the stricter bound leaking onto
+    /// `run`, which is frozen. Each entry point supplies the version that
+    /// matches its own bound, and `run`'s versions (`never_stop`,
+    /// `no_fd_sources`) are bound by nothing at all.
+    fn run_inner<S: OutputHandler>(
+        &self,
+        display: Option<&Display>,
+        state: &mut S,
+        runtime: &Runtime,
+        until: Until,
+        hooks: RunHooks<'d, S>,
+    ) -> Result<()> {
         alive_or_err(&self.alive)?;
-        // Taken before anything else is built, so a refused re-entry perturbs
-        // nothing at all — in particular it does not register a listener or
-        // start the backend on its way to returning the error.
         let _reentry = ReentryGuard::acquire()?;
 
         // `state` is consumed into a raw pointer here and never touched as a
@@ -519,6 +635,8 @@ impl<'d> Backend<'d> {
         let session = Session {
             dispatcher: Dispatcher::new(&raw mut *state),
             outputs: RefCell::new(HashMap::new()),
+            runtime,
+            deliver: hooks.deliver,
         };
 
         // Declared after `session`, so it drops — and therefore decides
@@ -534,8 +652,9 @@ impl<'d> Backend<'d> {
         // learns of the session, so nothing can hold a reference to it across
         // `emit` — the aliasing condition `Dispatcher::emit` requires — and
         // `on_new_output::<S>` casts the erased pointer back to the very
-        // `Session<S>` paired with it here. `session` is a local that is never
-        // moved after this point, so the address stays valid for the call.
+        // `Session<'_, S>` paired with it here. `session` is a local that is
+        // never moved after this point, so the address stays valid for the
+        // call.
         let _new_output = unsafe {
             Registration::link(
                 &raw mut (*self.raw.as_ptr()).events.new_output,
@@ -546,7 +665,12 @@ impl<'d> Backend<'d> {
             )
         };
 
-        // Only now, with the listener in place. `wlr_backend_start` announces
+        // Sources are registered here, for this call only. `_sources` is a
+        // named binding rather than `_`: binding to `_` would drop the vector
+        // — and so remove every source — at the end of this statement.
+        let _sources = (hooks.register_sources)(self, runtime, &session)?;
+
+        // Only now, with the listeners in place. `wlr_backend_start` announces
         // the backend's existing outputs synchronously, so starting before this
         // point would emit them into an empty signal; see `ensure_started`.
         self.ensure_started()?;
@@ -556,20 +680,230 @@ impl<'d> Backend<'d> {
         // outlives `'d` — and `&self` keeps that borrow alive for this call.
         //
         // Dispatching here is not the re-entry `EventLoop::dispatch` refuses:
-        // `run` is not a handler, and the flag that refusal consults is set
-        // only for the duration of a delivery, strictly inside the
-        // `loop_.dispatch(0)` call below rather than around it.
+        // `run_inner` is not a handler, and the flag that refusal consults is
+        // set only for the duration of a delivery, strictly inside the
+        // `loop_.dispatch(timeout)` call below rather than around it.
         let loop_ = unsafe { EventLoop::from_raw(self.loop_) };
-        for _ in 0..iterations {
-            loop_.dispatch(0)?;
+        let (timeout, mut remaining) = match until {
+            Until::Turns(n) => (0, Some(n)),
+            Until::Stop => (-1, None),
+        };
+
+        loop {
+            if let Some(0) = remaining {
+                return Ok(());
+            }
+            loop_.dispatch(timeout)?;
+            if let Some(display) = display {
+                display.flush_clients();
+            }
             // Checked every turn rather than only on entry: a backend that dies
             // mid-loop leaves nothing useful to dispatch, and reporting it is
             // the difference between a consumer learning about an unplugged GPU
             // and silently spinning out the remaining iterations.
             alive_or_err(&self.alive)?;
-        }
 
-        Ok(())
+            // No handler is running at this point — `emit` clears its guard
+            // before returning — so `should_stop` (which derefs the pointer
+            // `Dispatcher::new` was given) sees no other `&mut S` live.
+            if (hooks.should_stop)(session.dispatcher.state_ptr()) {
+                return Ok(());
+            }
+            if let Some(n) = remaining.as_mut() {
+                *n -= 1;
+            }
+        }
+    }
+
+    /// Register every declared fd source with the loop, for this run.
+    fn register_fd_sources<S: Handlers>(
+        &self,
+        runtime: &Runtime,
+        session: &Session<'_, S>,
+    ) -> Result<Vec<FdRegistration>> {
+        use sys::wayland_sys::ffi_dispatch;
+        #[allow(unused_imports)]
+        use sys::wayland_sys::server::*;
+
+        let mut out = Vec::new();
+        // The borrow is released before anything can call back into the
+        // runtime: `wl_event_loop_add_fd` does not dispatch, but the rule is
+        // absolute here rather than case-by-case, so collect first.
+        let declared: Vec<(std::os::fd::RawFd, u32, SourceId)> = {
+            let sources = runtime.inner.sources.borrow();
+            sources
+                .iter()
+                .map(|s| (s.fd.as_raw_fd(), s.interest.mask(), s.id))
+                .collect()
+        };
+
+        for (fd, mask, id) in declared {
+            let ctx = Box::new(FdCtx {
+                session: (session as *const Session<'_, S>).cast::<()>(),
+                id,
+            });
+            // SAFETY: the loop is live for this call; `ctx` stays boxed and
+            // unmoved until the `FdRegistration` below drops, which removes
+            // the source first; and `on_fd_ready::<S>` is instantiated at the
+            // same `S` the session belongs to.
+            let source = unsafe {
+                ffi_dispatch!(
+                    sys::wayland_sys::server::wayland_server_handle(),
+                    wl_event_loop_add_fd,
+                    self.loop_.as_ptr(),
+                    fd,
+                    mask,
+                    on_fd_ready::<S>,
+                    (&raw const *ctx).cast::<std::ffi::c_void>().cast_mut()
+                )
+            };
+            if source.is_null() {
+                return Err(Error::Operation("wl_event_loop_add_fd"));
+            }
+            out.push(FdRegistration { source, _ctx: ctx });
+        }
+        Ok(out)
+    }
+}
+
+/// How long [`Backend::run_all`] keeps dispatching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Until {
+    /// Dispatch exactly this many turns without blocking (a zero timeout),
+    /// the shape [`Backend::run`] has always had. Use this in tests: a run
+    /// that nothing ever stops still returns.
+    Turns(u32),
+    /// Block on each turn until [`LoopHandler::should_stop`] returns `true`.
+    ///
+    /// This is the shape a real compositor wants — the process sleeps between
+    /// events instead of spinning — and it is why `should_stop` exists at all.
+    /// A consumer with no way to set their stop condition will hang here.
+    Stop,
+}
+
+/// The three callbacks `run_inner` needs but cannot choose itself, bundled so
+/// `run_inner` takes one struct instead of three trailing `fn` parameters
+/// (which is what it used to do, and what tripped `clippy::too_many_arguments`
+/// — a real signal here, not noise to silence: three unrelated callbacks are
+/// easy to pass in the wrong order, and a named field cannot be).
+///
+/// See `run_inner`'s own doc comment for why these are parameters at all
+/// rather than being chosen inside it.
+struct RunHooks<'d, S> {
+    deliver: fn(&Session<'_, S>, &mut S, Event),
+    should_stop: fn(*mut S) -> bool,
+    register_sources: fn(&Backend<'d>, &Runtime, &Session<'_, S>) -> Result<Vec<FdRegistration>>,
+}
+
+/// One boxed fd-source registration: the `wl_event_source` libwayland handed
+/// back, plus the context its callback needs.
+///
+/// Removed from the loop by `Drop`, for the same reason [`Registration`]
+/// unlinks there: an early `?` return in the middle of `run_inner` must not
+/// leave a live source pointing at a freed context.
+struct FdRegistration {
+    source: *mut sys::wl_event_source,
+    // Declared after `source` so it is dropped after the source is removed,
+    // never while libwayland could still dispatch through it.
+    _ctx: Box<FdCtx>,
+}
+
+#[repr(C)]
+struct FdCtx {
+    /// An erased `*const Session<'_, S>`, for the `S` this context's
+    /// `on_fd_ready::<S>` was instantiated at — the same pairing
+    /// [`Bound::session`] documents.
+    session: *const (),
+    id: SourceId,
+}
+
+impl Drop for FdRegistration {
+    fn drop(&mut self) {
+        use sys::wayland_sys::ffi_dispatch;
+        #[allow(unused_imports)]
+        use sys::wayland_sys::server::*;
+
+        // SAFETY: `source` came from `wl_event_loop_add_fd` on a loop that
+        // outlives this run (the `Display` borrow guarantees it), and is
+        // removed exactly once, here.
+        let _ = unsafe {
+            ffi_dispatch!(
+                sys::wayland_sys::server::wayland_server_handle(),
+                wl_event_source_remove,
+                self.source
+            )
+        };
+    }
+}
+
+unsafe extern "C" fn on_fd_ready<S: Handlers>(
+    _fd: std::os::raw::c_int,
+    mask: u32,
+    data: *mut std::ffi::c_void,
+) -> std::os::raw::c_int {
+    // SAFETY: libwayland invokes this only for a source `register_fd_sources`
+    // registered, whose `data` is the `FdCtx` boxed alongside it — alive
+    // because the `FdRegistration` owning both is dropped (removing the
+    // source first) before the box is freed. Its `session` is the
+    // `*const Session<'_, S>` paired with this instantiation at the same `S`.
+    unsafe {
+        let ctx = data.cast::<FdCtx>();
+        let session = (*ctx).session.cast::<Session<'_, S>>();
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::FdReady((*ctx).id, mask), deliver);
+    }
+    // libwayland ignores the return value for fd sources; 0 is what every
+    // in-tree compositor returns.
+    0
+}
+
+/// Never stops a run. `run`'s `should_stop` slot: `run`'s bound is
+/// `OutputHandler`, which says nothing about `LoopHandler`, so there is no
+/// `S::should_stop` to call.
+fn never_stop<S>(_state: *mut S) -> bool {
+    false
+}
+
+/// `run_all`'s `should_stop` slot, deferring to the handler's own answer.
+fn should_stop_of<S: LoopHandler>(state: *mut S) -> bool {
+    // SAFETY: `run_inner` calls this only between dispatch turns, with no
+    // handler on the stack — `Dispatcher::emit` clears its guard before
+    // returning — so no other `&mut S` can be live, and `state` is the
+    // pointer `Dispatcher::new` was given for this call.
+    unsafe { (*state).should_stop() }
+}
+
+/// `run`'s `register_sources` slot: `run` makes its own empty [`Runtime`]
+/// (see its own doc comment) that nothing ever adds a source to, so there is
+/// nothing to register and no need for a `Handlers` bound to do it with.
+fn no_fd_sources<S>(
+    _backend: &Backend<'_>,
+    _runtime: &Runtime,
+    _session: &Session<'_, S>,
+) -> Result<Vec<FdRegistration>> {
+    Ok(Vec::new())
+}
+
+/// Delivery for `run_all`: every event kind, including the ones `deliver`
+/// (which is bound only by `OutputHandler`) cannot route.
+fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) {
+    match ev {
+        Event::NewOutput(id) => with_output(session, id, |output| state.new_output(output)),
+        Event::OutputFrame(id) => with_output(session, id, |output| state.frame(output)),
+        Event::OutputDestroyed(id) => state.destroyed(id),
+        Event::FdReady(id, mask) => {
+            // Resolving through the runtime rather than carrying the fd in
+            // the event is what makes deferral sound here too: a source the
+            // runtime no longer knows about simply misses, and the event is
+            // dropped instead of naming a closed descriptor.
+            let readiness = crate::Readiness::from_mask(mask);
+            session
+                .runtime
+                .with_fd(id, |fd| state.fd_ready(id, fd, readiness));
+        }
     }
 }
 
@@ -677,7 +1011,7 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
     // the end of `run`), which is what lets them pass a null liveness flag.
     unsafe {
         let bound = bound_of(l);
-        let session = (*bound).session.cast::<Session<S>>();
+        let session = (*bound).session.cast::<Session<'_, S>>();
         let output = data.cast::<sys::wlr_output>();
 
         // Give the output an identity before anyone can ask for one.
@@ -721,9 +1055,10 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
         );
         drop(displaced);
 
+        let deliver = (*session).deliver;
         (*session)
             .dispatcher
-            .emit(&*session, Event::NewOutput(id), deliver::<S>);
+            .emit(&*session, Event::NewOutput(id), deliver);
     }
 }
 
@@ -739,15 +1074,16 @@ unsafe extern "C" fn on_frame<S: OutputHandler>(
     // `on_new_output::<S>` was itself paired with.
     unsafe {
         let bound = bound_of(l);
-        let session = (*bound).session.cast::<Session<S>>();
+        let session = (*bound).session.cast::<Session<'_, S>>();
         // Cannot be `None`: `on_new_output` is the only site that installs this
         // callback and it always supplies an id. Handled rather than unwrapped
         // because this is an `extern "C"` frame, where a panic aborts.
         let Some(id) = (*bound).id else { return };
 
+        let deliver = (*session).deliver;
         (*session)
             .dispatcher
-            .emit(&*session, Event::OutputFrame(id), deliver::<S>);
+            .emit(&*session, Event::OutputFrame(id), deliver);
     }
 }
 
@@ -761,7 +1097,7 @@ unsafe extern "C" fn on_output_destroy<S: OutputHandler>(
     // output is still alive for the duration of the emission.
     unsafe {
         let bound = bound_of(l);
-        let session = (*bound).session.cast::<Session<S>>();
+        let session = (*bound).session.cast::<Session<'_, S>>();
         let Some(id) = (*bound).id else { return };
 
         // Both values this frame still needs have been copied out of `*bound`
@@ -782,9 +1118,10 @@ unsafe extern "C" fn on_output_destroy<S: OutputHandler>(
         let entry = (*session).outputs.borrow_mut().remove(&id);
         drop(entry);
 
+        let deliver = (*session).deliver;
         (*session)
             .dispatcher
-            .emit(&*session, Event::OutputDestroyed(id), deliver::<S>);
+            .emit(&*session, Event::OutputDestroyed(id), deliver);
     }
 }
 
@@ -793,7 +1130,7 @@ unsafe extern "C" fn on_output_destroy<S: OutputHandler>(
 /// The registry borrow is released before `f` runs: a handler can re-enter
 /// wlroots (committing an output, say), which can fire a signal, which can take
 /// the borrow mutably.
-fn with_output<S>(session: &Session<S>, id: OutputId, f: impl FnOnce(&Output<'_>)) {
+fn with_output<S>(session: &Session<'_, S>, id: OutputId, f: impl FnOnce(&Output<'_>)) {
     let raw = session.outputs.borrow().get(&id).map(|entry| entry.raw);
     let Some(raw) = raw else { return };
 
@@ -833,7 +1170,7 @@ fn with_output<S>(session: &Session<S>, id: OutputId, f: impl FnOnce(&Output<'_>
 /// Ids are resolved here rather than carried as handles, which is what makes
 /// deferral sound: an output destroyed between queueing and delivery is simply
 /// absent from the registry and the event is dropped.
-fn deliver<S: OutputHandler>(session: &Session<S>, state: &mut S, ev: Event) {
+fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event) {
     match ev {
         Event::NewOutput(id) => with_output(session, id, |output| state.new_output(output)),
         Event::OutputFrame(id) => with_output(session, id, |output| state.frame(output)),
@@ -841,6 +1178,10 @@ fn deliver<S: OutputHandler>(session: &Session<S>, state: &mut S, ev: Event) {
         // outlives the object on purpose, and the handler is told about the
         // destruction even though nothing is left to hand it.
         Event::OutputDestroyed(id) => state.destroyed(id),
+        // Unreachable: `run` registers no fd sources. Dropped rather than
+        // unreachable!() because this is on the path from an `extern "C"`
+        // frame, where a panic aborts the process.
+        Event::FdReady(..) => {}
     }
 }
 
@@ -1234,17 +1575,21 @@ mod tests {
     unsafe fn announce(
         state: *mut Recorder,
         output: *mut sys::wlr_output,
-        body: impl FnOnce(&Session<Recorder>, OutputId),
+        body: impl FnOnce(&Session<'_, Recorder>, OutputId),
     ) {
         // SAFETY: the caller's guarantees are what `Dispatcher::emit` and
         // `Registration::link` require. `session` is a local that never moves
         // after its address is taken, and the harness signal and its flag both
-        // outlive the registration below. `Session<Recorder>` is not reachable
-        // from `Recorder`, so no reference to it can be live across `emit`.
+        // outlive the registration below. `Session<'_, Recorder>` is not
+        // reachable from `Recorder`, so no reference to it can be live across
+        // `emit`.
         unsafe {
+            let runtime = Runtime::new().expect("runtime");
             let session = Session {
                 dispatcher: Dispatcher::new(state),
                 outputs: RefCell::new(HashMap::new()),
+                runtime: &runtime,
+                deliver: deliver::<Recorder>,
             };
             let mut h = Harness::new();
             let hp = &raw mut *h;
@@ -1404,11 +1749,14 @@ mod tests {
     fn an_event_for_an_unknown_output_is_dropped_rather_than_delivered() {
         let mut state = Recorder::default();
         let ghost = OutputId(u64::MAX);
-        let session: Session<Recorder> = Session {
+        let runtime = Runtime::new().expect("runtime");
+        let session: Session<'_, Recorder> = Session {
             // Never dereferenced: these tests call `deliver` directly and pass
             // the state alongside, rather than going through `emit`.
             dispatcher: Dispatcher::new(std::ptr::null_mut()),
             outputs: RefCell::new(HashMap::new()),
+            runtime: &runtime,
+            deliver: deliver::<Recorder>,
         };
 
         deliver(&session, &mut state, Event::NewOutput(ghost));
