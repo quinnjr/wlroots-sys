@@ -1,8 +1,33 @@
 # Releasing / bumping the wlroots minor
 
-wlroots breaks API on **every** minor release, and this crate's versioning policy
-is `wlr-sys 0.N.x` binds wlroots `0.N.x`. So bumping the wlroots minor is the
+wlroots breaks API on **every** minor release, and both crates' versioning policy
+is that `0.N.x` binds wlroots `0.N.x`. So bumping the wlroots minor is the
 most frequent maintenance task this repo has, and it touches more than one file.
+
+## Tags name their crate
+
+The workspace publishes two crates, so a bare `vX.Y.Z` is ambiguous. Tags are
+prefixed with the crate:
+
+- `wlr-sys-v0.20.2`
+- `wlr-v0.20.0`
+
+Tags `v0.15.0` … `v0.20.2` predate `wlr` and are all `wlr-sys`; they are left
+as they are rather than rewritten, since they are published references. Anything
+new takes a prefix.
+
+Both crates carry the same minor for the same wlroots, so `wlr 0.20.x` and
+`wlr-sys 0.20.x` bind the same wlroots — but their patch numbers are
+independent and will drift, because a fix to one is not a release of the other.
+
+## Publishing order
+
+`wlr` depends on `wlr-sys` by `version` *and* `path`. Cargo drops the path when
+packaging, so a published `wlr` resolves `wlr-sys` from crates.io — which means
+**`wlr-sys` must be published first**, and `cargo package -p wlr` is what proves
+it: watch its output for `Compiling wlr-sys vX.Y.Z` without a path, which is the
+registry copy being used. If that line shows a path, the release is untested
+against what consumers will actually get.
 
 Two of these sites are self-enforcing — `tests/link.rs` fails if the crate
 version and `WLR_VERSION_MINOR` disagree, and `cargo` fails if `links` collides.
@@ -63,12 +88,19 @@ than silently wrong documentation.
 ```sh
 cargo package -p wlr-sys            # builds from a clean extraction
 cargo publish -p wlr-sys --dry-run
+cargo package -p wlr                # after wlr-sys is on crates.io
+cargo publish -p wlr --dry-run
 ```
 
 `cargo package` is the step that catches a missing `protocol/*.xml`, an
 `include_str!` escaping the package root, or a `build.rs` reading outside
 `CARGO_MANIFEST_DIR` — all of which look fine in-tree. A version can only be
 yanked, never replaced, so this is not optional.
+
+A `support/*` release cannot be verified on an Arch host, which has only the
+newest wlroots: run `cargo package` in that branch's container instead, then
+publish from the host with `--no-verify`, since the host cannot build it. See
+`CONTRIBUTING.md`.
 
 ## Frozen within a minor
 

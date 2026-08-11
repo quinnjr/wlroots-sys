@@ -168,6 +168,23 @@ They are not redundant — each covers something the others structurally cannot:
 bindgen's own ~690 `const _` layout assertions run on every build and cover
 struct layout; the tests above cover what layout checks cannot.
 
+## Branching
+
+git-flow. `develop` is the integration branch and the PR target; `main` carries
+only tagged releases. Older wlroots lines live on **long-lived** `support/*`
+branches that are never merged into `develop` — they bind different wlroots
+minors with genuinely different subsystem tables and tests:
+
+| Branch | wlroots | Distro |
+|---|---|---|
+| `develop` / `main` | 0.20 | Arch |
+| `support/wlroots-0.19` | 0.19 | Ubuntu 26.04 |
+| `support/wlroots-0.17` | 0.17 | Ubuntu 24.04 |
+| `support/wlroots-0.15` | 0.15 | Ubuntu 22.04 |
+
+Shared fixes are cherry-picked between lines, not merged, and must be re-verified
+in the target branch's own container. See `CONTRIBUTING.md`.
+
 ## Conventions
 
 **MSRV is 1.88** (`rust-version` in the workspace manifest) and it is a published
