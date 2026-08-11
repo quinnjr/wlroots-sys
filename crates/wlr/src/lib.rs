@@ -8,9 +8,11 @@ pub(crate) mod sys;
 mod dispatch;
 mod error;
 mod id;
+mod output;
 
 pub use error::{Error, Result};
 pub use id::OutputId;
+pub use output::Output;
 
 /// The wlroots version this build of `wlr` binds, as `(major, minor)`.
 ///
