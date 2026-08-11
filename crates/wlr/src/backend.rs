@@ -31,17 +31,18 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
+use std::rc::Rc;
 
 use crate::dispatch::{Dispatcher, Event};
 use crate::id::{attach_id, find_id};
-use crate::{Display, Error, EventLoop, Output, OutputHandler, OutputId, Result, sys};
+use crate::{Error, EventLoop, Output, OutputHandler, OutputId, Result, sys};
 
 /// A wlroots backend.
 ///
 /// Has no `Drop` *impl*, deliberately. `wlr_backend_destroy` is, in wlroots' own
 /// words, "normally called automatically when the event loop is destroyed", and
 /// `wlr_backend_autocreate` registers the backend with the loop for exactly
-/// that. The loop belongs to the [`Display`], so `wl_display_destroy` in
+/// that. The loop belongs to the [`Display`](crate::Display), so `wl_display_destroy` in
 /// `Display`'s `Drop` is what tears the backend down; calling
 /// `wlr_backend_destroy` here as well would be a double free. That ordering is
 /// guaranteed by the type system rather than by discipline: `'d` comes from the
@@ -61,15 +62,24 @@ pub struct Backend<'d> {
 
     /// Whether `raw` still points at a live `wlr_backend`.
     ///
-    /// Boxed so the flag has an address that survives this struct being moved —
-    /// `autocreate` returns a `Backend` by value, and `_death_watch` holds a
-    /// pointer to the flag. Same reason [`Bound`] is boxed.
+    /// Heap-allocated so the flag has an address that survives this struct being
+    /// moved — `autocreate` returns a `Backend` by value, and `_death_watch`
+    /// holds a raw pointer to the flag.
+    ///
+    /// `Rc`, not `Box`, and that is a soundness distinction rather than a
+    /// stylistic one. A `Box` asserts unique ownership of its pointee, so moving
+    /// the `Backend` re-tags the boxed `Cell` — which, under Stacked Borrows
+    /// with `retag-fields`, pops the raw pointer `_death_watch` derived from it
+    /// and makes the callback's later write model-level UB. `Rc`'s pointee is
+    /// shared and carries no such assertion, so moving the handle leaves
+    /// pointers into the allocation valid. `Backend` is already `!Send`/`!Sync`
+    /// through its `NonNull` fields, so the non-atomic refcount costs nothing.
     ///
     /// Cleared, permanently, by [`on_backend_destroy`]. wlroots emits
     /// `events.destroy` from `wlr_backend_finish` *before* freeing anything, so
     /// the flag is always brought down while the struct is still valid — there
     /// is no window in which it reads `true` for a freed backend.
-    alive: Box<Cell<bool>>,
+    alive: Rc<Cell<bool>>,
 
     /// Whether `wlr_backend_start` has already been called.
     ///
@@ -78,6 +88,15 @@ pub struct Backend<'d> {
     /// does exactly that — it announces every output it already has from inside
     /// `wlr_backend_start`. Starting twice would announce them twice.
     started: Cell<bool>,
+
+    /// The event loop this backend was created on.
+    ///
+    /// Kept rather than discarded so that [`Backend::run`] can dispatch the
+    /// loop the backend's signals actually arrive on. Asking the caller to
+    /// re-supply it as a `&Display` was the alternative, and it was
+    /// unenforceable: nothing related the two, so passing a second display's
+    /// loop compiled, dispatched the wrong loop, and produced silence.
+    loop_: NonNull<sys::wl_event_loop>,
 
     _loop: PhantomData<&'d ()>,
 }
@@ -302,6 +321,13 @@ thread_local! {
 /// Marks [`Backend::run`] as being on the stack, and clears the mark on the way
 /// out — including the `?` paths, which is why it is a guard and not a pair of
 /// assignments.
+///
+/// The sibling of `dispatch.rs`'s handler guard, and deliberately not merged
+/// with it: this one spans a whole `run` call and refuses a second `run`, while
+/// that one spans a single handler delivery and refuses the event loop being
+/// driven from inside it. `run` itself drives the loop, so one flag could not
+/// serve both — it would have to be clear for the very call the other exists to
+/// forbid.
 struct ReentryGuard {
     /// Nothing to hold; the field exists only so the guard cannot be
     /// constructed without going through [`ReentryGuard::acquire`].
@@ -341,7 +367,7 @@ impl<'d> Backend<'d> {
         let raw = unsafe { sys::wlr_backend_autocreate(loop_.as_ptr(), std::ptr::null_mut()) };
         let raw = NonNull::new(raw).ok_or(Error::Create("wlr_backend_autocreate"))?;
 
-        let alive = Box::new(Cell::new(true));
+        let alive = Rc::new(Cell::new(true));
 
         // Registered here, not in `run`, so the flag is trustworthy for the
         // backend's whole life rather than only while a handler loop happens to
@@ -351,8 +377,9 @@ impl<'d> Backend<'d> {
         // SAFETY: `wlr_backend_autocreate` returned non-null, so `events.destroy`
         // is an initialised signal on a live backend. The backend is not
         // required to outlive this registration, because `on_backend_destroy`
-        // clears `alive` before wlroots frees it. `alive` is boxed, so moving
-        // the `Backend` returned below does not move the flag, and the
+        // clears `alive` before wlroots frees it. `alive` is heap-allocated
+        // behind an `Rc`, so moving the `Backend` returned below neither moves
+        // the flag nor re-tags it (see the field's own comment), and the
         // `_death_watch` field is declared before `alive` so it drops — and so
         // reads the flag — while the flag is still there. `on_backend_destroy`
         // never reads `session` or `id`, so null and `None` are the honest
@@ -372,6 +399,9 @@ impl<'d> Backend<'d> {
             _death_watch: death_watch,
             alive,
             started: Cell::new(false),
+            // Kept from the loop we were created on, rather than asked for
+            // again at `run` time — see the field's own comment.
+            loop_: loop_.as_non_null(),
             _loop: PhantomData,
         })
     }
@@ -429,8 +459,22 @@ impl<'d> Backend<'d> {
     /// backend already has synchronously, before it returns. Starting is done
     /// once however many times this is called.
     ///
-    /// Takes a count rather than blocking forever so tests terminate; a
-    /// blocking loop belongs with signal handling in a later slice.
+    /// The loop dispatched is the one this backend was created on, which is
+    /// why nothing here asks for a display: the backend keeps that pointer, so
+    /// there is no second value that could disagree with it.
+    ///
+    /// `iterations` is a count rather than a block-forever loop, and that is a
+    /// deliberate interim shape rather than the final API: a blocking
+    /// `run_forever` needs signal handling to be interruptible, which belongs
+    /// with a later slice, and adding it then is a new method rather than a
+    /// change to this one. So do **not** build around `u32::MAX` as a way to
+    /// spell "run until quit" — it will spin the loop the same way any other
+    /// count does, and the blocking entry point is coming.
+    ///
+    /// # Panics
+    ///
+    /// Never directly, but a panic escaping one of `state`'s handler methods
+    /// aborts the process; see [`OutputHandler`]'s own documentation.
     ///
     /// Handlers are installed for the duration of this call only, so an output
     /// announced during one call is not announced again by the next: wlroots
@@ -456,12 +500,7 @@ impl<'d> Backend<'d> {
     /// announcement, but that is only the visible symptom.)
     ///
     /// [`Error::Operation`] if starting the backend fails.
-    pub fn run<S: OutputHandler>(
-        &self,
-        display: &Display,
-        state: &mut S,
-        iterations: u32,
-    ) -> Result<()> {
+    pub fn run<S: OutputHandler>(&self, state: &mut S, iterations: u32) -> Result<()> {
         alive_or_err(&self.alive)?;
         // Taken before anything else is built, so a refused re-entry perturbs
         // nothing at all — in particular it does not register a listener or
@@ -506,7 +545,15 @@ impl<'d> Backend<'d> {
         // point would emit them into an empty signal; see `ensure_started`.
         self.ensure_started()?;
 
-        let loop_ = display.event_loop();
+        // SAFETY: `self.loop_` was taken from the `EventLoop<'d>` handed to
+        // `autocreate`, so it names a live loop belonging to a display that
+        // outlives `'d` — and `&self` keeps that borrow alive for this call.
+        //
+        // Dispatching here is not the re-entry `EventLoop::dispatch` refuses:
+        // `run` is not a handler, and the flag that refusal consults is set
+        // only for the duration of a delivery, strictly inside the
+        // `loop_.dispatch(0)` call below rather than around it.
+        let loop_ = unsafe { EventLoop::from_raw(self.loop_) };
         for _ in 0..iterations {
             loop_.dispatch(0)?;
             // Checked every turn rather than only on entry: a backend that dies
@@ -643,7 +690,14 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
         // Registered before the handler is told, so that a handler asking about
         // this output — or anything deferred behind it — can resolve the id.
         // The borrow ends with the statement, before any handler runs.
-        (*session).outputs.borrow_mut().insert(
+        //
+        // Any displaced entry is bound and dropped *after* that statement, so
+        // its two `Registration::drop`s run with the `RefMut` released. They
+        // only call `wl_list_remove` today, so it would be harmless either way;
+        // binding it keeps the ordering true for a future `Drop` that touches
+        // the registry, which would otherwise panic on a double borrow inside
+        // an `extern "C"` frame — that is, abort.
+        let displaced = (*session).outputs.borrow_mut().insert(
             id,
             OutputEntry {
                 raw: output,
@@ -651,6 +705,7 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
                 _destroy: destroy,
             },
         );
+        drop(displaced);
 
         (*session)
             .dispatcher
@@ -733,12 +788,25 @@ fn with_output<S>(session: &Session<S>, id: OutputId, f: impl FnOnce(&Output<'_>
     // names a live output. The handle is created and dropped inside this call,
     // so it cannot outlive the handler `f` passes it to.
     //
-    // That premise is about the entry, not about the handle: it holds at the
-    // moment `raw` is read, and it is `f` that must not invalidate it. Nothing
-    // can today — `Output` exposes only `id`, `name` and `commit`, none of
-    // which can destroy an output. Whoever adds a method that *can* (a
-    // `destroy`, or anything that lets wlroots tear the output down mid-call)
-    // owes this line an answer: the handle would still name freed memory for
+    // The handle must also stay valid *for* the whole of `f`, which the entry
+    // being present at this instant does not establish on its own — an output
+    // is freed by wlroots, and wlroots only runs when something drives the
+    // event loop. So the invariant is: no wlroots code runs between here and
+    // `f` returning. Two facts together give it, and both are enforced rather
+    // than hoped for.
+    //
+    // First, `f` cannot drive the loop. `Dispatcher::emit` sets the thread's
+    // handler flag for exactly this window and `EventLoop::dispatch` refuses
+    // while it is set, so the one safe public route into wlroots' own
+    // dispatching is shut — including via a `&Display` or a `&Backend` that
+    // `f`'s state happens to hold, since neither offers another way in.
+    // `Backend::run` is refused by its own `ReentryGuard` for the same reason.
+    //
+    // Second, `f` cannot reach wlroots directly. `Output` exposes only `id`,
+    // `name` and `commit`, none of which can destroy an output. Whoever adds a
+    // method that *can* — a `destroy`, or anything that lets wlroots tear the
+    // output down mid-call — owes this line an answer, because that route
+    // bypasses the flag entirely: the handle would still name freed memory for
     // the rest of `f`, and no re-lookup here can help, because `f` holds it.
     let output = unsafe { Output::from_raw(raw) };
     f(&output);

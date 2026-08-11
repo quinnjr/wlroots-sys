@@ -25,6 +25,17 @@
 //!    documentation states the consequence for consumers, and any future path
 //!    with the same requirement inherits the same answer.
 //!
+//! Deferral is only half of what a running handler needs, though. It keeps the
+//! `&mut S` unaliased; it does nothing about the *handles* a handler is holding.
+//! A handler given `&Output<'h>` cannot let it escape the call, but it can drive
+//! the event loop from inside the call — `EventLoop::dispatch` is public, safe,
+//! takes `&self`, and any `&Display` yields an `EventLoop` — and wlroots is then
+//! free to destroy and free that very output while the handler still holds the
+//! handle. No `unsafe` appears anywhere in that sequence. So a second,
+//! thread-scoped flag ([`IN_HANDLER`]) records that a handler is on the stack,
+//! and `EventLoop::dispatch` refuses while it is set. The lifetime bounds where
+//! a handle may travel; this bounds what may happen underneath it.
+//!
 //! The drain loop below is intentionally unbounded: a handler that queues a
 //! new event on every delivery livelocks rather than terminating. That is the
 //! correct behaviour for real wlroots traffic (it is bounded by however many
@@ -46,6 +57,73 @@ pub(crate) enum Event {
     OutputDestroyed(OutputId),
 }
 
+thread_local! {
+    /// Set while a handler is running anywhere on this thread.
+    ///
+    /// Distinct from [`Dispatcher::in_dispatch`], which is per-dispatcher and
+    /// decides *deferral*. This one is thread-scoped and decides *refusal*: it
+    /// is what [`crate::EventLoop::dispatch`] consults, and that entry point
+    /// has no dispatcher to ask. See [`HandlerGuard`].
+    static IN_HANDLER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether a handler is currently running on this thread.
+///
+/// The one fact that makes a borrowed handle's validity window enforceable.
+/// A handler is handed `&Output<'h>`, whose `'h` stops it escaping the call —
+/// but not from driving the event loop *within* the call, which lets wlroots
+/// free the very output the handler is still holding. Nothing about that needs
+/// `unsafe`: [`crate::EventLoop::dispatch`] is public, safe, takes `&self`, and
+/// an `EventLoop` is re-derivable from any `&Display` a handler's own state
+/// happens to hold. So the handle's lifetime cannot be the whole argument, and
+/// this flag supplies the rest: while it is set, the event loop refuses to be
+/// driven, so no wlroots code that could free a live handle's object runs.
+pub(crate) fn in_handler() -> bool {
+    IN_HANDLER.get()
+}
+
+/// Marks a handler as running, on both the per-dispatcher and the thread-wide
+/// flag, and clears both on every exit path.
+///
+/// A guard rather than paired assignments so that an unwind out of `deliver`
+/// cannot leave either flag stuck — a stuck [`IN_HANDLER`] would wedge the
+/// event loop shut for the rest of the thread's life. This is the same shape,
+/// and for the same reason, as `Backend`'s `ReentryGuard`; the two are
+/// deliberately separate because they guard different windows. `ReentryGuard`
+/// spans a whole `Backend::run` call and refuses a second `run`; this spans one
+/// handler delivery and refuses the loop being driven from inside it. Neither
+/// can subsume the other: `run` legitimately dispatches the loop (outside any
+/// handler), and a handler legitimately runs with no `run` on the stack at all
+/// once a future entry point delivers events some other way.
+struct HandlerGuard<'a> {
+    in_dispatch: &'a Cell<bool>,
+
+    /// What [`IN_HANDLER`] read on the way in, restored rather than cleared on
+    /// the way out. Today it is always `false` — a second dispatcher on one
+    /// thread is what `Backend::run`'s `ReentryGuard` refuses — but restoring
+    /// costs nothing and means a nested guard cannot reopen the loop while an
+    /// outer handler is still running, which clearing unconditionally would.
+    previous: bool,
+}
+
+impl<'a> HandlerGuard<'a> {
+    fn enter(in_dispatch: &'a Cell<bool>) -> Self {
+        in_dispatch.set(true);
+        let previous = IN_HANDLER.replace(true);
+        HandlerGuard {
+            in_dispatch,
+            previous,
+        }
+    }
+}
+
+impl Drop for HandlerGuard<'_> {
+    fn drop(&mut self) {
+        IN_HANDLER.set(self.previous);
+        self.in_dispatch.set(false);
+    }
+}
+
 /// Routes events to handler traits, one at a time.
 pub(crate) struct Dispatcher<S> {
     state: *mut S,
@@ -60,18 +138,6 @@ impl<S> Dispatcher<S> {
             in_dispatch: Cell::new(false),
             deferred: RefCell::new(VecDeque::new()),
         }
-    }
-
-    /// True while a handler is running.
-    ///
-    /// Nothing in the crate needs to ask outside tests — the queueing decision
-    /// is made inside [`Dispatcher::emit`], and `Backend::run`'s re-entry guard
-    /// is about a second *dispatcher* rather than a second event — so this is
-    /// dead code in a non-test build. `expect` rather than `allow`, so the
-    /// attribute itself is flagged the moment a caller appears.
-    #[cfg_attr(not(test), expect(dead_code))]
-    pub(crate) fn is_dispatching(&self) -> bool {
-        self.in_dispatch.get()
     }
 
     /// Deliver `ev`, or queue it if a handler is already running.
@@ -105,7 +171,8 @@ impl<S> Dispatcher<S> {
             return;
         }
 
-        self.in_dispatch.set(true);
+        // Sets both flags and clears them on every exit path, unwind included.
+        let _handler = HandlerGuard::enter(&self.in_dispatch);
 
         // SAFETY: the flag above guarantees no other `&mut S` is live for the
         // duration of this call (any reentrant `emit` sees the flag set and
@@ -124,8 +191,6 @@ impl<S> Dispatcher<S> {
                 None => break,
             }
         }
-
-        self.in_dispatch.set(false);
     }
 }
 
@@ -217,9 +282,14 @@ mod tests {
             ]
         );
         assert!(
-            !d.is_dispatching(),
-            "flag must be clear once dispatch unwinds"
+            !in_handler(),
+            "the handler flag must be clear once dispatch unwinds, or the \
+             event loop would stay shut for the rest of this thread's life"
         );
+        // One guard sets and clears both flags together, so this also witnesses
+        // that the per-dispatcher `in_dispatch` flag was cleared: the only code
+        // that can restore `IN_HANDLER` is `HandlerGuard::drop`, which clears
+        // `in_dispatch` in the same breath.
     }
 
     /// A handler-entry/exit marker. Unlike a bare `Event` log, this can tell
@@ -282,5 +352,35 @@ mod tests {
             ],
             "the inner handler must not start until the outer handler has fully exited"
         );
+    }
+
+    /// The thread-scoped half of the guard, which `EventLoop::dispatch`
+    /// consults to refuse being driven from inside a handler.
+    ///
+    /// Asserted from inside the delivery rather than around it, because "set
+    /// while a handler runs" is the whole claim; a test that only checked it
+    /// was clear afterwards would pass against a flag that is never set.
+    #[test]
+    fn the_handler_flag_is_set_for_the_duration_of_a_delivery() {
+        fn record(_ctx: &(), state: &mut Vec<bool>, _ev: Event) {
+            state.push(in_handler());
+        }
+
+        let mut seen: Vec<bool> = Vec::new();
+        assert!(!in_handler(), "no handler is running before dispatch");
+
+        let p = &raw mut seen;
+        let d = Dispatcher::new(p);
+        // SAFETY: `seen` outlives `d` and is reached only through `p` from
+        // here on; nothing else holds a reference to it across the call.
+        unsafe { d.emit(&(), Event::OutputFrame(OutputId(1)), record) };
+
+        assert_eq!(
+            seen,
+            vec![true],
+            "the flag must read set from inside the handler, which is the only \
+             place it can do any good"
+        );
+        assert!(!in_handler(), "and be restored once the delivery returns");
     }
 }

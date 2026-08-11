@@ -20,6 +20,25 @@
 //! would still fail to compile even if `from_raw` were `pub`. It is kept
 //! because it documents real intended usage, not because it proves anything
 //! about `Output`'s soundness.
+//!
+//! # When these fail after a toolchain update
+//!
+//! The `.stderr` fixtures next to each case pin rustc's *exact* diagnostic
+//! text, notes and spans included, and CI runs `cargo test --workspace` on
+//! stable — which moves. So a rustc release that rewords a note or renumbers a
+//! span breaks these tests without anything in this crate having changed, and
+//! it will look like a `wlr` regression rather than what it is.
+//!
+//! Read the diff trybuild prints before doing anything. If the *error* is still
+//! the same error — still E0603/"private", still the same borrow complaint —
+//! it is a formatting change: regenerate with
+//!
+//! ```sh
+//! TRYBUILD=overwrite cargo test -p wlr --test compile_fail
+//! ```
+//!
+//! and commit the new `.stderr`. If the error code or the reason changed, the
+//! guarantee changed with it; fix the crate, not the fixture.
 
 #[test]
 fn output_lifetime_parameter_and_calling_convention_are_pinned() {

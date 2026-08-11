@@ -71,15 +71,6 @@ impl Display {
             _display: PhantomData,
         }
     }
-
-    // Unused outside this module's tests until the dispatch-time constructors
-    // that call this for real are wired up; `expect` (rather than `allow`)
-    // makes the compiler flag this attribute itself as unnecessary the
-    // moment those callers land.
-    #[cfg_attr(not(test), expect(dead_code))]
-    pub(crate) fn as_ptr(&self) -> *mut sys::wl_display {
-        self.raw.as_ptr()
-    }
 }
 
 impl Drop for Display {
@@ -111,12 +102,52 @@ pub struct EventLoop<'d> {
 }
 
 impl<'d> EventLoop<'d> {
+    /// Re-borrow a loop pointer this crate already holds.
+    ///
+    /// # Safety
+    ///
+    /// `raw` must name a live `wl_event_loop` belonging to a display that
+    /// outlives `'d`. [`Backend`](crate::Backend) is the only caller: it keeps
+    /// the pointer it was created from, and its own `'d` is that display's.
+    pub(crate) unsafe fn from_raw(raw: NonNull<sys::wl_event_loop>) -> EventLoop<'d> {
+        EventLoop {
+            raw,
+            _display: PhantomData,
+        }
+    }
+
     pub(crate) fn as_ptr(&self) -> *mut sys::wl_event_loop {
         self.raw.as_ptr()
     }
 
+    /// The same pointer, still carrying its non-nullness, for the one caller
+    /// that stores it rather than passing it straight to C.
+    pub(crate) fn as_non_null(&self) -> NonNull<sys::wl_event_loop> {
+        self.raw
+    }
+
     /// Dispatch pending events. `timeout_ms` of 0 returns immediately.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Reentrant`] if called from inside a handler, and that refusal
+    /// is load-bearing rather than defensive. A handler is passed borrowed
+    /// handles — [`Output`](crate::Output) and whatever later slices add —
+    /// whose lifetime stops them escaping the call but says nothing about what
+    /// may happen *during* it. Driving the loop here lets wlroots destroy and
+    /// free the very object a handle in the enclosing frame still names, and
+    /// nothing in that sequence needs `unsafe`: this method is safe, takes
+    /// `&self`, and a handler's own state may hold a `&Display` to re-derive
+    /// the loop from. Refusing is what makes a live handle's validity an
+    /// invariant rather than an expectation. Queue the work in your own state
+    /// and do it once the handler has returned.
+    ///
+    /// [`Error::Operation`] if libwayland reports the dispatch failed.
     pub fn dispatch(&self, timeout_ms: i32) -> Result<()> {
+        if crate::dispatch::in_handler() {
+            return Err(Error::Reentrant("EventLoop::dispatch"));
+        }
+
         use sys::wayland_sys::ffi_dispatch;
         // `allow`, not `expect`: unused only under the `dlopen` expansion of
         // `ffi_dispatch!`, which calls through a function-pointer table instead
@@ -146,14 +177,25 @@ impl<'d> EventLoop<'d> {
 mod tests {
     use super::*;
 
-    /// Exercises `as_ptr` on both `Display` and `EventLoop`, which otherwise
-    /// have no caller until the dispatch-time code in later tasks lands.
+    /// A display always has an event loop, and `event_loop` hands back a
+    /// usable pointer to it rather than the display's own.
     #[test]
-    fn as_ptr_is_non_null_for_display_and_event_loop() {
+    fn a_display_yields_a_non_null_event_loop() {
         let display = Display::new().expect("wl_display_create failed");
-        assert!(!display.as_ptr().is_null());
-
         let loop_ = display.event_loop();
         assert!(!loop_.as_ptr().is_null());
+    }
+
+    /// Dispatching outside any handler must work — this is the path
+    /// `Backend::run` takes on every turn of its loop, and the refusal added
+    /// for handlers must not catch it.
+    #[test]
+    fn dispatching_outside_a_handler_is_allowed() {
+        let display = Display::new().expect("wl_display_create failed");
+        assert_eq!(
+            display.event_loop().dispatch(0),
+            Ok(()),
+            "no handler is running, so there is nothing to refuse"
+        );
     }
 }

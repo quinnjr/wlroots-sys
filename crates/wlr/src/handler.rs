@@ -27,6 +27,13 @@ use crate::{Output, OutputId};
 pub trait OutputHandler {
     /// A new output was attached. The handle is valid only for this call;
     /// remember [`Output::id`] if you need to refer to it later.
+    ///
+    /// An announcement may be **dropped** rather than delivered. If wlroots
+    /// destroys the output between announcing it and this call — which it can,
+    /// because an announcement arriving while another handler is running is
+    /// queued behind it — there is no longer an object to hand you, and the
+    /// event is discarded. See [`destroyed`](OutputHandler::destroyed) for the
+    /// consequence.
     fn new_output(&mut self, output: &Output<'_>) {
         let _ = output;
     }
@@ -58,6 +65,17 @@ pub trait OutputHandler {
 
     /// The output is gone. Only the id is passed, because there is no longer an
     /// object to borrow.
+    ///
+    /// **`id` may be one you were never told about.** This is delivered
+    /// unconditionally, whereas [`new_output`](OutputHandler::new_output) is
+    /// dropped when the output dies before it can be delivered — so an output
+    /// created and destroyed while another handler was running produces a
+    /// `destroyed` with no preceding `new_output`. That falls out of ids
+    /// outliving objects on purpose, and it is not going to change.
+    ///
+    /// Write this method so an unknown id is harmless. `remove` on a map that
+    /// has no such key is fine; indexing it is not, and a panic here **aborts
+    /// the process** rather than failing anything (see the trait's own docs).
     fn destroyed(&mut self, id: OutputId) {
         let _ = id;
     }

@@ -40,11 +40,6 @@ impl<'h> Output<'h> {
         }
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
-    pub(crate) fn as_ptr(&self) -> *mut sys::wlr_output {
-        self.raw.as_ptr()
-    }
-
     /// This output's stable identity, safe to store beyond the handler.
     ///
     /// # Panics
@@ -74,15 +69,28 @@ impl<'h> Output<'h> {
         }
     }
 
-    /// Commit the output's pending state.
+    /// Commit an empty state to the output.
     ///
-    /// wlroots replaced the implicit pending-state model with an explicit
-    /// `wlr_output_state` part-way through the versions this project supports:
-    /// 0.15 has only `wlr_output_commit`, 0.19 and later only
+    /// There is no *pending* state to commit, and that is not an omission here
+    /// but a change in wlroots: it replaced the implicit pending-state model
+    /// with an explicit `wlr_output_state` part-way through the versions this
+    /// project supports. 0.15 has only `wlr_output_commit`, 0.19 and later only
     /// `wlr_output_commit_state`, and 0.17 carries both during the transition.
-    /// This branch binds 0.20, so it uses the newer call; the `support/*`
-    /// branches differ *inside this method* and keep the signature identical,
-    /// which is what lets a consumer move between them by changing a version.
+    /// This branch binds 0.20, so it initialises a fresh `wlr_output_state`,
+    /// commits that, and finishes it. The `support/*` branches differ *inside
+    /// this method* and keep the signature identical, which is what lets a
+    /// consumer move between them by changing a version.
+    ///
+    /// Committing an empty state applies no changes, so on a disabled output
+    /// this is observably a no-op. That is the whole of what this slice offers:
+    /// the `wlr_output_state` setters — enabling an output, setting a mode,
+    /// attaching a buffer — are not exposed yet and arrive with the rendering
+    /// slice. Until then there is nothing to put in the state, and no way to
+    /// make an output produce a frame.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] if wlroots rejected the commit.
     pub fn commit(&self) -> Result<()> {
         // SAFETY: the handle's lifetime guarantees the output is live.
         // `state` starts uninitialised rather than zeroed: nothing reads it
@@ -138,6 +146,12 @@ mod tests {
             // sized for `wlr_addon_set`'s enclosing type; `wlr_addon_set_init`
             // only writes the two `wl_list` fields it owns, which is in
             // bounds of that allocation.
+            // SAFETY: as above — `name` is in bounds of the same allocation.
+            // The string is `'static`, so the pointer stays valid for as long
+            // as this scratch output can be read, and nothing frees it (real
+            // wlroots owns its own `name`, but nothing in this crate frees
+            // that either).
+            unsafe { (*ptr).name = c"SCRATCH-1".as_ptr().cast_mut() };
             unsafe { sys::wlr_addon_set_init(&raw mut (*ptr).addons) };
             Self(ptr)
         }
@@ -155,22 +169,42 @@ mod tests {
         }
     }
 
-    /// Exercises `from_raw`/`as_ptr` against a standalone `wlr_output`, the
-    /// same style `id::tests` uses for a standalone `wlr_addon_set`: no
-    /// display, backend, or real output is needed to prove the pointer plumbing.
+    /// Exercises `from_raw` against a standalone `wlr_output`, the same style
+    /// `id::tests` uses for a standalone `wlr_addon_set`: no display, backend,
+    /// or real output is needed to prove the pointer plumbing.
+    ///
+    /// Asserted through `name()` rather than by comparing a recovered raw
+    /// pointer, so that nothing but the public surface has to exist for the
+    /// test's sake. It is the stronger check of the two anyway: reading back
+    /// the distinctive name this scratch output was given proves the handle
+    /// reached *this* struct at the right offset, which a pointer that
+    /// `from_raw` merely stored and handed back could not.
     #[test]
-    fn from_raw_wraps_and_as_ptr_recovers_the_same_pointer() {
+    fn from_raw_wraps_the_output_it_was_given() {
         let output = ScratchOutput::new();
 
         // SAFETY: `output.0` is a live `wlr_output` with an initialised addon
         // set, and the handle does not outlive this function.
         let handle = unsafe { Output::from_raw(output.0) };
         assert_eq!(
-            handle.as_ptr(),
-            output.0,
-            "from_raw must not copy or offset"
+            handle.name().as_deref(),
+            Some("SCRATCH-1"),
+            "the handle must read through to the output it was built from, \
+             without copying or offsetting it"
         );
-        assert_eq!(handle.name(), None, "zeroed output has a null name");
+    }
+
+    /// The other half: a null `name` is reported as absent rather than
+    /// dereferenced. wlroots leaves it null until the output is configured.
+    #[test]
+    fn an_unnamed_output_has_no_name() {
+        let output = ScratchOutput::new();
+        // SAFETY: `output.0` is exclusively owned by this test and live.
+        unsafe { (*output.0).name = std::ptr::null_mut() };
+
+        // SAFETY: as in the test above.
+        let handle = unsafe { Output::from_raw(output.0) };
+        assert_eq!(handle.name(), None);
     }
 
     /// Pins the panic *message*, not just that `id()` panics: whoever wires

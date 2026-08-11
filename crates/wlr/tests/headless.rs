@@ -74,7 +74,7 @@ fn headless_backend_announces_an_output_exactly_once() {
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
     let mut app = App::default();
 
-    backend.run(&display, &mut app, 4).expect("run");
+    backend.run(&mut app, 4).expect("run");
 
     assert!(
         !app.outputs.is_empty(),
@@ -107,7 +107,7 @@ fn headless_backend_announces_an_output_exactly_once() {
     // this one — and no assertion on `outputs` could tell: `ensure_id` is
     // idempotent, so the duplicate carries the same id and collapses back into
     // the same single map entry. Only the call count sees it.
-    backend.run(&display, &mut app, 2).expect("second run");
+    backend.run(&mut app, 2).expect("second run");
 
     assert_eq!(
         app.new_output_calls, after_first_run,

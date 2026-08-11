@@ -68,6 +68,14 @@ static DESTROY_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomic
 /// thread at the same moment would inflate that delta and fail it for the wrong
 /// reason. `backend.rs`'s delivery tests destroy id addons, so they take this
 /// lock too — the alternative is a suite that passes or fails by scheduling.
+///
+/// **If you write a test that finishes an addon set carrying an id addon —
+/// calling `wlr_addon_set_finish` directly, or through a fixture whose `Drop`
+/// does — take this lock for the whole test.** Finishing the set runs
+/// [`id_addon_destroy`], which bumps [`DESTROY_COUNT`]; a test that does so
+/// without holding the lock will not fail itself, it will fail whichever test
+/// happens to be measuring the delta at that moment, intermittently and
+/// somewhere else.
 #[cfg(test)]
 pub(crate) fn id_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

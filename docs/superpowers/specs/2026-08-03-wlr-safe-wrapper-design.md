@@ -254,14 +254,23 @@ The safety claim is tested as an invariant, not assumed:
 |---|---|
 | `trybuild` compile-fail | `&Output` cannot escape a handler. The entire design rests on this. |
 | Reentrancy test | A handler destroying an output from inside `frame` defers correctly, and a deferred event for a destroyed object is dropped rather than delivered. |
-| Headless integration | Real backend, real frame, real teardown — mirroring `wlr-sys`'s `examples/headless.rs`. |
+| Headless integration | Real backend, real announcement, real teardown — mirroring `wlr-sys`'s `examples/headless.rs`. Not a real *frame*: see the revision under "Scope". |
 | Version matrix in CI | Each branch's own distro container builds and tests that branch's `wlr`, so a divergence that reaches the public API fails on the affected branch. |
 
 ## 7. Scope
 
 **In this spec:** `Display`, `EventLoop`, `Backend`, `Output`, the dispatch core,
-deferral, IDs, version selection, `Error`. Ends at a headless backend rendering a
-frame.
+deferral, IDs, version selection, `Error`. Ends at a headless backend announcing
+an output to a handler, and tearing down cleanly.
+
+**Revised during implementation:** this originally read "Ends at a headless
+backend rendering a frame." It does not, and cannot. Making an output produce a
+frame means enabling it and setting a mode, which means exposing the
+`wlr_output_state` setters — and those belong to the rendering slice, not this
+one. `Output::commit` therefore commits an *empty* state, which is a no-op on a
+disabled output, and the headless integration test asserts zero frames rather
+than one. Frame *delivery* is covered against a real `wl_signal` in `backend.rs`'s
+own tests; frame *production* waits.
 
 Two things settled during implementation that the design did not anticipate:
 
