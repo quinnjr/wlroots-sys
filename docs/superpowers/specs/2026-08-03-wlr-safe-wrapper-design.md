@@ -202,7 +202,26 @@ later:
    delivery — dropping silently if the object is gone.
 2. **Anything wlroots requires the compositor to do before a callback returns
    cannot be deferred.** That set is small and enumerable (frame timing, buffer
-   commit); those paths dispatch directly and are documented as such.
+   commit).
+
+### The cost of consequence 2, found during implementation
+
+Point 2 originally said such paths "dispatch directly". **They cannot**, and this
+is the first real cost the deferral decision has imposed.
+
+Delivering `frame` directly while another handler is running would hand out a
+second `&mut State` while the first is still live — precisely the aliasing UB
+deferral exists to prevent. Soundness is not negotiable against a
+timeliness contract, so `frame` is deferred like every other event, and a frame
+arriving while another handler runs is delivered *after* that handler returns,
+outside the window wlroots intended it for.
+
+So the category of never-deferred paths does not exist in this design. The
+rendering slice inherits this: making frames timely requires changing the
+dispatch model — a second borrow discipline for render-critical paths, say — not
+special-casing `frame` against the current one. `OutputHandler::frame`'s
+documentation states the limitation rather than promising what the crate cannot
+deliver.
 
 ## 4. Handler traits
 
@@ -243,6 +262,21 @@ The safety claim is tested as an invariant, not assumed:
 **In this spec:** `Display`, `EventLoop`, `Backend`, `Output`, the dispatch core,
 deferral, IDs, version selection, `Error`. Ends at a headless backend rendering a
 frame.
+
+Two things settled during implementation that the design did not anticipate:
+
+- **`Backend` has no public `start`.** `wlr_backend_start` announces existing
+  outputs *synchronously* — `backend.h` documents that starting "may signal
+  new_input or new_output immediately" — so a compositor that starts the backend
+  before linking its listeners silently never hears about them. `run` therefore
+  owns starting, after wiring. A public `start` whose only failure mode is
+  silence was not worth keeping.
+- **The registry mapping `OutputId` back to a live output is per-`run`**, not
+  process-wide. Per-output listeners name a `Dispatcher<S>` and a `&mut State`
+  that exist only for that call, and `EventLoop::dispatch` is public safe API, so
+  a longer-lived registry would be a use-after-free reachable without `unsafe`.
+  The cost is that outputs are not re-announced by a later `run`, since wlroots
+  offers no enumeration API.
 
 **Later specs, in likely order:** seat and input; xdg-shell; layer-shell; scene
 graph; renderer surface beyond output bring-up.
