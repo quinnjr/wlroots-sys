@@ -1,0 +1,421 @@
+//! Event delivery, and the reentrancy guard that makes it sound.
+//!
+//! One `&mut S` reaches handlers. wlroots emits signals synchronously from
+//! inside API calls, so a handler that destroys an object re-enters dispatch
+//! while that `&mut S` is still live — which aliases `&mut` and is undefined
+//! behaviour. The dispatcher detects reentrancy and queues the inner event,
+//! draining the queue once the outer handler returns.
+//!
+//! Two consequences fall out of that and are deliberate:
+//!
+//! 1. Deferred events carry an [`OutputId`], never a handle, because the object
+//!    may be destroyed before delivery. Delivery re-resolves and drops silently
+//!    if it is gone.
+//! 2. Anything wlroots requires the compositor to complete *before* a callback
+//!    returns is delivered late when it is deferred, and this crate has no
+//!    exemption for it. There is exactly one such path today —
+//!    [`crate::OutputHandler::frame`], which wlroots expects to render before
+//!    its emission returns — and it is deferred along with everything else.
+//!
+//!    That is forced, not a shortcut. The exemption would have to deliver
+//!    directly while a handler is running, which is precisely the second
+//!    `&mut S` this module exists to prevent; a rendering deadline does not
+//!    outrank undefined behaviour. So no never-deferred category exists here,
+//!    and none can be added without changing the model. `frame`'s own
+//!    documentation states the consequence for consumers, and any future path
+//!    with the same requirement inherits the same answer.
+//!
+//! Deferral is only half of what a running handler needs, though. It keeps the
+//! `&mut S` unaliased; it does nothing about the *handles* a handler is holding.
+//! A handler given `&Output<'h>` cannot let it escape the call, but it can drive
+//! the event loop from inside the call — `EventLoop::dispatch` is public, safe,
+//! takes `&self`, and any `&Display` yields an `EventLoop` — and wlroots is then
+//! free to destroy and free that very output while the handler still holds the
+//! handle. No `unsafe` appears anywhere in that sequence. So a second,
+//! thread-scoped flag ([`IN_HANDLER`]) records that a handler is on the stack,
+//! and `EventLoop::dispatch` refuses while it is set. The lifetime bounds where
+//! a handle may travel; this bounds what may happen underneath it.
+//!
+//! The drain loop below is intentionally unbounded: a handler that queues a
+//! new event on every delivery livelocks rather than terminating. That is the
+//! correct behaviour for real wlroots traffic (it is bounded by however many
+//! objects a compositor can actually destroy in a chain), not an oversight.
+
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+
+use crate::OutputId;
+
+/// An event awaiting delivery.
+///
+/// Carries ids rather than handles precisely because a deferred event may name
+/// an object that no longer exists by the time it is delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Event {
+    NewOutput(OutputId),
+    OutputFrame(OutputId),
+    OutputDestroyed(OutputId),
+}
+
+thread_local! {
+    /// Set while a handler is running anywhere on this thread.
+    ///
+    /// Distinct from [`Dispatcher::in_dispatch`], which is per-dispatcher and
+    /// decides *deferral*. This one is thread-scoped and decides *refusal*: it
+    /// is what [`crate::EventLoop::dispatch`] consults, and that entry point
+    /// has no dispatcher to ask. See [`HandlerGuard`].
+    static IN_HANDLER: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether a handler is currently running on this thread.
+///
+/// The one fact that makes a borrowed handle's validity window enforceable.
+/// A handler is handed `&Output<'h>`, whose `'h` stops it escaping the call —
+/// but not from driving the event loop *within* the call, which lets wlroots
+/// free the very output the handler is still holding. Nothing about that needs
+/// `unsafe`: [`crate::EventLoop::dispatch`] is public, safe, takes `&self`, and
+/// an `EventLoop` is re-derivable from any `&Display` a handler's own state
+/// happens to hold. So the handle's lifetime cannot be the whole argument, and
+/// this flag supplies the rest: while it is set, the event loop refuses to be
+/// driven, so no wlroots code that could free a live handle's object runs.
+///
+/// The other half of the argument is that the flag is thread-local: it only
+/// closes this hole because `Display`, `EventLoop`, `Backend`, and `Output`
+/// are all `!Send`/`!Sync`, so a handler cannot move one to another thread
+/// and find the flag clear there. That currently holds incidentally, from
+/// `NonNull` and `PhantomData<&Display>` fields, not from any explicit
+/// assertion on those types besides the compile-time check pinning it
+/// elsewhere in the crate.
+pub(crate) fn in_handler() -> bool {
+    IN_HANDLER.get()
+}
+
+/// Marks a handler as running, on both the per-dispatcher and the thread-wide
+/// flag, and clears both on every exit path.
+///
+/// A guard rather than paired assignments so that an unwind out of `deliver`
+/// cannot leave either flag stuck — a stuck [`IN_HANDLER`] would wedge the
+/// event loop shut for the rest of the thread's life. This is the same shape,
+/// and for the same reason, as `Backend`'s `ReentryGuard`; the two are
+/// deliberately separate because they guard different windows. `ReentryGuard`
+/// spans a whole `Backend::run` call and refuses a second `run`; this spans one
+/// handler delivery and refuses the loop being driven from inside it. Neither
+/// can subsume the other: `run` legitimately dispatches the loop (outside any
+/// handler), and a handler legitimately runs with no `run` on the stack at all
+/// once a future entry point delivers events some other way.
+struct HandlerGuard<'a> {
+    in_dispatch: &'a Cell<bool>,
+
+    /// What [`IN_HANDLER`] read on the way in, restored rather than cleared on
+    /// the way out. Today it is always `false` — a second dispatcher on one
+    /// thread is what `Backend::run`'s `ReentryGuard` refuses — but restoring
+    /// costs nothing and means a nested guard cannot reopen the loop while an
+    /// outer handler is still running, which clearing unconditionally would.
+    previous: bool,
+}
+
+impl<'a> HandlerGuard<'a> {
+    fn enter(in_dispatch: &'a Cell<bool>) -> Self {
+        in_dispatch.set(true);
+        let previous = IN_HANDLER.replace(true);
+        HandlerGuard {
+            in_dispatch,
+            previous,
+        }
+    }
+}
+
+impl Drop for HandlerGuard<'_> {
+    fn drop(&mut self) {
+        IN_HANDLER.set(self.previous);
+        self.in_dispatch.set(false);
+    }
+}
+
+/// Routes events to handler traits, one at a time.
+pub(crate) struct Dispatcher<S> {
+    state: *mut S,
+    in_dispatch: Cell<bool>,
+    deferred: RefCell<VecDeque<Event>>,
+}
+
+impl<S> Dispatcher<S> {
+    pub(crate) fn new(state: *mut S) -> Self {
+        Self {
+            state,
+            in_dispatch: Cell::new(false),
+            deferred: RefCell::new(VecDeque::new()),
+        }
+    }
+
+    /// Deliver `ev`, or queue it if a handler is already running.
+    ///
+    /// `ctx` is whatever `deliver` needs besides the state — for this crate,
+    /// the table that turns an [`OutputId`] back into a live object. It is
+    /// threaded through rather than captured because `deliver` is a plain `fn`
+    /// pointer: the dispatcher stores no closure, so there is nothing for a
+    /// closure to borrow from and no lifetime to smuggle past `emit`'s
+    /// reentrancy guard.
+    ///
+    /// # Safety
+    ///
+    /// The `*mut S` this dispatcher was built with must still be valid and must
+    /// not be aliased by any live reference. In particular, `S` must not own
+    /// this `Dispatcher` by value (e.g. `struct Compositor { dispatcher:
+    /// Dispatcher<Self>, .. }`): this call holds `&self` across
+    /// `deliver(&mut *self.state, ..)`, and if the dispatcher lives inside
+    /// `S` itself, that `&mut S` reborrows the very `&self` this call is
+    /// still holding, which is aliasing UB regardless of the reentrancy
+    /// guard. The dispatcher must be reachable from `S` only through a raw
+    /// pointer, and any reentrant `emit` call (e.g. from inside `deliver`)
+    /// must be made through that raw pointer, not through a reference derived
+    /// from `S`.
+    ///
+    /// `ctx` is borrowed only for the call, so it may overlap this dispatcher —
+    /// both borrows are shared.
+    pub(crate) unsafe fn emit<C>(&self, ctx: &C, ev: Event, deliver: fn(&C, &mut S, Event)) {
+        if self.in_dispatch.get() {
+            self.deferred.borrow_mut().push_back(ev);
+            return;
+        }
+
+        // Sets both flags and clears them on every exit path, unwind included.
+        let _handler = HandlerGuard::enter(&self.in_dispatch);
+
+        // SAFETY: the flag above guarantees no other `&mut S` is live for the
+        // duration of this call (any reentrant `emit` sees the flag set and
+        // queues instead of calling `deliver`), and the caller guarantees the
+        // pointer is valid. `in_dispatch` only excludes a reentrant call on
+        // *this* `Dispatcher`; it is a per-dispatcher `Cell` and a second
+        // `Dispatcher<S>` built over the same `*mut S` would not consult it.
+        // What excludes that case is this call's own `# Safety` clause above
+        // (no live aliasing `&mut S`), which `Backend::run`'s `ReentryGuard`
+        // discharges by refusing a second concurrent `run`.
+        unsafe { deliver(ctx, &mut *self.state, ev) };
+
+        // Drain whatever the handler queued. `pop_front` borrows only for the
+        // statement, so a handler may queue more while we deliver.
+        loop {
+            let next = self.deferred.borrow_mut().pop_front();
+            match next {
+                // SAFETY: as above — still inside the guarded region, so no
+                // other `&mut S` can be live.
+                Some(ev) => unsafe { deliver(ctx, &mut *self.state, ev) },
+                None => break,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    /// The premise [`IN_HANDLER`] rests on, asserted rather than assumed.
+    ///
+    /// The guard is thread-scoped: [`crate::EventLoop::dispatch`] refuses while
+    /// a handler is on *this* thread's stack. A handler that could move an
+    /// `EventLoop` — or a `&Display` it could derive one from — to another
+    /// thread would find the flag clear there, dispatch freely, and free an
+    /// output this thread still holds a handle to, with no `unsafe` written.
+    ///
+    /// Today that cannot happen because every one of these types is `!Send`,
+    /// which falls out incidentally of holding a `NonNull` or a `PhantomData`
+    /// of one. Nothing else states it. A future field — an `Arc`, a plain
+    /// `usize` handle — or a well-meant `unsafe impl Send` would void the
+    /// entire guard in silence, and no other test would notice.
+    mod thread_scoped {
+        use static_assertions::assert_not_impl_any;
+
+        assert_not_impl_any!(crate::Display: Send, Sync);
+        assert_not_impl_any!(crate::EventLoop<'static>: Send, Sync);
+        assert_not_impl_any!(crate::Backend<'static>: Send, Sync);
+        assert_not_impl_any!(crate::Output<'static>: Send, Sync);
+    }
+
+    /// Records delivery order, and re-enters the dispatcher from inside a
+    /// handler — exactly what wlroots does when a handler destroys an object.
+    ///
+    /// `reenter_with` is a `Cell`, not a `RefCell`: `Event` is `Copy` and
+    /// `Option<Event>` is `Default`, so `Cell::take` is a drop-in replacement
+    /// that never holds a borrow guard live across the reentrant `emit` call
+    /// below — a `RefCell`'s `RefMut` from `borrow_mut().take()` remains live
+    /// through the `if let` body in edition 2024 (rescoping only moved it
+    /// ahead of the `else` block), so the reentrant call would double-borrow.
+    struct Recorder {
+        seen: Vec<Event>,
+        reenter_with: Cell<Option<Event>>,
+        dispatcher: *const Dispatcher<Recorder>,
+    }
+
+    fn deliver(_ctx: &(), state: &mut Recorder, ev: Event) {
+        state.seen.push(ev);
+        if let Some(inner) = state.reenter_with.take() {
+            // SAFETY: the dispatcher outlives the test body.
+            unsafe { (*state.dispatcher).emit(&(), inner, deliver) };
+        }
+    }
+
+    #[test]
+    fn reentrant_events_are_deferred_until_the_outer_handler_returns() {
+        let mut state = Recorder {
+            seen: Vec::new(),
+            reenter_with: Cell::new(Some(Event::OutputDestroyed(OutputId(2)))),
+            dispatcher: std::ptr::null(),
+        };
+        // A raw pointer taken once and used throughout: writing through
+        // `state.dispatcher = ..` directly (after already deriving `p`)
+        // would invalidate `p` under Stacked/Tree Borrows, which is exactly
+        // the aliasing hazard `emit`'s contract forbids. Going through `p`
+        // for the write keeps one consistent provenance for the whole test.
+        let p = &raw mut state;
+        let d = Dispatcher::new(p);
+        // SAFETY: `p` is a live, exclusively-derived pointer to `state`, and
+        // no reference to `state` exists at this point.
+        unsafe { (*p).dispatcher = &raw const d };
+
+        // SAFETY: `state` outlives `d` for the duration of this call, and is
+        // reached only through `p`'s provenance from here on.
+        unsafe { d.emit(&(), Event::OutputFrame(OutputId(1)), deliver) };
+
+        // `p`'s last use was inside `emit` above, so reading through the
+        // original `state` binding here does not conflict with it.
+        assert_eq!(
+            state.seen,
+            vec![
+                Event::OutputFrame(OutputId(1)),
+                Event::OutputDestroyed(OutputId(2))
+            ],
+            "the inner event must arrive after the outer handler returns, not during it"
+        );
+    }
+
+    #[test]
+    fn non_reentrant_events_dispatch_immediately() {
+        let mut state = Recorder {
+            seen: Vec::new(),
+            reenter_with: Cell::new(None),
+            dispatcher: std::ptr::null(),
+        };
+        let p = &raw mut state;
+        let d = Dispatcher::new(p);
+        // SAFETY: as in the test above.
+        unsafe { (*p).dispatcher = &raw const d };
+
+        // SAFETY: as above.
+        unsafe {
+            d.emit(&(), Event::NewOutput(OutputId(7)), deliver);
+            d.emit(&(), Event::OutputFrame(OutputId(7)), deliver);
+        }
+
+        assert_eq!(
+            state.seen,
+            vec![
+                Event::NewOutput(OutputId(7)),
+                Event::OutputFrame(OutputId(7))
+            ]
+        );
+        assert!(
+            !in_handler(),
+            "the handler flag must be clear once dispatch unwinds, or the \
+             event loop would stay shut for the rest of this thread's life"
+        );
+        // One guard sets and clears both flags together, so this also witnesses
+        // that the per-dispatcher `in_dispatch` flag was cleared: the only code
+        // that can restore `IN_HANDLER` is `HandlerGuard::drop`, which clears
+        // `in_dispatch` in the same breath.
+    }
+
+    /// A handler-entry/exit marker. Unlike a bare `Event` log, this can tell
+    /// deferred delivery apart from naive recursion: both produce the same
+    /// final *event* order at one level of reentrancy, but only naive
+    /// recursion nests an `Enter` inside another handler's `Enter`/`Exit`
+    /// pair.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Trace {
+        Enter(Event),
+        Exit(Event),
+    }
+
+    struct TracingRecorder {
+        trace: Vec<Trace>,
+        reenter_with: Cell<Option<Event>>,
+        dispatcher: *const Dispatcher<TracingRecorder>,
+    }
+
+    fn tracing_deliver(_ctx: &(), state: &mut TracingRecorder, ev: Event) {
+        state.trace.push(Trace::Enter(ev));
+        if let Some(inner) = state.reenter_with.take() {
+            // SAFETY: the dispatcher outlives the test body.
+            unsafe { (*state.dispatcher).emit(&(), inner, tracing_deliver) };
+        }
+        state.trace.push(Trace::Exit(ev));
+    }
+
+    /// The load-bearing soundness test: proves the inner handler does not
+    /// start running until the outer handler has *fully exited*, not merely
+    /// that both events eventually appear in the right order. A dispatcher
+    /// that recursed into `deliver` directly (instead of deferring) would
+    /// produce `Enter(outer), Enter(inner), Exit(inner), Exit(outer)` here —
+    /// a nested pair, still with the events in the same final order as the
+    /// correct trace, which is exactly what the plain event-order test above
+    /// cannot distinguish.
+    #[test]
+    fn reentrant_handler_fully_exits_before_the_deferred_handler_enters() {
+        let mut state = TracingRecorder {
+            trace: Vec::new(),
+            reenter_with: Cell::new(Some(Event::OutputDestroyed(OutputId(2)))),
+            dispatcher: std::ptr::null(),
+        };
+        let p = &raw mut state;
+        let d = Dispatcher::new(p);
+        // SAFETY: as in the tests above.
+        unsafe { (*p).dispatcher = &raw const d };
+
+        // SAFETY: `state` outlives `d` for the duration of this call, and is
+        // reached only through `p`'s provenance from here on.
+        unsafe { d.emit(&(), Event::OutputFrame(OutputId(1)), tracing_deliver) };
+
+        assert_eq!(
+            state.trace,
+            vec![
+                Trace::Enter(Event::OutputFrame(OutputId(1))),
+                Trace::Exit(Event::OutputFrame(OutputId(1))),
+                Trace::Enter(Event::OutputDestroyed(OutputId(2))),
+                Trace::Exit(Event::OutputDestroyed(OutputId(2))),
+            ],
+            "the inner handler must not start until the outer handler has fully exited"
+        );
+    }
+
+    /// The thread-scoped half of the guard, which `EventLoop::dispatch`
+    /// consults to refuse being driven from inside a handler.
+    ///
+    /// Asserted from inside the delivery rather than around it, because "set
+    /// while a handler runs" is the whole claim; a test that only checked it
+    /// was clear afterwards would pass against a flag that is never set.
+    #[test]
+    fn the_handler_flag_is_set_for_the_duration_of_a_delivery() {
+        fn record(_ctx: &(), state: &mut Vec<bool>, _ev: Event) {
+            state.push(in_handler());
+        }
+
+        let mut seen: Vec<bool> = Vec::new();
+        assert!(!in_handler(), "no handler is running before dispatch");
+
+        let p = &raw mut seen;
+        let d = Dispatcher::new(p);
+        // SAFETY: `seen` outlives `d` and is reached only through `p` from
+        // here on; nothing else holds a reference to it across the call.
+        unsafe { d.emit(&(), Event::OutputFrame(OutputId(1)), record) };
+
+        assert_eq!(
+            seen,
+            vec![true],
+            "the flag must read set from inside the handler, which is the only \
+             place it can do any good"
+        );
+        assert!(!in_handler(), "and be restored once the delivery returns");
+    }
+}

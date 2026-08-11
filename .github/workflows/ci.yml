@@ -60,11 +60,24 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
 
+      # Workspace-wide, so this already builds and tests `wlr` alongside
+      # `wlr-sys` — no separate `-p wlr` step is needed. `wlr` binds this
+      # branch's wlroots minor; the other minors live on their own branches,
+      # each running this same job against its own wlroots, since cargo cannot
+      # resolve a manifest listing two `wlr-sys` versions.
       - run: cargo test --workspace
 
       # The README is the crate's rustdoc (`#![doc = include_str!(...)]`), so a
       # broken link or fence in it breaks documentation builds.
       - run: cargo doc -p wlr-sys --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      # `wlr` too, and not only for symmetry: its rustdoc is the crate's front
+      # page and its `pub(crate)` constructors are easy to link to by accident
+      # from public docs, which `-D warnings` rejects and nothing else catches.
+      # Three such links reached a release branch before this step existed.
+      - run: cargo doc -p wlr --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
 
