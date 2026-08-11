@@ -5,6 +5,7 @@
 #[derive(Default)]
 struct App {
     runtime: Option<wlr::Runtime>,
+    bg: Option<wlr::RectId>,
     outputs: Vec<wlr::OutputId>,
     sizes: Vec<(i32, i32)>,
     init_errors: Vec<wlr::Error>,
@@ -45,6 +46,17 @@ impl wlr::OutputHandler for App {
 
     fn frame(&mut self, output: &wlr::Output<'_>) {
         let Some(runtime) = self.runtime.as_ref() else { return };
+        // `commit_output` deliberately never reschedules on its own — the
+        // scene reschedules itself when it has new damage (see that
+        // method's own doc). Recolouring the background here is what
+        // supplies that damage each turn: without it, the one frame painted
+        // from the rect added before `run_all` would be the last one, and
+        // this test would only prove a single-shot paint rather than a
+        // compositor's steady-state boot path.
+        if let Some(bg) = self.bg {
+            let shade = 0.1 + (self.commits % 2) as f32 * 0.01;
+            let _ = runtime.set_rect_color(bg, [shade, shade, shade + 0.02, 1.0]);
+        }
         match runtime.commit_output(output) {
             Ok(()) => self.commits += 1,
             Err(e) => self.commit_errors.push(e),
@@ -73,8 +85,19 @@ fn a_headless_output_renders_a_scene_with_a_background_rect() {
         .expect("background rect");
     runtime.lower_rect_to_bottom(bg).expect("rect is known");
 
+    // A rect id is only meaningful against the runtime that minted it: a
+    // second, unrelated runtime must not resolve it, proving the lookup is
+    // keyed per-runtime rather than trusting the id's own value.
+    let other = wlr::Runtime::new().expect("other runtime");
+    assert_eq!(
+        other.set_rect_position(bg, 1, 1),
+        None,
+        "a rect id minted by one runtime must not resolve through another's table"
+    );
+
     let mut app = App {
         runtime: Some(runtime.clone()),
+        bg: Some(bg),
         ..App::default()
     };
     backend

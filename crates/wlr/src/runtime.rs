@@ -76,9 +76,33 @@ pub(crate) struct RuntimeInner {
 /// [`Runtime::init_graphics`] creates in one call and every later graphics
 /// operation reads.
 ///
-/// No `Drop`: every field here is an object wlroots tears down with the
-/// display or the backend, and destroying any of them here would double-free
-/// it.
+/// No `Drop`, but not for one uniform reason — each field's real fate
+/// differs:
+///
+/// - `layout` is destroyed *by wlroots* when the display dies:
+///   `wlr_output_layout_create` registers its own destroy listener on the
+///   display it is given (confirmed empirically — see the comment on the
+///   call in [`Runtime::init_graphics`] explaining why `display`, not null,
+///   is passed). `wlr_scene_attach_output_layout`'s own doc says
+///   `scene_layout` is destroyed along with whichever of `scene` or
+///   `layout` dies first, so it goes with `layout` here. This is exactly
+///   why [`Runtime`] must not outlive the [`Display`](crate::Display) it
+///   was initialised against (see `Runtime`'s own doc): once the display
+///   drops, `layout` and `scene_layout` are already freed, and every
+///   pointer this struct holds to them is dangling.
+/// - `scene`, `renderer` and `allocator` are **not** torn down by anything
+///   in wlroots. `wlr_renderer_destroy`/`wlr_allocator_destroy` exist and a
+///   well-behaved compositor calls them on shutdown (tinywl does); a scene
+///   is torn down with `wlr_scene_node_destroy` on its root node, not
+///   automatically. This crate leaks all three for the process's life
+///   instead — deliberately, not by oversight: there is exactly one
+///   `Runtime` per process, modelling one compositor's whole-process state,
+///   so the OS reclaims the leak at exit exactly as a `Drop` run a moment
+///   earlier would have. A future `Drop` impl, should the crate grow
+///   support for a `Runtime` that does not simply outlive its process,
+///   would need to call `wlr_renderer_destroy`, `wlr_allocator_destroy` and
+///   `wlr_scene_node_destroy` on the scene's root node — and *not* touch
+///   `layout`, which wlroots may already have freed by then.
 pub(crate) struct Graphics {
     pub(crate) scene: NonNull<sys::wlr_scene>,
     pub(crate) layout: NonNull<sys::wlr_output_layout>,
@@ -92,6 +116,24 @@ pub(crate) struct Graphics {
 /// Cheap to clone (one `Rc` bump). Every clone names the same underlying
 /// state, so a clone kept in a consumer's own state and the one passed to
 /// [`Backend::run_all`](crate::Backend::run_all) are interchangeable.
+///
+/// # Lifetime obligation
+///
+/// Once [`init_graphics`](Runtime::init_graphics) has run, this handle (and
+/// every clone of it) must not outlive the [`Display`](crate::Display) it
+/// was given. wlroots frees the output layout — and, with it, the
+/// scene-output layout attached to it — when the display is destroyed
+/// (`wlr_output_layout_create` registers its own destroy listener on the
+/// display it is given), and every later call through this `Runtime` that
+/// touches either one (`init_output` directly;
+/// `commit_output` and the rect methods indirectly, since they read the
+/// scene that shares the layout's lifetime) dereferences whatever pointer
+/// `init_graphics` stored, live or not. **Nothing in this crate enforces
+/// this today.** Reachability is narrow in practice — a handle to either
+/// type only exists inside a handler call, so violating this means a
+/// consumer deliberately kept a `Runtime` clone somewhere the `Display`
+/// does not reach and used it afterward — but the obligation is real, is
+/// not checked, and is the caller's to keep.
 #[derive(Clone)]
 pub struct Runtime {
     pub(crate) inner: Rc<RuntimeInner>,
@@ -181,6 +223,11 @@ impl Runtime {
     /// Calling twice returns [`Error::Operation`] rather than leaking a
     /// second renderer.
     ///
+    /// A successful call binds `self` to `display`'s lifetime: see
+    /// [`Runtime`]'s own doc for the obligation this creates (the output
+    /// layout wlroots creates here is freed when `display` is, and this
+    /// handle must not be used past that point).
+    ///
     /// # Errors
     ///
     /// [`Error::Create`] naming whichever wlroots constructor returned null;
@@ -192,10 +239,13 @@ impl Runtime {
         }
         // SAFETY: `backend` and `display` are live for this call (the backend
         // is necessarily alive, since no run — the only thing that can start
-        // it and let it die — has happened yet), each pointer is null-checked
-        // before use, and every object created here is owned by wlroots
-        // (destroyed with the backend or the display) rather than by this
-        // crate.
+        // it and let it die — has happened yet), and each pointer is
+        // null-checked before use. What happens to each object afterward is
+        // not uniform — see `Graphics`'s own doc for the detail — but
+        // nothing here is a double free, because nothing created here is
+        // ever freed by this crate at all. What this call *does* establish,
+        // per `Graphics`'s doc and restated on `Runtime` itself: `self` must
+        // not outlive `display` from this point on.
         let graphics = unsafe {
             let scene = sys::wlr_scene_create();
             let scene = NonNull::new(scene).ok_or(Error::Create("wlr_scene_create"))?;
@@ -300,26 +350,43 @@ impl Runtime {
     ///
     /// The whole body of an
     /// [`OutputHandler::frame`](crate::OutputHandler::frame) implementation.
-    /// Does `wlr_scene_output_commit`, `wlr_scene_output_send_frame_done` with
-    /// the current time, and `wlr_output_schedule_frame` — all three, because
-    /// a client that is never sent frame-done renders exactly one frame and
-    /// then waits forever, and an output that is never rescheduled produces
-    /// exactly one `frame` event and then none again: unlike a real display,
-    /// nothing paces a headless (or nested) output's frames but this call.
+    /// Does `wlr_scene_output_commit` and `wlr_scene_output_send_frame_done`
+    /// with the current time — the latter because a client that is never
+    /// sent frame-done renders exactly one frame and then waits forever.
+    ///
+    /// Deliberately does **not** call `wlr_output_schedule_frame`. The scene
+    /// watches its own damage — a rect moved, resized, recoloured, or a
+    /// surface repainted — and reschedules the output itself once there is
+    /// something new to draw (`wlr_scene_output_needs_frame`, which
+    /// `wlr_scene_output_commit` consults, and the scene's own
+    /// `output_needs_frame` listener). Rescheduling unconditionally from
+    /// here would defeat that: a compositor whose content never changes
+    /// would render forever regardless, which is exactly the "motionless
+    /// desktop burns power in a loop" behaviour `wlr_scene_output_commit`'s
+    /// own legitimate skip (see `wlr_scene.h`'s `wlr_scene_output_needs_frame`
+    /// doc) exists to avoid. A consumer whose output has otherwise gone
+    /// idle and needs a one-time kick — most notably right after
+    /// [`init_output`](Runtime::init_output), to receive the very first
+    /// `frame` — calls `wlr_output_schedule_frame` themselves; this call
+    /// does not do it on their behalf on every commit.
     ///
     /// # Errors
     ///
-    /// [`Error::Destroyed`] if this output has no scene output, which means it
-    /// was never passed to [`init_output`](Runtime::init_output) (or its scene
-    /// output has already gone), or [`init_graphics`](Runtime::init_graphics)
-    /// never ran. [`Error::Operation`] if wlroots rejected the commit —
-    /// routine when nothing changed, so a consumer may ignore it.
+    /// [`Error::Destroyed`] if this output has no scene output, which means
+    /// it was never passed to [`init_output`](Runtime::init_output) (or its
+    /// scene output has already gone). [`Error::Operation`] if
+    /// [`init_graphics`](Runtime::init_graphics) has not run, or if wlroots
+    /// rejected the commit — a genuine failure, not the routine case:
+    /// `wlr_scene_output_commit` reports `Ok(())` when it legitimately finds
+    /// nothing new to draw and skips the commit (see `wlr_scene.h`'s
+    /// `wlr_scene_output_needs_frame` doc), so an `Err` here always means the
+    /// commit was attempted and wlroots said no.
     pub fn commit_output(&self, output: &Output<'_>) -> Result<()> {
         let scene = {
             let g = self.inner.graphics.borrow();
             match g.as_ref() {
                 Some(g) => g.scene,
-                None => return Err(Error::Destroyed("wlr_scene_output")),
+                None => return Err(Error::Operation("Runtime::commit_output before init_graphics")),
             }
         };
         // SAFETY: the handle's lifetime guarantees the output is live, and the
@@ -335,10 +402,16 @@ impl Runtime {
             }
             // `SystemTime` rather than `clock_gettime`: `wlr-sys`'s bindings
             // do not bind libc's `clock_gettime`/`CLOCK_MONOTONIC`, and this
-            // avoids adding a `libc` dependency for one call. wlroots only
-            // uses this timestamp to compute presentation latency for the
-            // `frame_done` event, so the small skew between `CLOCK_MONOTONIC`
-            // and wall-clock time is immaterial here.
+            // avoids adding a `libc` dependency for one call. This is wall
+            // clock, not monotonic, so unlike a real compositor's timestamp
+            // it can step backwards or forwards under an NTP correction — a
+            // client that measures the gap between two `frame_done`
+            // timestamps spanning such a step sees a bogus duration.
+            // Accepted because this crate never consumes this value itself
+            // (`frame_done`'s whole job is handing clients a timestamp, not
+            // reading one back), so the failure mode is a wrong number in a
+            // client's own frame-pacing statistics, not anything this crate
+            // can observe or get wrong.
             let now_dur = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default();
@@ -347,7 +420,6 @@ impl Runtime {
                 tv_nsec: now_dur.subsec_nanos() as _,
             };
             sys::wlr_scene_output_send_frame_done(scene_output, &raw mut now);
-            sys::wlr_output_schedule_frame(output.as_ptr());
         }
         Ok(())
     }
@@ -364,13 +436,20 @@ impl Runtime {
     ///
     /// [`Error::Create`] if wlroots could not create the node, or if
     /// [`init_graphics`](Runtime::init_graphics) has not run yet (there is no
-    /// scene to attach the rect to).
+    /// scene to attach the rect to — in that case the payload names this
+    /// call rather than a C function, since none ran; match on the variant,
+    /// as this doc already tells you to).
     pub fn add_rect(&self, width: i32, height: i32, color: [f32; 4]) -> Result<RectId> {
         let scene = {
             let g = self.inner.graphics.borrow();
             match g.as_ref() {
                 Some(g) => g.scene,
-                None => return Err(Error::Create("wlr_scene_rect_create")),
+                // Not `wlr_scene_rect_create`: that call never runs without a
+                // scene to attach to, and naming it here would claim a call
+                // that did not happen. `Error::Create`'s payload is usually a
+                // C function name; this is the one exception, and it names
+                // the Rust entry point instead.
+                None => return Err(Error::Create("Runtime::add_rect before init_graphics")),
             }
         };
         // SAFETY: the scene is this runtime's own and outlives the call;
@@ -407,7 +486,9 @@ impl Runtime {
         Some(())
     }
 
-    /// Recolour a rect. `None` if this runtime never issued `rect`.
+    /// Recolour a rect, in the same premultiplied RGBA
+    /// [`add_rect`](Runtime::add_rect) takes. `None` if this runtime never
+    /// issued `rect`.
     pub fn set_rect_color(&self, rect: RectId, color: [f32; 4]) -> Option<()> {
         let raw = self.rect_ptr(rect)?;
         // SAFETY: as above; `color` is live for the call and wlroots copies it.
