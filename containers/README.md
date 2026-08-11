@@ -20,6 +20,21 @@ docker run --rm wlr-sys-ubuntu:24.04                      # survey
 docker run --rm -v "$PWD:/src" -w /src wlr-sys-ubuntu:24.04 cargo test   # build the crate
 ```
 
+### Building `wlr` against a specific wlroots
+
+`wlr`'s minor tracks the wlroots minor it binds, and each lives on its own
+branch, so verifying one means checking out that branch and using its distro's
+container. **This is forward-looking**: `wlr` exists only on `develop`/`main`
+(wlroots 0.20, Arch) as of this writing and has not yet been cherry-picked to
+any `support/*` branch, so the command below cannot actually be run yet — it
+documents the procedure for when it is.
+
+```sh
+git checkout support/wlroots-0.19
+docker run --rm -v "$PWD:/src" -w /src -e CARGO_TARGET_DIR=/tmp/t \
+  wlr-sys-ubuntu:26.04 cargo test -p wlr
+```
+
 ## Survey results (2026-08-03)
 
 | | Ubuntu 22.04 | Ubuntu 24.04 | Ubuntu 26.04 | Arch (reference) |
