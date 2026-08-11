@@ -84,6 +84,7 @@ mod id;
 mod interest;
 mod output;
 mod runtime;
+mod scene;
 
 pub use backend::{Backend, Until};
 pub use display::{Display, EventLoop};
@@ -93,6 +94,7 @@ pub use id::{OutputId, SourceId};
 pub use interest::{Interest, Readiness};
 pub use output::Output;
 pub use runtime::Runtime;
+pub use scene::RectId;
 
 /// The wlroots version this build of `wlr` binds, as `(major, minor)`.
 ///

@@ -422,6 +422,17 @@ impl<'d> Backend<'d> {
         })
     }
 
+    /// The raw backend, for the in-crate callers that pass it to wlroots.
+    ///
+    /// Callers must have established liveness themselves (`alive_or_err`);
+    /// this deliberately does not check, because its callers are inside
+    /// operations that already did. [`Runtime::init_graphics`](crate::Runtime::init_graphics)
+    /// is one of those callers: it runs before any run, when the backend is
+    /// necessarily alive (nothing has had the chance to kill it yet).
+    pub(crate) fn as_ptr(&self) -> *mut sys::wlr_backend {
+        self.raw.as_ptr()
+    }
+
     /// Start the backend, at most once.
     ///
     /// Deliberately **not** public, and that is a decision rather than an
