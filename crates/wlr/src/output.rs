@@ -27,13 +27,17 @@ impl<'h> Output<'h> {
     ///
     /// # Safety
     ///
-    /// `raw` must be a live `wlr_output` carrying one of our id addons, and the
-    /// returned handle must not outlive the callback it was created for.
+    /// `raw` must be a live `wlr_output` with an initialised addon set, and
+    /// the returned handle must not outlive the callback it was created for.
+    /// An id addon is not required here: [`id`](Output::id) tolerates its
+    /// absence (it panics rather than reading invalid memory), so attaching
+    /// one is a correctness concern for callers of `id`, not a soundness
+    /// precondition of this constructor.
     ///
-    /// Unused outside this module's tests until Task 7 wires up the real
-    /// dispatch-time constructors; `expect` (rather than `allow`) makes the
-    /// compiler flag this attribute itself as unnecessary the moment those
-    /// callers land.
+    /// Unused outside this module's tests until the dispatch-time
+    /// constructors that call this for real are wired up; `expect` (rather
+    /// than `allow`) makes the compiler flag this attribute itself as
+    /// unnecessary the moment those callers land.
     #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) unsafe fn from_raw(raw: *mut sys::wlr_output) -> Output<'h> {
         Output {
@@ -52,16 +56,15 @@ impl<'h> Output<'h> {
     /// # Panics
     ///
     /// Panics if no id addon is attached. Nothing attaches one yet — that
-    /// wiring lands in Task 7, alongside the constructors that call
+    /// wiring lands alongside the dispatch-time constructors that call
     /// `Output::from_raw` for real. Until then this method is unreachable
     /// from outside the crate's own tests.
     pub fn id(&self) -> OutputId {
-        // SAFETY: the handle's lifetime guarantees the output is live, and an id
-        // addon is attached when the output is first seen (Task 7).
+        // SAFETY: the handle's lifetime guarantees the output is live.
         let id = unsafe { find_id(&raw const (*self.raw.as_ptr()).addons) };
         OutputId(id.expect(
-            "output has no id addon; it was not registered through the handle constructors \
-             wired up in Task 7",
+            "output has no id addon; it was not registered by the dispatch-time constructor \
+             that attaches its id addon",
         ))
     }
 
@@ -88,12 +91,20 @@ impl<'h> Output<'h> {
     /// branches differ *inside this method* and keep the signature identical,
     /// which is what lets a consumer move between them by changing a version.
     pub fn commit(&self) -> Result<()> {
-        // SAFETY: the handle's lifetime guarantees the output is live. The
-        // state is initialised before use and finished before it drops, as
-        // wlroots requires.
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        // `state` starts uninitialised rather than zeroed: nothing reads it
+        // before `wlr_output_state_init` writes it below, so this makes no
+        // claim about what bit pattern is valid for `wlr_output_state` (a
+        // claim that zeroing would make, and that a future wlroots minor
+        // could silently invalidate by adding a field for which zero is
+        // not a valid value). `assume_init` is sound because
+        // `wlr_output_state_init` fully initialises the value it is handed a
+        // pointer to. The state is finished before it drops, as wlroots
+        // requires.
         unsafe {
-            let mut state = std::mem::zeroed::<sys::wlr_output_state>();
-            sys::wlr_output_state_init(&raw mut state);
+            let mut state = std::mem::MaybeUninit::<sys::wlr_output_state>::uninit();
+            sys::wlr_output_state_init(state.as_mut_ptr());
+            let mut state = state.assume_init();
             let ok = sys::wlr_output_commit_state(self.raw.as_ptr(), &raw const state);
             sys::wlr_output_state_finish(&raw mut state);
 
@@ -169,9 +180,10 @@ mod tests {
         assert_eq!(handle.name(), None, "zeroed output has a null name");
     }
 
-    /// The panic message this produces is read by a Task 7 author the moment
-    /// they wire up a constructor that forgot to attach an id addon first —
-    /// it must name what is missing, not just that `id()` failed.
+    /// Pins the panic *message*, not just that `id()` panics: whoever wires
+    /// up the real dispatch-time constructor will read this message the
+    /// moment they forget to attach an id addon first, so it must name what
+    /// is missing rather than just say that `id()` failed.
     #[test]
     #[should_panic(expected = "output has no id addon")]
     fn id_panics_when_no_addon_is_attached() {
