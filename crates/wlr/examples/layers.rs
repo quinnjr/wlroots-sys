@@ -27,9 +27,13 @@ struct App {
     /// one, so positioning against an edge needs this compositor's own
     /// record of what it configured.
     sizes: HashMap<wlr::LayerSurfaceId, (u32, u32)>,
-    /// Whether each layer surface asked for keyboard interactivity, recorded
-    /// at `new_layer_surface` time — `layer_surface_mapped` gets only an id,
-    /// not a handle, so this is what lets it decide whether to focus.
+    /// Whether each layer surface currently asks for keyboard interactivity,
+    /// refreshed on every `layer_surface_commit` — `keyboard_interactive()`
+    /// reads `current`, which is all-zero until the first commit, so it
+    /// cannot be read meaningfully from `new_layer_surface` (see
+    /// `LayerSurface::keyboard_interactive`'s own doc). `layer_surface_mapped`
+    /// gets only an id, not a handle, so this is what lets it decide whether
+    /// to focus.
     wants_keyboard: HashMap<wlr::LayerSurfaceId, bool>,
 }
 
@@ -69,21 +73,28 @@ impl wlr::ToplevelHandler for App {
         let height = desired.1.max(30);
         println!(
             "new layer surface {id:?} layer={:?} anchor={:?} exclusive_zone={} desired={desired:?} \
-             keyboard_interactive={} output_id={:?}",
+             output_id={:?}",
             surface.layer(),
             surface.anchor(),
             surface.exclusive_zone(),
-            surface.keyboard_interactive(),
             surface.output_id(),
         );
+        // `keyboard_interactive()` is not read here: it reports `false` for
+        // every surface at this point, since it reads `current`, which is
+        // all-zero until this surface's first commit (see
+        // `LayerSurface::keyboard_interactive`'s own doc). `layer_surface_commit`
+        // is where this crate's own record of it gets populated instead.
         self.sizes.insert(id, (width, height));
-        self.wants_keyboard
-            .insert(id, surface.keyboard_interactive());
         self.runtime.configure_layer_surface(id, width, height);
     }
 
     fn layer_surface_commit(&mut self, surface: &wlr::LayerSurface<'_>) {
         let id = surface.id();
+        // Refreshed on every commit, not just the first: a client is free to
+        // change its keyboard-interactivity request after mapping, and this
+        // is the only handler method that ever sees `current` populated.
+        self.wants_keyboard
+            .insert(id, surface.keyboard_interactive());
         let Some((w, h)) = self.sizes.get(&id).copied() else {
             return;
         };

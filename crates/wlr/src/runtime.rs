@@ -36,6 +36,7 @@ use std::rc::Rc;
 use crate::buffer::create_pixel_buffer;
 use crate::decoration::{DecorationEntry, DecorationMode};
 use crate::id::{SourceId, next_id};
+use crate::layer::Layer;
 use crate::scene::RectId;
 use crate::{
     Backend, BufferId, Display, Error, Interest, LayerSurfaceId, Output, OutputId, Result,
@@ -242,6 +243,16 @@ pub(crate) struct LayerSurfaceEntry {
     /// `backend.rs`'s `on_layer_surface_commit` for where this is taken and
     /// actually sent.
     pub(crate) staged_configure: std::cell::Cell<Option<(u32, u32)>>,
+
+    /// The band [`scene_tree`](LayerSurfaceEntry::scene_tree) is currently
+    /// parented under — set at creation to the layer the client asked for,
+    /// and updated by [`Runtime::reparent_layer_surface_if_changed`]
+    /// whenever a later commit reports a different
+    /// [`Layer`](crate::Layer). This is what lets that method tell "the
+    /// client changed layers" apart from "the client committed again with
+    /// the same layer it already had", so an unchanged layer never pays for
+    /// a `wlr_scene_node_reparent` call it does not need.
+    pub(crate) band: std::cell::Cell<Layer>,
 }
 
 /// A live scene rect: the node wlroots created for it, and which toplevel
@@ -315,6 +326,50 @@ pub(crate) struct Graphics {
     pub(crate) scene_layout: NonNull<sys::wlr_scene_output_layout>,
     pub(crate) renderer: NonNull<sys::wlr_renderer>,
     pub(crate) allocator: NonNull<sys::wlr_allocator>,
+
+    /// The five stacking bands, direct children of `scene.tree` (the scene
+    /// root) in exactly this order — bottom to top:
+    /// `background_band`, `bottom_band`, `toplevel_band`, `top_band`,
+    /// `overlay_band`. Created once, together, right after `scene` itself
+    /// (see [`Runtime::init_graphics`]), and never reordered or reparented
+    /// afterward.
+    ///
+    /// This is the fix for the two-band approximation 0.20.11 shipped
+    /// (see `layer.rs`'s [`Layer`](crate::Layer) doc for the full argument
+    /// this replaces): every toplevel now lives inside `toplevel_band`
+    /// (`backend.rs`'s `on_new_toplevel`) instead of directly under the
+    /// scene root, and every layer surface lives inside the band matching
+    /// its own [`Layer`](crate::Layer) (`on_new_layer_surface`, reparented
+    /// by `on_layer_surface_commit` if the client changes layers later).
+    /// Because `wlr_scene_tree_create`'s own `scene_node_init` appends each
+    /// new sibling at the *end* of its parent's children list
+    /// (`wl_list_insert(parent->children.prev, ...)`), creating these five
+    /// in this order at start-of-day is what fixes their relative stacking
+    /// order permanently: nothing a consumer or a client does afterward can
+    /// move `toplevel_band` above `top_band`/`overlay_band`, or below
+    /// `background_band`/`bottom_band`, because
+    /// `wlr_scene_node_raise_to_top`/`_lower_to_bottom` only reorder
+    /// *siblings*, and a toplevel's or layer surface's own node is never a
+    /// sibling of a band — it is a descendant, several levels down, of
+    /// exactly one.
+    ///
+    /// [`Runtime::add_rect`]/[`Runtime::add_buffer`] deliberately do **not**
+    /// go through a band: they are parented directly into `scene.tree`
+    /// itself, as siblings of these five trees, exactly as before this
+    /// field existed. A plain root rect/buffer therefore still lands above
+    /// everything by default (it is created after every band, so it starts
+    /// at the end of the root's own children list, above all five bands),
+    /// and [`Runtime::lower_rect_to_bottom`]/[`lower_buffer_to_bottom`](Runtime::lower_buffer_to_bottom)
+    /// still put it beneath everything, `background_band` included, because
+    /// "everything" is still just its root-level siblings — the bands
+    /// themselves never move, so lowering a rect below all of them lowers
+    /// it below every toplevel and every layer surface too, exactly as a
+    /// background rect needs.
+    pub(crate) background_band: NonNull<sys::wlr_scene_tree>,
+    pub(crate) bottom_band: NonNull<sys::wlr_scene_tree>,
+    pub(crate) toplevel_band: NonNull<sys::wlr_scene_tree>,
+    pub(crate) top_band: NonNull<sys::wlr_scene_tree>,
+    pub(crate) overlay_band: NonNull<sys::wlr_scene_tree>,
 }
 
 /// Handle to a compositor's long-lived wlroots state.
@@ -558,12 +613,13 @@ impl Runtime {
     /// and register the protocol globals every client needs before it can
     /// even bind a surface.
     ///
-    /// Specifically: `wlr_scene_create`, `wlr_output_layout_create`,
-    /// `wlr_scene_attach_output_layout`, `wlr_renderer_autocreate`,
-    /// `wlr_allocator_autocreate`, `wlr_renderer_init_wl_display` (which is
-    /// what advertises `wl_shm` and the dmabuf formats), `wlr_compositor_create`
-    /// at version 6, `wlr_subcompositor_create` and
-    /// `wlr_data_device_manager_create`.
+    /// Specifically: `wlr_scene_create`, five `wlr_scene_tree_create` calls
+    /// for the stacking bands (see `Graphics::background_band`'s own doc),
+    /// `wlr_output_layout_create`, `wlr_scene_attach_output_layout`,
+    /// `wlr_renderer_autocreate`, `wlr_allocator_autocreate`,
+    /// `wlr_renderer_init_wl_display` (which is what advertises `wl_shm` and
+    /// the dmabuf formats), `wlr_compositor_create` at version 6,
+    /// `wlr_subcompositor_create` and `wlr_data_device_manager_create`.
     ///
     /// Bundled into one call rather than exposed piecemeal, because there is
     /// no order or subset of them that works: a compositor missing any one of
@@ -604,6 +660,26 @@ impl Runtime {
         let graphics = unsafe {
             let scene = sys::wlr_scene_create();
             let scene = NonNull::new(scene).ok_or(Error::Create("wlr_scene_create"))?;
+
+            // The five stacking bands, created in bottom-to-top order right
+            // after the scene itself and before anything else can be
+            // inserted — see `Graphics::background_band`'s own doc for why
+            // this order is what fixes the stacking order permanently.
+            let background_band = sys::wlr_scene_tree_create(&raw mut (*scene.as_ptr()).tree);
+            let background_band = NonNull::new(background_band)
+                .ok_or(Error::Create("wlr_scene_tree_create (background band)"))?;
+            let bottom_band = sys::wlr_scene_tree_create(&raw mut (*scene.as_ptr()).tree);
+            let bottom_band = NonNull::new(bottom_band)
+                .ok_or(Error::Create("wlr_scene_tree_create (bottom band)"))?;
+            let toplevel_band = sys::wlr_scene_tree_create(&raw mut (*scene.as_ptr()).tree);
+            let toplevel_band = NonNull::new(toplevel_band)
+                .ok_or(Error::Create("wlr_scene_tree_create (toplevel band)"))?;
+            let top_band = sys::wlr_scene_tree_create(&raw mut (*scene.as_ptr()).tree);
+            let top_band =
+                NonNull::new(top_band).ok_or(Error::Create("wlr_scene_tree_create (top band)"))?;
+            let overlay_band = sys::wlr_scene_tree_create(&raw mut (*scene.as_ptr()).tree);
+            let overlay_band = NonNull::new(overlay_band)
+                .ok_or(Error::Create("wlr_scene_tree_create (overlay band)"))?;
 
             // A live display, not null: this wlroots build has
             // `wlr_output_layout_create` register a destroy listener on the
@@ -647,6 +723,11 @@ impl Runtime {
                 scene_layout,
                 renderer,
                 allocator,
+                background_band,
+                bottom_band,
+                toplevel_band,
+                top_band,
+                overlay_band,
             }
         };
         *self.inner.graphics.borrow_mut() = Some(graphics);
@@ -1364,6 +1445,31 @@ impl Runtime {
         self.inner.graphics.borrow().as_ref().map(|g| g.scene)
     }
 
+    /// The scene tree every toplevel's own tree is parented into — see
+    /// `Graphics::background_band`'s own doc for the full argument.
+    /// `None` before [`init_graphics`](Runtime::init_graphics) has run.
+    pub(crate) fn toplevel_band_ptr(&self) -> Option<NonNull<sys::wlr_scene_tree>> {
+        self.inner
+            .graphics
+            .borrow()
+            .as_ref()
+            .map(|g| g.toplevel_band)
+    }
+
+    /// The scene tree `layer`'s own band — `background`/`bottom`/`top`/
+    /// `overlay` — a layer surface belongs under. `None` before
+    /// [`init_graphics`](Runtime::init_graphics) has run.
+    pub(crate) fn layer_band_ptr(&self, layer: Layer) -> Option<NonNull<sys::wlr_scene_tree>> {
+        let g = self.inner.graphics.borrow();
+        let g = g.as_ref()?;
+        Some(match layer {
+            Layer::Background => g.background_band,
+            Layer::Bottom => g.bottom_band,
+            Layer::Top => g.top_band,
+            Layer::Overlay => g.overlay_band,
+        })
+    }
+
     /// Record a newly-announced toplevel under `id`, in both the id table and
     /// the tree-to-id reverse lookup.
     pub(crate) fn record_toplevel(
@@ -1726,8 +1832,22 @@ impl Runtime {
         Some(())
     }
 
-    /// Raise the toplevel above every sibling in the scene. `None` for an
-    /// unknown or stale id; see `set_toplevel_size`'s doc.
+    /// Raise the toplevel above every other toplevel. `None` for an unknown
+    /// or stale id; see `set_toplevel_size`'s doc.
+    ///
+    /// **Published-behavior note:** since the banded-tree scene design (see
+    /// [`Layer`](crate::Layer)'s own doc), this raises the toplevel only
+    /// within `toplevel_band` — above every *other toplevel*, never above a
+    /// `Top` or `Overlay` layer surface. That is now correct and intended,
+    /// not a limitation to work around: `wlr_scene_node_raise_to_top`
+    /// reorders siblings, and after the banded-tree fix a toplevel's node is
+    /// never a sibling of a layer surface's — it is several levels below
+    /// `toplevel_band`, which is itself a fixed root-level sibling of
+    /// `top_band`/`overlay_band` that this call never touches. A panel or
+    /// launcher placed in `Top`/`Overlay` therefore stays above every
+    /// toplevel unconditionally, with no raise call of its own needed —
+    /// see [`Layer`](crate::Layer)'s doc for why `raise_layer_surface` does
+    /// not exist and is not needed.
     pub fn raise_toplevel(&self, id: ToplevelId) -> Option<()> {
         let entry = self.toplevel_entry(id)?;
         // SAFETY: as above.
@@ -1947,12 +2067,17 @@ impl Runtime {
         *self.inner.layer_shell.borrow()
     }
 
-    /// Record a newly-announced layer surface under `id`.
+    /// Record a newly-announced layer surface under `id`. `band` is the
+    /// layer its scene tree was placed under at creation (`backend.rs`'s
+    /// `on_new_layer_surface`) — the starting point
+    /// [`reparent_layer_surface_if_changed`](Runtime::reparent_layer_surface_if_changed)
+    /// compares every later commit's layer against.
     pub(crate) fn record_layer_surface(
         &self,
         id: LayerSurfaceId,
         raw: NonNull<sys::wlr_layer_surface_v1>,
         scene_tree: NonNull<sys::wlr_scene_tree>,
+        band: Layer,
     ) {
         self.inner.layer_surfaces.borrow_mut().insert(
             id,
@@ -1960,6 +2085,7 @@ impl Runtime {
                 raw,
                 scene_tree,
                 staged_configure: std::cell::Cell::new(None),
+                band: std::cell::Cell::new(band),
             },
         );
     }
@@ -1992,6 +2118,56 @@ impl Runtime {
             .borrow()
             .get(&id)
             .map(|e| e.scene_tree)
+    }
+
+    /// Move `id`'s scene tree into the band matching `layer`, but only if
+    /// that differs from the band it is already parented under — called by
+    /// `backend.rs`'s `on_layer_surface_commit` on every commit with the
+    /// layer that commit just made current.
+    ///
+    /// A client is free to send `zwlr_layer_surface_v1.set_layer` (protocol
+    /// version 2+) after its surface is already mapped, and unlike `anchor`/
+    /// `exclusive_zone`/size, which this crate leaves the handler to notice
+    /// and act on itself, a stale *band* would misstack the surface with no
+    /// way for a consumer to fix it — there is no `raise_layer_surface`, and
+    /// there does not need to be one; see [`Layer`](crate::Layer)'s own doc.
+    /// So this runs unconditionally from the dispatch layer rather than
+    /// waiting on a handler to ask for it.
+    ///
+    /// `None` if this runtime has no live layer surface with that id
+    /// (including a stale one). Reparenting itself never fails: a live
+    /// entry's `scene_tree` is a real node in this runtime's own scene, and
+    /// [`layer_band_ptr`](Runtime::layer_band_ptr) resolving to `None` here
+    /// would mean `init_graphics` was undone after this surface's tree was
+    /// created, which cannot happen — the tree could not have been created
+    /// without it in the first place.
+    pub(crate) fn reparent_layer_surface_if_changed(
+        &self,
+        id: LayerSurfaceId,
+        layer: Layer,
+    ) -> Option<()> {
+        let (tree, changed) = {
+            let surfaces = self.inner.layer_surfaces.borrow();
+            let entry = surfaces.get(&id)?;
+            let changed = entry.band.get() != layer;
+            if changed {
+                entry.band.set(layer);
+            }
+            (entry.scene_tree, changed)
+        };
+        if !changed {
+            return Some(());
+        }
+        let Some(band) = self.layer_band_ptr(layer) else {
+            return Some(());
+        };
+        // SAFETY: `tree` came from a live `LayerSurfaceEntry` (the table
+        // lookup above just resolved it), so it names a scene node this
+        // runtime's own scene still owns; `band` is one of the five band
+        // trees created once in `init_graphics` and never destroyed while
+        // this runtime is.
+        unsafe { sys::wlr_scene_node_reparent(&raw mut (*tree.as_ptr()).node, band.as_ptr()) };
+        Some(())
     }
 
     /// Record a size for `id` to send once its surface is initialized,
@@ -2029,15 +2205,32 @@ impl Runtime {
     /// Answer a layer surface's (re)configure with the size the compositor
     /// chose, in surface-local pixels.
     ///
-    /// **Staged, not always sent.** See `layer.rs`'s own module doc for the
-    /// full argument: this crate could not confirm firsthand whether
-    /// `wlr_layer_surface_v1_configure` asserts on `initialized` the way
-    /// `wlr_xdg_surface_schedule_configure` does, so it treats the hazard as
-    /// real defensively. This method sends immediately only if the surface
-    /// is already initialized; otherwise it records `width`/`height` for
+    /// **Staged, not always sent, because the early call would abort the
+    /// process otherwise.** See `layer.rs`'s own module doc for the full
+    /// argument: `wlr_layer_surface_v1_configure` asserts
+    /// `surface->initialized` (`types/wlr_layer_shell_v1.c:318`,
+    /// `assert(surface->initialized)`, confirmed compiled into the shipped
+    /// `libwlroots-0.20.so` — the distribution does not build wlroots with
+    /// `NDEBUG`), and that flag only flips true during the surface's first
+    /// commit, so calling this before that commit and sending unconditionally
+    /// would abort the whole compositor process on an entirely legal client
+    /// ordering. This method sends immediately only if the surface is
+    /// already initialized; otherwise it records `width`/`height` for
     /// `backend.rs`'s `on_layer_surface_commit` to send for real at the
     /// surface's initial commit. Either way this returns `Some(())`; the
     /// difference is invisible to a caller.
+    ///
+    /// The same guard also protects a second window this crate mirrors
+    /// without being told to by wlroots' own docs: `initialized` is reset
+    /// to `false` again on the surface's *unmap* commit
+    /// (`layer_surface_reset`, invoked from `layer_surface_role_commit`),
+    /// so a layer surface re-enters the uninitialized state after every
+    /// unmap. A call to this method made from
+    /// [`ToplevelHandler::layer_surface_unmapped`](crate::ToplevelHandler::layer_surface_unmapped)
+    /// (or from any point after an unmap and before the surface's next
+    /// commit) would abort exactly the same way without this staging — this
+    /// is not incidental, and the staging must never be simplified away to
+    /// an unconditional send.
     ///
     /// The immediate branch also clears any earlier staged value (there
     /// should not be one — a caller only reaches the immediate branch once
@@ -2316,11 +2509,13 @@ impl Runtime {
     /// unrelated things at once, and a caller computing a drag offset from
     /// them would see the window jump the moment a click landed on a
     /// client-side decoration. The leaf offset is subtracted back out here:
-    /// the toplevel's scene tree is a direct child of the scene root (see
-    /// `backend.rs`'s `wlr_scene_xdg_surface_create` call), so its node's
-    /// `x`/`y` *are* its scene-absolute origin, and `(x, y)` minus that is
-    /// the window-relative position regardless of how deep the struck leaf
-    /// was.
+    /// the toplevel's scene tree is a direct child of `toplevel_band` (see
+    /// `backend.rs`'s `wlr_scene_xdg_surface_create` call), and
+    /// `toplevel_band` itself is never repositioned away from the scene
+    /// root's own origin (see `Graphics::background_band`'s doc), so its
+    /// node's `x`/`y` *are* still its scene-absolute origin, and `(x, y)`
+    /// minus that is the window-relative position regardless of how deep
+    /// the struck leaf was.
     ///
     /// This is **not** the method pointer forwarding uses, and a caller must
     /// not build one out of it: notifying the toplevel's own root surface
@@ -3102,5 +3297,263 @@ mod tests {
     fn decoration_answered_is_false_for_an_unknown_id() {
         let rt = Runtime::new().expect("runtime");
         assert!(!rt.decoration_answered(ToplevelId(next_id())));
+    }
+
+    // M-2 — banded scene trees.
+    //
+    // Every test below needs a real `wlr_scene` (band creation and
+    // `wlr_scene_node_reparent`/`raise_to_top` walk and mutate real
+    // intrusive `wl_list`s, which a dangling pointer cannot stand in for),
+    // so each one brings up a headless backend and calls `init_graphics`
+    // for real, exactly like `tests/scene.rs` does. What each test does
+    // *not* need is a real client: a toplevel's or a layer surface's own
+    // scene tree is created directly with `wlr_scene_tree_create`, parented
+    // where `on_new_toplevel`/`on_new_layer_surface` would parent it, and
+    // recorded with `record_toplevel`/`record_layer_surface` exactly as
+    // those callbacks do — which is enough to exercise the real mutators
+    // (`raise_toplevel`, `reparent_layer_surface_if_changed`) against a real
+    // scene without needing a client library in this crate's own test
+    // suite (see `tests/layers.rs`'s own doc for why that is out of reach
+    // here).
+
+    /// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once
+    /// for this binary's unit tests — mirrors the integration tests' own
+    /// `headless_env` helper (`tests/scene.rs`, `tests/layers.rs`), each of
+    /// which needs its own copy because each integration-test file is a
+    /// separate binary; this unit-test module is the one copy this binary
+    /// needs.
+    fn headless_env() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            // SAFETY: `Once::call_once` runs this closure at most once and
+            // blocks every other caller until it returns, so no concurrent
+            // `getenv` from another test can observe a torn write.
+            unsafe {
+                std::env::set_var("WLR_BACKENDS", "headless");
+                std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
+            }
+        });
+    }
+
+    /// A runtime with a real scene, brought up exactly the way a consumer's
+    /// `main` does: `Display::new`, `Backend::autocreate`, `init_graphics`.
+    ///
+    /// The `Display` and `Backend` are deliberately leaked (`Box::leak`)
+    /// rather than returned to the caller: [`Runtime`]'s own doc requires
+    /// both to outlive it, and this crate's own `Graphics` already leaks
+    /// the scene, renderer and allocator for the identical "one per
+    /// process, the OS reclaims it at exit" reason (see `Graphics`'s own
+    /// doc) — a short-lived unit test process is exactly that "process"
+    /// with nothing else asking for the memory back before it exits.
+    /// Returning owned `Display`/`Backend` values instead would require
+    /// giving each caller a way to keep them alive for exactly as long as
+    /// `rt`, which is more machinery than any test below needs.
+    fn headless_runtime() -> Runtime {
+        headless_env();
+        let display: &'static crate::Display =
+            Box::leak(Box::new(crate::Display::new().expect("display")));
+        let backend: &'static Backend<'static> = Box::leak(Box::new(
+            Backend::autocreate(&display.event_loop()).expect("backend"),
+        ));
+        let rt = Runtime::new().expect("runtime");
+        rt.init_graphics(display, backend).expect("init_graphics");
+        rt
+    }
+
+    /// Every node directly under `tree`, in scene-child order (oldest/
+    /// bottom-most first) — the same order `wlr_scene_node_at`'s hit
+    /// testing and the compositor's own paint walk see. Identifies each
+    /// child by the address of its own `node.link` — a `wl_list` entry's
+    /// address is stable and unique for the life of the node, so comparing
+    /// these addresses is exactly as precise as comparing the nodes
+    /// themselves, without needing a `container_of`-style cast back to
+    /// whatever concrete type each child actually is (a mix of
+    /// `wlr_scene_tree`, `wlr_scene_rect`, `wlr_scene_buffer`, ... in the
+    /// general case).
+    fn scene_children(tree: NonNull<sys::wlr_scene_tree>) -> Vec<*const sys::wl_list> {
+        // SAFETY: `tree` is a live scene tree for the whole of this call
+        // (every caller below holds the runtime, and so the scene, alive
+        // throughout); `children` is `wl_list`, valid as long as the tree
+        // is, and this only reads `next` pointers, never mutates.
+        unsafe {
+            let head = &raw const (*tree.as_ptr()).children;
+            let mut out = Vec::new();
+            let mut cur = (*head).next;
+            while cur != head.cast_mut() {
+                out.push(cur as *const sys::wl_list);
+                cur = (*cur).next;
+            }
+            out
+        }
+    }
+
+    /// The frozen fix for M-2: the five bands exist, are direct children of
+    /// the scene root, and are created in exactly this bottom-to-top order,
+    /// which is what makes every later toplevel/layer-surface placement
+    /// stack correctly with no further bookkeeping — see
+    /// `Graphics::background_band`'s own doc for the mechanism.
+    #[test]
+    fn scene_bands_are_created_bottom_to_top_in_a_fixed_order() {
+        let rt = headless_runtime();
+
+        let scene = rt.scene_ptr().expect("scene");
+        // SAFETY: `scene` is live for the whole of this call (owned by `rt`,
+        // which outlives it).
+        let root = NonNull::from(unsafe { &(*scene.as_ptr()).tree });
+        let actual = scene_children(root);
+
+        let g = rt.inner.graphics.borrow();
+        let g = g.as_ref().expect("graphics");
+        let band_link = |t: NonNull<sys::wlr_scene_tree>| -> *const sys::wl_list {
+            // SAFETY: every band tree is live for the whole of this call.
+            unsafe { &raw const (*t.as_ptr()).node.link }
+        };
+        let expected = vec![
+            band_link(g.background_band),
+            band_link(g.bottom_band),
+            band_link(g.toplevel_band),
+            band_link(g.top_band),
+            band_link(g.overlay_band),
+        ];
+
+        assert_eq!(
+            actual, expected,
+            "the five bands must be the scene root's first five children, \
+             in Background < Bottom < toplevels < Top < Overlay order"
+        );
+    }
+
+    /// A layer surface whose `layer` changes on a later commit is
+    /// reparented into the new band — the fix for the "Top panel pushed
+    /// below the next toplevel" failure M-2 describes for the old
+    /// once-at-creation placement. A commit that reports the *same* layer
+    /// it already has must not touch the scene at all.
+    #[test]
+    fn reparent_layer_surface_if_changed_moves_the_tree_only_when_the_layer_changed() {
+        let rt = headless_runtime();
+
+        let background = rt.layer_band_ptr(Layer::Background).expect("background");
+        let top = rt.layer_band_ptr(Layer::Top).expect("top");
+
+        // Stands in for the tree `wlr_scene_layer_surface_v1_create` would
+        // have handed `on_new_layer_surface`, parented under `Background`
+        // exactly as that callback would for a surface that asked for it.
+        // SAFETY: `background` is a live tree owned by `rt`'s own scene.
+        let tree =
+            NonNull::new(unsafe { sys::wlr_scene_tree_create(background.as_ptr()) }).unwrap();
+
+        let id = LayerSurfaceId(next_id());
+        rt.record_layer_surface(
+            id,
+            NonNull::<sys::wlr_layer_surface_v1>::dangling(),
+            tree,
+            Layer::Background,
+        );
+
+        // Same layer again: no-op.
+        rt.reparent_layer_surface_if_changed(id, Layer::Background);
+        assert_eq!(
+            unsafe { (*tree.as_ptr()).node.parent },
+            background.as_ptr(),
+            "an unchanged layer must not be reparented"
+        );
+
+        // The client asked for `Top` on a later commit: must move.
+        rt.reparent_layer_surface_if_changed(id, Layer::Top);
+        assert_eq!(
+            unsafe { (*tree.as_ptr()).node.parent },
+            top.as_ptr(),
+            "a changed layer must reparent the surface's tree into the new band"
+        );
+
+        // Asking for `Top` again, now that it is already there: no-op,
+        // proven by the parent staying exactly `top` (a bogus second
+        // reparent onto the same tree would not be observable by this
+        // assertion alone, but this at minimum proves nothing moved it
+        // *out* of `top`).
+        rt.reparent_layer_surface_if_changed(id, Layer::Top);
+        assert_eq!(unsafe { (*tree.as_ptr()).node.parent }, top.as_ptr());
+    }
+
+    /// `reparent_layer_surface_if_changed` misses cleanly for an id this
+    /// runtime never recorded, the same "unknown id is not a fault" rule
+    /// every other by-id operation in this crate follows.
+    #[test]
+    fn reparent_layer_surface_if_changed_is_none_for_an_unknown_id() {
+        let rt = headless_runtime();
+        let dead = LayerSurfaceId::dangling_for_test();
+        assert_eq!(rt.reparent_layer_surface_if_changed(dead, Layer::Top), None);
+    }
+
+    /// `raise_toplevel` reorders a toplevel only among its own siblings
+    /// inside the toplevel band — it must never promote the toplevel's node
+    /// out of that band, and the band order itself (toplevel band still
+    /// below the top band) must be completely unaffected by the raise. This
+    /// is the frozen, tested claim behind `raise_toplevel`'s
+    /// published-behavior doc note: a `Top`/`Overlay` layer surface stays
+    /// above every toplevel unconditionally, raise or no raise.
+    #[test]
+    fn raise_toplevel_reorders_only_within_the_toplevel_band() {
+        let rt = headless_runtime();
+
+        let toplevel_band = rt.toplevel_band_ptr().expect("toplevel band");
+        let top_band = rt.layer_band_ptr(Layer::Top).expect("top band");
+
+        // Two toplevels' own trees, standing in for what `on_new_toplevel`
+        // would have created for two real windows.
+        // SAFETY: `toplevel_band` is a live tree owned by `rt`'s own scene.
+        let win_a =
+            NonNull::new(unsafe { sys::wlr_scene_tree_create(toplevel_band.as_ptr()) }).unwrap();
+        let win_b =
+            NonNull::new(unsafe { sys::wlr_scene_tree_create(toplevel_band.as_ptr()) }).unwrap();
+
+        let id_a = ToplevelId(next_id());
+        rt.record_toplevel(id_a, NonNull::<sys::wlr_xdg_toplevel>::dangling(), win_a);
+        let id_b = ToplevelId(next_id());
+        rt.record_toplevel(id_b, NonNull::<sys::wlr_xdg_toplevel>::dangling(), win_b);
+
+        // `win_a` was created first, so it starts below `win_b` in the
+        // toplevel band; raise it above its sibling.
+        rt.raise_toplevel(id_a).expect("id_a is known");
+
+        assert_eq!(
+            unsafe { (*win_a.as_ptr()).node.parent },
+            toplevel_band.as_ptr(),
+            "raising a toplevel must not change which band it is parented \
+             under"
+        );
+        assert_eq!(
+            scene_children(toplevel_band),
+            vec![
+                // SAFETY: both are live trees for the whole of this call.
+                unsafe { &raw const (*win_b.as_ptr()).node.link },
+                unsafe { &raw const (*win_a.as_ptr()).node.link },
+            ],
+            "within the band, the raised toplevel must now be the topmost \
+             sibling"
+        );
+
+        // The band order itself — the actual guarantee a `Top` panel relies
+        // on — is a root-level property this raise call never touches.
+        let scene = rt.scene_ptr().expect("scene");
+        // SAFETY: `scene` is live for the whole of this call.
+        let root = NonNull::from(unsafe { &(*scene.as_ptr()).tree });
+        let root_children = scene_children(root);
+        let toplevel_band_link = unsafe { &raw const (*toplevel_band.as_ptr()).node.link };
+        let top_band_link = unsafe { &raw const (*top_band.as_ptr()).node.link };
+        let toplevel_pos = root_children
+            .iter()
+            .position(|&p| p == toplevel_band_link)
+            .expect("toplevel band is a root child");
+        let top_pos = root_children
+            .iter()
+            .position(|&p| p == top_band_link)
+            .expect("top band is a root child");
+        assert!(
+            toplevel_pos < top_pos,
+            "raising a toplevel must never move the toplevel band above the \
+             top band: a Top layer surface must stay above every toplevel \
+             regardless of any raise_toplevel call"
+        );
     }
 }

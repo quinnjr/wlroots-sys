@@ -1786,13 +1786,18 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
         // possible if a consumer creates the shell without it, and not this
         // callback's mistake to recover from. Drop the announcement rather
         // than dereference a null tree.
-        let Some(scene) = (*session).runtime.scene_ptr() else {
+        let Some(toplevel_band) = (*session).runtime.toplevel_band_ptr() else {
             return;
         };
 
         // Insert into the scene before the handler runs, so that a handler
-        // positioning the window by id finds a node to position.
-        let tree = sys::wlr_scene_xdg_surface_create(&raw mut (*scene.as_ptr()).tree, base);
+        // positioning the window by id finds a node to position. Parented
+        // into the toplevel band, not the scene root directly — see
+        // `Layer`'s own doc for why this is what makes `raise_toplevel`
+        // (and every layer surface's fixed position relative to it)
+        // structurally correct rather than an ordering that the next
+        // toplevel or the next raise call can undo.
+        let tree = sys::wlr_scene_xdg_surface_create(toplevel_band.as_ptr(), base);
         let Some(tree) = NonNull::new(tree) else {
             return;
         };
@@ -1936,17 +1941,6 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
 unsafe fn toplevel_id_of_surface(surface: *mut sys::wlr_surface) -> Option<ToplevelId> {
     // SAFETY: the caller guarantees the surface is live.
     unsafe { find_id(&raw const (*surface).addons).map(ToplevelId) }
-}
-
-/// Recover the [`LayerSurfaceId`] a surface's id addon carries, if any.
-/// Mirrors [`toplevel_id_of_surface`] exactly.
-///
-/// # Safety
-///
-/// `surface` must be a live `wlr_surface` with an initialised addon set.
-unsafe fn layer_surface_id_of_surface(surface: *mut sys::wlr_surface) -> Option<LayerSurfaceId> {
-    // SAFETY: the caller guarantees the surface is live.
-    unsafe { find_id(&raw const (*surface).addons).map(LayerSurfaceId) }
 }
 
 unsafe extern "C" fn on_surface_commit<S: Handlers>(
@@ -2363,8 +2357,9 @@ unsafe extern "C" fn on_toplevel_decoration_destroy<S: Handlers>(
 /// A client created a wlr-layer-shell surface (`get_layer_surface`). Give it
 /// an id and a scene tree before anyone is told about it — mirrors
 /// `on_new_toplevel` exactly, with `wlr_scene_layer_surface_v1_create` in
-/// place of `wlr_scene_xdg_surface_create` and the once-at-creation band
-/// placement [`Layer`]'s own doc describes.
+/// place of `wlr_scene_xdg_surface_create`, parented straight into the band
+/// matching this surface's own [`Layer`] rather than the scene root — see
+/// [`Layer`]'s own doc for the banded-tree design this places it into.
 unsafe extern "C" fn on_new_layer_surface<S: Handlers>(
     l: *mut sys::wl_listener,
     data: *mut std::ffi::c_void,
@@ -2392,34 +2387,46 @@ unsafe extern "C" fn on_new_layer_surface<S: Handlers>(
         // No scene to insert into if `init_graphics` was never called.
         // Drop the announcement rather than dereference a null tree — the
         // same choice `on_new_toplevel` makes for the identical situation.
-        let Some(scene) = (*session).runtime.scene_ptr() else {
+        let layer = Layer::from_raw((*ls).pending.layer.0);
+        let Some(band) = (*session).runtime.layer_band_ptr(layer) else {
             return;
         };
 
-        let scene_layer_surface =
-            sys::wlr_scene_layer_surface_v1_create(&raw mut (*scene.as_ptr()).tree, ls);
+        let scene_layer_surface = sys::wlr_scene_layer_surface_v1_create(band.as_ptr(), ls);
         let Some(scene_layer_surface) = NonNull::new(scene_layer_surface) else {
             return;
         };
         let Some(scene_tree) = NonNull::new((*scene_layer_surface.as_ptr()).tree) else {
+            // m-2: do not abandon the `wlr_scene_layer_surface_v1` wlroots
+            // just allocated on this path — free it rather than leak it.
+            //
+            // Disassembling `wlr_scene_layer_surface_v1_create` in
+            // `libwlroots-0.20.so` shows it is allocated with a bare
+            // `calloc(1, sizeof(*scene_layer_surface))`, its `tree` field is
+            // the very first thing written into it, and every path that
+            // could leave `tree` null already calls `free` on the same
+            // pointer and returns null itself before this crate ever sees
+            // it — so a *non-null* `scene_layer_surface` with a null `tree`
+            // does not occur in the shipped binary today. Nothing in this
+            // crate's ABI checks pin that shape, though, and a future
+            // wlroots could change it, so this stays a real guard rather
+            // than an `unreachable!()`.
+            //
+            // SAFETY: `scene_layer_surface` is a pointer this call just
+            // received from `wlr_scene_layer_surface_v1_create`, allocated
+            // (per the disassembly above) by glibc's `calloc` and not yet
+            // handed to anything else this crate or wlroots could hold a
+            // second reference to — no listener has been linked into it on
+            // this path (linking only happens after both the tree and its
+            // subsurface tree are confirmed non-null in the real function),
+            // so nothing observes it being freed. `libc::free` is the exact
+            // counterpart to the `calloc` that produced it.
+            libc::free(scene_layer_surface.as_ptr().cast());
             return;
         };
         let Some(raw) = NonNull::new(ls) else {
             return;
         };
-
-        // The once-at-creation two-band approximation [`Layer`]'s own doc
-        // describes: everything below toplevels goes to the very bottom,
-        // everything above goes to the very top, in creation order within
-        // each half.
-        match Layer::from_raw((*ls).pending.layer.0) {
-            Layer::Background | Layer::Bottom => {
-                sys::wlr_scene_node_lower_to_bottom(&raw mut (*scene_tree.as_ptr()).node);
-            }
-            Layer::Top | Layer::Overlay => {
-                sys::wlr_scene_node_raise_to_top(&raw mut (*scene_tree.as_ptr()).node);
-            }
-        }
 
         // Four listeners, all with a null liveness flag: each is dropped
         // from inside the destroy emission, while the object is still
@@ -2477,7 +2484,9 @@ unsafe extern "C" fn on_new_layer_surface<S: Handlers>(
         );
         drop(displaced);
 
-        (*session).runtime.record_layer_surface(id, raw, scene_tree);
+        (*session)
+            .runtime
+            .record_layer_surface(id, raw, scene_tree, layer);
 
         let deliver = (*session).deliver;
         (*session)
@@ -2488,21 +2497,38 @@ unsafe extern "C" fn on_new_layer_surface<S: Handlers>(
 
 unsafe extern "C" fn on_layer_surface_commit<S: Handlers>(
     l: *mut sys::wl_listener,
-    data: *mut std::ffi::c_void,
+    _data: *mut std::ffi::c_void,
 ) {
     // SAFETY: linked by `on_new_layer_surface` into this surface's
     // `events.commit`, unlinked (from `on_layer_surface_destroy`) before the
-    // surface is freed; `data` is the `wlr_surface`.
+    // surface is freed. `_data` unused: the id comes from `Bound::layer`,
+    // the same "resolve by the id carried at link time, not by re-deriving
+    // it from `data`" discipline `Bound::layer`'s own doc states and that
+    // `on_layer_surface_map`/`_unmap`/`_destroy` already follow — commit is
+    // brought into line here too (m-1) rather than staying the one
+    // exception, even though `data` really is this surface for the commit
+    // signal specifically and re-deriving from it was not itself a live
+    // bug.
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
-        let surface = data.cast::<sys::wlr_surface>();
-        let Some(id) = layer_surface_id_of_surface(surface) else {
-            return;
-        };
+        let Some(id) = (*bound).layer else { return };
         let Some(raw) = (*session).runtime.layer_surface_ptr(id) else {
             return;
         };
+
+        // Reparent into the current layer's band if it changed since this
+        // surface was placed (M-2): a client may send `set_layer` after
+        // mapping, and the band it lands in is structural, not something a
+        // handler can fix after the fact — see [`Layer`]'s own doc. Read
+        // from `current`, which this commit has just populated; done before
+        // the handler runs so a handler that positions this surface
+        // (`Runtime::set_layer_surface_position`) sees it already in its
+        // final band.
+        let layer = Layer::from_raw((*raw.as_ptr()).current.layer.0);
+        (*session)
+            .runtime
+            .reparent_layer_surface_if_changed(id, layer);
 
         // Delivered for **every** commit, not only the first — see
         // `Event::LayerSurfaceCommit`'s own doc for why. A handler running

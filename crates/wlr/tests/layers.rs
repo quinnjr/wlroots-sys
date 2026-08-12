@@ -4,6 +4,14 @@
 //! client library is that the layer-shell global can be created, that the
 //! id-keyed mutators reject an id that was never issued rather than
 //! dereferencing it, and that the new handler methods are additive.
+//!
+//! The banded-tree scene tests (band stacking order, reparent-on-layer-
+//! change, `raise_toplevel` staying within its band — see `Layer`'s own
+//! doc) live in `src/runtime.rs`'s own `#[cfg(test)]` module instead of
+//! here: they need to read a live `wlr_scene_tree`'s `children`/`parent`
+//! fields directly, which are private to the crate, and an integration test
+//! binary like this one only ever sees the crate's public surface — the
+//! same reason this file cannot exercise anything client-driven either.
 
 /// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
 /// any test in this binary calls `Backend::autocreate`. See `toplevels.rs`'s
