@@ -2,7 +2,7 @@
 //! surfaces anchored to an output's edges rather than positioned by the
 //! compositor's own window management, added to this crate in 0.20.11.
 //!
-//! # The timing hazard, investigated
+//! # The timing hazard: confirmed, and it is a hard abort
 //!
 //! xdg-decoration's `set_decoration_mode` (see `decoration.rs`'s own doc)
 //! stages its answer instead of sending it immediately because
@@ -10,26 +10,42 @@
 //! that flag only flips true during the toplevel's first commit — so a
 //! preference the client stated before ever committing (the ordinary case)
 //! cannot be answered synchronously. `wlr_layer_surface_v1` carries the
-//! identically-named fields `initialized`/`initial_commit`, with the 0.20
-//! header spelling `initialized`'s purpose exactly the same way
-//! ("Whether the surface is ready to receive configure events"), so the same
-//! question had to be asked here before writing a line of this module:
-//! does `wlr_layer_surface_v1_configure` assert on it too?
+//! identically-named fields `initialized`/`initial_commit`, and the
+//! identical hazard is confirmed here too, from the shipped binary rather
+//! than from source:
 //!
-//! The answer could not be confirmed by reading `wlr_layer_surface_v1_configure`
-//! itself firsthand against the exact 0.20.11 sources — gitlab.freedesktop.org
-//! blocks automated fetches, and the one mirror this investigation could reach
-//! (a stale pre-refactor snapshot, whose `wlr_layer_surface_v1` still has the
-//! older `added`/`configured`/`mapped` fields rather than `initialized`/
-//! `initial_commit`, so it predates the change entirely) is not evidence
-//! about the version this crate binds. What *is* evidence: the 0.20 header's
-//! own doc comment on `initialized`, worded to match `wlr_xdg_surface`'s
-//! identical field, and independent corroboration that current wlroots logs
-//! (or asserts — the exact severity could not be confirmed either) a
-//! diagnostic worded "a configure is sent to an uninitialized
-//! wlr_layer_surface_v1" for exactly this misuse. That is enough to treat the
-//! hazard as real rather than gamble a compositor's whole event loop on a
-//! guess, so [`crate::Runtime::configure_layer_surface`] applies the identical
+//! `wlr_layer_surface_v1_configure` contains `assert(surface->initialized);`
+//! at `types/wlr_layer_shell_v1.c:318` — confirmed by disassembling
+//! `libwlroots-0.20.so` (the distribution ships wlroots **without**
+//! `NDEBUG`, so the `__assert_fail` call and its four string arguments —
+//! `"surface->initialized"`, `"types/wlr_layer_shell_v1.c"`, line `318`,
+//! `"wlr_layer_surface_v1_configure"` — are present in the release binary)
+//! and cross-checked against `offsetof(struct wlr_layer_surface_v1,
+//! initialized)` computed from the installed 0.20 header, which matches the
+//! offset the assert reads. **Calling `wlr_layer_surface_v1_configure`
+//! before this surface's first commit aborts the whole compositor
+//! process** — identical severity to the xdg-decoration hazard this
+//! module's staged-answer shape is modeled on.
+//!
+//! It is load-bearing a second way, also confirmed from the binary:
+//! `layer_surface_reset`, invoked from `layer_surface_role_commit` on the
+//! surface's *unmap* commit, resets `initialized` back to `false` (proved by
+//! the `assert(!surface->initialized)` immediately after the reset call in
+//! the same disassembly). So a layer surface re-enters the uninitialized
+//! state after **every** unmap, not only before its first ever commit, and
+//! [`crate::Runtime::configure_layer_surface`] called from
+//! [`crate::ToplevelHandler::layer_surface_unmapped`] — or from any point
+//! after an unmap and before the surface's next commit — would abort
+//! exactly the same way without this staging. The implementation already
+//! handles this correctly, because it stages on wlroots' own `initialized`
+//! flag rather than on any state of its own, and that flag mirrors both
+//! windows (pre-first-commit and post-unmap) identically. **This is not
+//! incidental and the staging must never be simplified away to an
+//! unconditional immediate send** — that would reintroduce a
+//! compositor-killing abort on two different, both entirely legal, client
+//! orderings.
+//!
+//! [`crate::Runtime::configure_layer_surface`] applies the identical
 //! staged-answer shape [`crate::decoration::DecorationEntry`] uses for
 //! `set_decoration_mode`: a call that lands before the surface is initialized
 //! records the size instead of sending it, and `backend.rs`'s
@@ -48,6 +64,40 @@
 //! records — so there is nothing else that could race it, and reusing a
 //! `Cell<Option<(u32, u32)>>` as its own "is anything outstanding" flag is
 //! sufficient.
+//!
+//! # Answering `new_layer_surface` is mandatory
+//!
+//! Unlike xdg-shell, nothing in this crate's dispatch layer sends a
+//! fallback configure for a layer surface. `on_surface_commit` unconditionally
+//! schedules one for a toplevel that never got an answer; no equivalent
+//! exists here, because there is no universally sane default size to invent
+//! for a surface that asked for `0x0`. A [`crate::ToplevelHandler`] that
+//! ignores [`crate::ToplevelHandler::new_layer_surface`] (and every
+//! subsequent [`crate::ToplevelHandler::layer_surface_commit`]) therefore
+//! leaves that client's layer surface **permanently unmapped** — it is
+//! waiting for a configure that will never come. Call
+//! [`crate::Runtime::configure_layer_surface`] from at least one of those two
+//! handler methods for every layer surface this crate hands you, or that
+//! client hangs forever.
+//!
+//! # `pending` vs `current`, and when each accessor reads which
+//!
+//! Every accessor on [`LayerSurface`] except
+//! [`keyboard_interactive`](LayerSurface::keyboard_interactive) reads
+//! `pending`, deliberately — see [`LayerSurface::layer`]'s own doc for why
+//! that is right at `new_layer_surface`, before any commit exists.
+//! `pending` and `current` agree whenever
+//! [`crate::ToplevelHandler::layer_surface_commit`] is delivered
+//! synchronously with the commit that produced it, which is the ordinary
+//! case. They can disagree, narrowly, under deferred event delivery: if a
+//! handler queues delivery rather than running it inline (see
+//! `dispatch.rs`), further client requests may land in `pending` before the
+//! queued handler call actually runs, so a `pending`-reading accessor can
+//! report state the client has not committed yet by the time the handler
+//! sees it. Worth knowing since these are frozen accessor semantics, even
+//! though no handler in this crate's own examples triggers it.
+//! [`keyboard_interactive`](LayerSurface::keyboard_interactive) reads
+//! `current` instead, and has its own timing caveat — see its doc.
 
 use std::marker::PhantomData;
 use std::ptr::NonNull;
@@ -88,34 +138,54 @@ impl LayerSurfaceId {
 /// Which of wlr-layer-shell's four stacking bands a surface belongs to,
 /// lowest to highest: `Background`, `Bottom`, `Top`, `Overlay`.
 ///
-/// # A documented 0.20.x limitation: two bands, not four
+/// # The banded-tree scene design
 ///
-/// This crate's scene graph places every toplevel directly under the scene
-/// root (see `backend.rs`'s `on_new_toplevel`), with nothing between it and
-/// the root to slot a layer surface's tree into on either side. Giving each
-/// of the four layers its own scene sub-tree, with toplevels living in a
-/// fifth between `Bottom` and `Top`, is the correct general fix and is not
-/// done here — it is a structural change to the M1 scene this crate already
-/// ships, not a layer-shell concern in isolation.
+/// This crate's scene graph gives each of the four layers its own scene
+/// sub-tree, plus a fifth for ordinary toplevels, as direct children of the
+/// scene root, created once in this fixed bottom-to-top order at
+/// [`crate::Runtime::init_graphics`] time:
+/// `Background` < `Bottom` < *toplevels* < `Top` < `Overlay`. See
+/// `runtime.rs`'s `Graphics::background_band` for the mechanism (why
+/// creating them in this order at start-of-day fixes their relative
+/// stacking order permanently, using `wlr_scene_tree_create`'s own
+/// append-at-the-end behavior).
 ///
-/// Instead, a layer surface's scene node is raised or lowered *once*, at
-/// creation (`backend.rs`'s `on_new_layer_surface`): `Background` and
-/// `Bottom` call `wlr_scene_node_lower_to_bottom`, `Top` and `Overlay` call
-/// `wlr_scene_node_raise_to_top`. That collapses four bands into two —
-/// everything below toplevels, and everything above them — which is
-/// observably wrong only when two surfaces in the *same* pair (two
-/// `Background`-and-`Bottom` clients, say) need a guaranteed relative order,
-/// or when a `Background` surface must never be capable of ending up above a
-/// `Bottom` one (both simply land at "the bottom", in creation order, via a
-/// series of `lower_to_bottom` calls, and the two variants become
-/// indistinguishable in the scene once placed).
+/// A layer surface's scene node is created directly inside its own band
+/// (`backend.rs`'s `on_new_layer_surface`), and reparented into a different
+/// band (`wlr_scene_node_reparent`) whenever a later commit reports a
+/// different `Layer` than the one it was placed under — a client is free to
+/// send `set_layer` after mapping, and this crate follows that change
+/// automatically rather than leaving the surface stacked where it started.
+/// Every toplevel lives inside the toplevel band instead of directly under
+/// the scene root; [`crate::Runtime::raise_toplevel`] now only reorders a
+/// toplevel among *other toplevels*, which is correct because the bands
+/// make the cross-band ordering structural rather than something any raise
+/// call needs to maintain — see that method's own doc for the detail.
 ///
-/// This is accepted rather than fixed for 0.20.11 because icedtea M2 — the
-/// only consumer this release serves — uses `Top` for its panels and its own
-/// wallpaper for the background, never a client-supplied `Background`
-/// surface, so the two-band approximation is invisible to it. Revisit this
-/// only once a real consumer needs strict `Bottom`-vs-`Background` ordering
-/// or an `Overlay` surface that must outrank a `Top` one deterministically.
+/// This replaces the two-band approximation earlier 0.20.11 pre-releases of
+/// this crate shipped (collapsing all four layers into "below toplevels" /
+/// "above toplevels" by raising or lowering once at creation), which broke
+/// the instant a second toplevel was created after a `Top` panel: new
+/// toplevels appended above every existing sibling, including that panel,
+/// and [`crate::Runtime::raise_toplevel`] raised a toplevel above every
+/// sibling too, `Top`/`Overlay` layer surfaces included — exactly the
+/// panel-above-windows case a real compositor needs and the case the old
+/// doc here incorrectly called rare. The banded-tree design has no such
+/// failure mode: a `Top`/`Overlay` layer surface's node can never become a
+/// descendant of the toplevel band, and a toplevel's node can never become
+/// a descendant of `Top`/`Overlay`, regardless of creation order, raise
+/// calls, or how many toplevels or layer surfaces come and go afterward.
+///
+/// **There is no `raise_layer_surface` method, and none is needed.** Band
+/// ordering is structural: a `Top`-band layer surface's node is always
+/// above every toplevel-band and `Background`/`Bottom`-band node, in every
+/// scene traversal, with no raise call required to establish or maintain
+/// that. A `raise_layer_surface` would only ever have something to do
+/// *within* a band (ordering two `Top` surfaces relative to each other),
+/// which this crate does not need for its current consumer and does not
+/// expose — the same "not this crate's job yet" reasoning
+/// [`crate::LayerSurface::output_id`]'s own doc gives for
+/// `set_layer_surface_output`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Layer {
     /// Below everything, typically a wallpaper.
@@ -265,6 +335,19 @@ impl<'h> LayerSurface<'h> {
     /// crate has announced already carries one; see `backend.rs`'s
     /// `on_new_output`) but is not treated as a panic-worthy invariant
     /// violation in a method with no way to report one.
+    ///
+    /// **Gap, deferred rather than fixed:** wlr-layer-shell's own doc names
+    /// the compositor's responsibility plainly — "it is your responsibility
+    /// to assign an output before returning" — but this crate exposes no
+    /// `set_layer_surface_output`, so a consumer that receives `None` here
+    /// has no way through this crate to discharge that responsibility. This
+    /// is safe for this crate's own manual-positioning model specifically
+    /// because nothing in this crate ever dereferences `(*ls).output`
+    /// itself — `output_id` only reads and null-checks it — so a layer
+    /// surface left without one simply reports `None` forever rather than
+    /// crashing anything. `set_layer_surface_output` remains a real gap in
+    /// the frozen surface, additive and left for a future release, not a
+    /// defect being silently frozen away.
     pub fn output_id(&self) -> Option<OutputId> {
         // SAFETY: the handle's lifetime guarantees the layer surface is
         // live; `output` is read and null-checked before use, and when
@@ -302,14 +385,19 @@ impl<'h> LayerSurface<'h> {
 
     /// The space, in surface-local pixels, the client asked the compositor to
     /// reserve for this surface along its anchored edge. wlr-layer-shell
-    /// defines `0` as "reserve nothing" and `-1` as "this surface does not
-    /// participate in exclusive-zone layout at all" (a positive value is the
-    /// ordinary "reserve this many pixels" case — a bar's height, say). This
-    /// crate passes the raw value through rather than collapsing the two
-    /// non-reserving cases into one, since a caller that cares about the
-    /// distinction (querying `wlr_layer_surface_v1_get_exclusive_edge`'s
-    /// equivalent, say) needs it intact. Read from `pending`, for the same
-    /// reason [`layer`](LayerSurface::layer) is.
+    /// defines `0` as "reserve nothing" and *any negative value* as "the
+    /// client would not like to be moved to avoid occluding surfaces with a
+    /// positive exclusive zone" — `-1` is the conventional negative value to
+    /// send, but it is not privileged by the protocol over `-2` or any other
+    /// negative number; a positive value is the ordinary "reserve this many
+    /// pixels" case, a bar's height, say. This crate passes the raw value
+    /// through rather than collapsing every negative value into one, since a
+    /// caller that cares about the exact number a client sent needs it
+    /// intact. A positive value only has a defined edge to apply
+    /// to for certain anchor configurations — wlroots'
+    /// `wlr_layer_surface_v1_get_exclusive_edge` reports `WLR_EDGE_NONE` for
+    /// a nonpositive zone regardless of anchor. Read from `pending`, for the
+    /// same reason [`layer`](LayerSurface::layer) is.
     pub fn exclusive_zone(&self) -> i32 {
         // SAFETY: as `output_id`.
         unsafe { (*self.raw.as_ptr()).pending.exclusive_zone }
@@ -348,6 +436,19 @@ impl<'h> LayerSurface<'h> {
     /// matters once a surface is actually being considered for focus, which
     /// cannot happen before it is mapped, which cannot happen before at
     /// least one commit.
+    ///
+    /// **Reads as `false` for every surface when called from
+    /// [`crate::ToplevelHandler::new_layer_surface`].** `current` is
+    /// entirely zeroed until the surface's first commit —
+    /// `zwlr_layer_shell_v1.get_layer_surface` only ever writes
+    /// `pending.layer` at creation, confirmed by disassembling
+    /// `libwlroots-0.20.so` — so this always reports `false` there
+    /// regardless of what the client asked for. Call this from
+    /// [`crate::ToplevelHandler::layer_surface_commit`] instead, where
+    /// `current` has just been populated by the commit that triggered the
+    /// call; this crate's own `examples/layers.rs` originally called it from
+    /// `new_layer_surface` and its keyboard-focus path was consequently dead
+    /// code until that was fixed.
     pub fn keyboard_interactive(&self) -> bool {
         // SAFETY: as `output_id`.
         unsafe { (*self.raw.as_ptr()).current.keyboard_interactive.0 != 0 }

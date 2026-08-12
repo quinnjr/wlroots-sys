@@ -40,11 +40,22 @@ wlr-layer-shell.
   written against an earlier 0.20.x has to change" guarantee every prior
   additive release here keeps.
 
-Scene placement is a documented 0.20.x limitation: every layer surface is
-raised or lowered once, at creation, collapsing the protocol's four
-stacking bands into two (below toplevels, above toplevels) rather than
-maintaining all four as distinct scene sub-trees. See `Layer`'s own doc for
-the full argument and when to revisit it.
+Scene placement uses five fixed scene sub-trees ("bands"), created once at
+`init_graphics` time and never reordered: `Background` < `Bottom` <
+toplevels < `Top` < `Overlay`. A layer surface is created directly inside
+its own band and reparented into a different one if a later commit reports
+a different layer; every toplevel lives inside the toplevel band instead of
+under the scene root. This makes the stacking order structural — a `Top`
+panel stays above every toplevel regardless of creation order or any
+`raise_toplevel` call — so there is no `raise_layer_surface` method, and
+none is needed. See `Layer`'s own doc for the full design.
+
+**Answering `new_layer_surface`/`layer_surface_commit` with
+`Runtime::configure_layer_surface` is mandatory, not optional.** Unlike
+xdg-shell, nothing in this crate's dispatch layer sends a fallback
+configure for a layer surface; a `ToplevelHandler` that ignores every layer
+surface it is handed leaves that client permanently unmapped, waiting for a
+configure that never comes. See `layer.rs`'s own module doc for the detail.
 
 ## 0.20.10
 
