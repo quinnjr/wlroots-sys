@@ -1669,6 +1669,16 @@ impl Runtime {
             // `assert(surface->initialized)` this method's own doc
             // describes cannot fire.
             unsafe { sys::wlr_xdg_toplevel_decoration_v1_set_mode(raw.as_ptr(), mode) };
+            // This call is now the authoritative, on-the-wire answer, so
+            // any earlier staged-but-unflushed decision must not survive
+            // it — otherwise `on_surface_commit`'s flush (or a second call
+            // to this method after this one, in either order relative to
+            // the flush) would resend a stale value and silently override
+            // whatever was just sent here. `mark_decoration_answered` is
+            // what closes that window: an immediate send always clears
+            // `staged`, whether or not one was pending — see its own doc
+            // for why this is pulled out rather than inlined here.
+            self.mark_decoration_answered(id);
         } else if let Some(entry) = self.inner.decorations.borrow().get(&id) {
             entry.staged.set(Some(server_side));
         }
@@ -1677,6 +1687,28 @@ impl Runtime {
             entry.mode_set_this_dispatch.set(true);
         }
         Some(())
+    }
+
+    /// The bookkeeping half of an *immediate* decoration answer — clearing
+    /// any value staged by an earlier, not-yet-flushed call — pulled out of
+    /// [`set_decoration_mode`](Runtime::set_decoration_mode)'s immediate
+    /// branch into its own method for exactly one reason: so it can be
+    /// exercised by a test without going through the real
+    /// `wlr_xdg_toplevel_decoration_v1_set_mode` FFI call, which asserts
+    /// `surface->initialized` and then reaches deep enough into wlroots
+    /// (`configure_list`, the surface's real `wl_resource`) that a
+    /// fabricated surface segfaults rather than merely misbehaving — this
+    /// was verified empirically, not assumed, before this method existed as
+    /// a separate, safely-testable unit. Every real caller reaches this
+    /// only from `set_decoration_mode`'s immediate branch, i.e. only after
+    /// the FFI call has actually run; this method itself makes no such
+    /// claim and cannot enforce it, so it stays private to this module
+    /// (visible to `tests` as a descendant of it) rather than becoming a
+    /// second public entry point a consumer could call out of order.
+    fn mark_decoration_answered(&self, id: ToplevelId) {
+        if let Some(entry) = self.inner.decorations.borrow().get(&id) {
+            entry.staged.set(None);
+        }
     }
 
     /// Create the seat, its cursor, and the cursor theme.
@@ -2352,6 +2384,69 @@ mod tests {
             rt.take_staged_decoration_mode(id),
             None,
             "taking it clears it, so a second flush cannot resend a stale decision"
+        );
+    }
+
+    /// The exact regression the fix closes: an immediate answer (the
+    /// surface already initialized) must clear any earlier staged decision,
+    /// or a later flush resends it and silently overrides whatever was just
+    /// sent.
+    ///
+    /// This calls the real production code that enforces it —
+    /// [`Runtime::mark_decoration_answered`], the bookkeeping
+    /// `set_decoration_mode`'s immediate branch calls right after its FFI
+    /// send — rather than the public method itself, which cannot be driven
+    /// here: an earlier version of this test called `set_decoration_mode`
+    /// directly, against a real `wl_client`/`wl_resource` and a `initialized
+    /// = true` (but otherwise blank) `wlr_xdg_surface`, and it segfaulted
+    /// inside wlroots' real `wlr_xdg_surface_schedule_configure` — verified
+    /// empirically, not assumed, before `mark_decoration_answered` was
+    /// pulled out into its own, separately-callable unit specifically so
+    /// this invariant could be pinned without that crash. See that
+    /// method's own doc for the full argument.
+    #[test]
+    fn mark_decoration_answered_clears_any_staged_decision() {
+        let rt = Runtime::new().expect("runtime");
+        let id = ToplevelId(next_id());
+        rt.record_toplevel(
+            id,
+            NonNull::<sys::wlr_xdg_toplevel>::dangling(),
+            NonNull::<sys::wlr_scene_tree>::dangling(),
+        );
+        rt.record_decoration(
+            id,
+            NonNull::<sys::wlr_xdg_toplevel_decoration_v1>::dangling(),
+        );
+
+        // Stage a pre-commit decision, exactly as `set_decoration_mode`'s
+        // own staging branch does when a `request_mode` fires before the
+        // initial commit — the scenario the review traced: a consumer's
+        // `initial_commit` handler later answers explicitly (the immediate
+        // branch, reached because the surface is initialized by then),
+        // while this earlier staged value is still sitting in the table.
+        rt.inner
+            .decorations
+            .borrow()
+            .get(&id)
+            .expect("just recorded")
+            .staged
+            .set(Some(true));
+        assert_eq!(
+            rt.inner.decorations.borrow().get(&id).unwrap().staged.get(),
+            Some(true),
+            "the stage must be visible before `mark_decoration_answered` \
+             runs, or this test would not be exercising the hazard at all"
+        );
+
+        rt.mark_decoration_answered(id);
+
+        assert_eq!(
+            rt.take_staged_decoration_mode(id),
+            None,
+            "an answered request must leave nothing staged behind — a \
+             non-empty `staged` here is exactly the bug: `on_surface_commit`'s \
+             later flush would resend it and override the answer that was \
+             just sent on the immediate branch"
         );
     }
 }
