@@ -24,6 +24,17 @@ follows on the same branches, not because they are on crates.io yet.
 The API is held identical across all four, so once they ship, moving between
 them is a version change rather than a code change.
 
+## 0.20.6
+
+Pixel-buffer scene nodes.
+
+- `BufferId` and the `Runtime::*_buffer` family — scene nodes displaying
+  owned RGBA8888 pixels (copied in), at the scene root or inside a
+  toplevel's tree; reposition, rescale (`set_buffer_dest_size`), replace
+  pixels, lower, remove — all by id, all `Option` on stale ids.
+- `add_buffer` errors (`Error::Create`) if `init_graphics` has not run yet,
+  symmetric with `add_rect`.
+
 ## 0.20.5
 
 Milestone-1 residuals.
