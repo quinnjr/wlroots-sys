@@ -954,6 +954,18 @@ impl Runtime {
     /// appends above one — an un-lowered root rect now sits permanently
     /// above every toplevel and every layer surface, `Overlay` included.
     ///
+    /// **That also swallows pointer input over the rect's area.** Hit
+    /// testing resolves to the topmost node, and a scene rect is not a
+    /// surface, so a hit on one yields no surface at all: the seat's pointer
+    /// focus is cleared and click-to-focus does not reach whatever is drawn
+    /// underneath. For a transient overlay (a drag preview) that is usually
+    /// harmless, because the consumer's own drag machine is consuming
+    /// motion for the rect's whole lifetime; for a *persistent* translucent
+    /// overlay it makes the covered area permanently unclickable, and there
+    /// is no way to express "above the toplevels, below `Overlay`" in
+    /// 0.20.x. `add_rect_in_band` — additive, planned for a later 0.20.x —
+    /// is the intended fix. Until then, lower it or keep it transient.
+    ///
     /// # Errors
     ///
     /// [`Error::Create`] if wlroots could not create the node, or if
@@ -1138,7 +1150,11 @@ impl Runtime {
     /// stacking bands (see [`Layer`](crate::Layer)'s banded-tree doc), so
     /// unlike pre-band versions of this scene, a later toplevel no longer
     /// appends above one — an un-lowered root buffer now sits permanently
-    /// above every toplevel and every layer surface, `Overlay` included.
+    /// above every toplevel and every layer surface, `Overlay` included,
+    /// and swallows pointer input over its area exactly as an un-lowered
+    /// root rect does. See [`add_rect`](Runtime::add_rect)'s own paragraph
+    /// on that (and on the planned additive `add_rect_in_band` fix); the
+    /// mechanism and the consequence are identical for buffers.
     ///
     /// Pixels are copied: `rgba` need not outlive this call.
     ///
@@ -1371,6 +1387,27 @@ impl Runtime {
     /// deliberately advertising an older xdg-shell (to work around a client)
     /// is a real thing to want; pass 6 unless you know otherwise.
     ///
+    /// # One `Runtime` per `Display`, per process
+    ///
+    /// **The pointer cached by this call belongs to `display` and is never
+    /// taken back.** The shell object is owned by the `Display` and dies
+    /// with it, while the `Runtime` goes on holding the raw pointer — and
+    /// the "called twice" guard below refuses to re-create against a
+    /// replacement `Display`, so there is no way to refresh it. A consumer
+    /// that drops its `Display`, builds a new one, and reuses the same
+    /// `Runtime` will therefore have `Backend::run_all` link its listeners
+    /// into freed `wl_list`s: a use-after-free with no recovery path. The
+    /// same is true of the pointers cached by
+    /// [`create_xdg_decoration_manager`](Runtime::create_xdg_decoration_manager)
+    /// and [`create_layer_shell`](Runtime::create_layer_shell).
+    ///
+    /// Build one `Runtime` per `Display`, and (because the graphics and
+    /// backend state hanging off a `Runtime` is process-global in wlroots)
+    /// one `Display` per process. This cannot be enforced by signature
+    /// without a breaking change, so 0.20.x states it rather than checks
+    /// it; a `debug_assert` pinning the originating `Display` is planned
+    /// for the next publish.
+    ///
     /// # Errors
     ///
     /// [`Error::Operation`] if a shell already exists on this runtime, or if
@@ -1389,6 +1426,11 @@ impl Runtime {
         // by the display and destroyed with it, so this crate never frees it.
         let raw = unsafe { sys::wlr_xdg_shell_create(display.as_ptr(), version) };
         let raw = NonNull::new(raw).ok_or(Error::Create("wlr_xdg_shell_create"))?;
+        // Cached for the lifetime of this `Runtime`, but only valid for the
+        // lifetime of *this* `display` — see the "One `Runtime` per
+        // `Display`" section above. Nothing here can tell a second call
+        // apart by display, which is why the guard above rejects it
+        // outright rather than refreshing.
         *self.inner.xdg_shell.borrow_mut() = Some(raw);
         Ok(())
     }
@@ -1413,6 +1455,10 @@ impl Runtime {
     /// call, so creating the manager after a run has started has no effect
     /// until the next one — the same rule [`create_xdg_shell`](Runtime::create_xdg_shell)
     /// follows.
+    ///
+    /// The pointer cached here is tied to `display` for good: see
+    /// [`create_xdg_shell`](Runtime::create_xdg_shell)'s *One `Runtime` per
+    /// `Display`* section, which applies verbatim to this manager.
     ///
     /// # Errors
     ///
@@ -2054,6 +2100,10 @@ impl Runtime {
     /// `version` is a parameter for the same reason
     /// [`create_xdg_shell`](Runtime::create_xdg_shell)'s is; pass 4 unless
     /// you know otherwise.
+    ///
+    /// The pointer cached here is tied to `display` for good: see
+    /// [`create_xdg_shell`](Runtime::create_xdg_shell)'s *One `Runtime` per
+    /// `Display`* section, which applies verbatim to this shell.
     ///
     /// # Errors
     ///

@@ -24,6 +24,45 @@ follows on the same branches, not because they are on crates.io yet.
 The API is held identical across all four, so once they ship, moving between
 them is a version change rather than a code change.
 
+## Compatibility policy, and its one recorded exception
+
+Releases within a `wlr` minor line are **additive only**: no published item
+changes name, signature, or trait bounds, and no published item changes what
+it observably does. Everything from `0.20.0` onward has held to the first
+half of that without exception — a full public-surface diff across
+`0.20.4..0.20.11` shows no renamed, re-signed, or re-bounded item.
+
+**`0.20.11` is a knowing exception to the second half.** The banded scene
+tree (see that release's own section below) was necessary — layer-shell
+stacking cannot be made correct by bookkeeping alone, and the alternative
+was shipping a protocol whose ordering guarantee silently depended on
+creation order — but it changed the observable behavior of two things that
+already existed:
+
+- **`raise_toplevel`** used to mean "above every sibling in the scene root".
+  It now means "above every other toplevel", because toplevels are siblings
+  of each other inside the toplevel band rather than siblings of everything.
+  A `Top`/`Overlay` layer surface stays above a raised toplevel, which is
+  the point.
+- **An un-lowered root `add_rect`/`add_buffer` node** used to sit above
+  whatever existed when it was created, with later toplevels appending above
+  it. It now sits permanently above every toplevel and every layer surface,
+  `Overlay` included, because it is a sibling of the fixed bands. It also
+  swallows pointer hit-tests over its own area (a scene rect is not a
+  surface, so a hit on it clears pointer focus instead of falling through) —
+  documented on `add_rect`/`add_buffer` themselves.
+
+Who this can bite: a `0.20.4`-era consumer that used an un-lowered root rect
+as an interim decoration band, or that relied on `raise_toplevel` to lift a
+window above such a rect. Upgrading to `0.20.11` regresses that silently —
+it still compiles, it still runs, it draws in a different order. The
+migration is `add_rect_in_toplevel` (`0.20.5`) for anything meant to move
+with a window, and `lower_rect_to_bottom` for anything meant to be a
+background. `add_rect_in_band`, the additive way to place a node *between*
+bands, is planned for a later `0.20.x`; there is no way to express it today.
+
+No further exception is sanctioned in the `0.20` line.
+
 ## 0.20.11
 
 wlr-layer-shell.
