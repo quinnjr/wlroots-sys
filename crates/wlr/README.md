@@ -24,6 +24,17 @@ follows on the same branches, not because they are on crates.io yet.
 The API is held identical across all four, so once they ship, moving between
 them is a version change rather than a code change.
 
+## 0.20.7
+
+Client-driven state requests.
+
+- `ToplevelHandler::{request_maximize, request_fullscreen, request_move,
+  request_resize}` — fully-defaulted, additive. The dispatch layer always
+  schedules the protocol-required configure answer for state requests, so
+  ignoring a request stays protocol-correct.
+- `Edges` — resize-edge flags.
+- `Runtime::configure_toplevel` — a bare configure by id.
+
 ## 0.20.6
 
 Pixel-buffer scene nodes.

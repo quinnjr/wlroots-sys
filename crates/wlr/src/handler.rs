@@ -219,7 +219,17 @@ pub trait ToplevelHandler {
     }
 
     /// The client asked to (un)maximize (`xdg_toplevel.set_maximized` /
-    /// `unset_maximized`). `maximize` is the requested state.
+    /// `unset_maximized`). `maximize` is the state the client asked for —
+    /// the requested *target*, not a toggle: `true` for `set_maximized`,
+    /// `false` for `unset_maximized`, regardless of the current state.
+    ///
+    /// The whole handle is passed, not just the id, because deciding whether
+    /// to grant a state request is policy, and policy usually wants
+    /// [`Toplevel::title`](crate::Toplevel::title) /
+    /// [`app_id`](crate::Toplevel::app_id) — unlike
+    /// [`request_move`](ToplevelHandler::request_move) /
+    /// [`request_resize`](ToplevelHandler::request_resize), which get a bare
+    /// id because the handle offers nothing move-specific.
     ///
     /// xdg-shell requires the compositor to answer *every* such request
     /// with a configure, whether or not it grants it — ignoring the request
@@ -238,10 +248,13 @@ pub trait ToplevelHandler {
     }
 
     /// The client asked to (un)fullscreen (`xdg_toplevel.set_fullscreen` /
-    /// `unset_fullscreen`). Same contract as
-    /// [`request_maximize`](ToplevelHandler::request_maximize): the
-    /// dispatch layer, not this default, guarantees the answering
-    /// configure.
+    /// `unset_fullscreen`). `fullscreen` is the state the client asked for,
+    /// on the same terms as `maximize` above: a target, not a toggle.
+    ///
+    /// Same contract as
+    /// [`request_maximize`](ToplevelHandler::request_maximize) throughout —
+    /// the dispatch layer, not this default, guarantees the answering
+    /// configure, and the handle is passed for the same policy reason.
     fn request_fullscreen(&mut self, toplevel: &Toplevel<'_>, fullscreen: bool) {
         let _ = (toplevel, fullscreen);
     }
@@ -252,6 +265,11 @@ pub trait ToplevelHandler {
     /// terms — an interactive move that never starts is not a protocol
     /// violation — so there is no configure guarantee to keep and no
     /// dispatch-layer follow-up after it.
+    ///
+    /// Only the id, not a [`Toplevel`] handle: starting an interactive move
+    /// needs the pointer's position and the compositor's own window
+    /// geometry, none of which the handle carries, so borrowing it would buy
+    /// nothing.
     ///
     /// The seat and serial the wire event carries are deliberately not
     /// passed through: this crate does not forward them, so a compositor

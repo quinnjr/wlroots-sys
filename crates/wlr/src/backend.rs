@@ -1845,7 +1845,7 @@ unsafe extern "C" fn on_toplevel_destroy<S: Handlers>(
         // freed the object, so a lookup at delivery time would resolve the id
         // to freed memory. Clearing here means it simply misses.
         //
-        // Removing the entry drops its five registrations, one of which owns
+        // Removing the entry drops every registration it holds, one of which owns
         // this very `Bound`. `wl_signal_emit_mutable` advances past the
         // firing listener before calling us, so that is what it exists to
         // tolerate; `bound` is dangling from here on and is not touched again.
