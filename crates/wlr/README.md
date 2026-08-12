@@ -24,6 +24,28 @@ follows on the same branches, not because they are on crates.io yet.
 The API is held identical across all four, so once they ship, moving between
 them is a version change rather than a code change.
 
+## 0.20.11
+
+wlr-layer-shell.
+
+- `Runtime::create_layer_shell` — the zwlr_layer_shell_v1 global.
+- `Runtime::configure_layer_surface` / `Runtime::set_layer_surface_position`
+  / `Runtime::focus_layer_keyboard` — id-keyed mutators for a layer
+  surface's size, scene position, and keyboard focus.
+- `LayerSurfaceId`, `LayerSurface`, `Layer`, `Anchor` — the borrow-scoped
+  handle and its stable id, and the two small value types it exposes.
+- `ToplevelHandler::new_layer_surface` / `layer_surface_commit` /
+  `layer_surface_mapped` / `layer_surface_unmapped` /
+  `layer_surface_destroyed` — additive, defaulted; the same "no `impl`
+  written against an earlier 0.20.x has to change" guarantee every prior
+  additive release here keeps.
+
+Scene placement is a documented 0.20.x limitation: every layer surface is
+raised or lowered once, at creation, collapsing the protocol's four
+stacking bands into two (below toplevels, above toplevels) rather than
+maintaining all four as distinct scene sub-trees. See `Layer`'s own doc for
+the full argument and when to revisit it.
+
 ## 0.20.10
 
 Output layout.
