@@ -44,7 +44,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
-use crate::{OutputId, ToplevelId};
+use crate::{DecorationMode, Edges, LayerSurfaceId, OutputId, ToplevelId};
 
 /// An event awaiting delivery.
 ///
@@ -67,6 +67,38 @@ pub(crate) enum Event {
     ToplevelUnmapped(ToplevelId),
     ToplevelTitleChanged(ToplevelId),
     ToplevelDestroyed(ToplevelId),
+
+    /// A client requested (un)maximize. The bool is the requested state —
+    /// read from `wlr_xdg_toplevel::requested.maximized` at emission time,
+    /// not re-read at delivery, so a deferred event still reports what the
+    /// client actually asked for.
+    RequestMaximize(ToplevelId, bool),
+    /// As `RequestMaximize`, for `requested.fullscreen`.
+    RequestFullscreen(ToplevelId, bool),
+    /// Interactive move. Seat and serial are not carried — see
+    /// `ToplevelHandler::request_move`'s own doc for why.
+    RequestMove(ToplevelId),
+    /// Interactive resize. As `RequestMove`, minus the edges the client
+    /// reported dragging.
+    RequestResize(ToplevelId, Edges),
+
+    /// The client asked for a decoration mode on a toplevel's
+    /// `zxdg_toplevel_decoration_v1`. The `Option<DecorationMode>` is read
+    /// from `wlr_xdg_toplevel_decoration_v1::requested_mode` at emission
+    /// time — see [`crate::decoration::requested_preference`] — not re-read
+    /// at delivery, so a deferred event still reports what the client
+    /// actually asked for.
+    RequestDecorationMode(ToplevelId, Option<DecorationMode>),
+
+    NewLayerSurface(LayerSurfaceId),
+    /// Fires on **every** commit of a layer surface's underlying
+    /// `wlr_surface`, not only the first — unlike `ToplevelInitialCommit`,
+    /// wlr-layer-shell surfaces routinely change their anchor, margins or
+    /// exclusive zone after mapping and a compositor needs to see each one.
+    LayerSurfaceCommit(LayerSurfaceId),
+    LayerSurfaceMapped(LayerSurfaceId),
+    LayerSurfaceUnmapped(LayerSurfaceId),
+    LayerSurfaceDestroyed(LayerSurfaceId),
 
     Key {
         keysym: u32,

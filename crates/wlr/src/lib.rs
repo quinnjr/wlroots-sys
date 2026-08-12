@@ -76,12 +76,15 @@
 pub(crate) mod sys;
 
 mod backend;
+mod buffer;
+mod decoration;
 mod dispatch;
 mod display;
 mod error;
 mod handler;
 mod id;
 mod interest;
+mod layer;
 mod output;
 mod runtime;
 mod scene;
@@ -89,16 +92,19 @@ mod seat;
 mod toplevel;
 
 pub use backend::{Backend, Until};
+pub use buffer::BufferId;
+pub use decoration::DecorationMode;
 pub use display::{Display, EventLoop};
 pub use error::{Error, Result};
 pub use handler::{FdHandler, Handlers, LoopHandler, OutputHandler, SeatHandler, ToplevelHandler};
 pub use id::{OutputId, SourceId};
 pub use interest::{Interest, Readiness};
+pub use layer::{Anchor, Layer, LayerSurface, LayerSurfaceId};
 pub use output::Output;
 pub use runtime::Runtime;
 pub use scene::RectId;
 pub use seat::{KeyEvent, Modifiers};
-pub use toplevel::{Toplevel, ToplevelId};
+pub use toplevel::{Edges, Toplevel, ToplevelId};
 
 /// The wlroots version this build of `wlr` binds, as `(major, minor)`.
 ///

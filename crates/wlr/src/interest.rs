@@ -91,7 +91,7 @@ impl Readiness {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -139,21 +139,29 @@ mod tests {
         }
     }
 
-    /// Serialises this module's real-backend tests against each other.
+    /// Serialises this crate's `--lib` unit-test binary's real-backend tests
+    /// against each other.
     ///
     /// `Backend::autocreate` reads `WLR_BACKENDS` via `getenv`, and libtest
     /// runs `#[test]` functions on parallel threads by default, so an
     /// unguarded `setenv` racing another thread's `getenv` is undefined
-    /// behaviour. `headless_env` is the single call site for both, and every
-    /// test below calls it before touching a `Display` or a `Backend`: the
-    /// `Once` serialises the one write against every read *this module*
-    /// makes, and no test anywhere else in this crate's `#[cfg(test)]` code
-    /// touches `WLR_BACKENDS` or calls `autocreate` (`tests/fd_sources.rs`,
-    /// `tests/headless.rs` and `tests/reentrancy.rs` do, but each is compiled
-    /// to its own binary — a separate process, with its own environment — so
-    /// none of them can race a write made here). That is what makes "no other
-    /// reader exists" true rather than merely convenient.
-    fn headless_env() {
+    /// behaviour. This `headless_env` is the single call site for both, in
+    /// the whole `--lib` binary — not just this module — and every test that
+    /// needs a real headless backend anywhere in this crate's unit tests
+    /// calls it (via `pub(crate)`) before touching a `Display` or a
+    /// `Backend`: the one `Once` here serialises the one write against every
+    /// read any of them makes. Two known callers today: this module's own
+    /// tests below, and `runtime.rs`'s `mod tests::headless_runtime` (which
+    /// additionally needs `WLR_HEADLESS_OUTPUTS`, set here too so both
+    /// callers share the identical environment). A second, independent
+    /// `Once` guarding the same variable anywhere else in this binary would
+    /// race this one — don't add one; route any new real-backend unit test
+    /// through this function instead. Integration tests (`tests/fd_sources.rs`,
+    /// `tests/headless.rs`, `tests/reentrancy.rs`, ...) each declare their own
+    /// copy of this helper and are unaffected: each integration-test file is
+    /// compiled to its own binary — a separate process, with its own
+    /// environment — so none of them can race a write made here.
+    pub(crate) fn headless_env() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             // SAFETY: `Once::call_once` runs this closure at most once and

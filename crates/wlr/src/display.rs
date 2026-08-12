@@ -178,20 +178,6 @@ pub struct EventLoop<'d> {
 }
 
 impl<'d> EventLoop<'d> {
-    /// Re-borrow a loop pointer this crate already holds.
-    ///
-    /// # Safety
-    ///
-    /// `raw` must name a live `wl_event_loop` belonging to a display that
-    /// outlives `'d`. [`Backend`](crate::Backend) is the only caller: it keeps
-    /// the pointer it was created from, and its own `'d` is that display's.
-    pub(crate) unsafe fn from_raw(raw: NonNull<sys::wl_event_loop>) -> EventLoop<'d> {
-        EventLoop {
-            raw,
-            _display: PhantomData,
-        }
-    }
-
     pub(crate) fn as_ptr(&self) -> *mut sys::wl_event_loop {
         self.raw.as_ptr()
     }

@@ -4,7 +4,10 @@
 //! every handler as `&mut S`. Every method is defaulted, so a consumer
 //! implements only what they use.
 
-use crate::{KeyEvent, Output, OutputId, Toplevel, ToplevelId};
+use crate::{
+    DecorationMode, Edges, KeyEvent, LayerSurface, LayerSurfaceId, Output, OutputId, Toplevel,
+    ToplevelId,
+};
 
 /// Output lifecycle and frame events.
 ///
@@ -142,6 +145,19 @@ pub trait LoopHandler {
 /// `impl ToplevelHandler for MyState {}` written against 0.20.1 still
 /// compiles unchanged.
 ///
+/// `request_maximize`, `request_fullscreen`, `request_move` and
+/// `request_resize` were added in 0.20.7, additively for the same reason:
+/// every one of them is defaulted, so an impl written against any earlier
+/// 0.20.x still compiles.
+///
+/// `new_layer_surface`, `layer_surface_commit`, `layer_surface_mapped`,
+/// `layer_surface_unmapped` and `layer_surface_destroyed` were added in
+/// 0.20.11, on the same additive terms — wlr-layer-shell surfaces are not
+/// xdg-shell toplevels, but they share this trait rather than getting their
+/// own for the identical reason `request_decoration_mode` does: one more
+/// defaulted method costs an implementor nothing, and a second trait would
+/// cost every consumer a second (also-empty) `impl` block.
+///
 /// # Panics
 ///
 /// As for [`OutputHandler`]: every method runs underneath an `extern "C"`
@@ -210,6 +226,166 @@ pub trait ToplevelHandler {
     /// `new_toplevel`. Write this so an unknown id is harmless — `remove` on
     /// a map, never indexing.
     fn toplevel_destroyed(&mut self, id: ToplevelId) {
+        let _ = id;
+    }
+
+    /// The client asked to (un)maximize (`xdg_toplevel.set_maximized` /
+    /// `unset_maximized`). `maximize` is the state the client asked for —
+    /// the requested *target*, not a toggle: `true` for `set_maximized`,
+    /// `false` for `unset_maximized`, regardless of the current state.
+    ///
+    /// The whole handle is passed, not just the id, because deciding whether
+    /// to grant a state request is policy, and policy usually wants
+    /// [`Toplevel::title`](crate::Toplevel::title) /
+    /// [`app_id`](crate::Toplevel::app_id) — unlike
+    /// [`request_move`](ToplevelHandler::request_move) /
+    /// [`request_resize`](ToplevelHandler::request_resize), which get a bare
+    /// id because the handle offers nothing move-specific.
+    ///
+    /// xdg-shell requires the compositor to answer *every* such request
+    /// with a configure, whether or not it grants it — ignoring the request
+    /// is legal, ignoring the configure is not. This default does nothing,
+    /// and it is still protocol-correct: the guarantee lives in the
+    /// **dispatch layer**, not here. After this method returns, dispatch
+    /// unconditionally schedules a bare configure on this toplevel
+    /// ([`Runtime::configure_toplevel`](crate::Runtime::configure_toplevel))
+    /// — a default trait method has no `Runtime` to send one with itself.
+    /// wlroots coalesces a second scheduled configure into whatever this
+    /// call already staged (`Runtime::set_toplevel_*`), so overriding this
+    /// method to honour the request costs nothing extra: the dispatch
+    /// layer's schedule after it returns is harmless, not a duplicate send.
+    fn request_maximize(&mut self, toplevel: &Toplevel<'_>, maximize: bool) {
+        let _ = (toplevel, maximize);
+    }
+
+    /// The client asked to (un)fullscreen (`xdg_toplevel.set_fullscreen` /
+    /// `unset_fullscreen`). `fullscreen` is the state the client asked for,
+    /// on the same terms as `maximize` above: a target, not a toggle.
+    ///
+    /// Same contract as
+    /// [`request_maximize`](ToplevelHandler::request_maximize) throughout —
+    /// the dispatch layer, not this default, guarantees the answering
+    /// configure, and the handle is passed for the same policy reason.
+    fn request_fullscreen(&mut self, toplevel: &Toplevel<'_>, fullscreen: bool) {
+        let _ = (toplevel, fullscreen);
+    }
+
+    /// Interactive move request (`xdg_toplevel.move`).
+    ///
+    /// Unlike the two methods above, ignoring this is legal on its own
+    /// terms — an interactive move that never starts is not a protocol
+    /// violation — so there is no configure guarantee to keep and no
+    /// dispatch-layer follow-up after it.
+    ///
+    /// Only the id, not a [`Toplevel`] handle: starting an interactive move
+    /// needs the pointer's position and the compositor's own window
+    /// geometry, none of which the handle carries, so borrowing it would buy
+    /// nothing.
+    ///
+    /// The seat and serial the wire event carries are deliberately not
+    /// passed through: this crate does not forward them, so a compositor
+    /// wanting interactive move/resize enforces its own pointer-pressed
+    /// policy rather than trusting the client's claim of an active grab.
+    fn request_move(&mut self, id: ToplevelId) {
+        let _ = id;
+    }
+
+    /// Interactive resize request (`xdg_toplevel.resize`). `edges` is which
+    /// edge(s) the client reported dragging. Same no-guarantee contract as
+    /// [`request_move`](ToplevelHandler::request_move), and the same reason
+    /// seat/serial are absent.
+    fn request_resize(&mut self, id: ToplevelId, edges: Edges) {
+        let _ = (id, edges);
+    }
+
+    /// The client (un)stated a decoration-mode preference for this toplevel,
+    /// via `zxdg_decoration_manager_v1`/`zxdg_toplevel_decoration_v1`.
+    ///
+    /// `preference` is what the client asked for:
+    /// `Some(`[`DecorationMode::ClientSide`]`)` or
+    /// `Some(`[`DecorationMode::ServerSide`]`)`, or `None` if it stated no
+    /// preference at all (`requested_mode` reads
+    /// `WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_NONE`) — a client that has not
+    /// called `set_mode`, which the protocol allows and which is also how
+    /// this fires for a decoration whose client never asks at all.
+    ///
+    /// Answer with
+    /// [`Runtime::set_decoration_mode`](crate::Runtime::set_decoration_mode)
+    /// from inside this call. It takes the same [`DecorationMode`], so
+    /// honoring the client is `set_decoration_mode(id, pref)` for whatever
+    /// `pref` arrived — a preference is only a request, though, and
+    /// answering with the other variant is equally valid.
+    ///
+    /// wlroots requires a mode be set before the toplevel's initial commit
+    /// is answered, so — same coalescing pattern as
+    /// [`request_maximize`](ToplevelHandler::request_maximize)'s bare
+    /// configure — the dispatch layer sends
+    /// [`DecorationMode::ServerSide`] after this method returns, but *only*
+    /// if this method sent nothing itself: unlike the configure case,
+    /// sending twice here is not harmless (it would tell the client
+    /// server-side and then, in the same turn, whatever this method asked
+    /// for), so the default is conditional rather than unconditional.
+    fn request_decoration_mode(&mut self, id: ToplevelId, preference: Option<DecorationMode>) {
+        let _ = (id, preference);
+    }
+
+    /// A client created a wlr-layer-shell surface (`get_layer_surface`).
+    ///
+    /// Added in 0.20.11, additively, on this trait rather than a new one —
+    /// see this trait's own doc for why `request_maximize` and its 0.20.7
+    /// siblings live here rather than on a `LayerShellHandler`: every method
+    /// is defaulted, so an `impl ToplevelHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged.
+    ///
+    /// Like [`new_toplevel`](ToplevelHandler::new_toplevel), the surface is
+    /// not mapped yet and has no buffer. Answer with
+    /// [`Runtime::configure_layer_surface`](crate::Runtime::configure_layer_surface)
+    /// from here (or later, from
+    /// [`layer_surface_commit`](ToplevelHandler::layer_surface_commit)) —
+    /// see that method's own doc for what happens if nothing ever answers.
+    /// Record [`LayerSurface::id`] if you need to refer to this surface
+    /// later; the handle is valid only for this call.
+    fn new_layer_surface(&mut self, surface: &LayerSurface<'_>) {
+        let _ = surface;
+    }
+
+    /// The client committed to this layer surface's underlying `wl_surface`.
+    ///
+    /// Unlike [`initial_commit`](ToplevelHandler::initial_commit), this
+    /// fires on **every** commit, not only the first — wlr-layer-shell
+    /// clients routinely re-anchor, resize their exclusive zone, or change
+    /// margins after mapping, each by way of another `wl_surface.commit`,
+    /// and a compositor generally wants to see all of them, not just the
+    /// one that maps the surface. Use
+    /// [`LayerSurface::layer`]/[`anchor`](LayerSurface::anchor)/etc. to read
+    /// whatever changed.
+    fn layer_surface_commit(&mut self, surface: &LayerSurface<'_>) {
+        let _ = surface;
+    }
+
+    /// The layer surface has a buffer and should be displayed. Only the id,
+    /// mirroring [`mapped`](ToplevelHandler::mapped)'s toplevel counterpart
+    /// — the crate has already inserted this surface into the scene graph
+    /// by this point.
+    fn layer_surface_mapped(&mut self, id: LayerSurfaceId) {
+        let _ = id;
+    }
+
+    /// The layer surface should not be displayed any more. Not the same as
+    /// destruction — mirrors
+    /// [`unmapped`](ToplevelHandler::unmapped)'s toplevel counterpart
+    /// exactly, including that a layer surface can unmap and remap while
+    /// keeping its id.
+    fn layer_surface_unmapped(&mut self, id: LayerSurfaceId) {
+        let _ = id;
+    }
+
+    /// The layer surface is gone. Only the id, for the identical reason
+    /// [`toplevel_destroyed`](ToplevelHandler::toplevel_destroyed) documents
+    /// — including that **`id` may be one you were never told about**, on
+    /// the same "queued behind a running handler" grounds. Write this so an
+    /// unknown id is harmless.
+    fn layer_surface_destroyed(&mut self, id: LayerSurfaceId) {
         let _ = id;
     }
 }

@@ -162,6 +162,34 @@ impl<'h> KeyEvent<'h> {
     }
 }
 
+impl KeyEvent<'static> {
+    /// Build a synthetic key event, bound to no keyboard and no handler
+    /// call, for a consumer's own tests of
+    /// [`SeatHandler::key`](crate::SeatHandler::key).
+    ///
+    /// `'static` rather than the borrowed `'h` every real event carries:
+    /// this event is not scoped to any callback (there is no live keyboard
+    /// or handler frame behind it), so nothing would bound a shorter
+    /// lifetime, and pinning it at `'static` is what lets a consumer's test
+    /// build one, store it in a local, and pass it to their own handler
+    /// method without fighting a lifetime a real event never actually
+    /// needs there.
+    ///
+    /// Identical construction to the crate-internal `KeyEvent::new` — same
+    /// fields, same `PhantomData` — this is simply that constructor made
+    /// `pub` under a name that says "test double", so a consumer's own
+    /// key-binding logic can be exercised without a live wlroots keyboard
+    /// at all.
+    pub fn for_test(
+        keysym: u32,
+        modifiers: Modifiers,
+        pressed: bool,
+        time_msec: u32,
+    ) -> KeyEvent<'static> {
+        KeyEvent::new(keysym, modifiers, pressed, time_msec)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

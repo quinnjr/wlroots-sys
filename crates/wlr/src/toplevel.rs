@@ -92,6 +92,20 @@ pub struct Toplevel<'h> {
     _scope: PhantomData<&'h ()>,
 }
 
+/// Hand-written rather than derived, for the same reason
+/// [`KeyEvent`](crate::KeyEvent)'s is: the `PhantomData` scope marker has no
+/// value to print, and a raw pointer printed by a derive is neither useful
+/// nor stable across runs. Named fields only: `id`, `title`, `app_id`.
+impl std::fmt::Debug for Toplevel<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Toplevel")
+            .field("id", &self.id)
+            .field("title", &self.title())
+            .field("app_id", &self.app_id())
+            .finish()
+    }
+}
+
 impl<'h> Toplevel<'h> {
     /// # Safety
     ///
@@ -125,6 +139,39 @@ impl<'h> Toplevel<'h> {
     pub fn app_id(&self) -> Option<String> {
         // SAFETY: as for `title`.
         unsafe { cstr_field((*self.raw.as_ptr()).app_id) }
+    }
+
+    /// The client's current surface size, in content (client-owned) pixels —
+    /// the counterpart to the size
+    /// [`Runtime::set_toplevel_size`](crate::Runtime::set_toplevel_size)
+    /// stages: that call sets what the *next* configure asks for, this
+    /// reads what the client's most recent commit actually produced.
+    ///
+    /// `(0, 0)` before the client's first commit, since that is what
+    /// wlroots' own `wlr_surface_state` starts zeroed at and this reads it
+    /// directly rather than tracking a separate "has it mapped yet" flag of
+    /// its own.
+    ///
+    /// # Panics
+    ///
+    /// Never: the handle's lifetime guarantees the toplevel is live, and a
+    /// live `wlr_xdg_toplevel` always has a non-null `base` (its owning
+    /// `wlr_xdg_surface`) and a non-null `base->surface` — both are set once
+    /// at role-object creation, before this crate ever hands a `Toplevel` to
+    /// a handler, and neither is ever cleared while the toplevel itself is
+    /// still alive.
+    pub fn current_size(&self) -> (i32, i32) {
+        // SAFETY: as this method's own `# Panics` section argues: the
+        // handle's lifetime guarantees the toplevel is live, so `base` and
+        // `base->surface` are non-null, and `current` is a plain embedded
+        // struct (not a pointer) that is always initialised once the
+        // surface exists.
+        unsafe {
+            let base = (*self.raw.as_ptr()).base;
+            let surface = (*base).surface;
+            let current = &(*surface).current;
+            (current.width, current.height)
+        }
     }
 
     /// The pid of the client that owns this toplevel.
@@ -169,6 +216,67 @@ impl<'h> Toplevel<'h> {
     }
 }
 
+/// Which edge(s) of a toplevel an interactive resize is dragging.
+///
+/// A plain `bool` per edge rather than a bitflags type: xdg-shell's
+/// `xdg_toplevel_resize_edge` is a small, closed, protocol-frozen set (a
+/// corner drag sets two adjacent edges; nothing else is representable), and
+/// four named fields make an edge check at the call site
+/// (`edges.left`) read straight through, with no bit constant to look up.
+///
+/// `Default` is every field `false` — no edge — which is also what
+/// [`is_empty`](Edges::is_empty) reports on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Edges {
+    /// The top edge is being dragged.
+    pub top: bool,
+    /// The bottom edge is being dragged.
+    pub bottom: bool,
+    /// The left edge is being dragged.
+    pub left: bool,
+    /// The right edge is being dragged.
+    pub right: bool,
+}
+
+impl Edges {
+    /// True if no edge is set.
+    pub fn is_empty(self) -> bool {
+        !(self.top || self.bottom || self.left || self.right)
+    }
+
+    /// Decode xdg-shell's `xdg_toplevel_resize_edge` bitmask, as carried by
+    /// `wlr_xdg_toplevel_resize_event::edges`: `top` = 1, `bottom` = 2,
+    /// `left` = 4, `right` = 8, a corner ORing the two adjacent bits
+    /// together. Unknown bits are ignored rather than rejected — a future
+    /// protocol extension setting one is not this crate's concern, and
+    /// there is nowhere to report it from an event handler that returns
+    /// nothing.
+    pub(crate) fn from_xdg(bits: u32) -> Edges {
+        let (top, bottom, left, right) = decode_edge_bits(bits);
+        Edges {
+            top,
+            bottom,
+            left,
+            right,
+        }
+    }
+}
+
+/// Decode a `top`=1/`bottom`=2/`left`=4/`right`=8 edge bitmask into its four
+/// booleans, in that order.
+///
+/// Shared by [`Edges::from_xdg`] and
+/// [`crate::layer::Anchor::from_bits`](crate::layer::Anchor::from_bits):
+/// xdg-shell's `xdg_toplevel_resize_edge` and wlr-layer-shell's
+/// `zwlr_layer_surface_v1_anchor` happen to assign the identical four bits to
+/// the identical four edges, so the decode is one function with two distinct
+/// public result types built from it, rather than the same four lines
+/// maintained twice. `pub(crate)` — both call sites live in this crate; there
+/// is no reason for a consumer to decode this bitmask itself.
+pub(crate) fn decode_edge_bits(bits: u32) -> (bool, bool, bool, bool) {
+    (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0)
+}
+
 /// Copy a wlroots-owned C string field out, or `None` if it is null.
 ///
 /// # Safety
@@ -185,7 +293,153 @@ unsafe fn cstr_field(p: *mut std::os::raw::c_char) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::ToplevelId;
+    use super::{Edges, Toplevel, ToplevelId};
+    use crate::sys;
+    use std::alloc::{Layout, alloc_zeroed, dealloc};
+
+    /// A zeroed, heap-allocated `wlr_xdg_toplevel` chained to a fabricated
+    /// `wlr_xdg_surface` and `wlr_surface`, wired up just enough for
+    /// [`current_size`](Toplevel::current_size) to read a real value through
+    /// the pointer chain its own doc names (`base` -> `base->surface` ->
+    /// `surface->current`).
+    ///
+    /// `alloc_zeroed` rather than `std::mem::zeroed`, for the same reason
+    /// `output.rs`'s `ScratchOutput` uses it: these structs embed
+    /// `wl_signal`/`wl_listener` machinery with bare function pointers, a bit
+    /// pattern `std::mem::zeroed` refuses to produce as a materialised
+    /// *value*. Allocating the bytes directly and only ever touching them
+    /// through a raw pointer -- never loading a whole struct into a Rust
+    /// place -- sidesteps that: nothing here reads a listener's `notify`
+    /// field or any `wl_list` link, only the plain `i32`s `current_size`
+    /// itself reads.
+    struct ScratchToplevel {
+        toplevel: *mut sys::wlr_xdg_toplevel,
+        surface_role: *mut sys::wlr_xdg_surface,
+        surface: *mut sys::wlr_surface,
+    }
+
+    impl ScratchToplevel {
+        fn new(width: i32, height: i32) -> Self {
+            fn alloc_zeroed_of<T>() -> *mut T {
+                let layout = Layout::new::<T>();
+                // SAFETY: every type this is called with here has a nonzero
+                // size, so `alloc_zeroed` returns either null (checked
+                // below) or a suitably aligned, zeroed allocation of exactly
+                // that size.
+                let ptr = unsafe { alloc_zeroed(layout) }.cast::<T>();
+                assert!(!ptr.is_null(), "allocation failed");
+                ptr
+            }
+
+            let surface = alloc_zeroed_of::<sys::wlr_surface>();
+            let surface_role = alloc_zeroed_of::<sys::wlr_xdg_surface>();
+            let toplevel = alloc_zeroed_of::<sys::wlr_xdg_toplevel>();
+
+            // SAFETY: each pointer is a fresh, exclusively-owned, zeroed
+            // allocation sized for its own type; these writes only touch the
+            // specific fields named below, all in bounds of that allocation.
+            unsafe {
+                (*surface).current.width = width;
+                (*surface).current.height = height;
+                (*surface_role).surface = surface;
+                (*toplevel).base = surface_role;
+            }
+
+            Self {
+                toplevel,
+                surface_role,
+                surface,
+            }
+        }
+
+        /// # Safety
+        ///
+        /// The returned handle borrows this `ScratchToplevel`'s allocations
+        /// and must not outlive it. Its id is never read by `current_size`,
+        /// so the fixed placeholder here is fine for this narrow use.
+        unsafe fn toplevel(&self) -> Toplevel<'_> {
+            // SAFETY: `self.toplevel` is a live, fully-wired allocation for
+            // as long as `self` is; the caller upholds the lifetime bound.
+            unsafe { Toplevel::from_raw_with_id(self.toplevel, ToplevelId(0)) }
+        }
+    }
+
+    impl Drop for ScratchToplevel {
+        fn drop(&mut self) {
+            // SAFETY: each pointer was allocated by `alloc_zeroed` with the
+            // matching `Layout::new::<T>()` in `new`, is still exclusively
+            // owned by this struct, and nothing else frees or aliases it.
+            unsafe {
+                dealloc(self.toplevel.cast(), Layout::new::<sys::wlr_xdg_toplevel>());
+                dealloc(
+                    self.surface_role.cast(),
+                    Layout::new::<sys::wlr_xdg_surface>(),
+                );
+                dealloc(self.surface.cast(), Layout::new::<sys::wlr_surface>());
+            }
+        }
+    }
+
+    #[test]
+    fn current_size_reads_the_surfaces_current_committed_size() {
+        let scratch = ScratchToplevel::new(1920, 1080);
+        // SAFETY: `scratch` outlives every use of the handle below.
+        let toplevel = unsafe { scratch.toplevel() };
+        assert_eq!(toplevel.current_size(), (1920, 1080));
+    }
+
+    /// The documented pre-first-commit default: `wlr_surface_state` starts
+    /// zeroed, and `current_size` reads it directly rather than tracking a
+    /// separate "has it mapped yet" flag of its own.
+    #[test]
+    fn current_size_is_zero_before_any_commit() {
+        let scratch = ScratchToplevel::new(0, 0);
+        // SAFETY: as above.
+        let toplevel = unsafe { scratch.toplevel() };
+        assert_eq!(toplevel.current_size(), (0, 0));
+    }
+
+    #[test]
+    fn from_xdg_decodes_every_bit_and_their_combinations() {
+        assert_eq!(Edges::from_xdg(0), Edges::default());
+        assert_eq!(
+            Edges::from_xdg(1),
+            Edges {
+                top: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            Edges::from_xdg(2),
+            Edges {
+                bottom: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            Edges::from_xdg(4),
+            Edges {
+                left: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            Edges::from_xdg(8),
+            Edges {
+                right: true,
+                ..Default::default()
+            }
+        );
+        // top-left corner: bits ORed together.
+        assert_eq!(
+            Edges::from_xdg(1 | 4),
+            Edges {
+                top: true,
+                left: true,
+                ..Default::default()
+            }
+        );
+    }
 
     /// Both test constructors sit at the top of the id space, which a
     /// process-wide counter starting at 1 and only ever incrementing can

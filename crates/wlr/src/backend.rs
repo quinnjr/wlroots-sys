@@ -36,10 +36,11 @@ use std::rc::Rc;
 
 use crate::dispatch::{Dispatcher, Event};
 use crate::id::{SourceId, attach_id, find_id};
+use crate::layer::Layer;
 use crate::seat::{KeyEvent, Modifiers};
 use crate::{
-    Display, Error, EventLoop, Handlers, LoopHandler, Output, OutputHandler, OutputId, Result,
-    Runtime, Toplevel, ToplevelId, sys,
+    Display, Error, EventLoop, Handlers, LayerSurface, LayerSurfaceId, LoopHandler, Output,
+    OutputHandler, OutputId, Result, Runtime, Toplevel, ToplevelId, sys,
 };
 
 /// `wl_seat.capability` bit values from `wayland.xml`. Not bound by
@@ -162,9 +163,12 @@ struct Bound {
     /// whole design exists to prevent.
     id: Option<OutputId>,
 
-    /// The toplevel this listener belongs to, for the five per-toplevel
-    /// listeners `on_new_toplevel` links; `None` for every other listener in
-    /// this file.
+    /// The toplevel this listener belongs to, for the nine per-toplevel
+    /// listeners `on_new_toplevel` links plus the two per-decoration
+    /// listeners `on_new_toplevel_decoration` links (keyed by the toplevel
+    /// the decoration was created for, not by any id of the decoration's
+    /// own — this crate mints no such id); `None` for every other listener
+    /// in this file.
     ///
     /// This is what makes `on_toplevel_map`, `on_toplevel_unmap`,
     /// `on_toplevel_set_title` and `on_toplevel_destroy` sound at all: wlroots
@@ -172,13 +176,35 @@ struct Bound {
     /// `wlr_xdg_toplevel.events.set_title`/`.destroy` with a **null** `data`
     /// argument (confirmed against the C sources — `wlr_compositor.c` and
     /// `wlr_xdg_toplevel.c`), so a callback that read the id out of `data`
-    /// would dereference a null pointer on the first real client. `Bound` is
-    /// private to this module, so widening it with a second id field costs
-    /// nothing outside it — unlike `Bound::id`, which stays `Option<OutputId>`
-    /// rather than being generalised, because every output-side call site
-    /// still wants that exact type and a shared enum would cost every one of
-    /// them a match arm for a case that can never apply to it.
+    /// would dereference a null pointer on the first real client. The two
+    /// decoration listeners follow the identical discipline for a different
+    /// reason: `on_toplevel_decoration_destroy` can fire after wlroots has
+    /// already cleared `wlr_xdg_toplevel_decoration_v1::toplevel` to null
+    /// (when the toplevel died first), so re-deriving the id from the
+    /// decoration itself would be unsound exactly when it matters most.
+    /// `Bound` is private to this module, so widening it with a second id
+    /// field costs nothing outside it — unlike `Bound::id`, which stays
+    /// `Option<OutputId>` rather than being generalised, because every
+    /// output-side call site still wants that exact type and a shared enum
+    /// would cost every one of them a match arm for a case that can never
+    /// apply to it.
     toplevel: Option<ToplevelId>,
+
+    /// The layer surface this listener belongs to, for the four per-layer-
+    /// surface listeners `on_new_layer_surface` links (commit/map/unmap on
+    /// the base `wlr_surface`, destroy on the layer surface's own
+    /// `events.destroy`); `None` for every other listener in this file.
+    ///
+    /// A fourth id field alongside `id`/`toplevel` rather than a shared enum,
+    /// for the identical reason `toplevel`'s own doc gives for not folding
+    /// into `id`: `Bound` is private to this module, so widening it costs
+    /// nothing outside it, and every other call site wants its own exact
+    /// type. wlroots emits `wlr_surface.events.map`/`.unmap` with a null
+    /// `data` for a layer surface's base surface too — the same discipline
+    /// `toplevel`'s doc documents for `on_toplevel_map`/`on_toplevel_unmap`
+    /// applies verbatim here, which is why `on_layer_surface_map`/`_unmap`
+    /// read this field rather than `data`.
+    layer: Option<LayerSurfaceId>,
 }
 
 // `bound_of`'s cast is sound only while `listener` is `Bound`'s first field, at
@@ -218,6 +244,7 @@ impl Registration {
         alive: *const Cell<bool>,
         id: Option<OutputId>,
         toplevel: Option<ToplevelId>,
+        layer: Option<LayerSurfaceId>,
     ) -> Self {
         let mut bound = Box::new(Bound {
             listener: sys::wl_listener {
@@ -233,6 +260,7 @@ impl Registration {
             alive,
             id,
             toplevel,
+            layer,
         });
 
         // SAFETY: the caller guarantees `signal` is an initialised `wl_signal`,
@@ -242,6 +270,82 @@ impl Registration {
         unsafe { sys::wl_signal_add(signal, &raw mut bound.listener) };
 
         Registration { bound }
+    }
+
+    /// Link a listener that routes no per-entity event: the backend-level
+    /// signals and the per-input-device ones, which resolve their target some
+    /// way other than a `Bound` id field (or route nothing at all, like the
+    /// destroy watch). Fixes all three id slots to `None` so no call site has
+    /// to spell the empty slots out.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`], to which every argument is forwarded
+    /// verbatim.
+    unsafe fn link_bare(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        alive: *const Cell<bool>,
+    ) -> Self {
+        // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
+        unsafe { Self::link(signal, notify, session, alive, None, None, None) }
+    }
+
+    /// Link a per-output listener, carrying the [`OutputId`] its callback reads
+    /// back from [`Bound::id`]. Fixes the toplevel and layer slots to `None`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`], to which the shared arguments are
+    /// forwarded verbatim.
+    unsafe fn link_output(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        alive: *const Cell<bool>,
+        id: OutputId,
+    ) -> Self {
+        // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
+        unsafe { Self::link(signal, notify, session, alive, Some(id), None, None) }
+    }
+
+    /// Link a per-toplevel (or per-decoration) listener, carrying the
+    /// [`ToplevelId`] its callback reads back from [`Bound::toplevel`]. Fixes
+    /// the output and layer slots to `None`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`], to which the shared arguments are
+    /// forwarded verbatim.
+    unsafe fn link_toplevel(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        alive: *const Cell<bool>,
+        toplevel: ToplevelId,
+    ) -> Self {
+        // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
+        unsafe { Self::link(signal, notify, session, alive, None, Some(toplevel), None) }
+    }
+
+    /// Link a per-layer-surface listener, carrying the [`LayerSurfaceId`] its
+    /// callback reads back from [`Bound::layer`]. Fixes the output and toplevel
+    /// slots to `None`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`], to which the shared arguments are
+    /// forwarded verbatim.
+    unsafe fn link_layer(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        alive: *const Cell<bool>,
+        layer: LayerSurfaceId,
+    ) -> Self {
+        // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
+        unsafe { Self::link(signal, notify, session, alive, None, None, Some(layer)) }
     }
 }
 
@@ -335,6 +439,20 @@ struct Session<'r, S> {
     /// `outputs` above.
     toplevels: RefCell<HashMap<ToplevelId, ToplevelListeners>>,
 
+    /// This run's listeners on every live decoration object, keyed by the
+    /// toplevel it belongs to. Removed, and so unlinked, from
+    /// `on_toplevel_decoration_destroy` when the decoration dies, and from
+    /// `on_toplevel_destroy` when its toplevel dies first — mirroring
+    /// `toplevels`' own destroy-triggered removal, but from two independent
+    /// sites instead of one; see `RuntimeInner::decorations`'s own doc for
+    /// why both exist.
+    decorations: RefCell<HashMap<ToplevelId, DecorationListeners>>,
+
+    /// This run's listeners on every live layer surface. Removed, and so
+    /// unlinked, from `on_layer_surface_destroy` — before the layer surface
+    /// is freed, mirroring `toplevels` above.
+    layers: RefCell<HashMap<LayerSurfaceId, LayerSurfaceListeners>>,
+
     /// This run's listeners on every live input device, one [`InputDevice`]
     /// per device, keyed by the device's own `*mut wlr_input_device` address
     /// (as `usize`) — unlike the destroy-only removal `outputs` and
@@ -378,10 +496,11 @@ struct OutputEntry {
     _destroy: Registration,
 }
 
-/// One live toplevel's listeners: the surface's commit/map/unmap and the
-/// toplevel's own set_title/destroy. Field order is not load-bearing here —
+/// One live toplevel's listeners: the surface's commit/map/unmap, the
+/// toplevel's own set_title/destroy, and its four client-request signals
+/// (maximize/fullscreen/move/resize). Field order is not load-bearing here —
 /// unlike [`OutputEntry`], nothing here owns the `Bound` any of the others
-/// recover their session from — but all five must drop, and so unlink, as
+/// recover their session from — but all nine must drop, and so unlink, as
 /// part of removing the entry, which happens while the toplevel is still
 /// alive.
 struct ToplevelListeners {
@@ -390,6 +509,39 @@ struct ToplevelListeners {
     _unmap: Registration,
     _set_title: Registration,
     _destroy: Registration,
+    _request_maximize: Registration,
+    _request_fullscreen: Registration,
+    _request_move: Registration,
+    _request_resize: Registration,
+}
+
+/// One live decoration object's two listeners: its own `request_mode` and
+/// `destroy`. Field order is not load-bearing, as for `ToplevelListeners`.
+struct DecorationListeners {
+    _request_mode: Registration,
+    _destroy: Registration,
+}
+
+/// One live layer surface's listeners: the base surface's commit/map/unmap,
+/// and the layer surface's own `destroy`. Field order is not load-bearing,
+/// as for [`ToplevelListeners`].
+struct LayerSurfaceListeners {
+    _commit: Registration,
+    _map: Registration,
+    _unmap: Registration,
+    _destroy: Registration,
+}
+
+/// Clears `Runtime`'s layer-surface table when the `run_inner` call holding
+/// this guard returns, on every exit path. Mirrors [`ToplevelTableGuard`]
+/// exactly, for the identical reason: see
+/// `Runtime::clear_layer_surfaces`'s own doc.
+struct LayerSurfaceTableGuard<'r>(&'r Runtime);
+
+impl Drop for LayerSurfaceTableGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear_layer_surfaces();
+    }
 }
 
 /// Clears `Runtime`'s toplevel tables when the `run_inner` call holding this
@@ -403,6 +555,33 @@ struct ToplevelTableGuard<'r>(&'r Runtime);
 impl Drop for ToplevelTableGuard<'_> {
     fn drop(&mut self) {
         self.0.clear_toplevels();
+    }
+}
+
+/// Clears `Runtime`'s `outputs` table when the `run_inner` call holding this
+/// guard returns, on every exit path. Mirrors [`ToplevelTableGuard`] exactly,
+/// for the identical reason: see `Runtime::clear_outputs`'s own doc.
+struct OutputTableGuard<'r>(&'r Runtime);
+
+impl Drop for OutputTableGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear_outputs();
+    }
+}
+
+/// Clears `Runtime`'s `live_sources` table when the `run_inner` call holding
+/// this guard returns, on every exit path — the same "declared once,
+/// registered and torn down per run" rule [`ToplevelTableGuard`] enforces
+/// for toplevels. The sources themselves are already removed from the event
+/// loop by this point, each by its own [`FdRegistration`]'s `Drop`; this
+/// only stops the table naming a `SourceId` whose registration is gone,
+/// which would otherwise let a later [`Runtime::remove_fd`] attempt a
+/// second `wl_event_source_remove` on it.
+struct LiveSourcesGuard<'r>(&'r Runtime);
+
+impl Drop for LiveSourcesGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear_live_sources();
     }
 }
 
@@ -486,13 +665,11 @@ impl<'d> Backend<'d> {
         // never reads `session` or `id`, so null and `None` are the honest
         // values for them.
         let death_watch = unsafe {
-            Registration::link(
+            Registration::link_bare(
                 &raw mut (*raw.as_ptr()).events.destroy,
                 on_backend_destroy,
                 std::ptr::null(),
                 &raw const *alive,
-                None,
-                None,
             )
         };
 
@@ -566,6 +743,10 @@ impl<'d> Backend<'d> {
 
     /// Wire up handlers, start the backend, and dispatch `iterations` turns of
     /// the event loop.
+    ///
+    /// Prefer [`Backend::run_all`] for a real compositor: `run` never installs
+    /// fd sources, the xdg-shell, or the seat, and does not flush clients.
+    /// `run` remains the minimal output-only path and is kept forever.
     ///
     /// This is the only thing that starts a backend, and it starts it *after*
     /// installing handlers, because `wlr_backend_start` announces the outputs a
@@ -735,6 +916,8 @@ impl<'d> Backend<'d> {
             dispatcher: Dispatcher::new(&raw mut *state),
             outputs: RefCell::new(HashMap::new()),
             toplevels: RefCell::new(HashMap::new()),
+            decorations: RefCell::new(HashMap::new()),
+            layers: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime,
@@ -753,6 +936,20 @@ impl<'d> Backend<'d> {
         // no signal and nothing any `Registration::drop` reads.
         let _toplevel_table_guard = ToplevelTableGuard(runtime);
 
+        // Same reasoning, for `layer_surfaces`; see that guard's own doc.
+        let _layer_surface_table_guard = LayerSurfaceTableGuard(runtime);
+
+        // Same reasoning, for `outputs`; see that guard's own doc.
+        let _output_table_guard = OutputTableGuard(runtime);
+
+        // Same reasoning, for `live_sources`; see that guard's own doc.
+        // Declared alongside `_toplevel_table_guard` for the same reason:
+        // nothing here depends on drop order relative to the registrations
+        // below, but declaring the clear-on-exit guards together up front
+        // keeps every "cleared on every exit path" table's guard in one
+        // place.
+        let _live_sources_guard = LiveSourcesGuard(runtime);
+
         // Declared after `session`, so it drops — and therefore decides
         // about unlinking — while the session it names is still alive. Bound
         // to a named `_new_output` rather than to `_`, which would drop it at
@@ -770,13 +967,11 @@ impl<'d> Backend<'d> {
         // never moved after this point, so the address stays valid for the
         // call.
         let _new_output = unsafe {
-            Registration::link(
+            Registration::link_bare(
                 &raw mut (*self.raw.as_ptr()).events.new_output,
                 on_new_output::<S>,
                 (&raw const session).cast::<()>(),
                 &raw const *self.alive,
-                None,
-                None,
             )
         };
 
@@ -795,15 +990,6 @@ impl<'d> Backend<'d> {
         // point would emit them into an empty signal; see `ensure_started`.
         self.ensure_started()?;
 
-        // SAFETY: `self.loop_` was taken from the `EventLoop<'d>` handed to
-        // `autocreate`, so it names a live loop belonging to a display that
-        // outlives `'d` — and `&self` keeps that borrow alive for this call.
-        //
-        // Dispatching here is not the re-entry `EventLoop::dispatch` refuses:
-        // `run_inner` is not a handler, and the flag that refusal consults is
-        // set only for the duration of a delivery, strictly inside the
-        // `loop_.dispatch(timeout)` call below rather than around it.
-        let loop_ = unsafe { EventLoop::from_raw(self.loop_) };
         let (timeout, mut remaining) = match until {
             Until::Turns(n) => (0, Some(n)),
             Until::Stop => (-1, None),
@@ -813,7 +999,58 @@ impl<'d> Backend<'d> {
             if let Some(0) = remaining {
                 return Ok(());
             }
-            loop_.dispatch(timeout)?;
+            // Called directly via `wl_event_loop_dispatch`, rather than
+            // through `EventLoop::dispatch`, so a signal landing mid-poll
+            // (`EINTR`) can be retried with the same timeout instead of
+            // surfacing as a spurious `Error::Operation` — libwayland's own
+            // `wl_event_loop_dispatch` does not retry this itself, and a
+            // compositor process fields plenty of signals (`SIGCHLD` from a
+            // reaped client, a `SIGUSR1` a consumer installs) that have
+            // nothing to do with the loop having failed.
+            //
+            // SAFETY: `self.loop_` was taken from the `EventLoop<'d>` handed
+            // to `autocreate`, so it names a live loop belonging to a
+            // display that outlives `'d` — and `&self` keeps that borrow
+            // alive for this call. Dispatching here is not the re-entry
+            // `EventLoop::dispatch` refuses: `run_inner` is not a handler,
+            // and the flag that refusal consults is set only for the
+            // duration of a delivery, strictly inside this call rather than
+            // around it.
+            loop {
+                use sys::wayland_sys::ffi_dispatch;
+                #[allow(unused_imports)]
+                use sys::wayland_sys::server::*;
+                let n = unsafe {
+                    ffi_dispatch!(
+                        sys::wayland_sys::server::wayland_server_handle(),
+                        wl_event_loop_dispatch,
+                        self.loop_.as_ptr(),
+                        timeout
+                    )
+                };
+                if n >= 0 {
+                    break;
+                }
+                let errno = std::io::Error::last_os_error();
+                // `ErrorKind::Interrupted` rather than a hard-coded `4`: the
+                // crate has no `libc` dependency to name `EINTR`, and std's
+                // own mapping of the raw errno to this kind is exactly the
+                // portable spelling of it — no numeric constant pinned in
+                // this crate that a future target could falsify.
+                if errno.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(Error::Operation("wl_event_loop_dispatch"));
+                }
+                // EINTR: a signal landed mid-poll; retry with the same
+                // timeout.
+            }
+            // Every callback this turn's dispatch could have invoked —
+            // including any `FdHandler::fd_ready` that called
+            // `Runtime::remove_fd` on itself or another source — has
+            // returned by now, so no `BorrowedFd` handed out during this
+            // turn can still be alive. This is the one point per turn
+            // `Runtime::remove_fd`'s deferred-close doc promises a close
+            // will actually happen by.
+            runtime.drain_pending_closes();
             if let Some(display) = display {
                 display.flush_clients();
             }
@@ -829,11 +1066,12 @@ impl<'d> Backend<'d> {
             // non-dangling regardless of what `hooks.should_stop` does with
             // it. No handler is running at this point — `Dispatcher::emit`
             // clears its guard before returning, and the only calls into
-            // `emit` happen inside `loop_.dispatch` above, which has already
-            // returned — so `hooks.should_stop` (which derefs the pointer) is
-            // the sole reader here and sees no other `&mut S` live. This is
-            // the discharge site `state_ptr`'s own doc requires: the caller
-            // states, right here, why no handler is on the stack.
+            // `emit` happen inside the `wl_event_loop_dispatch` call above,
+            // which has already returned — so `hooks.should_stop` (which
+            // derefs the pointer) is the sole reader here and sees no other
+            // `&mut S` live. This is the discharge site `state_ptr`'s own
+            // doc requires: the caller states, right here, why no handler
+            // is on the stack.
             let stop = unsafe { (hooks.should_stop)(session.dispatcher.state_ptr()) };
             if stop {
                 return Ok(());
@@ -886,10 +1124,18 @@ impl<'d> Backend<'d> {
                     (&raw const *ctx).cast::<std::ffi::c_void>().cast_mut()
                 )
             };
-            if source.is_null() {
+            let Some(non_null) = NonNull::new(source) else {
                 return Err(Error::Operation("wl_event_loop_add_fd"));
-            }
-            out.push(FdRegistration { source, _ctx: ctx });
+            };
+            // Recorded so `Runtime::remove_fd` can find and remove this
+            // registration mid-run; see that method's own doc.
+            runtime.record_live_source(id, non_null);
+            out.push(FdRegistration {
+                source,
+                id,
+                runtime: runtime.clone(),
+                _ctx: ctx,
+            });
         }
         Ok(out)
     }
@@ -917,13 +1163,41 @@ impl<'d> Backend<'d> {
             // liveness flag is needed: the shell's owner (the display)
             // cannot predecease this call.
             regs.push(unsafe {
-                Registration::link(
+                Registration::link_bare(
                     &raw mut (*shell.as_ptr()).events.new_toplevel,
                     on_new_toplevel::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     std::ptr::null(),
-                    None,
-                    None,
+                )
+            });
+        }
+
+        if let Some(manager) = runtime.xdg_decoration_manager_ptr() {
+            // SAFETY: `create_xdg_decoration_manager` returned a non-null
+            // `wlr_xdg_decoration_manager_v1` owned by the display, which
+            // this call requires to outlive it, exactly as for the xdg
+            // shell just above; the same reasoning applies verbatim.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.new_toplevel_decoration,
+                    on_new_toplevel_decoration::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
+        if let Some(shell) = runtime.layer_shell_ptr() {
+            // SAFETY: `create_layer_shell` returned a non-null
+            // `wlr_layer_shell_v1` owned by the display, which this call
+            // requires to outlive it, exactly as for the xdg shell above;
+            // the same reasoning applies verbatim.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*shell.as_ptr()).events.new_surface,
+                    on_new_layer_surface::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
                 )
             });
         }
@@ -937,13 +1211,11 @@ impl<'d> Backend<'d> {
             // as the liveness flag. `session` is paired with `on_new_input`
             // at the same `S`, as above.
             regs.push(unsafe {
-                Registration::link(
+                Registration::link_bare(
                     &raw mut (*self.raw.as_ptr()).events.new_input,
                     on_new_input::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     &raw const *self.alive,
-                    None,
-                    None,
                 )
             });
         }
@@ -1006,9 +1278,17 @@ struct RunHooks<'d, S> {
 ///
 /// Removed from the loop by `Drop`, for the same reason [`Registration`]
 /// unlinks there: an early `?` return in the middle of `run_inner` must not
-/// leave a live source pointing at a freed context.
+/// leave a live source pointing at a freed context. That removal is
+/// conditional — see the `Drop` impl below — because
+/// [`Runtime::remove_fd`](crate::Runtime::remove_fd) may have already done
+/// it mid-run.
 struct FdRegistration {
     source: *mut sys::wl_event_source,
+    id: SourceId,
+    /// Cloned rather than borrowed — one `Rc` bump (see [`Runtime`]'s own
+    /// doc) — so this struct needs no lifetime parameter of its own for
+    /// what is otherwise a plain, `'static`-shaped registration handle.
+    runtime: Runtime,
     // Declared after `source` so it is dropped after the source is removed,
     // never while libwayland could still dispatch through it.
     _ctx: Box<FdCtx>,
@@ -1025,13 +1305,27 @@ struct FdCtx {
 
 impl Drop for FdRegistration {
     fn drop(&mut self) {
+        // `Runtime::remove_fd` may have already removed this exact source
+        // mid-run — the motivating case is a consumer calling it from
+        // inside this very source's own `fd_ready`. `take_live_source` is
+        // the single choke point that decides which of the two removers
+        // actually calls `wl_event_source_remove`; see its own doc. `None`
+        // here means `remove_fd` already claimed and removed it, so this
+        // teardown has nothing left to do — calling
+        // `wl_event_source_remove` a second time would be a use-after-free
+        // on a `wl_event_source` libwayland has already freed.
+        if self.runtime.take_live_source(self.id).is_none() {
+            return;
+        }
+
         use sys::wayland_sys::ffi_dispatch;
         #[allow(unused_imports)]
         use sys::wayland_sys::server::*;
 
         // SAFETY: `source` came from `wl_event_loop_add_fd` on a loop that
-        // outlives this run (the `Display` borrow guarantees it), and is
-        // removed exactly once, here.
+        // outlives this run (the `Display` borrow guarantees it), and the
+        // `take_live_source` call above establishes this is the first (and
+        // by construction, only) removal of it.
         let _ = unsafe {
             ffi_dispatch!(
                 sys::wayland_sys::server::wayland_server_handle(),
@@ -1137,6 +1431,65 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         Event::ToplevelUnmapped(id) => state.unmapped(id),
         Event::ToplevelTitleChanged(id) => with_toplevel(session, id, |t| state.title_changed(t)),
         Event::ToplevelDestroyed(id) => state.toplevel_destroyed(id),
+        Event::RequestMaximize(id, maximize) => {
+            with_toplevel(session, id, |t| state.request_maximize(t, maximize));
+            // xdg-shell requires an answer to *every* maximize/fullscreen
+            // request, whether or not the compositor grants it — and the
+            // trait default has no `Runtime` to send one with, so this is
+            // the dispatch layer discharging that guarantee instead.
+            // Unconditional, not "only if the handler staged nothing":
+            // wlroots coalesces a second scheduled configure into whatever
+            // the handler above already staged through `Runtime::
+            // set_toplevel_*`, so scheduling here as well is harmless, and
+            // "harmless every time" is simpler and no less correct than
+            // probing for whether it was needed this time.
+            session.runtime.configure_toplevel(id);
+        }
+        Event::RequestFullscreen(id, fullscreen) => {
+            with_toplevel(session, id, |t| state.request_fullscreen(t, fullscreen));
+            // As above.
+            session.runtime.configure_toplevel(id);
+        }
+        Event::RequestMove(id) => state.request_move(id),
+        Event::RequestResize(id, edges) => state.request_resize(id, edges),
+        Event::RequestDecorationMode(id, preference) => {
+            // Cleared here, immediately before the handler runs, rather
+            // than back in `on_decoration_request_mode` at emit time — see
+            // `DecorationEntry::mode_set_this_dispatch`'s own doc. This is
+            // what makes clear-then-check correct even if this event is
+            // ever deferred (queued behind an outer handler, or delivered
+            // from the synthetic "no `request_mode` ever fired" path
+            // `on_surface_commit` drives at initial commit): the clear and
+            // the check below now bracket exactly one handler invocation,
+            // never a different one's.
+            session.runtime.clear_decoration_dispatch_flag(id);
+            state.request_decoration_mode(id, preference);
+            // wlroots requires a mode be set before the initial commit is
+            // answered — see `Runtime::set_decoration_mode`'s own doc for
+            // how that requirement is actually satisfied (staged, not sent,
+            // until the surface is initialized). The handler may have
+            // already answered through `Runtime::set_decoration_mode`,
+            // which sets this same flag; unlike `RequestMaximize`'s bare
+            // configure, this follow-up is *conditional*: sending a second
+            // `set_mode` after the handler already sent (or staged) one
+            // would tell the client server-side and then, in the same turn,
+            // whatever the handler asked for — not "harmless, coalesced"
+            // the way a second configure is.
+            if !session.runtime.decoration_dispatch_flag(id) {
+                session
+                    .runtime
+                    .set_decoration_mode(id, crate::DecorationMode::ServerSide);
+            }
+        }
+        Event::NewLayerSurface(id) => {
+            with_layer_surface(session, id, |s| state.new_layer_surface(s))
+        }
+        Event::LayerSurfaceCommit(id) => {
+            with_layer_surface(session, id, |s| state.layer_surface_commit(s))
+        }
+        Event::LayerSurfaceMapped(id) => state.layer_surface_mapped(id),
+        Event::LayerSurfaceUnmapped(id) => state.layer_surface_unmapped(id),
+        Event::LayerSurfaceDestroyed(id) => state.layer_surface_destroyed(id),
         Event::Key {
             keysym,
             modifiers_raw,
@@ -1200,6 +1553,24 @@ fn with_toplevel<S>(session: &Session<'_, S>, id: ToplevelId, f: impl FnOnce(&To
     // dispatcher's handler flag is set for exactly this window).
     let toplevel = unsafe { Toplevel::from_raw_with_id(entry.raw.as_ptr(), id) };
     f(&toplevel);
+}
+
+/// Borrow the layer surface `id` names, if this runtime still knows of one.
+/// Mirrors [`with_toplevel`] exactly, including its obligations on `f`.
+fn with_layer_surface<S>(
+    session: &Session<'_, S>,
+    id: LayerSurfaceId,
+    f: impl FnOnce(&LayerSurface<'_>),
+) {
+    let Some(raw) = session.runtime.layer_surface_ptr(id) else {
+        return;
+    };
+    // SAFETY: an entry is removed by `on_layer_surface_destroy`, which
+    // wlroots runs before it frees the layer surface, so a present entry
+    // names a live one. The handle is created and dropped inside this call,
+    // exactly as `with_toplevel`'s does.
+    let surface = unsafe { LayerSurface::from_raw_with_id(raw.as_ptr(), id) };
+    f(&surface);
 }
 
 /// # Safety
@@ -1319,21 +1690,19 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
         // `(*bound).session` is forwarded verbatim rather than re-derived, so
         // these two callbacks are instantiated at the `S` that pointer already
         // belongs to — the pairing `Bound::session` documents.
-        let frame = Registration::link(
+        let frame = Registration::link_output(
             &raw mut (*output).events.frame,
             on_frame::<S>,
             (*bound).session,
             std::ptr::null(),
-            Some(id),
-            None,
+            id,
         );
-        let destroy = Registration::link(
+        let destroy = Registration::link_output(
             &raw mut (*output).events.destroy,
             on_output_destroy::<S>,
             (*bound).session,
             std::ptr::null(),
-            Some(id),
-            None,
+            id,
         );
 
         // Registered before the handler is told, so that a handler asking about
@@ -1355,6 +1724,15 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
             },
         );
         drop(displaced);
+
+        // Recorded in `Runtime`'s own table too, alongside the session-local
+        // listeners above: `output_layout_box`/`set_output_position` are
+        // called through a `Runtime` clone, which cannot reach `session`.
+        // Before the handler is told, mirroring `record_toplevel`'s own
+        // ordering, for the same reason (see that call site's comment).
+        if let Some(raw) = NonNull::new(output) {
+            (*session).runtime.record_output(id, raw);
+        }
 
         let deliver = (*session).deliver;
         (*session)
@@ -1418,6 +1796,9 @@ unsafe extern "C" fn on_output_destroy<S: OutputHandler>(
         // freed output. Removing it here means the lookup simply misses.
         let entry = (*session).outputs.borrow_mut().remove(&id);
         drop(entry);
+        // Mirrors the removal above, in `Runtime`'s own table — see
+        // `record_output`'s call site for why both exist.
+        (*session).runtime.forget_output(id);
 
         let deliver = (*session).deliver;
         (*session)
@@ -1459,13 +1840,18 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
         // possible if a consumer creates the shell without it, and not this
         // callback's mistake to recover from. Drop the announcement rather
         // than dereference a null tree.
-        let Some(scene) = (*session).runtime.scene_ptr() else {
+        let Some(toplevel_band) = (*session).runtime.toplevel_band_ptr() else {
             return;
         };
 
         // Insert into the scene before the handler runs, so that a handler
-        // positioning the window by id finds a node to position.
-        let tree = sys::wlr_scene_xdg_surface_create(&raw mut (*scene.as_ptr()).tree, base);
+        // positioning the window by id finds a node to position. Parented
+        // into the toplevel band, not the scene root directly — see
+        // `Layer`'s own doc for why this is what makes `raise_toplevel`
+        // (and every layer surface's fixed position relative to it)
+        // structurally correct rather than an ordering that the next
+        // toplevel or the next raise call can undo.
+        let tree = sys::wlr_scene_xdg_surface_create(toplevel_band.as_ptr(), base);
         let Some(tree) = NonNull::new(tree) else {
             return;
         };
@@ -1488,45 +1874,68 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
         // toplevel) get to use `data` for identity; the other four use the
         // `Bound` instead. See `Bound::toplevel`'s own doc for the fuller
         // argument.
-        let commit = Registration::link(
+        let commit = Registration::link_toplevel(
             &raw mut (*surface).events.commit,
             on_surface_commit::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
+            id,
         );
-        let map = Registration::link(
+        let map = Registration::link_toplevel(
             &raw mut (*surface).events.map,
             on_toplevel_map::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
+            id,
         );
-        let unmap = Registration::link(
+        let unmap = Registration::link_toplevel(
             &raw mut (*surface).events.unmap,
             on_toplevel_unmap::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
+            id,
         );
-        let set_title = Registration::link(
+        let set_title = Registration::link_toplevel(
             &raw mut (*toplevel).events.set_title,
             on_toplevel_set_title::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
+            id,
         );
-        let destroy = Registration::link(
+        let destroy = Registration::link_toplevel(
             &raw mut (*toplevel).events.destroy,
             on_toplevel_destroy::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
+            id,
+        );
+        let request_maximize = Registration::link_toplevel(
+            &raw mut (*toplevel).events.request_maximize,
+            on_toplevel_request_maximize::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
+        let request_fullscreen = Registration::link_toplevel(
+            &raw mut (*toplevel).events.request_fullscreen,
+            on_toplevel_request_fullscreen::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
+        let request_move = Registration::link_toplevel(
+            &raw mut (*toplevel).events.request_move,
+            on_toplevel_request_move::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
+        let request_resize = Registration::link_toplevel(
+            &raw mut (*toplevel).events.request_resize,
+            on_toplevel_request_resize::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
         );
 
         // The registrations own the callbacks' backing memory, so they live in
@@ -1543,6 +1952,10 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
                 _unmap: unmap,
                 _set_title: set_title,
                 _destroy: destroy,
+                _request_maximize: request_maximize,
+                _request_fullscreen: request_fullscreen,
+                _request_move: request_move,
+                _request_resize: request_resize,
             },
         );
         drop(displaced);
@@ -1593,10 +2006,82 @@ unsafe extern "C" fn on_surface_commit<S: Handlers>(
             .dispatcher
             .emit(&*session, Event::ToplevelInitialCommit(id), deliver);
 
+        // The decoration default-answer synthesis below reads
+        // `take_staged_decoration_mode`/`decoration_answered` *after* the
+        // `ToplevelInitialCommit` emit above and assumes that emit delivered
+        // synchronously — that the handler has already run, so this state
+        // reflects whatever it negotiated. That holds on the only path any
+        // public API reaches: a first commit driven from the event loop with
+        // no handler on the stack, where `emit` runs `deliver` inline.
+        //
+        // It does *not* hold if this callback ever fires re-entrantly from
+        // inside a running handler (a nested synchronous commit).
+        // `Dispatcher::emit` would then see `in_dispatch` already set, queue
+        // `ToplevelInitialCommit` for `deliver_all` to run *after* the outer
+        // handler returns, and come back here before the handler has run —
+        // so synthesizing now would answer from pre-handler state and could
+        // re-send a `ServerSide` default over the answer the deferred handler
+        // is about to negotiate (the 0.20.8 bug class). Gating on
+        // `in_handler()` keeps the synthesis on the synchronous path only; in
+        // the deferred case it is skipped and the queued
+        // `ToplevelInitialCommit` still reaches the handler through
+        // `deliver_all`. No public API produces that nested commit today, so
+        // this is latent — the gate is what stops it becoming live.
+        if !crate::dispatch::in_handler() {
+            // If this toplevel has a decoration, this is the first point at
+            // which answering it is safe: `wlr_xdg_surface_schedule_configure`
+            // — which both `Runtime::set_decoration_mode` and the client's own
+            // `set_mode` request funnel into — asserts `surface->initialized`,
+            // and `initial_commit` handling (above `base.initial_commit`'s
+            // gate at the top of this function) is exactly what just made that
+            // true. See `Runtime::set_decoration_mode`'s own doc for the full
+            // argument. Two cases follow from whether a `request_mode` already
+            // ran for this decoration before this commit:
+            if let Some(mode) = (*session).runtime.take_staged_decoration_mode(id) {
+                // It did: the client called `set_mode`/`unset_mode` before
+                // committing, `on_decoration_request_mode` already gave the
+                // handler its say, and the resulting decision — the handler's,
+                // or the dispatch-layer default — was staged rather than sent
+                // because the surface was not yet initialized then. Flush it
+                // now; `set_decoration_mode` takes the immediate path this
+                // time, since `initialized` just went true.
+                (*session).runtime.set_decoration_mode(id, mode);
+            } else if !(*session).runtime.decoration_answered(id) {
+                // It did not, *and* nothing else has answered this decoration
+                // either. The guard is `decoration_answered`, not "nothing is
+                // staged": the `ToplevelInitialCommit` emitted just above runs
+                // with `initialized` already true, so a handler that answers
+                // from `initial_commit` sends immediately and leaves `staged`
+                // empty — indistinguishable, to a staged-only check, from a
+                // decoration nobody has touched. 0.20.8 made exactly that
+                // mistake and overrode such an answer with the server-side
+                // default one statement later. `answered` latches on both of
+                // `set_decoration_mode`'s branches, so it separates the two.
+                if let Some(preference) = (*session).runtime.decoration_requested_preference(id) {
+                    // A decoration exists (`decoration_requested_preference`
+                    // returns `None` for a toplevel without one) but the client
+                    // never called `set_mode` — legal, and what a client that
+                    // wants the compositor to just decide does. Nothing has
+                    // consulted the handler for it yet, so do that now, through
+                    // the same event a real `request_mode` would produce.
+                    // `deliver_all`'s arm answers it, and — since `initialized`
+                    // is already true here — that answer is sent immediately
+                    // rather than staged again.
+                    (*session).dispatcher.emit(
+                        &*session,
+                        Event::RequestDecorationMode(id, preference),
+                        deliver,
+                    );
+                }
+            }
+        }
+
         // xdg-shell requires an answer to the first commit. The handler may
         // already have staged one through `Runtime::set_toplevel_*`, in which
         // case wlroots coalesces this into that same configure; if it staged
-        // nothing, this is what stops the client waiting forever.
+        // nothing, this is what stops the client waiting forever. This also
+        // picks up whichever decoration configure the block above just sent,
+        // coalesced into the same wire message.
         sys::wlr_xdg_surface_schedule_configure(base);
     }
 }
@@ -1682,18 +2167,623 @@ unsafe extern "C" fn on_toplevel_destroy<S: Handlers>(
         // freed the object, so a lookup at delivery time would resolve the id
         // to freed memory. Clearing here means it simply misses.
         //
-        // Removing the entry drops its five registrations, one of which owns
+        // Removing the entry drops every registration it holds, one of which owns
         // this very `Bound`. `wl_signal_emit_mutable` advances past the
         // firing listener before calling us, so that is what it exists to
         // tolerate; `bound` is dangling from here on and is not touched again.
         (*session).runtime.forget_toplevel(id);
         let listeners = (*session).toplevels.borrow_mut().remove(&id);
         drop(listeners);
+        // The toplevel dying first is one of the two orders a decoration and
+        // its toplevel can die in; see `RuntimeInner::decorations`'s own
+        // doc. `forget_toplevel` just purged the data-side table above —
+        // this purges this run's listener registrations for the same id, if
+        // any. wlroots *does* eventually free the decoration in this order
+        // too — it posts the `orphaned` protocol error and destroys the
+        // resource — but not from inside this emission: that happens from
+        // wlroots' own `toplevel_destroy` listener on the decoration, which
+        // was registered after this crate's (`get_toplevel_decoration` runs
+        // after `on_new_toplevel`, and `wl_signal_add` appends), so it
+        // fires *after* this callback returns. The decoration is therefore
+        // still alive right now, so dropping — and so unlinking — these
+        // registrations here is not a use-after-free; it is what makes
+        // wlroots' later `assert`-on-empty-listener-lists (see
+        // `on_toplevel_decoration_destroy`'s own doc) hold once that
+        // listener does run.
+        let decoration_listeners = (*session).decorations.borrow_mut().remove(&id);
+        drop(decoration_listeners);
 
         let deliver = (*session).deliver;
         (*session)
             .dispatcher
             .emit(&*session, Event::ToplevelDestroyed(id), deliver);
+    }
+}
+
+/// A client created a decoration object for an already-announced toplevel.
+unsafe extern "C" fn on_new_toplevel_decoration<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener
+    // `register_toplevel_and_input` linked into
+    // `wlr_xdg_decoration_manager_v1.events.new_toplevel_decoration`, whose
+    // `session` is the `*const Session<'_, S>` paired with this
+    // instantiation. The signal carries a `*mut wlr_xdg_toplevel_decoration_v1`,
+    // live and fully initialised at the point wlroots announces it —
+    // including `toplevel`, which is non-null here: a client can only reach
+    // `get_toplevel_decoration` by naming a live toplevel resource, and
+    // wlroots resolves that reference before emitting this signal.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let decoration = data.cast::<sys::wlr_xdg_toplevel_decoration_v1>();
+
+        let toplevel = (*decoration).toplevel;
+        if toplevel.is_null() {
+            return;
+        }
+        let base = (*toplevel).base;
+        if base.is_null() {
+            return;
+        }
+        let surface = (*base).surface;
+        if surface.is_null() {
+            return;
+        }
+        // The id is looked up, not minted: `on_new_toplevel` already
+        // attached one to this surface when the toplevel itself was
+        // announced, and a decoration cannot exist for a toplevel that was
+        // not — `get_toplevel_decoration` names an existing toplevel
+        // resource. A miss here means the surface's id addon is somehow
+        // absent, which this callback cannot recover from soundly (there is
+        // no `ToplevelId` to key either table by), so the announcement is
+        // dropped rather than minting a fresh, disconnected id.
+        let Some(id) = toplevel_id_of_surface(surface) else {
+            return;
+        };
+        let Some(raw) = NonNull::new(decoration) else {
+            return;
+        };
+
+        // Two listeners, both keyed by `Bound::toplevel` rather than by
+        // re-deriving the id from `data` at callback time — the same
+        // discipline `on_new_toplevel`'s five listeners follow, and for the
+        // same underlying reason: `destroy` on this object may fire after
+        // its `toplevel` field has already been cleared to null by wlroots,
+        // at which point re-deriving the id from `(*decoration).toplevel`
+        // would read a null pointer instead of resolving to anything.
+        let request_mode = Registration::link_toplevel(
+            &raw mut (*decoration).events.request_mode,
+            on_decoration_request_mode::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
+        let destroy = Registration::link_toplevel(
+            &raw mut (*decoration).events.destroy,
+            on_toplevel_decoration_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
+
+        let displaced = (*session).decorations.borrow_mut().insert(
+            id,
+            DecorationListeners {
+                _request_mode: request_mode,
+                _destroy: destroy,
+            },
+        );
+        drop(displaced);
+
+        (*session).runtime.record_decoration(id, raw);
+
+        // A decoration created *after* its toplevel's initial commit has
+        // already missed `on_surface_commit`'s "the client never asked"
+        // path, which runs once and has run. That ordering is legal: the
+        // protocol only forbids `get_toplevel_decoration` once a buffer has
+        // been attached, so a client may commit with no buffer, wait for
+        // `xdg_surface.configure`, create its decoration, and wait for a
+        // decoration configure before attaching one. Such a client that
+        // never calls `set_mode` would then wait forever — nothing else
+        // would ever answer it. So give the handler its say here instead,
+        // through the same event, whenever the surface is already
+        // initialized (which is exactly the "we are past that commit" case;
+        // when it is false the commit path has not run yet and will handle
+        // this decoration itself).
+        //
+        // `initialized`, not `initial_commit`: the latter is only true
+        // during the commit that sets it, and this runs outside any commit.
+        //
+        // SAFETY: `toplevel_entry` resolves through the same table
+        // `on_toplevel_destroy` purges before wlroots frees the toplevel, so
+        // a present entry names a live one — and this runs from
+        // `get_toplevel_decoration`, which wlroots only dispatches for a
+        // toplevel resource the client still holds. `base` is set once at
+        // role-object creation and never cleared while the toplevel lives
+        // (`configure_toplevel` documents the same claim); it is null-checked
+        // here anyway, since this path is reached from a client request
+        // rather than from a wlroots callback that guarantees the role is
+        // established. `unwrap_or(false)` makes a missing entry mean "not
+        // initialized", which skips the emission — the safe direction, since
+        // an id with no toplevel has nothing to answer.
+        let initialized = (*session)
+            .runtime
+            .toplevel_entry(id)
+            .map(|e| {
+                let base = (*e.raw.as_ptr()).base;
+                !base.is_null() && (*base).initialized
+            })
+            .unwrap_or(false);
+        if initialized && !(*session).runtime.decoration_answered(id) {
+            let requested = (*raw.as_ptr()).requested_mode;
+            let preference = crate::decoration::requested_preference(requested);
+            let deliver = (*session).deliver;
+            (*session).dispatcher.emit(
+                &*session,
+                Event::RequestDecorationMode(id, preference),
+                deliver,
+            );
+        }
+    }
+}
+
+/// The client asked for a decoration mode (`set_mode` on
+/// `zxdg_toplevel_decoration_v1`, or the implicit request an `unset_mode`
+/// leaves behind).
+unsafe extern "C" fn on_decoration_request_mode<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_toplevel_decoration` into this decoration's
+    // `events.request_mode`, unlinked (from `on_toplevel_decoration_destroy`
+    // or `on_toplevel_destroy`) before the decoration or its toplevel is
+    // freed. `_data` is deliberately unused, on the same "resolve by id
+    // through the table the runtime already tracks" discipline
+    // `on_toplevel_request_maximize` documents: the requested mode is read
+    // from the decoration entry below, not from whatever wlroots put in
+    // `data` for this signal.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).toplevel else { return };
+
+        // The `mode_set_this_dispatch` flag is cleared in `deliver_all`,
+        // immediately before it calls the handler — not here. See
+        // `DecorationEntry::mode_set_this_dispatch`'s own doc for why that
+        // placement, rather than this one, is what keeps clear-then-check
+        // correct under deferral and reentrancy.
+        let Some(decoration) = (*session).runtime.decoration_ptr(id) else {
+            return;
+        };
+        let requested = (*decoration.as_ptr()).requested_mode;
+        let preference = crate::decoration::requested_preference(requested);
+
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::RequestDecorationMode(id, preference),
+            deliver,
+        );
+    }
+}
+
+/// The decoration object is about to be freed. Forget it *now*, whatever the
+/// handler does — the same "purge before emitting, not after" rule
+/// `on_toplevel_destroy` and `on_output_destroy` already follow, applied
+/// here even though no event is emitted for this signal at all: there is
+/// nothing for [`crate::ToplevelHandler`] to be told (the toplevel itself
+/// may still be alive and unaffected), only bookkeeping to do.
+///
+/// Unlinking both of this decoration's listeners is not optional cleanup:
+/// wlroots' own `toplevel_decoration_handle_resource_destroy` emits
+/// `events.destroy` and then **asserts both of the decoration's signal
+/// listener lists are empty** (`wlr_xdg_decoration_v1.c`). A wrapper that
+/// left either of these two linked past this point would abort wlroots on
+/// every decoration a client destroys.
+unsafe extern "C" fn on_toplevel_decoration_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_toplevel_decoration` into this decoration's
+    // `events.destroy`; the decoration is still alive for the duration of
+    // this emission. `_data` unused for the same reason
+    // `on_toplevel_set_title` leaves its `_data` unused — the id comes from
+    // `Bound::toplevel`, set at link time, since re-deriving it from the
+    // decoration's own `toplevel` field would read null if the toplevel
+    // already died first.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).toplevel else { return };
+
+        // The decoration dying first is the other of the two orders a
+        // decoration and its toplevel can die in; see
+        // `RuntimeInner::decorations`'s own doc. This is the half of the
+        // purge owned by the decoration side — the toplevel, if still
+        // alive, is entirely untouched.
+        (*session).runtime.forget_decoration(id);
+        let listeners = (*session).decorations.borrow_mut().remove(&id);
+        drop(listeners);
+    }
+}
+
+/// A client created a wlr-layer-shell surface (`get_layer_surface`). Give it
+/// an id and a scene tree before anyone is told about it — mirrors
+/// `on_new_toplevel` exactly, with `wlr_scene_layer_surface_v1_create` in
+/// place of `wlr_scene_xdg_surface_create`, parented straight into the band
+/// matching this surface's own [`Layer`] rather than the scene root — see
+/// [`Layer`]'s own doc for the banded-tree design this places it into.
+unsafe extern "C" fn on_new_layer_surface<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener
+    // `register_toplevel_and_input` linked into
+    // `wlr_layer_shell_v1.events.new_surface`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a `*mut wlr_layer_surface_v1`, live and fully initialised —
+    // its `surface` included — at the point wlroots announces it.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ls = data.cast::<sys::wlr_layer_surface_v1>();
+        let surface = (*ls).surface;
+        if surface.is_null() {
+            return;
+        }
+
+        // The id lives on the surface's addon set, mirroring
+        // `on_new_toplevel`'s identical choice and for the identical
+        // reason: the role object itself carries no addon set of its own.
+        let id = LayerSurfaceId(ensure_id_raw(&raw mut (*surface).addons));
+
+        // No scene to insert into if `init_graphics` was never called.
+        // Drop the announcement rather than dereference a null tree — the
+        // same choice `on_new_toplevel` makes for the identical situation.
+        let layer = Layer::from_raw((*ls).pending.layer.0);
+        let Some(band) = (*session).runtime.layer_band_ptr(layer) else {
+            return;
+        };
+
+        let scene_layer_surface = sys::wlr_scene_layer_surface_v1_create(band.as_ptr(), ls);
+        let Some(scene_layer_surface) = NonNull::new(scene_layer_surface) else {
+            return;
+        };
+        let Some(scene_tree) = NonNull::new((*scene_layer_surface.as_ptr()).tree) else {
+            // m-2/N-4: this abandons the `wlr_scene_layer_surface_v1` wlroots
+            // just allocated on this path, exactly as `on_new_toplevel` does
+            // for the identical situation — deliberately, not an oversight.
+            //
+            // An earlier fix instead called `libc::free` on it, reasoning
+            // that disassembly of `wlr_scene_layer_surface_v1_create` in
+            // `libwlroots-0.20.so` shows it allocated with a bare
+            // `calloc(1, sizeof(*scene_layer_surface))` and no listener
+            // linked into it yet on this path — so freeing was sound today.
+            // Re-review reverted that: the path is unreachable in the
+            // shipped binary (every real way `tree` could end up null
+            // already frees the struct and returns null itself, before this
+            // crate ever sees a non-null pointer here), so the fix traded a
+            // hypothetical leak for a hard runtime dependency (`libc`) added
+            // to the published crate on the eve of its freeze, and inverted
+            // `on_new_toplevel`'s own precedent for no live benefit. Worse,
+            // the trade only gets worse if wlroots ever *does* change shape
+            // here: the most plausible way `tree` becomes null on some
+            // future version is a reordering that leaves other state
+            // (listeners, the subsurface tree) partially set up, and a bare
+            // `libc::free` on that is a use-after-free on the next signal
+            // emission, not merely a leak. A leak is the safe failure mode
+            // for a guard that exists only for a future this crate cannot
+            // observe.
+            return;
+        };
+        let Some(raw) = NonNull::new(ls) else {
+            return;
+        };
+
+        // Four listeners, all with a null liveness flag: each is dropped
+        // from inside the destroy emission, while the object is still
+        // alive — the same reasoning `on_new_toplevel`'s five listeners
+        // document. `commit`/`map`/`unmap` are the base `wlr_surface`'s
+        // signals (wlr-layer-shell has no signals of its own for these, the
+        // same "role object defers to its surface" shape xdg-shell has),
+        // carrying `id` in `Bound::layer` rather than trusting `data` — see
+        // that field's own doc for why.
+        let commit = Registration::link_layer(
+            &raw mut (*surface).events.commit,
+            on_layer_surface_commit::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
+        let map = Registration::link_layer(
+            &raw mut (*surface).events.map,
+            on_layer_surface_map::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
+        let unmap = Registration::link_layer(
+            &raw mut (*surface).events.unmap,
+            on_layer_surface_unmap::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
+        let destroy = Registration::link_layer(
+            &raw mut (*ls).events.destroy,
+            on_layer_surface_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
+
+        let displaced = (*session).layers.borrow_mut().insert(
+            id,
+            LayerSurfaceListeners {
+                _commit: commit,
+                _map: map,
+                _unmap: unmap,
+                _destroy: destroy,
+            },
+        );
+        drop(displaced);
+
+        (*session)
+            .runtime
+            .record_layer_surface(id, raw, scene_tree, layer);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::NewLayerSurface(id), deliver);
+    }
+}
+
+unsafe extern "C" fn on_layer_surface_commit<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_layer_surface` into this surface's
+    // `events.commit`, unlinked (from `on_layer_surface_destroy`) before the
+    // surface is freed. `_data` unused: the id comes from `Bound::layer`,
+    // the same "resolve by the id carried at link time, not by re-deriving
+    // it from `data`" discipline `Bound::layer`'s own doc states and that
+    // `on_layer_surface_map`/`_unmap`/`_destroy` already follow — commit is
+    // brought into line here too (m-1) rather than staying the one
+    // exception, even though `data` really is this surface for the commit
+    // signal specifically and re-deriving from it was not itself a live
+    // bug.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).layer else { return };
+        let Some(raw) = (*session).runtime.layer_surface_ptr(id) else {
+            return;
+        };
+
+        // Reparent into the current layer's band if it changed since this
+        // surface was placed (M-2): a client may send `set_layer` after
+        // mapping, and the band it lands in is structural, not something a
+        // handler can fix after the fact — see [`Layer`]'s own doc. Read
+        // from `current`, which this commit has just populated; done before
+        // the handler runs so a handler that positions this surface
+        // (`Runtime::set_layer_surface_position`) sees it already in its
+        // final band.
+        let layer = Layer::from_raw((*raw.as_ptr()).current.layer.0);
+        (*session)
+            .runtime
+            .reparent_layer_surface_if_changed(id, layer);
+
+        // Delivered for **every** commit, not only the first — see
+        // `Event::LayerSurfaceCommit`'s own doc for why. A handler running
+        // from this event sees `initialized` already true (the same
+        // argument `on_surface_commit` makes for `base.initialized`), so a
+        // `Runtime::configure_layer_surface` call made from inside it takes
+        // the immediate branch regardless of what happens below.
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::LayerSurfaceCommit(id), deliver);
+
+        // The first point at which flushing a staged configure is safe —
+        // see `layer.rs`'s own module doc for the full argument. If the
+        // handler above already answered through
+        // `Runtime::configure_layer_surface` (now immediate, since
+        // `initialized` is true), that call already cleared this, so
+        // `take_staged_layer_configure` finds nothing and this is a no-op
+        // rather than a second, stale configure.
+        //
+        // Gated on `!in_handler()` for the same reason `on_surface_commit`'s
+        // decoration synthesis is: this reads `take_staged_layer_configure`
+        // *after* the `LayerSurfaceCommit` emit above and assumes it delivered
+        // synchronously — that the handler has already had its chance to stage
+        // (or immediately send) a configure. That holds on the only path a
+        // public API reaches, a commit driven from the event loop with no
+        // handler on the stack. If this callback ever fired re-entrantly from
+        // inside a running handler, `emit` would queue `LayerSurfaceCommit`
+        // for `deliver_all` and return before the handler ran, so flushing
+        // here would send a stale (or absent) configure ahead of the answer
+        // the deferred handler is about to make. In that case the flush is
+        // skipped; the queued `LayerSurfaceCommit` still reaches the handler
+        // through `deliver_all`, and any configure it stages is flushed by the
+        // next non-nested commit. No public API produces that nested commit
+        // today, so this is latent — the gate keeps it that way.
+        if !crate::dispatch::in_handler()
+            && (*raw.as_ptr()).initial_commit
+            && let Some((width, height)) = (*session).runtime.take_staged_layer_configure(id)
+        {
+            sys::wlr_layer_surface_v1_configure(raw.as_ptr(), width, height);
+        }
+    }
+}
+
+unsafe extern "C" fn on_layer_surface_map<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_toplevel_map` — linked by `on_new_layer_surface`
+    // into this surface's `events.map`, which wlroots emits with a **null**
+    // `data`, so the id comes from `Bound::layer`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).layer else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::LayerSurfaceMapped(id), deliver);
+    }
+}
+
+unsafe extern "C" fn on_layer_surface_unmap<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_layer_surface_map`, on `events.unmap`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).layer else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::LayerSurfaceUnmapped(id), deliver);
+    }
+}
+
+/// A layer surface is about to be freed. Forget it *now*, whatever the
+/// handler does — mirrors `on_toplevel_destroy` exactly.
+unsafe extern "C" fn on_layer_surface_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_layer_surface` into the layer surface's own
+    // `events.destroy`; the layer surface is still alive for the duration
+    // of the emission. `_data` unused: the id comes from `Bound::layer`,
+    // the same "resolve by id carried at link time, not by re-deriving it"
+    // discipline `on_toplevel_destroy` follows.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).layer else { return };
+
+        // Purge before emitting — the same ordering argument
+        // `on_toplevel_destroy` and `on_output_destroy` both make: a
+        // destroy queued behind a running handler is delivered long after
+        // wlroots freed the object, so resolving at delivery time would
+        // dereference freed memory. Clearing here means it simply misses.
+        (*session).runtime.forget_layer_surface(id);
+        let listeners = (*session).layers.borrow_mut().remove(&id);
+        drop(listeners);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::LayerSurfaceDestroyed(id), deliver);
+    }
+}
+
+/// The client asked to (un)maximize.
+unsafe extern "C" fn on_toplevel_request_maximize<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_toplevel` into `wlr_xdg_toplevel.events.
+    // request_maximize`, unlinked from `on_toplevel_destroy` before the
+    // toplevel is freed. `_data` is deliberately unused: this crate reads
+    // the requested state through the toplevel entry the runtime already
+    // tracks — the same "do not trust `data`'s identity, resolve by id
+    // instead" discipline `on_toplevel_set_title` and its siblings already
+    // follow, applied here to the *payload* rather than just the id, so
+    // this callback makes no claim at all about what wlroots puts in
+    // `data` for this signal.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).toplevel else { return };
+        let Some(entry) = (*session).runtime.toplevel_entry(id) else {
+            return;
+        };
+        let maximize = (*entry.raw.as_ptr()).requested.maximized;
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::RequestMaximize(id, maximize), deliver);
+    }
+}
+
+/// The client asked to (un)fullscreen.
+unsafe extern "C" fn on_toplevel_request_fullscreen<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_toplevel_request_maximize`, on `wlr_xdg_toplevel.
+    // events.request_fullscreen`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).toplevel else { return };
+        let Some(entry) = (*session).runtime.toplevel_entry(id) else {
+            return;
+        };
+        let fullscreen = (*entry.raw.as_ptr()).requested.fullscreen;
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::RequestFullscreen(id, fullscreen), deliver);
+    }
+}
+
+/// Interactive move request.
+unsafe extern "C" fn on_toplevel_request_move<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_toplevel` into `wlr_xdg_toplevel.events.
+    // request_move`. `_data` carries a `wlr_xdg_toplevel_move_event` (seat +
+    // serial), deliberately ignored: this crate does not forward them to
+    // the consumer, by design — see `ToplevelHandler::request_move`'s own
+    // doc. Only the id, from `Bound::toplevel`, is needed.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).toplevel else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::RequestMove(id), deliver);
+    }
+}
+
+/// Interactive resize request.
+unsafe extern "C" fn on_toplevel_request_resize<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_toplevel` into `wlr_xdg_toplevel.events.
+    // request_resize`, whose `data` is a live `wlr_xdg_toplevel_resize_event`
+    // (`wlr_xdg_shell.h`) for the duration of this emission. Seat and serial
+    // are ignored for the same reason `on_toplevel_request_move` ignores
+    // them; only `edges` is read. Guarded against null anyway, on the same
+    // "an `extern "C"` frame does not get to panic" footing as every other
+    // callback in this file — reading a null pointer would abort the
+    // process just as surely as a panic would.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).toplevel else { return };
+        let event = data.cast::<sys::wlr_xdg_toplevel_resize_event>();
+        let edges = if event.is_null() {
+            crate::Edges::default()
+        } else {
+            crate::Edges::from_xdg((*event).edges)
+        };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::RequestResize(id, edges), deliver);
     }
 }
 
@@ -1863,13 +2953,11 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
         // which this device-watch reused before this was found unsound)
         // must unlink this device's other listeners synchronously, from
         // inside the very emission this registers for.
-        let destroy = Registration::link(
+        let destroy = Registration::link_bare(
             &raw mut (*device).events.destroy,
             on_input_destroy::<S>,
             (*bound).session,
             &raw const *alive,
-            None,
-            None,
         );
 
         let mut listeners = Vec::new();
@@ -1905,21 +2993,17 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                     runtime.record_keyboard(kb_nn);
                     keyboard = Some(kb_nn);
 
-                    listeners.push(Registration::link(
+                    listeners.push(Registration::link_bare(
                         &raw mut (*kb).events.key,
                         on_key::<S>,
                         (*bound).session,
                         &raw const *alive,
-                        None,
-                        None,
                     ));
-                    listeners.push(Registration::link(
+                    listeners.push(Registration::link_bare(
                         &raw mut (*kb).events.modifiers,
                         on_modifiers::<S>,
                         (*bound).session,
                         &raw const *alive,
-                        None,
-                        None,
                     ));
                 }
             }
@@ -1933,29 +3017,23 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                     runtime.record_pointer(p_nn);
                     pointer = Some(p_nn);
 
-                    listeners.push(Registration::link(
+                    listeners.push(Registration::link_bare(
                         &raw mut (*raw_pointer).events.motion,
                         on_pointer_motion::<S>,
                         (*bound).session,
                         &raw const *alive,
-                        None,
-                        None,
                     ));
-                    listeners.push(Registration::link(
+                    listeners.push(Registration::link_bare(
                         &raw mut (*raw_pointer).events.motion_absolute,
                         on_pointer_motion_absolute::<S>,
                         (*bound).session,
                         &raw const *alive,
-                        None,
-                        None,
                     ));
-                    listeners.push(Registration::link(
+                    listeners.push(Registration::link_bare(
                         &raw mut (*raw_pointer).events.button,
                         on_pointer_button::<S>,
                         (*bound).session,
                         &raw const *alive,
-                        None,
-                        None,
                     ));
                 }
             }
@@ -2362,6 +3440,16 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::ToplevelUnmapped(..)
         | Event::ToplevelTitleChanged(..)
         | Event::ToplevelDestroyed(..)
+        | Event::RequestMaximize(..)
+        | Event::RequestFullscreen(..)
+        | Event::RequestMove(..)
+        | Event::RequestResize(..)
+        | Event::RequestDecorationMode(..)
+        | Event::NewLayerSurface(..)
+        | Event::LayerSurfaceCommit(..)
+        | Event::LayerSurfaceMapped(..)
+        | Event::LayerSurfaceUnmapped(..)
+        | Event::LayerSurfaceDestroyed(..)
         | Event::Key { .. }
         | Event::PointerMotion { .. }
         | Event::PointerButton { .. } => {}
@@ -2440,13 +3528,11 @@ mod tests {
         unsafe {
             assert!(!is_linked(hp, noop), "a fresh signal has no listeners");
 
-            let reg = Registration::link(
+            let reg = Registration::link_bare(
                 &raw mut (*hp).signal,
                 noop,
                 std::ptr::null(),
                 &raw const (*hp).alive,
-                None,
-                None,
             );
             assert!(is_linked(hp, noop), "link must register the listener");
 
@@ -2473,8 +3559,7 @@ mod tests {
         fn link_then_fail(signal: *mut sys::wl_signal, alive: *const Cell<bool>) -> Result<()> {
             // SAFETY: the caller owns a live signal and flag that both outlive
             // this call.
-            let _reg =
-                unsafe { Registration::link(signal, noop, std::ptr::null(), alive, None, None) };
+            let _reg = unsafe { Registration::link_bare(signal, noop, std::ptr::null(), alive) };
             failing_dispatch()?;
             Ok(())
         }
@@ -2507,13 +3592,11 @@ mod tests {
 
         // SAFETY: as in the tests above.
         unsafe {
-            let reg = Registration::link(
+            let reg = Registration::link_bare(
                 &raw mut (*hp).signal,
                 noop,
                 std::ptr::null(),
                 &raw const (*hp).alive,
-                None,
-                None,
             );
             let linked_next = (*hp).signal.listener_list.next;
             assert_ne!(
@@ -2552,13 +3635,11 @@ mod tests {
         // null is safe to pass here in a way it would not be for a signal whose
         // handlers dereference it.
         unsafe {
-            let reg = Registration::link(
+            let reg = Registration::link_bare(
                 &raw mut (*hp).signal,
                 on_backend_destroy,
                 std::ptr::null(),
                 &raw const (*hp).alive,
-                None,
-                None,
             );
             assert!((*hp).alive.get(), "the flag starts set");
 
@@ -2776,6 +3857,8 @@ mod tests {
                 dispatcher: Dispatcher::new(state),
                 outputs: RefCell::new(HashMap::new()),
                 toplevels: RefCell::new(HashMap::new()),
+                decorations: RefCell::new(HashMap::new()),
+                layers: RefCell::new(HashMap::new()),
                 inputs: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
                 runtime: &runtime,
@@ -2786,13 +3869,11 @@ mod tests {
 
             // Declared after `session`, so it unlinks while the session it
             // names is still alive — the ordering `run` uses.
-            let _reg = Registration::link(
+            let _reg = Registration::link_bare(
                 &raw mut (*hp).signal,
                 on_new_output::<Recorder>,
                 (&raw const session).cast::<()>(),
                 &raw const (*hp).alive,
-                None,
-                None,
             );
 
             sys::wl_signal_emit_mutable(&raw mut (*hp).signal, output.cast());
@@ -2947,6 +4028,8 @@ mod tests {
             dispatcher: Dispatcher::new(std::ptr::null_mut()),
             outputs: RefCell::new(HashMap::new()),
             toplevels: RefCell::new(HashMap::new()),
+            decorations: RefCell::new(HashMap::new()),
+            layers: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime: &runtime,
@@ -3067,23 +4150,19 @@ mod tests {
         // no `Session<S>` in this test at all, so `session` is null for
         // these two — `noop` never reads it).
         let key = unsafe {
-            Registration::link(
+            Registration::link_bare(
                 &raw mut kb.events.key,
                 noop,
                 std::ptr::null(),
                 std::ptr::null(),
-                None,
-                None,
             )
         };
         let modifiers = unsafe {
-            Registration::link(
+            Registration::link_bare(
                 &raw mut kb.events.modifiers,
                 noop,
                 std::ptr::null(),
                 std::ptr::null(),
-                None,
-                None,
             )
         };
         // SAFETY: `kb.base.events.destroy` is initialised by
@@ -3092,13 +4171,11 @@ mod tests {
         // registration (it is a local that is not dropped until after
         // `wlr_keyboard_finish` returns, below).
         let destroy = unsafe {
-            Registration::link(
+            Registration::link_bare(
                 &raw mut kb.base.events.destroy,
                 on_kb_destroy,
                 regs_ptr,
                 std::ptr::null(),
-                None,
-                None,
             )
         };
 
