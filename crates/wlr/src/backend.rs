@@ -34,7 +34,7 @@ use std::os::fd::AsRawFd;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use crate::dispatch::{Dispatcher, Event};
+use crate::dispatch::{Dispatcher, DisplayPinGuard, Event};
 use crate::id::{SourceId, attach_id, find_id};
 use crate::layer::Layer;
 use crate::seat::{KeyEvent, Modifiers};
@@ -908,6 +908,14 @@ impl<'d> Backend<'d> {
     ) -> Result<()> {
         alive_or_err(&self.alive)?;
         let _reentry = ReentryGuard::acquire()?;
+
+        // Pins `Runtime`'s Display-identity assert (see `Runtime`'s own doc
+        // on the pin) to `display`'s pointer for the life of this call —
+        // `None` for `run` (`display` is `None` there; see `DisplayPinGuard`'s
+        // own doc). Declared before `session` so it outlives every handler
+        // call this function makes, which is the whole window the assert
+        // needs covered.
+        let _display_pin = DisplayPinGuard::enter(display.map(|d| d.as_ptr() as usize));
 
         // `state` is consumed into a raw pointer here and never touched as a
         // reference again for the rest of this function, so no `&mut S` is live

@@ -101,7 +101,7 @@ pub use id::{OutputId, SourceId};
 pub use interest::{Interest, Readiness};
 pub use layer::{Anchor, Layer, LayerSurface, LayerSurfaceId};
 pub use output::Output;
-pub use runtime::Runtime;
+pub use runtime::{Band, Runtime};
 pub use scene::RectId;
 pub use seat::{KeyEvent, Modifiers};
 pub use toplevel::{Edges, Toplevel, ToplevelId};

@@ -57,9 +57,9 @@ as an interim decoration band, or that relied on `raise_toplevel` to lift a
 window above such a rect. Upgrading to `0.20.11` regresses that silently —
 it still compiles, it still runs, it draws in a different order. The
 migration is `add_rect_in_toplevel` (`0.20.5`) for anything meant to move
-with a window, and `lower_rect_to_bottom` for anything meant to be a
-background. `add_rect_in_band`, the additive way to place a node *between*
-bands, is planned for a later `0.20.x`; there is no way to express it today.
+with a window, `lower_rect_to_bottom` for anything meant to be a
+background, and `add_rect_in_band` (`0.20.12`) for anything meant to place a
+node *between* bands.
 
 This is also the exception's own caveat, made explicit: within this line,
 "documented" is standing in for "semver-compatible". A consumer pinning
@@ -69,19 +69,38 @@ above on a plain `cargo update`, with no version bump of their own to
 review against. The disclosure here is what makes that acceptable, not a
 guarantee that nothing observable moved.
 
-**Deferred additive gaps, tracked for a future `0.20.x`:**
-
-- `add_rect_in_band` — see above; no way today to place a scene node
-  *between* the fixed bands rather than pinned to one of them.
-- `set_layer_surface_output` — wlr-layer-shell's own contract puts assigning
-  an output on the compositor when `new_layer_surface` hands one a `None`
-  (see `layer.rs`'s doc on `LayerSurface::output_id`), but this crate
-  exposes no id-keyed way to discharge that; a layer surface left without an
-  output just reports `None` from `output_id` forever rather than crashing
-  anything, so this is safe today, not silently broken. Targeted for the
-  next `0.20.x`.
-
 No further compatibility exception is sanctioned in the `0.20` line.
+
+## 0.20.12
+
+Scene-band placement and output assignment for layer surfaces; the two gaps
+`0.20.11` deferred, both closed additively.
+
+- `Band` and `Runtime::add_rect_in_band` — a solid-colour rect parented into
+  a named scene band (`Background`/`Bottom`/`Toplevel`/`Top`/`Overlay`)
+  rather than the scene root: it stacks *with* its band instead of sitting
+  above everything, and (unlike `add_rect`) does not swallow pointer input
+  over its area purely by virtue of being on top. `Band` is a new,
+  five-variant enum, not `Layer` reused — `Layer` is the four-variant
+  wire vocabulary a layer-shell client speaks, and `Band::Toplevel` (the
+  band every toplevel's own tree lives in) has no client-facing
+  counterpart. Removed by `Runtime::remove_rect`, exactly like a root rect;
+  never purged by a toplevel's death, even for a `Band::Toplevel` rect —
+  the toplevel band tree outlives every toplevel ever parented into it.
+- `Runtime::set_layer_surface_output` — assigns a layer surface's output,
+  discharging the responsibility wlr-layer-shell's own doc for
+  `new_surface` states plainly: "the output may be NULL. In this case, it
+  is your responsibility to assign an output before returning." Assigns the
+  role object's `output` field directly; wlroots exposes no setter function
+  for it. `None` on an unknown/stale layer-surface id or output id, the
+  layer-surface id resolved first.
+- `Runtime` now pins the `wl_display` `init_graphics` was given and
+  `debug_assert_eq!`s it, in `add_rect`/`add_rect_in_band`/`commit_output`,
+  against whichever `Display` the current `Backend::run_all` call is
+  actually driving — a debug-only bug detector (compiled out under
+  `--release`) for a `Runtime` clone driven by a `run_all` call for a
+  different `Display` than the one it was initialized against. See
+  `Runtime`'s own doc, "Lifetime obligation" section.
 
 ## 0.20.11
 

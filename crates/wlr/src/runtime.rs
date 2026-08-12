@@ -215,6 +215,31 @@ pub(crate) struct RuntimeInner {
     /// `OutputId` kept past that point reports `None` here rather than
     /// resolving to a pointer wlroots may have already reused or freed.
     pub(crate) outputs: RefCell<HashMap<OutputId, NonNull<sys::wlr_output>>>,
+
+    /// The `wl_display` [`Runtime::init_graphics`] was given, as a `usize`
+    /// — `0` before `init_graphics` has run. See `Runtime`'s own doc for
+    /// the obligation this exists to catch a violation of: every clone of
+    /// this handle must not outlive the `Display` it was initialised
+    /// against, since wlroots frees the output layout (and the scene-output
+    /// layout attached to it) when that display dies, and `init_output`/
+    /// `commit_output`/every rect-and-buffer mutator dereferences a pointer
+    /// that shares the layout's lifetime.
+    ///
+    /// Read, not just written: [`Runtime::add_rect`],
+    /// [`Runtime::add_rect_in_band`] and [`Runtime::commit_output`] each
+    /// `debug_assert_eq!` this against
+    /// [`crate::dispatch::current_display`] — the `wl_display`
+    /// [`Backend::run_all`](crate::Backend::run_all) is *currently* driving
+    /// on this thread, pinned for the call's duration by
+    /// [`crate::dispatch::DisplayPinGuard`]. A mismatch means this
+    /// `Runtime` clone is being driven by a `run_all` call for a *different*
+    /// `Display` than the one it was initialised against — exactly the
+    /// misuse this field exists to catch. `debug_assert_eq!` rather than a
+    /// real check: this is a bug detector for a mistake nothing here can
+    /// recover from cleanly (the layout may already be freed), not a
+    /// recoverable error a release build should pay to guard — see each
+    /// assert site's own comment.
+    pub(crate) pinned_display: std::cell::Cell<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -255,20 +280,70 @@ pub(crate) struct LayerSurfaceEntry {
     pub(crate) band: std::cell::Cell<Layer>,
 }
 
-/// A live scene rect: the node wlroots created for it, and which toplevel
-/// (if any) it is parented into.
+/// A named scene band a rect (or, in principle, anything else this crate
+/// later parents by band) can live in — the same five stacking bands
+/// [`Graphics`] creates, plus [`Band::Toplevel`] for the band every
+/// toplevel's own tree lives in.
+///
+/// Deliberately **not** [`Layer`]: `Layer` is the public four-variant
+/// protocol vocabulary a layer-shell client speaks
+/// (`Background`/`Bottom`/`Top`/`Overlay`, `layer.rs`'s own type), and
+/// reusing it here would either strand `Band::Toplevel` outside that
+/// vocabulary or force a fifth variant onto a type whose four variants are
+/// already frozen as of 0.20.x's layer-shell surface. `Band` is a new,
+/// separate enum instead, covering exactly the five bands
+/// [`Runtime::add_rect_in_band`] can target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Band {
+    /// Beneath everything — [`Graphics::background_band`].
+    Background,
+    /// Above `Background`, beneath every toplevel — [`Graphics::bottom_band`].
+    Bottom,
+    /// Where every toplevel's own tree lives — [`Graphics::toplevel_band`].
+    Toplevel,
+    /// Above every toplevel, beneath `Overlay` — [`Graphics::top_band`].
+    Top,
+    /// Above everything — [`Graphics::overlay_band`].
+    Overlay,
+}
+
+/// Which scene tree a [`RectEntry`] is parented into, and so how (or
+/// whether) it is purged when something else dies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RectParent {
+    /// A root rect [`Runtime::add_rect`] created, parented into the scene's
+    /// root tree. Outlives every toplevel; only [`Runtime::remove_rect`] or
+    /// tearing down the whole scene destroys it.
+    Root,
+    /// A rect [`Runtime::add_rect_in_toplevel`] created, parented into that
+    /// toplevel's own scene tree. Destroyed automatically when the
+    /// toplevel is — see [`Runtime::forget_toplevel`] and
+    /// [`Runtime::clear_toplevels`], which purge (without destroying) the
+    /// table row for one of these, since wlroots is about to (or already
+    /// did) free the node itself as part of freeing the toplevel's tree
+    /// recursively.
+    Toplevel(ToplevelId),
+    /// A rect [`Runtime::add_rect_in_band`] created, parented into the
+    /// named band's tree — a sibling of every toplevel/layer-surface tree
+    /// in that band, not a descendant of any single one of them. Like
+    /// `Root`, a band rect is never purged by a toplevel's death (a band
+    /// outlives every toplevel that ever lived in it); only
+    /// [`Runtime::remove_rect`] or tearing down the scene destroys it.
+    Band(Band),
+}
+
+/// A live scene rect: the node wlroots created for it, and which tree it is
+/// parented into.
 #[derive(Clone, Copy)]
 pub(crate) struct RectEntry {
     pub(crate) raw: NonNull<sys::wlr_scene_rect>,
-    /// `Some(id)` for a rect [`Runtime::add_rect_in_toplevel`] created,
-    /// parented into that toplevel's own scene tree. `None` for a root
-    /// rect [`Runtime::add_rect`] created, parented into the scene's root
-    /// tree instead.
-    ///
-    /// Read by [`Runtime::forget_toplevel`] to purge every rect that dies
-    /// along with a destroyed toplevel's tree, without double-destroying
-    /// the node wlroots is about to free recursively.
-    pub(crate) parent: Option<ToplevelId>,
+    /// See [`RectParent`]. Read by [`Runtime::forget_toplevel`] and
+    /// [`Runtime::clear_toplevels`] to purge every rect that dies along
+    /// with a destroyed toplevel's tree, without double-destroying the
+    /// node wlroots is about to free recursively — and, symmetrically, to
+    /// leave `Root`/`Band` rects alone, since neither dies with any
+    /// toplevel.
+    pub(crate) parent: RectParent,
 }
 
 /// A live RGBA pixel-buffer scene node: the node wlroots created for it, and
@@ -373,6 +448,20 @@ pub(crate) struct Graphics {
     pub(crate) overlay_band: NonNull<sys::wlr_scene_tree>,
 }
 
+impl Graphics {
+    /// The scene tree `band` names. Total — every [`Band`] variant maps to
+    /// exactly one of the five fields above.
+    pub(crate) fn band_tree(&self, band: Band) -> NonNull<sys::wlr_scene_tree> {
+        match band {
+            Band::Background => self.background_band,
+            Band::Bottom => self.bottom_band,
+            Band::Toplevel => self.toplevel_band,
+            Band::Top => self.top_band,
+            Band::Overlay => self.overlay_band,
+        }
+    }
+}
+
 /// Handle to a compositor's long-lived wlroots state.
 ///
 /// Cheap to clone (one `Rc` bump). Every clone names the same underlying
@@ -390,12 +479,22 @@ pub(crate) struct Graphics {
 /// touches either one (`init_output` directly;
 /// `commit_output` and the rect methods indirectly, since they read the
 /// scene that shares the layout's lifetime) dereferences whatever pointer
-/// `init_graphics` stored, live or not. **Nothing in this crate enforces
-/// this today.** Reachability is narrow in practice — a handle to either
-/// type only exists inside a handler call, so violating this means a
-/// consumer deliberately kept a `Runtime` clone somewhere the `Display`
-/// does not reach and used it afterward — but the obligation is real, is
-/// not checked, and is the caller's to keep.
+/// `init_graphics` stored, live or not. **This crate detects, but does not
+/// prevent, a violation** (0.20.12): `init_graphics` pins the `wl_display`
+/// pointer it was given (`RuntimeInner::pinned_display`), and
+/// [`add_rect`](Runtime::add_rect), [`add_rect_in_band`](Runtime::add_rect_in_band)
+/// and [`commit_output`](Runtime::commit_output) each `debug_assert_eq!`
+/// that pin against the `Display` the current
+/// [`Backend::run_all`](crate::Backend::run_all) call is actually driving.
+/// This is a debug-only bug detector, not a safety net a release build can
+/// rely on — `debug_assert!` compiles out entirely under `--release` (see
+/// each assert site's own comment) — so it catches a consumer's mistake in
+/// a debug build and does nothing to stop it in a release one. Reachability
+/// is narrow in practice regardless — a handle to either type only exists
+/// inside a handler call, so violating this means a consumer deliberately
+/// kept a `Runtime` clone somewhere the `Display` does not reach and used
+/// it afterward — but the obligation is real, is not *prevented*, and is
+/// the caller's to keep.
 #[derive(Clone)]
 pub struct Runtime {
     pub(crate) inner: Rc<RuntimeInner>,
@@ -433,6 +532,7 @@ impl Runtime {
                 keyboards: RefCell::new(Vec::new()),
                 pointers: RefCell::new(Vec::new()),
                 outputs: RefCell::new(HashMap::new()),
+                pinned_display: std::cell::Cell::new(0),
             }),
         })
     }
@@ -778,6 +878,24 @@ impl Runtime {
                 overlay_band,
             }
         };
+        // Records the Display this handle is now pinned to (see
+        // `RuntimeInner::pinned_display`'s own doc). If a `run_all` call is
+        // already driving this thread — unusual (init_graphics is normally
+        // called before the first run) but not impossible if a consumer
+        // calls it from inside a handler — it must be driving the same
+        // `display` this call was just given: `init_graphics` is hands the
+        // authoritative `Display` directly, so this is the one call site
+        // that can compare against genuinely live ground truth rather than
+        // a value another call recorded earlier.
+        let display_ptr = display.as_ptr() as usize;
+        if let Some(current) = crate::dispatch::current_display() {
+            debug_assert_eq!(
+                display_ptr, current,
+                "Runtime::init_graphics called with a different Display than \
+                 the run_all call currently driving this thread"
+            );
+        }
+        self.inner.pinned_display.set(display_ptr);
         *self.inner.graphics.borrow_mut() = Some(graphics);
         Ok(())
     }
@@ -877,6 +995,16 @@ impl Runtime {
     /// `wlr_scene_output_needs_frame` doc), so an `Err` here always means the
     /// commit was attempted and wlroots said no.
     pub fn commit_output(&self, output: &Output<'_>) -> Result<()> {
+        // Debug-only bug detector, not a safety mechanism a release build
+        // relies on — see `RuntimeInner::pinned_display`'s own doc and
+        // `add_rect`'s identical check.
+        if let Some(current) = crate::dispatch::current_display() {
+            debug_assert_eq!(
+                self.inner.pinned_display.get(),
+                current,
+                "Runtime reused across a different Display"
+            );
+        }
         let scene = {
             let g = self.inner.graphics.borrow();
             match g.as_ref() {
@@ -1023,9 +1151,12 @@ impl Runtime {
     /// harmless, because the consumer's own drag machine is consuming
     /// motion for the rect's whole lifetime; for a *persistent* translucent
     /// overlay it makes the covered area permanently unclickable, and there
-    /// is no way to express "above the toplevels, below `Overlay`" in
-    /// 0.20.x. `add_rect_in_band` — additive, planned for a later 0.20.x —
-    /// is the intended fix. Until then, lower it or keep it transient.
+    /// is no way to express "above the toplevels, below `Overlay`" through
+    /// this method. [`add_rect_in_band`](Runtime::add_rect_in_band)
+    /// (0.20.12) is the fix: a rect parented into a band stacks *with* that
+    /// band instead of sitting above every band unconditionally. Until a
+    /// consumer moves to it, lower a persistent root rect or keep it
+    /// transient.
     ///
     /// # Errors
     ///
@@ -1053,6 +1184,17 @@ impl Runtime {
                 None => return Err(Error::Create("Runtime::add_rect before init_graphics")),
             }
         };
+        // Debug-only bug detector, not a safety mechanism a release build
+        // relies on — see `RuntimeInner::pinned_display`'s own doc. Skipped
+        // entirely (not "passes vacuously") when no `run_all` call is on
+        // this thread, since there is then nothing live to compare against.
+        if let Some(current) = crate::dispatch::current_display() {
+            debug_assert_eq!(
+                self.inner.pinned_display.get(),
+                current,
+                "Runtime reused across a different Display"
+            );
+        }
         // SAFETY: the scene is this runtime's own and outlives the call;
         // `color` is a live four-float array for the duration of the call,
         // which is all `wlr_scene_rect_create` reads (it copies the value).
@@ -1066,10 +1208,13 @@ impl Runtime {
         };
         let raw = NonNull::new(raw).ok_or(Error::Create("wlr_scene_rect_create"))?;
         let id = RectId(next_id());
-        self.inner
-            .rects
-            .borrow_mut()
-            .insert(id, RectEntry { raw, parent: None });
+        self.inner.rects.borrow_mut().insert(
+            id,
+            RectEntry {
+                raw,
+                parent: RectParent::Root,
+            },
+        );
         Ok(id)
     }
 
@@ -1114,10 +1259,85 @@ impl Runtime {
             id,
             RectEntry {
                 raw,
-                parent: Some(toplevel),
+                parent: RectParent::Toplevel(toplevel),
             },
         );
         Some(id)
+    }
+
+    /// Add a solid-colour rect parented into `band`'s own scene tree, in the
+    /// same premultiplied RGBA [`add_rect`](Runtime::add_rect) takes.
+    ///
+    /// Unlike [`add_rect`](Runtime::add_rect) — which is parented directly
+    /// into the scene root, above every band, and so both sits above
+    /// everything and swallows pointer input over its area (see that
+    /// method's own doc) — a banded rect is a sibling of every
+    /// toplevel/layer-surface tree already living in `band`, and so stacks
+    /// *with* them: a `Band::Top` rect sits above every toplevel and every
+    /// `Background`/`Bottom` layer surface, exactly where a `Top` layer
+    /// surface itself would, but still beneath `Band::Overlay`.
+    ///
+    /// Coordinates given to [`set_rect_position`](Runtime::set_rect_position)
+    /// afterward are relative to the band tree's own origin, which for every
+    /// band is the scene root's origin (`init_graphics` never positions a
+    /// band tree away from `(0, 0)`) — so in practice these coordinates
+    /// read the same as [`add_rect`](Runtime::add_rect)'s.
+    ///
+    /// Removed by [`remove_rect`](Runtime::remove_rect), exactly like a root
+    /// rect — **never** by a toplevel dying, even a `Band::Toplevel` rect:
+    /// the toplevel band tree itself outlives every toplevel that is ever
+    /// parented into it, so a rect parented into the band (a sibling of
+    /// each toplevel's own tree) is never a descendant of any one of them.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Create`] if wlroots could not create the node, or if
+    /// [`init_graphics`](Runtime::init_graphics) has not run yet — the
+    /// identical shape [`add_rect`](Runtime::add_rect)'s own doc describes
+    /// for the same case.
+    ///
+    /// **Known hole, shared with [`add_rect`](Runtime::add_rect):**
+    /// `width`/`height` are not checked non-negative — see
+    /// [`set_rect_size`](Runtime::set_rect_size)'s doc.
+    pub fn add_rect_in_band(
+        &self,
+        band: Band,
+        width: i32,
+        height: i32,
+        color: [f32; 4],
+    ) -> Result<RectId> {
+        // Same reasoning as `add_rect`'s identical branch: no
+        // `wlr_scene_rect_create` ran, so the payload names this Rust entry
+        // point rather than a C function that was never called.
+        let tree = self.band_ptr(band).ok_or(Error::Create(
+            "Runtime::add_rect_in_band before init_graphics",
+        ))?;
+        // Debug-only bug detector, not a safety mechanism a release build
+        // relies on — see `RuntimeInner::pinned_display`'s own doc and
+        // `add_rect`'s identical check just above it in this file.
+        if let Some(current) = crate::dispatch::current_display() {
+            debug_assert_eq!(
+                self.inner.pinned_display.get(),
+                current,
+                "Runtime reused across a different Display"
+            );
+        }
+        // SAFETY: `tree` names one of the five band trees `init_graphics`
+        // created and this runtime owns; it outlives this call. `color` is
+        // a live four-float array for the duration of the call, which is
+        // all `wlr_scene_rect_create` reads (it copies the value).
+        let raw =
+            unsafe { sys::wlr_scene_rect_create(tree.as_ptr(), width, height, color.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_scene_rect_create"))?;
+        let id = RectId(next_id());
+        self.inner.rects.borrow_mut().insert(
+            id,
+            RectEntry {
+                raw,
+                parent: RectParent::Band(band),
+            },
+        );
+        Ok(id)
     }
 
     /// Destroy a rect's scene node, whether it is a root rect from
@@ -1200,6 +1420,29 @@ impl Runtime {
     /// take this same `RefCell` mutably.
     fn rect_ptr(&self, id: RectId) -> Option<NonNull<sys::wlr_scene_rect>> {
         self.inner.rects.borrow().get(&id).map(|e| e.raw)
+    }
+
+    /// Test-only: whether `rect`'s own node is currently parented directly
+    /// under `band`'s tree. `false` for an unknown `rect`, mirroring every
+    /// other by-id query in this crate rather than panicking.
+    ///
+    /// `#[cfg(test)]` rather than exported: this is the same "read
+    /// `node.parent` back" assertion
+    /// `reparent_layer_surface_if_changed_moves_the_tree_only_when_the_layer_changed`
+    /// makes for a layer surface's tree, applied to a rect's node instead,
+    /// and every caller of it lives in this module's own `mod tests` (which
+    /// can already reach private fields directly — this exists purely to
+    /// give `add_rect_in_band`'s own test a name to call through `Runtime`,
+    /// the same surface its assertion is really about).
+    #[cfg(test)]
+    fn rect_is_in_band(&self, rect: RectId, band: NonNull<sys::wlr_scene_tree>) -> bool {
+        let Some(raw) = self.rect_ptr(rect) else {
+            return false;
+        };
+        // SAFETY: `rect_ptr` resolving `rect` means its node has not been
+        // destroyed yet — the same argument `set_rect_position`'s own
+        // comment makes for reading a resolvable rect's node.
+        unsafe { (*raw.as_ptr()).node.parent == band.as_ptr() }
     }
 
     /// Add a scene node showing owned RGBA8888 pixels (bytes R, G, B, A per
@@ -1608,6 +1851,18 @@ impl Runtime {
         })
     }
 
+    /// The scene tree `band` names — any of the five bands, including
+    /// [`Band::Toplevel`], which [`layer_band_ptr`](Runtime::layer_band_ptr)
+    /// cannot express since [`Layer`] has no toplevel variant. `None`
+    /// before [`init_graphics`](Runtime::init_graphics) has run.
+    pub(crate) fn band_ptr(&self, band: Band) -> Option<NonNull<sys::wlr_scene_tree>> {
+        self.inner
+            .graphics
+            .borrow()
+            .as_ref()
+            .map(|g| g.band_tree(band))
+    }
+
     /// Record a newly-announced toplevel under `id`, in both the id table and
     /// the tree-to-id reverse lookup.
     pub(crate) fn record_toplevel(
@@ -1642,7 +1897,7 @@ impl Runtime {
         self.inner
             .rects
             .borrow_mut()
-            .retain(|_, entry| entry.parent != Some(id));
+            .retain(|_, entry| entry.parent != RectParent::Toplevel(id));
         // Same reasoning, for buffer nodes `add_buffer_in_toplevel` parented
         // into this toplevel's tree — see `BufferEntry`'s own doc.
         self.inner
@@ -1716,7 +1971,7 @@ impl Runtime {
         self.inner
             .rects
             .borrow_mut()
-            .retain(|_, entry| entry.parent.is_none());
+            .retain(|_, entry| !matches!(entry.parent, RectParent::Toplevel(_)));
         // Mirrors the rect purge just above, for buffer entries — the
         // identical hazard `RectEntry` closes applies verbatim to
         // `BufferEntry`: a `BufferId` is only as good as the `ToplevelId`
@@ -2506,6 +2761,58 @@ impl Runtime {
         Some(())
     }
 
+    /// Assign `id`'s layer surface to `output`.
+    ///
+    /// Discharges the responsibility wlr-layer-shell's own doc for
+    /// `wlr_layer_shell_v1::events::new_surface` states plainly — "the
+    /// output may be NULL. In this case, it is your responsibility to
+    /// assign an output before returning" (see
+    /// [`LayerSurface::output_id`](crate::LayerSurface::output_id)'s own
+    /// doc, which named this exact gap and deferred it here). Call it from
+    /// [`ToplevelHandler::new_layer_surface`](crate::ToplevelHandler::new_layer_surface)
+    /// when [`LayerSurface::output_id`](crate::LayerSurface::output_id)
+    /// reports `None` for a surface that just arrived — typically picking
+    /// whichever output currently has the seat's cursor, or simply the
+    /// first output this runtime knows of for a single-output compositor.
+    ///
+    /// Sets the role object's `output` field directly
+    /// (`(*raw).output = output_ptr`) rather than going through a wlroots
+    /// setter function: `wlr_layer_shell_v1.h` exposes none — `output` is a
+    /// plain `struct wlr_output *` on `wlr_layer_surface_v1`, assigned by
+    /// convention rather than through an accessor (confirmed against the
+    /// installed 0.20 header; every in-tree wlroots compositor that
+    /// implements this same responsibility, e.g. tinywl, assigns the field
+    /// the identical way). No `wlr_scene_layer_surface_v1` re-arrange
+    /// follows: this crate's whole layer-surface model is manual
+    /// positioning — [`set_layer_surface_position`](Runtime::set_layer_surface_position)'s
+    /// own doc — so nothing here auto-arranges by output layout either; a
+    /// consumer that anchors to the output reads its size itself (from
+    /// wherever it tracks `output_layout_box`/output mode) and calls
+    /// [`set_layer_surface_position`](Runtime::set_layer_surface_position),
+    /// exactly as it already does for the anchor-driven case.
+    ///
+    /// `None` if this runtime has no live layer surface with that id
+    /// (including a stale one; see
+    /// [`set_toplevel_size`](Runtime::set_toplevel_size)'s own doc for what
+    /// "stale" means) or no live output with that id. The layer-surface id
+    /// is resolved first, so an unknown/stale `output` is only ever
+    /// reached — and only ever the reason for a `None` — once the layer
+    /// surface itself is known to be live.
+    pub fn set_layer_surface_output(&self, id: LayerSurfaceId, output: OutputId) -> Option<()> {
+        let raw = self.layer_surface_ptr(id)?;
+        let out = self.output_ptr(output)?;
+        // SAFETY: a present `layer_surfaces` entry names a live layer
+        // surface (its destroy callback removes the entry before wlroots
+        // frees it), and a present `outputs` entry names a live output
+        // (the identical rule `output_ptr`'s own doc states) — both
+        // outlive this call. This assigns a raw field, not a call into
+        // wlroots, so there is no reentrancy hazard to guard against here.
+        unsafe {
+            (*raw.as_ptr()).output = out.as_ptr();
+        }
+        Some(())
+    }
+
     /// Create the seat, its cursor, and the cursor theme.
     ///
     /// One call rather than three for the same reason
@@ -2994,7 +3301,7 @@ mod tests {
             rect,
             RectEntry {
                 raw: NonNull::<sys::wlr_scene_rect>::dangling(),
-                parent: Some(toplevel),
+                parent: RectParent::Toplevel(toplevel),
             },
         );
         assert!(
@@ -3702,5 +4009,136 @@ mod tests {
              top band: a Top layer surface must stay above every toplevel \
              regardless of any raise_toplevel call"
         );
+    }
+
+    /// The frozen fix for M-3 task 1: `add_rect_in_band` parents the rect
+    /// into the named band's own tree, not the scene root — the whole
+    /// point of the method versus [`Runtime::add_rect`] (see that method's
+    /// own doc on the "swallows pointer input, sits above everything"
+    /// tradeoff `add_rect_in_band` exists to avoid).
+    #[test]
+    fn add_rect_in_band_parents_into_the_named_band() {
+        let rt = headless_runtime();
+        let rect = rt
+            .add_rect_in_band(Band::Overlay, 4, 4, [1.0, 0.0, 0.0, 1.0])
+            .expect("rect");
+        let overlay = rt.inner.graphics.borrow().as_ref().unwrap().overlay_band;
+        assert!(
+            rt.rect_is_in_band(rect, overlay),
+            "a Band::Overlay rect must be a direct child of the overlay band"
+        );
+        assert_eq!(rt.remove_rect(rect), Some(()));
+    }
+
+    /// `add_rect_in_band` must not parent into a *different* band than the
+    /// one asked for — the only way the assertion above could pass
+    /// vacuously is if every band happened to share a tree, which they do
+    /// not (see `scene_bands_are_created_bottom_to_top_in_a_fixed_order`).
+    #[test]
+    fn add_rect_in_band_does_not_parent_into_a_different_band() {
+        let rt = headless_runtime();
+        let rect = rt
+            .add_rect_in_band(Band::Background, 4, 4, [0.0, 1.0, 0.0, 1.0])
+            .expect("rect");
+        let overlay = rt.inner.graphics.borrow().as_ref().unwrap().overlay_band;
+        assert!(
+            !rt.rect_is_in_band(rect, overlay),
+            "a Band::Background rect must not be parented into the overlay band"
+        );
+        assert_eq!(rt.remove_rect(rect), Some(()));
+    }
+
+    /// `add_rect_in_band` before `init_graphics` must error, exactly like
+    /// `add_rect` does, rather than panicking on the missing scene.
+    #[test]
+    fn add_rect_in_band_before_init_graphics_errors() {
+        let rt = Runtime::new().expect("runtime");
+        assert!(
+            rt.add_rect_in_band(Band::Overlay, 8, 8, [0.0, 0.0, 0.0, 1.0])
+                .is_err()
+        );
+    }
+
+    /// A rect parented into `Band::Toplevel` survives `clear_toplevels` —
+    /// the band tree itself outlives every toplevel ever parented into it,
+    /// so a rect that is a *sibling* of toplevel trees (not a descendant of
+    /// any one of them) must never be purged just because some toplevel
+    /// died. This is the property `RectParent::Band` exists to keep
+    /// distinct from `RectParent::Toplevel`.
+    #[test]
+    fn clear_toplevels_does_not_purge_a_band_rect() {
+        let rt = headless_runtime();
+        let toplevel_band = rt.toplevel_band_ptr().expect("toplevel band");
+        let tree =
+            NonNull::new(unsafe { sys::wlr_scene_tree_create(toplevel_band.as_ptr()) }).unwrap();
+        let toplevel = ToplevelId(next_id());
+        rt.record_toplevel(toplevel, NonNull::<sys::wlr_xdg_toplevel>::dangling(), tree);
+
+        let rect = rt
+            .add_rect_in_band(Band::Toplevel, 4, 4, [0.0, 0.0, 1.0, 1.0])
+            .expect("rect");
+
+        rt.clear_toplevels();
+
+        assert!(
+            rt.inner.rects.borrow().contains_key(&rect),
+            "a Band::Toplevel rect must survive clear_toplevels: it is a \
+             sibling of toplevel trees, not a child of one"
+        );
+        assert_eq!(rt.remove_rect(rect), Some(()));
+    }
+
+    /// `set_layer_surface_output` on a dead layer-surface id must be `None`
+    /// without ever reaching output resolution — proven by handing it an
+    /// `OutputId` this runtime never issued either (an unresolvable id on
+    /// both sides still misses cleanly, and the layer-surface check must
+    /// short-circuit before touching the outputs table at all).
+    #[test]
+    fn set_layer_surface_output_on_a_dead_layer_id_is_none() {
+        let rt = headless_runtime();
+        let dead_layer = LayerSurfaceId::dangling_for_test();
+        let dead_output = OutputId(next_id());
+        assert_eq!(rt.set_layer_surface_output(dead_layer, dead_output), None);
+    }
+
+    /// `set_layer_surface_output` assigns the raw `output` field on a live
+    /// layer surface — the sanctioned mechanism `layer.rs`'s
+    /// `LayerSurface::output_id` doc now points back to (there is no
+    /// wlroots setter function; see `set_layer_surface_output`'s own doc).
+    #[test]
+    fn set_layer_surface_output_assigns_the_raw_output_field() {
+        let rt = headless_runtime();
+
+        // A zeroed, stack-local `wlr_layer_surface_v1` stands in for a live
+        // one: `set_layer_surface_output` only ever writes `(*raw).output`,
+        // and this test only ever reads that one field back, so a zeroed
+        // value (rather than a real wlroots object) is enough — the same
+        // "never dereferenced beyond one known field" trick
+        // `raise_toplevel_reorders_only_within_the_toplevel_band` and
+        // friends use for dangling `wlr_xdg_toplevel`/`wlr_scene_tree`
+        // pointers.
+        //
+        // SAFETY: `wlr_layer_surface_v1` is a plain `repr(C)` struct of
+        // pointers/integers/bools with no validity invariant tighter than
+        // "well-defined bit pattern" for any of them (a null pointer, a `0`
+        // integer and `false` are all valid), so its all-zero bit pattern
+        // is a valid value of the type. Every field but `output` stays
+        // zero/null for this test's whole life and is never read.
+        let mut layer_surface: sys::wlr_layer_surface_v1 = unsafe { std::mem::zeroed() };
+        let raw = NonNull::from(&mut layer_surface);
+        let id = LayerSurfaceId(next_id());
+        rt.record_layer_surface(
+            id,
+            raw,
+            NonNull::<sys::wlr_scene_tree>::dangling(),
+            Layer::Background,
+        );
+
+        let output_raw = NonNull::<sys::wlr_output>::dangling();
+        let output_id = OutputId(next_id());
+        rt.record_output(output_id, output_raw);
+
+        assert_eq!(rt.set_layer_surface_output(id, output_id), Some(()));
+        assert_eq!(layer_surface.output, output_raw.as_ptr());
     }
 }
