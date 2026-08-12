@@ -84,14 +84,43 @@ pub(crate) struct RuntimeInner {
     /// and has to name the toplevel it belongs to. Keyed by the tree pointer
     /// because that is what `wlr_scene_node_at` walks back to.
     ///
-    /// Write-only in this release: `record_toplevel`/`forget_toplevel`/
-    /// `clear_toplevels` keep it in step with `toplevels`, but nothing reads
-    /// it yet — no hit test exists until the seat task (0.20.3) adds pointer
-    /// input and needs to turn a `wlr_scene_node_at` result back into a
-    /// `ToplevelId`. Kept in step with `toplevels` from this release rather
-    /// than added alongside the hit test itself, so a toplevel announced
-    /// under 0.20.2 is already indexed when 0.20.3 starts reading this table.
+    /// Read by [`Runtime::toplevel_at`], the hit test that turns a
+    /// `wlr_scene_node_at` result back into a `ToplevelId`, added in 0.20.4
+    /// alongside seat and pointer input. Kept in step with `toplevels` since
+    /// 0.20.2 — `record_toplevel`/`forget_toplevel`/`clear_toplevels` write
+    /// both together — rather than added alongside the hit test itself, so a
+    /// toplevel announced under 0.20.2 was already indexed by the time
+    /// 0.20.4 started reading this table.
     pub(crate) tree_to_toplevel: RefCell<HashMap<usize, ToplevelId>>,
+
+    /// The seat, once [`Runtime::create_seat`] has run. `None` for a
+    /// consumer that only wants a scene and never takes input.
+    pub(crate) seat: RefCell<Option<NonNull<sys::wlr_seat>>>,
+    /// The cursor, created alongside the seat and attached to this runtime's
+    /// output layout. `None` exactly when `seat` is.
+    pub(crate) cursor: RefCell<Option<NonNull<sys::wlr_cursor>>>,
+    /// The xcursor theme manager, created alongside the seat. `None` exactly
+    /// when `seat` is.
+    pub(crate) xcursor: RefCell<Option<NonNull<sys::wlr_xcursor_manager>>>,
+    /// Whether [`Runtime::create_seat`] has already asked the xcursor
+    /// manager to load its theme at the default scale — done once, lazily,
+    /// on the first pointer event rather than eagerly in `create_seat`,
+    /// since loading a theme touches the filesystem and a consumer that
+    /// never gets a pointer device should not pay for it.
+    pub(crate) cursor_image_loaded: std::cell::Cell<bool>,
+
+    /// Every keyboard the backend has announced, so capabilities can be
+    /// recomputed as devices arrive and leave.
+    ///
+    /// Never dereferenced — only its length is read, by
+    /// [`Runtime::has_keyboard`], to decide whether the seat should advertise
+    /// the keyboard capability. That is what makes a stale entry (a keyboard
+    /// this vec still names after it was unplugged; nothing in this release
+    /// watches a keyboard's own destroy to remove it) harmless rather than a
+    /// dangling-pointer hazard: the count is wrong in that case, not unsound.
+    /// A future release that needs to read through these pointers would have
+    /// to close that gap first.
+    pub(crate) keyboards: RefCell<Vec<NonNull<sys::wlr_keyboard>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -185,6 +214,11 @@ impl Runtime {
                 xdg_shell: RefCell::new(None),
                 toplevels: RefCell::new(HashMap::new()),
                 tree_to_toplevel: RefCell::new(HashMap::new()),
+                seat: RefCell::new(None),
+                cursor: RefCell::new(None),
+                xcursor: RefCell::new(None),
+                cursor_image_loaded: std::cell::Cell::new(false),
+                keyboards: RefCell::new(Vec::new()),
             }),
         })
     }
@@ -758,6 +792,260 @@ impl Runtime {
         // event and cannot free the toplevel synchronously.
         unsafe { sys::wlr_xdg_toplevel_send_close(entry.raw.as_ptr()) };
         Some(())
+    }
+
+    /// Create the seat, its cursor, and the cursor theme.
+    ///
+    /// One call rather than three for the same reason
+    /// [`init_graphics`](Runtime::init_graphics) bundles its six: a seat with
+    /// no cursor attached to the output layout produces pointer coordinates
+    /// that mean nothing, and there is no useful compositor that wants one
+    /// without the other.
+    ///
+    /// Works whether or not [`init_graphics`](Runtime::init_graphics) has run
+    /// yet — a compositor is free to create its seat first — but a cursor
+    /// created before graphics has no output layout to attach to, and
+    /// `wlr_cursor_attach_output_layout`'s own doc says a cursor left that
+    /// way "allows infinite movement in any direction and does not support
+    /// absolute input events" until one is attached. This crate does
+    /// not attach one retroactively if `init_graphics` runs later; call
+    /// `init_graphics` first if that matters to you.
+    ///
+    /// The seat's capabilities are recomputed as devices arrive (see
+    /// `backend.rs`'s `on_new_input`), so a session with no keyboard yet does
+    /// not advertise one.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] if a seat already exists on this runtime;
+    /// [`Error::Create`] naming whichever wlroots constructor returned null.
+    pub fn create_seat(&self, display: &Display, name: &str) -> Result<()> {
+        if self.inner.seat.borrow().is_some() {
+            return Err(Error::Operation("Runtime::create_seat called twice"));
+        }
+        let layout = self.inner.graphics.borrow().as_ref().map(|g| g.layout);
+        let c_name = std::ffi::CString::new(name)
+            .map_err(|_| Error::Operation("Runtime::create_seat name contains a NUL"))?;
+
+        // SAFETY: `display` is live for the call; the seat and the cursor are
+        // owned by wlroots and torn down with the display; each pointer is
+        // null-checked before use. `layout`, when present, is this runtime's
+        // own from `init_graphics` and outlives the call (see `Graphics`'s
+        // own doc); when absent, `wlr_cursor_attach_output_layout` is simply
+        // not called, which is the documented "no layout attached" state.
+        unsafe {
+            let seat = sys::wlr_seat_create(display.as_ptr(), c_name.as_ptr());
+            let seat = NonNull::new(seat).ok_or(Error::Create("wlr_seat_create"))?;
+
+            let cursor = sys::wlr_cursor_create();
+            let cursor = NonNull::new(cursor).ok_or(Error::Create("wlr_cursor_create"))?;
+            if let Some(layout) = layout {
+                sys::wlr_cursor_attach_output_layout(cursor.as_ptr(), layout.as_ptr());
+            }
+
+            let xcursor = sys::wlr_xcursor_manager_create(std::ptr::null(), 24);
+            let xcursor =
+                NonNull::new(xcursor).ok_or(Error::Create("wlr_xcursor_manager_create"))?;
+
+            *self.inner.seat.borrow_mut() = Some(seat);
+            *self.inner.cursor.borrow_mut() = Some(cursor);
+            *self.inner.xcursor.borrow_mut() = Some(xcursor);
+        }
+        Ok(())
+    }
+
+    /// Give the keyboard focus to `id`.
+    ///
+    /// Sends the client the modifier state and the currently-held keys along
+    /// with the enter, which is what stops a newly-focused client believing
+    /// no keys are down when one is. Idempotent: focusing the already-focused
+    /// surface sends nothing, so a compositor may call this on every geometry
+    /// sync without churning leave/enter pairs at the client.
+    ///
+    /// `None` if this runtime has no seat, no live toplevel with that id, or
+    /// the toplevel is **not currently mapped**. The last case is the ledger
+    /// entry this method exists to close: this crate's own model has no
+    /// concept of "unmapped" visible to a by-id caller (an id resolves or it
+    /// does not), but wlroots does — a toplevel can exist, and be announced,
+    /// before its client ever attaches a buffer, and again after that buffer
+    /// is withdrawn — and asking wlroots to focus an unmapped surface's
+    /// keyboard is not something this crate lets through silently. Checked
+    /// directly against `wlr_surface::mapped`, which is wlroots' own flag,
+    /// rather than tracked separately here, so it can never drift out of
+    /// step with the map/unmap events
+    /// [`ToplevelHandler`](crate::ToplevelHandler) delivers.
+    pub fn focus_toplevel_keyboard(&self, id: ToplevelId) -> Option<()> {
+        let seat = *self.inner.seat.borrow();
+        let seat = seat?;
+        let entry = self.toplevel_entry(id)?;
+
+        // SAFETY: a present entry names a live toplevel (its destroy callback
+        // removes the entry before wlroots frees it), so `base->surface` is a
+        // live surface. `wlr_seat_get_keyboard` returns null when no keyboard
+        // is attached, which the enter call tolerates by taking no keycodes.
+        unsafe {
+            let base = (*entry.raw.as_ptr()).base;
+            if base.is_null() {
+                return None;
+            }
+            let surface = (*base).surface;
+            if surface.is_null() {
+                return None;
+            }
+            // The unmapped check: see this method's own doc for why.
+            if !(*surface).mapped {
+                return None;
+            }
+            if (*seat.as_ptr()).keyboard_state.focused_surface == surface {
+                return Some(());
+            }
+            let kb = sys::wlr_seat_get_keyboard(seat.as_ptr());
+            if kb.is_null() {
+                sys::wlr_seat_keyboard_notify_enter(
+                    seat.as_ptr(),
+                    surface,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                );
+            } else {
+                sys::wlr_seat_keyboard_notify_enter(
+                    seat.as_ptr(),
+                    surface,
+                    (*kb).keycodes.as_ptr(),
+                    (*kb).num_keycodes,
+                    &raw mut (*kb).modifiers,
+                );
+            }
+        }
+        Some(())
+    }
+
+    /// Take the keyboard focus away from whatever has it.
+    ///
+    /// Harmless when nothing is focused, which matters: this is what every
+    /// "nothing is focused now" path calls, unconditionally.
+    pub fn clear_keyboard_focus(&self) {
+        let seat = *self.inner.seat.borrow();
+        let Some(seat) = seat else { return };
+        // SAFETY: the seat is owned by the display and live for as long as
+        // this runtime can be used; the call is a no-op when nothing has
+        // focus.
+        unsafe { sys::wlr_seat_keyboard_notify_clear_focus(seat.as_ptr()) };
+    }
+
+    /// The topmost toplevel at scene coordinates `(x, y)`, and the position
+    /// within it.
+    ///
+    /// Walks the scene with `wlr_scene_node_at` and then walks *up* from
+    /// whatever node it found to the tree this crate created for a toplevel —
+    /// a hit almost always lands on a surface node several levels down (a
+    /// subsurface, a popup), and the compositor cares about the window, not
+    /// the node. The returned `(f64, f64)` is whatever `wlr_scene_node_at`
+    /// reported relative to the node it actually hit — surface-local
+    /// coordinates for the leaf that was struck, which is what
+    /// `wlr_seat_pointer_notify_*` wants.
+    ///
+    /// `None` when nothing is there, which includes hitting the background
+    /// rect, and when [`init_graphics`](Runtime::init_graphics) has not run
+    /// (there is no scene to test against).
+    pub fn toplevel_at(&self, x: f64, y: f64) -> Option<(ToplevelId, f64, f64)> {
+        let scene = self.scene_ptr()?;
+        let mut nx = 0.0;
+        let mut ny = 0.0;
+        // SAFETY: the scene is this runtime's own and outlives the call; the
+        // two out-parameters are live stack locals.
+        let node = unsafe {
+            sys::wlr_scene_node_at(
+                &raw mut (*scene.as_ptr()).tree.node,
+                x,
+                y,
+                &raw mut nx,
+                &raw mut ny,
+            )
+        };
+        if node.is_null() {
+            return None;
+        }
+
+        // The borrow is taken and released inside the loop rather than held
+        // across it: nothing in the loop calls out, but the rule is absolute.
+        // SAFETY: `node` is a live node in this scene, and every `parent`
+        // pointer in a scene is either a live tree or null at the root.
+        let mut tree = unsafe { (*node).parent };
+        while !tree.is_null() {
+            let found = self
+                .inner
+                .tree_to_toplevel
+                .borrow()
+                .get(&(tree as usize))
+                .copied();
+            if let Some(id) = found {
+                return Some((id, nx, ny));
+            }
+            // SAFETY: as above.
+            tree = unsafe { (*tree).node.parent };
+        }
+        None
+    }
+
+    /// Where the cursor is, in scene coordinates. `(0.0, 0.0)` with no seat.
+    pub fn pointer_position(&self) -> (f64, f64) {
+        let cursor = *self.inner.cursor.borrow();
+        let Some(cursor) = cursor else { return (0.0, 0.0) };
+        // SAFETY: the cursor was created by `create_seat` and lives as long
+        // as this runtime.
+        unsafe { ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y) }
+    }
+
+    pub(crate) fn seat_ptr(&self) -> Option<NonNull<sys::wlr_seat>> {
+        *self.inner.seat.borrow()
+    }
+
+    pub(crate) fn cursor_ptr(&self) -> Option<NonNull<sys::wlr_cursor>> {
+        *self.inner.cursor.borrow()
+    }
+
+    /// Make sure the cursor has an image, loading the default xcursor theme
+    /// on the first call and setting the `left_ptr` image whenever the
+    /// cursor has none. Called from every pointer motion/button callback in
+    /// `backend.rs` rather than once at `create_seat` time, so a consumer
+    /// that never gets a pointer device pays nothing for a theme it never
+    /// needed.
+    ///
+    /// A no-op with no seat.
+    pub(crate) fn ensure_cursor_image(&self) {
+        let (Some(cursor), Some(xcursor)) = (self.cursor_ptr(), *self.inner.xcursor.borrow())
+        else {
+            return;
+        };
+        // SAFETY: both pointers were created together by `create_seat` and
+        // live as long as this runtime. `wlr_xcursor_manager_load` is safe
+        // to call more than once (idempotent per its own header doc); this
+        // crate calls it at most once per process via the `Cell` guard, and
+        // `wlr_cursor_set_xcursor` is safe to call unconditionally.
+        unsafe {
+            if !self.inner.cursor_image_loaded.get() {
+                sys::wlr_xcursor_manager_load(xcursor.as_ptr(), 1.0);
+                self.inner.cursor_image_loaded.set(true);
+            }
+            sys::wlr_cursor_set_xcursor(cursor.as_ptr(), xcursor.as_ptr(), c"left_ptr".as_ptr());
+        }
+    }
+
+    /// Record a keyboard the backend announced, for
+    /// [`has_keyboard`](Runtime::has_keyboard) to count.
+    pub(crate) fn record_keyboard(&self, kb: NonNull<sys::wlr_keyboard>) {
+        self.inner.keyboards.borrow_mut().push(kb);
+    }
+
+    /// Whether this runtime has ever been told of a keyboard. Used to decide
+    /// whether the seat should advertise the keyboard capability; see
+    /// `RuntimeInner::keyboards`'s own doc for why a stale entry (one whose
+    /// device has since been unplugged) does not make this unsound, only
+    /// occasionally generous.
+    pub(crate) fn has_keyboard(&self) -> bool {
+        !self.inner.keyboards.borrow().is_empty()
     }
 }
 

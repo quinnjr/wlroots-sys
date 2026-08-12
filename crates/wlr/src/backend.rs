@@ -36,10 +36,21 @@ use std::rc::Rc;
 
 use crate::dispatch::{Dispatcher, Event};
 use crate::id::{SourceId, attach_id, find_id};
+use crate::seat::{KeyEvent, Modifiers};
 use crate::{
     Display, Error, EventLoop, Handlers, LoopHandler, Output, OutputHandler, OutputId, Result,
     Runtime, Toplevel, ToplevelId, sys,
 };
+
+/// `wl_seat.capability` bit values from `wayland.xml`. Not bound by
+/// `wlr-sys`: `wlr_seat_set_capabilities` takes a bare `u32` (see its own
+/// doc), so bindgen never had a reason to generate this enum from the
+/// wlroots headers it processes, and the core `wl_seat` protocol enum is not
+/// among them either. ABI-stable — it is core Wayland protocol, not
+/// wlroots — and checked by `capability_bits_match_the_wayland_protocol`
+/// below rather than trusted from this comment alone.
+const WL_SEAT_CAPABILITY_POINTER: u32 = 1;
+const WL_SEAT_CAPABILITY_KEYBOARD: u32 = 2;
 
 /// A wlroots backend.
 ///
@@ -323,6 +334,22 @@ struct Session<'r, S> {
     /// `on_toplevel_destroy` — before the toplevel is freed, mirroring
     /// `outputs` above.
     toplevels: RefCell<HashMap<ToplevelId, ToplevelListeners>>,
+
+    /// This run's listeners on every announced input device, one
+    /// [`InputDevice`] per device. Unlike `outputs` and `toplevels` this is
+    /// not keyed — nothing in this release needs to name one device's
+    /// listeners individually, only to keep every one of them linked for the
+    /// run and drop them (and so unlink) when it ends.
+    inputs: RefCell<Vec<InputDevice>>,
+
+    /// Whether the most recently delivered [`Event::Key`] was consumed by the
+    /// handler. `on_key` cannot get a return value back through
+    /// `Dispatcher::emit` directly — an `extern "C"` callback has no way to
+    /// receive one — so `deliver_all` records the answer here instead, and
+    /// `on_key` reads it back once `emit` returns to decide whether to
+    /// forward the key to the client. See `SeatHandler::key`'s own doc for
+    /// what "consumed" means to a compositor.
+    last_key_consumed: Cell<bool>,
 
     /// The runtime this run is serving, borrowed for the call.
     ///
@@ -673,7 +700,7 @@ impl<'d> Backend<'d> {
                 deliver: deliver_all::<S>,
                 should_stop: should_stop_of::<S>,
                 register_sources: Backend::register_fd_sources::<S>,
-                register_extra: Backend::register_toplevel_shell::<S>,
+                register_extra: Backend::register_toplevel_and_input::<S>,
             },
         )
     }
@@ -705,6 +732,8 @@ impl<'d> Backend<'d> {
             dispatcher: Dispatcher::new(&raw mut *state),
             outputs: RefCell::new(HashMap::new()),
             toplevels: RefCell::new(HashMap::new()),
+            inputs: RefCell::new(Vec::new()),
+            last_key_consumed: Cell::new(false),
             runtime,
             deliver: hooks.deliver,
         };
@@ -864,33 +893,59 @@ impl<'d> Backend<'d> {
 
     /// Link the xdg shell's `new_toplevel` listener, if
     /// [`Runtime::create_xdg_shell`](crate::Runtime::create_xdg_shell) was
-    /// called before this run. Returns an empty vec otherwise — a consumer
-    /// who never creates a shell gets no toplevels, which is not an error.
-    fn register_toplevel_shell<S: Handlers>(
+    /// called before this run, and the backend's `new_input` listener, if
+    /// [`Runtime::create_seat`](crate::Runtime::create_seat) was. Either or
+    /// both may be absent — a consumer who never creates a shell gets no
+    /// toplevels, and one who never creates a seat gets no input, and
+    /// neither is an error.
+    fn register_toplevel_and_input<S: Handlers>(
         &self,
         runtime: &Runtime,
         session: &Session<'_, S>,
     ) -> Result<Vec<Registration>> {
-        let Some(shell) = runtime.xdg_shell_ptr() else {
-            return Ok(Vec::new());
-        };
-        // SAFETY: `create_xdg_shell` returned a non-null `wlr_xdg_shell`
-        // owned by the display, which this call requires to outlive it (see
-        // `run_all`'s own doc); `session` is a local that never moves again
-        // for the rest of `run_inner`, so the erased pointer stays valid for
-        // as long as this registration lives. No liveness flag is needed:
-        // the shell's owner (the display) cannot predecease this call.
-        let registration = unsafe {
-            Registration::link(
-                &raw mut (*shell.as_ptr()).events.new_toplevel,
-                on_new_toplevel::<S>,
-                (session as *const Session<'_, S>).cast::<()>(),
-                std::ptr::null(),
-                None,
-                None,
-            )
-        };
-        Ok(vec![registration])
+        let mut regs = Vec::new();
+
+        if let Some(shell) = runtime.xdg_shell_ptr() {
+            // SAFETY: `create_xdg_shell` returned a non-null `wlr_xdg_shell`
+            // owned by the display, which this call requires to outlive it
+            // (see `run_all`'s own doc); `session` is a local that never
+            // moves again for the rest of `run_inner`, so the erased pointer
+            // stays valid for as long as this registration lives. No
+            // liveness flag is needed: the shell's owner (the display)
+            // cannot predecease this call.
+            regs.push(unsafe {
+                Registration::link(
+                    &raw mut (*shell.as_ptr()).events.new_toplevel,
+                    on_new_toplevel::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                    None,
+                    None,
+                )
+            });
+        }
+
+        if runtime.seat_ptr().is_some() {
+            // SAFETY: the backend is live (`run_inner` checked `alive_or_err`
+            // on entry, before this hook runs), so `events.new_input` is an
+            // initialised signal; and the registration is not required to
+            // outlive the backend, because `self.alive` — cleared by
+            // `on_backend_destroy` before wlroots frees anything — is passed
+            // as the liveness flag. `session` is paired with `on_new_input`
+            // at the same `S`, as above.
+            regs.push(unsafe {
+                Registration::link(
+                    &raw mut (*self.raw.as_ptr()).events.new_input,
+                    on_new_input::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    &raw const *self.alive,
+                    None,
+                    None,
+                )
+            });
+        }
+
+        Ok(regs)
     }
 }
 
@@ -1079,6 +1134,44 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         Event::ToplevelUnmapped(id) => state.unmapped(id),
         Event::ToplevelTitleChanged(id) => with_toplevel(session, id, |t| state.title_changed(t)),
         Event::ToplevelDestroyed(id) => state.toplevel_destroyed(id),
+        Event::Key {
+            keysym,
+            modifiers_raw,
+            pressed,
+            time_msec,
+        } => {
+            // Not a safety comment: `modifiers_raw` is the mask read at
+            // emission time in `on_key`, carried through the event rather
+            // than re-read here, because a deferred key must report the
+            // modifiers that were held *when it was pressed* — see
+            // `Modifiers::from_mask`'s own doc.
+            let modifiers = Modifiers::from_mask(modifiers_raw);
+            let ev = KeyEvent::new(keysym, modifiers, pressed, time_msec);
+            let consumed = state.key(&ev);
+            session.last_key_consumed.set(consumed);
+        }
+        Event::PointerMotion {
+            x_milli,
+            y_milli,
+            time_msec,
+        } => {
+            state.pointer_motion(x_milli as f64 / 1000.0, y_milli as f64 / 1000.0, time_msec);
+        }
+        Event::PointerButton {
+            x_milli,
+            y_milli,
+            button,
+            pressed,
+            time_msec,
+        } => {
+            state.pointer_button(
+                x_milli as f64 / 1000.0,
+                y_milli as f64 / 1000.0,
+                button,
+                pressed,
+                time_msec,
+            );
+        }
     }
 }
 
@@ -1589,6 +1682,452 @@ unsafe extern "C" fn on_toplevel_destroy<S: Handlers>(
     }
 }
 
+/// One live input device: its own liveness flag, and every registration
+/// linked against it.
+///
+/// A device can be unplugged mid-run independently of the backend dying —
+/// nothing else in this crate ties a keyboard or pointer's lifetime to
+/// anything longer-lived — so each one gets the same watch-your-own-destroy
+/// treatment [`Backend::alive`] gives the backend itself: `_destroy` clears
+/// `alive` from `events.destroy`, which wlroots emits before freeing
+/// anything, and every other registration below carries `alive` as its own
+/// liveness flag so [`Registration::drop`] knows to skip unlinking from a
+/// signal that no longer exists.
+struct InputDevice {
+    /// `Rc`, not `Box`, for the same reason [`Backend::alive`] is: the flag's
+    /// address must survive this struct moving — `Session::inputs` is a
+    /// `Vec`, which reallocates — because every other field's `Registration`
+    /// holds a raw pointer into it.
+    ///
+    /// Never read through this field directly (hence `#[allow(dead_code)]`):
+    /// every access is through the raw pointers handed to `Registration::link`
+    /// at construction time. Its only job here is to keep the `Cell`'s
+    /// allocation alive for as long as this `InputDevice` is, which the type
+    /// system already guarantees without reading it.
+    #[allow(dead_code)]
+    alive: Rc<Cell<bool>>,
+    _destroy: Registration,
+    /// The device's own signals: two for a keyboard (`key`, `modifiers`),
+    /// three for a pointer (`motion`, `motion_absolute`, `button`), zero for
+    /// a device type this crate does not yet wire up (the destroy watch
+    /// above is still linked, so `has_keyboard`/capabilities stay correct
+    /// even for an ignored device type).
+    _listeners: Vec<Registration>,
+}
+
+/// The layout-agnostic, unshifted keysym for `keycode` (evdev numbering) on
+/// `kb`'s **compiled keymap** — fixed at layout 0, level 0, deliberately not
+/// `kb`'s live `xkb_state`. See [`KeyEvent::keysym`] for why: reading through
+/// `xkb_state` would report whatever layout group the user last switched to,
+/// which is exactly the layout-*dependence* this function exists to avoid.
+///
+/// `0` (`XKB_KEY_NoSymbol`) if `kb` has no compiled keymap, or the key has no
+/// symbol at layout 0 level 0.
+///
+/// # Safety
+///
+/// `kb` must be a live `wlr_keyboard`.
+unsafe fn keysym_for_keycode(kb: *mut sys::wlr_keyboard, keycode: u32) -> u32 {
+    // SAFETY: the caller guarantees `kb` is live, so `kb.keymap` (when
+    // non-null) is a live, immutable-for-the-process-of-reading `xkb_keymap`
+    // — wlroots only replaces it wholesale via `wlr_keyboard_set_keymap`,
+    // never mutates it in place, and that call cannot run concurrently with
+    // this one (wlroots' event loop is single-threaded). `syms` is a live
+    // stack local for the out-parameter.
+    unsafe {
+        let keymap = (*kb).keymap;
+        if keymap.is_null() {
+            return 0;
+        }
+        let xkb_keycode = keycode + 8; // evdev -> xkb numbering
+        let mut syms: *const xkbcommon_sys::xkb_keysym_t = std::ptr::null();
+        let count =
+            xkbcommon_sys::xkb_keymap_key_get_syms_by_level(keymap, xkb_keycode, 0, 0, &raw mut syms);
+        if count <= 0 || syms.is_null() {
+            return 0;
+        }
+        // SAFETY: `count > 0` and a non-null `syms` together mean
+        // `xkb_keymap_key_get_syms_by_level` wrote a valid array of at least
+        // one `xkb_keysym_t`, per its own contract; reading the first
+        // element is always in bounds.
+        *syms
+    }
+}
+
+/// A new input device was announced. Give a keyboard a keymap and hook it to
+/// the seat, attach a pointer to the cursor, and recompute the seat's
+/// capabilities either way.
+unsafe extern "C" fn on_new_input<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `Backend::register_toplevel_and_input` into
+    // `wlr_backend.events.new_input`, whose data is a live `wlr_input_device`
+    // — live and fully initialised, including its own `events.destroy`, at
+    // the point wlroots announces it. The device outlives this call; the
+    // listeners linked below outlive it too, up to the device's own destroy
+    // (watched via `InputDevice::_destroy`) or the end of this run,
+    // whichever comes first.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let device = data.cast::<sys::wlr_input_device>();
+        let runtime = (*session).runtime;
+
+        let alive = Rc::new(Cell::new(true));
+        // Registered before anything else on this device, mirroring
+        // `Backend::autocreate`'s own death watch: wlroots emits a device's
+        // `events.destroy` synchronously before freeing it, so this is
+        // linked while the device is certainly still live, and nothing
+        // between here and the device's eventual removal can observe it
+        // freed without this flag having already been cleared first.
+        let destroy = Registration::link(
+            &raw mut (*device).events.destroy,
+            on_backend_destroy,
+            std::ptr::null(),
+            &raw const *alive,
+            None,
+            None,
+        );
+
+        let mut listeners = Vec::new();
+
+        match (*device).type_ {
+            sys::wlr_input_device_type::WLR_INPUT_DEVICE_KEYBOARD => {
+                let kb = sys::wlr_keyboard_from_input_device(device);
+                if !kb.is_null() {
+                    // A default keymap from the environment (XKB_DEFAULT_LAYOUT
+                    // and friends), because a keyboard with no keymap produces
+                    // no keysyms at all and the symptom is silence.
+                    let ctx = xkbcommon_sys::xkb_context_new(xkbcommon_sys::XKB_CONTEXT_NO_FLAGS);
+                    if !ctx.is_null() {
+                        let keymap = xkbcommon_sys::xkb_keymap_new_from_names(
+                            ctx,
+                            std::ptr::null(),
+                            xkbcommon_sys::XKB_KEYMAP_COMPILE_NO_FLAGS,
+                        );
+                        if !keymap.is_null() {
+                            sys::wlr_keyboard_set_keymap(kb, keymap);
+                            xkbcommon_sys::xkb_keymap_unref(keymap);
+                        }
+                        xkbcommon_sys::xkb_context_unref(ctx);
+                    }
+                    sys::wlr_keyboard_set_repeat_info(kb, 25, 600);
+
+                    if let Some(seat) = runtime.seat_ptr() {
+                        sys::wlr_seat_set_keyboard(seat.as_ptr(), kb);
+                    }
+                    runtime.record_keyboard(NonNull::new_unchecked(kb));
+
+                    listeners.push(Registration::link(
+                        &raw mut (*kb).events.key,
+                        on_key::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                        None,
+                        None,
+                    ));
+                    listeners.push(Registration::link(
+                        &raw mut (*kb).events.modifiers,
+                        on_modifiers::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                        None,
+                        None,
+                    ));
+                }
+            }
+            sys::wlr_input_device_type::WLR_INPUT_DEVICE_POINTER => {
+                if let Some(cursor) = runtime.cursor_ptr() {
+                    sys::wlr_cursor_attach_input_device(cursor.as_ptr(), device);
+                }
+                let pointer = sys::wlr_pointer_from_input_device(device);
+                if !pointer.is_null() {
+                    listeners.push(Registration::link(
+                        &raw mut (*pointer).events.motion,
+                        on_pointer_motion::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                        None,
+                        None,
+                    ));
+                    listeners.push(Registration::link(
+                        &raw mut (*pointer).events.motion_absolute,
+                        on_pointer_motion_absolute::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                        None,
+                        None,
+                    ));
+                    listeners.push(Registration::link(
+                        &raw mut (*pointer).events.button,
+                        on_pointer_button::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                        None,
+                        None,
+                    ));
+                }
+            }
+            _ => {}
+        }
+
+        (*session).inputs.borrow_mut().push(InputDevice {
+            alive,
+            _destroy: destroy,
+            _listeners: listeners,
+        });
+
+        // Capabilities are recomputed rather than accumulated: a seat that
+        // advertises a keyboard it does not have makes clients wait for a
+        // keymap that never arrives.
+        if let Some(seat) = runtime.seat_ptr() {
+            let mut caps = WL_SEAT_CAPABILITY_POINTER;
+            if runtime.has_keyboard() {
+                caps |= WL_SEAT_CAPABILITY_KEYBOARD;
+            }
+            sys::wlr_seat_set_capabilities(seat.as_ptr(), caps);
+        }
+    }
+}
+
+unsafe extern "C" fn on_key<S: Handlers>(l: *mut sys::wl_listener, data: *mut std::ffi::c_void) {
+    // SAFETY: linked by `on_new_input` into a live keyboard's `events.key`,
+    // whose data is a `wlr_keyboard_key_event`; the keyboard is live for the
+    // duration of the emission.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_keyboard_key_event>();
+        let Some(seat) = (*session).runtime.seat_ptr() else { return };
+        // The seat's *active* keyboard, not necessarily the one that fired
+        // this signal: with more than one keyboard attached, every key
+        // event is still funnelled through one logical keyboard identity at
+        // the seat, which is what `wlr_seat_set_keyboard` in `on_new_input`
+        // established. A client sees one keyboard regardless of how many
+        // physical ones are plugged in.
+        let kb = sys::wlr_seat_get_keyboard(seat.as_ptr());
+        if kb.is_null() {
+            return;
+        }
+
+        let keysym = keysym_for_keycode(kb, (*ev).keycode);
+        let modifiers_raw = sys::wlr_keyboard_get_modifiers(kb);
+        let pressed = (*ev).state == sys::wl_keyboard_key_state::WL_KEYBOARD_KEY_STATE_PRESSED;
+
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::Key {
+                keysym,
+                modifiers_raw,
+                pressed,
+                time_msec: (*ev).time_msec,
+            },
+            deliver,
+        );
+
+        // Forwarding is decided by the handler's return value, which
+        // `deliver_all` records on the session (an `extern "C"` callback
+        // cannot get one back through `emit` directly). A deferred key —
+        // one queued behind another handler already running — is forwarded,
+        // because the compositor's answer is not known yet and dropping a
+        // keystroke is worse than forwarding one.
+        if !(*session).last_key_consumed.get() {
+            sys::wlr_seat_set_keyboard(seat.as_ptr(), kb);
+            sys::wlr_seat_keyboard_notify_key(
+                seat.as_ptr(),
+                (*ev).time_msec,
+                (*ev).keycode,
+                (*ev).state.0,
+            );
+        }
+    }
+}
+
+unsafe extern "C" fn on_modifiers<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live keyboard's
+    // `events.modifiers`. No handler is called; this only forwards state the
+    // focused client needs to interpret the keys it is being sent.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(seat) = (*session).runtime.seat_ptr() else { return };
+        let kb = sys::wlr_seat_get_keyboard(seat.as_ptr());
+        if kb.is_null() {
+            return;
+        }
+        sys::wlr_seat_keyboard_notify_modifiers(seat.as_ptr(), &raw mut (*kb).modifiers);
+    }
+}
+
+/// Move the pointer focus and forward a motion/button to whatever the cursor
+/// is over, or clear pointer focus if it is over nothing. Shared by
+/// `on_pointer_motion`, `on_pointer_motion_absolute` and `on_pointer_button`
+/// rather than factored differently: each caller already has the seat and
+/// the cursor's current position in hand, and this only names the repeated
+/// "find the surface under the cursor and enter/clear-focus it" step, not
+/// the forwarding call itself (which differs per caller: motion sends a
+/// motion, a button sends nothing here at all).
+///
+/// # Safety
+///
+/// `seat` must be a live `wlr_seat`.
+unsafe fn enter_surface_under_cursor<S>(
+    session: &Session<'_, S>,
+    seat: *mut sys::wlr_seat,
+    x: f64,
+    y: f64,
+    time_msec: u32,
+) {
+    match session.runtime.toplevel_at(x, y) {
+        Some((id, sx, sy)) => {
+            let Some(entry) = session.runtime.toplevel_entry(id) else {
+                // SAFETY: the seat is live, per this function's contract.
+                unsafe { sys::wlr_seat_pointer_notify_clear_focus(seat) };
+                return;
+            };
+            // SAFETY: a present entry names a live toplevel (its destroy
+            // callback removes the entry before wlroots frees it), so
+            // `base->surface` is a live surface. The seat is live per this
+            // function's own contract.
+            unsafe {
+                let base = (*entry.raw.as_ptr()).base;
+                let surface = if base.is_null() { std::ptr::null_mut() } else { (*base).surface };
+                if surface.is_null() {
+                    sys::wlr_seat_pointer_notify_clear_focus(seat);
+                    return;
+                }
+                sys::wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
+                sys::wlr_seat_pointer_notify_motion(seat, time_msec, sx, sy);
+            }
+        }
+        // SAFETY: as above.
+        None => unsafe { sys::wlr_seat_pointer_notify_clear_focus(seat) },
+    }
+}
+
+unsafe extern "C" fn on_pointer_motion<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live pointer's `events.motion`,
+    // whose data is a `wlr_pointer_motion_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_pointer_motion_event>();
+        let runtime = (*session).runtime;
+        let Some(cursor) = runtime.cursor_ptr() else { return };
+
+        let device = &raw mut (*(*ev).pointer).base;
+        sys::wlr_cursor_move(cursor.as_ptr(), device, (*ev).delta_x, (*ev).delta_y);
+        runtime.ensure_cursor_image();
+
+        let (x, y) = ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y);
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::PointerMotion {
+                x_milli: (x * 1000.0) as i64,
+                y_milli: (y * 1000.0) as i64,
+                time_msec: (*ev).time_msec,
+            },
+            deliver,
+        );
+
+        if let Some(seat) = runtime.seat_ptr() {
+            enter_surface_under_cursor(&*session, seat.as_ptr(), x, y, (*ev).time_msec);
+            sys::wlr_seat_pointer_notify_frame(seat.as_ptr());
+        }
+    }
+}
+
+unsafe extern "C" fn on_pointer_motion_absolute<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live pointer's
+    // `events.motion_absolute`, whose data is a
+    // `wlr_pointer_motion_absolute_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_pointer_motion_absolute_event>();
+        let runtime = (*session).runtime;
+        let Some(cursor) = runtime.cursor_ptr() else { return };
+
+        let device = &raw mut (*(*ev).pointer).base;
+        sys::wlr_cursor_warp_absolute(cursor.as_ptr(), device, (*ev).x, (*ev).y);
+        runtime.ensure_cursor_image();
+
+        let (x, y) = ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y);
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::PointerMotion {
+                x_milli: (x * 1000.0) as i64,
+                y_milli: (y * 1000.0) as i64,
+                time_msec: (*ev).time_msec,
+            },
+            deliver,
+        );
+
+        if let Some(seat) = runtime.seat_ptr() {
+            enter_surface_under_cursor(&*session, seat.as_ptr(), x, y, (*ev).time_msec);
+            sys::wlr_seat_pointer_notify_frame(seat.as_ptr());
+        }
+    }
+}
+
+unsafe extern "C" fn on_pointer_button<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live pointer's `events.button`,
+    // whose data is a `wlr_pointer_button_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_pointer_button_event>();
+        let runtime = (*session).runtime;
+        let Some(cursor) = runtime.cursor_ptr() else { return };
+        runtime.ensure_cursor_image();
+
+        let (x, y) = ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y);
+        let pressed = (*ev).state == sys::wl_pointer_button_state::WL_POINTER_BUTTON_STATE_PRESSED;
+
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::PointerButton {
+                x_milli: (x * 1000.0) as i64,
+                y_milli: (y * 1000.0) as i64,
+                button: (*ev).button,
+                pressed,
+                time_msec: (*ev).time_msec,
+            },
+            deliver,
+        );
+
+        // Unconditional, unlike a key: there is no interception for a
+        // button, so this always runs after the handler has had its say —
+        // see `SeatHandler::pointer_button`'s own doc for why.
+        if let Some(seat) = runtime.seat_ptr() {
+            // Enter/focus the surface under the cursor first, exactly as a
+            // motion would, so a click on a window that never got a prior
+            // motion event (the pointer warped there, say) still has pointer
+            // focus before the button reaches it.
+            enter_surface_under_cursor(&*session, seat.as_ptr(), x, y, (*ev).time_msec);
+            sys::wlr_seat_pointer_notify_button(seat.as_ptr(), (*ev).time_msec, (*ev).button, (*ev).state);
+            sys::wlr_seat_pointer_notify_frame(seat.as_ptr());
+        }
+    }
+}
+
 /// Borrow the output `id` names, if this session still knows of one.
 ///
 /// The registry borrow is released before `f` runs: a handler can re-enter
@@ -1649,12 +2188,19 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         // Unreachable: `run` never registers an xdg shell, so it cannot
         // produce one of these either. Dropped for the same reason as
         // `FdReady` above.
+        //
+        // Same for every input event: `run` never registers a seat either
+        // (`Backend::register_toplevel_and_input` is `run_all`'s hook; `run`
+        // uses `no_extra`), so these cannot be produced on this path.
         Event::NewToplevel(..)
         | Event::ToplevelInitialCommit(..)
         | Event::ToplevelMapped(..)
         | Event::ToplevelUnmapped(..)
         | Event::ToplevelTitleChanged(..)
-        | Event::ToplevelDestroyed(..) => {}
+        | Event::ToplevelDestroyed(..)
+        | Event::Key { .. }
+        | Event::PointerMotion { .. }
+        | Event::PointerButton { .. } => {}
     }
 }
 
@@ -2066,6 +2612,8 @@ mod tests {
                 dispatcher: Dispatcher::new(state),
                 outputs: RefCell::new(HashMap::new()),
                 toplevels: RefCell::new(HashMap::new()),
+                inputs: RefCell::new(Vec::new()),
+                last_key_consumed: Cell::new(false),
                 runtime: &runtime,
                 deliver: deliver::<Recorder>,
             };
@@ -2235,6 +2783,8 @@ mod tests {
             dispatcher: Dispatcher::new(std::ptr::null_mut()),
             outputs: RefCell::new(HashMap::new()),
             toplevels: RefCell::new(HashMap::new()),
+            inputs: RefCell::new(Vec::new()),
+            last_key_consumed: Cell::new(false),
             runtime: &runtime,
             deliver: deliver::<Recorder>,
         };

@@ -34,10 +34,12 @@ impl ToplevelId {
     ///
     /// Public because "every by-id operation reports a miss rather than
     /// dereferencing" is a promise to consumers, and a promise nobody can
-    /// write a test for is not one. It is also the *only* way to obtain a
-    /// `ToplevelId` outside a handler, the field being private — so hiding it
-    /// from the docs would leave the promise untestable in practice while
-    /// still freezing the function.
+    /// write a test for is not one. Not the only way to obtain a `ToplevelId`
+    /// outside a handler any more —
+    /// [`dangling_nth_for_test`](Self::dangling_nth_for_test) is another —
+    /// but this one and that one are the *only* ways, the field being
+    /// private, so hiding either from the docs would leave the promise
+    /// untestable in practice while still freezing the function.
     ///
     /// That every by-id operation misses on this value is part of the frozen
     /// contract, not an implementation accident: ids come from a process-wide
@@ -66,8 +68,20 @@ impl ToplevelId {
     /// Callers wanting an id that also never collides with
     /// [`dangling_for_test`](Self::dangling_for_test)'s must pass `n >= 1`:
     /// `dangling_nth_for_test(0)` is `dangling_for_test()` itself.
+    ///
+    /// `n` is folded into a fixed 2^32-wide band immediately below
+    /// `u64::MAX` (`n % 2^32`) rather than subtracted from `u64::MAX`
+    /// unclamped. Every id this crate ever issues comes from `next_id`,
+    /// a single process-wide `u64` counter shared by every id type in the
+    /// crate — so a caller passing a very large `n` (this crate's own tests
+    /// probe `n = u64::MAX`) must still land on a value the counter cannot
+    /// reach in this process's lifetime, or the "no live toplevel can have
+    /// this id" guarantee above would be false for that call. The band is
+    /// still 2^32 ids wide, which is far more than any test needs, and
+    /// `n = 0` still aliases [`dangling_for_test`](Self::dangling_for_test)
+    /// and `n` in `1..=8` is unaffected (`n % 2^32 == n` for those).
     pub fn dangling_nth_for_test(n: u64) -> ToplevelId {
-        ToplevelId(u64::MAX - n)
+        ToplevelId(u64::MAX - (n % (1u64 << 32)))
     }
 }
 
@@ -210,5 +224,34 @@ mod tests {
         for n in 1..=8 {
             assert_ne!(base, ToplevelId::dangling_nth_for_test(n));
         }
+    }
+
+    /// The ledgered fix: an `n` near `u64::MAX` must not wrap past the
+    /// reserved band and alias a value a real (small, counter-issued) id
+    /// could ever reach. Before the `% (1 << 32)` fold,
+    /// `dangling_nth_for_test(u64::MAX)` computed `u64::MAX - u64::MAX == 0`
+    /// — well inside real-id space, since ids start at 1 and count up — which
+    /// made the "no live toplevel can have this id" doc guarantee false for
+    /// that call.
+    #[test]
+    fn nth_for_test_stays_in_band_at_the_extremes() {
+        for n in [u64::MAX, u64::MAX - 5] {
+            let id = ToplevelId::dangling_nth_for_test(n);
+            assert!(
+                id.0 > u32::MAX as u64,
+                "n = {n} produced {:#x}, which is not in the reserved band",
+                id.0
+            );
+        }
+    }
+
+    /// `n = 0` must still alias `dangling_for_test`'s value after the fold —
+    /// the documented behaviour the fix is required to preserve exactly.
+    #[test]
+    fn nth_for_test_zero_still_aliases_dangling_for_test() {
+        assert_eq!(
+            ToplevelId::dangling_nth_for_test(0),
+            ToplevelId::dangling_for_test()
+        );
     }
 }

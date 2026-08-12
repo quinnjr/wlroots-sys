@@ -4,7 +4,7 @@
 //! every handler as `&mut S`. Every method is defaulted, so a consumer
 //! implements only what they use.
 
-use crate::{Output, OutputId, Toplevel, ToplevelId};
+use crate::{KeyEvent, Output, OutputId, Toplevel, ToplevelId};
 
 /// Output lifecycle and frame events.
 ///
@@ -216,9 +216,53 @@ pub trait ToplevelHandler {
 
 /// Seat, keyboard and pointer input.
 ///
-/// Declared with no methods in 0.20.1 for the same reason as
-/// [`ToplevelHandler`]; the methods arrive in 0.20.3.
-pub trait SeatHandler {}
+/// Declared with no methods in 0.20.1 so that [`Handlers`]' supertrait list
+/// could freeze; these were added in 0.20.4, additively. An
+/// `impl SeatHandler for MyState {}` written against 0.20.1 still compiles
+/// unchanged.
+///
+/// # Panics
+///
+/// As for [`OutputHandler`]: every method here runs underneath an
+/// `extern "C"` frame, so a panic escaping one **aborts the process**.
+pub trait SeatHandler {
+    /// A key was pressed or released.
+    ///
+    /// Return `true` if the compositor consumed it — a bound action fired —
+    /// and it will **not** be forwarded to the focused client. Return `false`
+    /// and the library forwards it, which is what makes typing work.
+    ///
+    /// Called for releases as well as presses; a compositor that only binds
+    /// presses must check [`KeyEvent::pressed`] and return `false` otherwise,
+    /// or the matching release never reaches the client and it will believe
+    /// the key is still held.
+    fn key(&mut self, event: &KeyEvent<'_>) -> bool {
+        let _ = event;
+        false
+    }
+
+    /// The pointer moved to `(x, y)` in scene coordinates.
+    ///
+    /// The library has already moved the cursor and updated the client-side
+    /// pointer focus before this is called, so an implementor is free to do
+    /// nothing at all; this exists for compositors that track the pointer
+    /// themselves (for a drag, or a snap preview).
+    fn pointer_motion(&mut self, x: f64, y: f64, time_msec: u32) {
+        let _ = (x, y, time_msec);
+    }
+
+    /// A pointer button changed state at `(x, y)` in scene coordinates.
+    ///
+    /// `button` is a Linux input event code — `BTN_LEFT` is `0x110`.
+    ///
+    /// The library forwards the button to the focused client after this
+    /// returns, unconditionally: unlike keys there is no interception,
+    /// because a compositor that wants to swallow a click does it by not
+    /// having a client under the pointer, not by filtering.
+    fn pointer_button(&mut self, x: f64, y: f64, button: u32, pressed: bool, time_msec: u32) {
+        let _ = (x, y, button, pressed, time_msec);
+    }
+}
 
 /// Every handler trait at once.
 ///

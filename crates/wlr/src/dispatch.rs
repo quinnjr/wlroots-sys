@@ -67,6 +67,31 @@ pub(crate) enum Event {
     ToplevelUnmapped(ToplevelId),
     ToplevelTitleChanged(ToplevelId),
     ToplevelDestroyed(ToplevelId),
+
+    Key {
+        keysym: u32,
+        modifiers_raw: u32,
+        pressed: bool,
+        time_msec: u32,
+    },
+    /// Coordinates are thousandths of a pixel in an `i64` rather than `f64`:
+    /// `Event` derives `Eq` (this module's own reentrancy tests compare it
+    /// with `assert_eq!`), and an `f64` field would force that derive off,
+    /// since `f64` implements neither `Eq` nor `Hash`. Delivery converts
+    /// back (`x_milli as f64 / 1000.0`); sub-milli-pixel precision has no
+    /// consumer.
+    PointerMotion {
+        x_milli: i64,
+        y_milli: i64,
+        time_msec: u32,
+    },
+    PointerButton {
+        x_milli: i64,
+        y_milli: i64,
+        button: u32,
+        pressed: bool,
+        time_msec: u32,
+    },
 }
 
 thread_local! {
