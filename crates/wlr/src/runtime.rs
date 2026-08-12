@@ -726,6 +726,12 @@ impl Runtime {
     /// scene to attach the rect to — in that case the payload names this
     /// call rather than a C function, since none ran; match on the variant,
     /// as this doc already tells you to).
+    ///
+    /// **Known hole, kept for compatibility:** `width`/`height` are not
+    /// checked non-negative — see [`set_rect_size`](Runtime::set_rect_size)'s
+    /// doc, which documents the identical assert on the sibling C call this
+    /// one shares it with (`wlr_scene_rect_create` versus
+    /// `wlr_scene_rect_set_size`).
     pub fn add_rect(&self, width: i32, height: i32, color: [f32; 4]) -> Result<RectId> {
         let scene = {
             let g = self.inner.graphics.borrow();
@@ -843,6 +849,15 @@ impl Runtime {
     }
 
     /// Resize a rect. `None` if this runtime never issued `rect`.
+    ///
+    /// **Known hole, kept for compatibility:** unlike
+    /// [`set_buffer_dest_size`](Runtime::set_buffer_dest_size), this does
+    /// **not** guard against a negative `width`/`height` — this signature
+    /// was already published (0.20.1) before that asymmetry was noticed, and
+    /// adding the guard now would silently change already-published
+    /// behaviour (an abort becoming a `None`) rather than a memory-safety
+    /// fix, so it is documented instead. `wlr_scene_rect_set_size` asserts
+    /// both are non-negative; passing a negative one aborts the process.
     pub fn set_rect_size(&self, rect: RectId, width: i32, height: i32) -> Option<()> {
         let raw = self.rect_ptr(rect)?;
         // SAFETY: as for `set_rect_position` — see that call's own comment
@@ -890,16 +905,18 @@ impl Runtime {
     ///
     /// # Errors
     ///
-    /// [`Error::Operation`] if `rgba.len() != (width * height * 4) as usize`
-    /// or either dimension is less than 1 — checked before anything is
-    /// allocated or handed to wlroots. [`Error::Create`] if
+    /// [`Error::Operation`] if `rgba.len() != (width * height * 4) as usize`,
+    /// either dimension is less than 1, or `width` is large enough that
+    /// `width * 4` would overflow `i32` (`> i32::MAX / 4`, around 512M
+    /// pixels wide) — all checked before anything is allocated or handed to
+    /// wlroots. [`Error::Create`] if
     /// [`init_graphics`](Runtime::init_graphics) has not run yet (mirroring
     /// [`add_rect`](Runtime::add_rect); see that method's own doc for why
     /// this names the Rust entry point rather than a C function), or if
     /// wlroots could not create the node.
     pub fn add_buffer(&self, width: i32, height: i32, rgba: &[u8]) -> Result<BufferId> {
-        if width < 1 || height < 1 || rgba.len() != (width as usize) * (height as usize) * 4 {
-            return Err(Error::Operation("pixel length"));
+        if !crate::buffer::validate_pixels(width, height, rgba.len()) {
+            return Err(Error::Operation("pixel buffer dimensions or length"));
         }
         let scene = {
             let g = self.inner.graphics.borrow();
@@ -945,8 +962,8 @@ impl Runtime {
     ///
     /// `None` if this runtime has no live toplevel with that id (including a
     /// stale one), or on any of [`add_buffer`](Runtime::add_buffer)'s error
-    /// conditions (wrong pixel length, a non-positive dimension, or wlroots
-    /// refusing to create the node).
+    /// conditions (wrong pixel length, a non-positive or overflow-prone
+    /// dimension, or wlroots refusing to create the node).
     pub fn add_buffer_in_toplevel(
         &self,
         toplevel: ToplevelId,
@@ -954,7 +971,7 @@ impl Runtime {
         height: i32,
         rgba: &[u8],
     ) -> Option<BufferId> {
-        if width < 1 || height < 1 || rgba.len() != (width as usize) * (height as usize) * 4 {
+        if !crate::buffer::validate_pixels(width, height, rgba.len()) {
             return None;
         }
         let entry = self.toplevel_entry(toplevel)?;
@@ -984,7 +1001,19 @@ impl Runtime {
     ///
     /// `None` if this runtime never issued `buffer`, or on
     /// [`add_buffer`](Runtime::add_buffer)'s validation error conditions
-    /// (wrong pixel length, or a non-positive dimension).
+    /// (wrong pixel length, or a non-positive or overflow-prone dimension).
+    ///
+    /// Safe to call from a handler at any point, including while a frame is
+    /// mid-render: the swap this performs (`wlr_scene_buffer_set_buffer`,
+    /// below) can never land inside a renderer's own
+    /// `begin_data_ptr_access`/`end_data_ptr_access` bracket on the *old*
+    /// buffer, because this crate's whole event loop is single-threaded and
+    /// no renderer call that opens such a bracket re-enters handler code —
+    /// see `buffer.rs`'s module doc for the fuller argument. If either of
+    /// those two facts ever stopped holding (a second thread, or a render
+    /// callback that calls back into a handler), this call could race a
+    /// renderer reading through the pointer `pixel_begin_data_ptr_access`
+    /// handed out for the buffer being replaced.
     pub fn update_buffer(
         &self,
         buffer: BufferId,
@@ -992,7 +1021,7 @@ impl Runtime {
         height: i32,
         rgba: &[u8],
     ) -> Option<()> {
-        if width < 1 || height < 1 || rgba.len() != (width as usize) * (height as usize) * 4 {
+        if !crate::buffer::validate_pixels(width, height, rgba.len()) {
             return None;
         }
         let node = self.buffer_ptr(buffer)?;
@@ -1003,7 +1032,9 @@ impl Runtime {
         // mirroring `rect_ptr`'s). `wlr_scene_buffer_set_buffer` locks `buf`
         // (its own new consumer reference) and unlocks whatever buffer the
         // node held before, exactly mirroring the create-time handoff —
-        // see `buffer.rs`'s module doc.
+        // see `buffer.rs`'s module doc. That unlock cannot race a renderer
+        // still reading the old buffer's data pointer — see this method's
+        // own doc above.
         unsafe { sys::wlr_scene_buffer_set_buffer(node.as_ptr(), buf) };
         // SAFETY: as above — releases this call's own producer reference.
         unsafe { sys::wlr_buffer_drop(buf) };
@@ -1019,10 +1050,28 @@ impl Runtime {
     }
 
     /// Scale a buffer node's on-screen size independently of its pixel
-    /// size. `None` if this runtime never issued `buffer`.
+    /// size. `None` if this runtime never issued `buffer`, **or if either
+    /// `width` or `height` is negative** — `wlr_scene_buffer_set_dest_size`
+    /// asserts both are non-negative, and an assert failure aborts the
+    /// process, so this is checked first rather than handed through. (Zero
+    /// is accepted and passed on: wlroots documents zero as "use the
+    /// buffer's own size", not as an error.)
+    ///
+    /// [`set_rect_size`](Runtime::set_rect_size) has the identical C-side
+    /// assert on `wlr_scene_rect_set_size` and is **not** guarded — that
+    /// method was already published before this one existed, so adding the
+    /// guard there now would be an observable behaviour change to a frozen
+    /// signature. Noted here rather than silently left inconsistent.
     pub fn set_buffer_dest_size(&self, buffer: BufferId, width: i32, height: i32) -> Option<()> {
+        if width < 0 || height < 0 {
+            return None;
+        }
         let node = self.buffer_ptr(buffer)?;
-        // SAFETY: as for `update_buffer`.
+        // SAFETY: as for `update_buffer`. `width`/`height` are checked
+        // non-negative just above, which is `wlr_scene_buffer_set_dest_size`'s
+        // own precondition (violating it is an assert-abort in wlroots, not
+        // memory-unsafety, but this crate's own "panic-free public fn" rule
+        // treats an abort the same way a panic would be).
         unsafe { sys::wlr_scene_buffer_set_dest_size(node.as_ptr(), width, height) };
         Some(())
     }
