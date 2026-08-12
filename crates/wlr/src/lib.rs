@@ -100,7 +100,7 @@ pub use output::Output;
 pub use runtime::Runtime;
 pub use scene::RectId;
 pub use seat::{KeyEvent, Modifiers};
-pub use toplevel::{Toplevel, ToplevelId};
+pub use toplevel::{Edges, Toplevel, ToplevelId};
 
 /// The wlroots version this build of `wlr` binds, as `(major, minor)`.
 ///

@@ -216,6 +216,51 @@ impl<'h> Toplevel<'h> {
     }
 }
 
+/// Which edge(s) of a toplevel an interactive resize is dragging.
+///
+/// A plain `bool` per edge rather than a bitflags type: xdg-shell's
+/// `xdg_toplevel_resize_edge` is a small, closed, protocol-frozen set (a
+/// corner drag sets two adjacent edges; nothing else is representable), and
+/// four named fields make an edge check at the call site
+/// (`edges.left`) read straight through, with no bit constant to look up.
+///
+/// `Default` is every field `false` — no edge — which is also what
+/// [`is_empty`](Edges::is_empty) reports on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Edges {
+    /// The top edge is being dragged.
+    pub top: bool,
+    /// The bottom edge is being dragged.
+    pub bottom: bool,
+    /// The left edge is being dragged.
+    pub left: bool,
+    /// The right edge is being dragged.
+    pub right: bool,
+}
+
+impl Edges {
+    /// True if no edge is set.
+    pub fn is_empty(self) -> bool {
+        !(self.top || self.bottom || self.left || self.right)
+    }
+
+    /// Decode xdg-shell's `xdg_toplevel_resize_edge` bitmask, as carried by
+    /// `wlr_xdg_toplevel_resize_event::edges`: `top` = 1, `bottom` = 2,
+    /// `left` = 4, `right` = 8, a corner ORing the two adjacent bits
+    /// together. Unknown bits are ignored rather than rejected — a future
+    /// protocol extension setting one is not this crate's concern, and
+    /// there is nowhere to report it from an event handler that returns
+    /// nothing.
+    pub(crate) fn from_xdg(bits: u32) -> Edges {
+        Edges {
+            top: bits & 1 != 0,
+            bottom: bits & 2 != 0,
+            left: bits & 4 != 0,
+            right: bits & 8 != 0,
+        }
+    }
+}
+
 /// Copy a wlroots-owned C string field out, or `None` if it is null.
 ///
 /// # Safety
@@ -232,7 +277,49 @@ unsafe fn cstr_field(p: *mut std::os::raw::c_char) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::ToplevelId;
+    use super::{Edges, ToplevelId};
+
+    #[test]
+    fn from_xdg_decodes_every_bit_and_their_combinations() {
+        assert_eq!(Edges::from_xdg(0), Edges::default());
+        assert_eq!(
+            Edges::from_xdg(1),
+            Edges {
+                top: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            Edges::from_xdg(2),
+            Edges {
+                bottom: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            Edges::from_xdg(4),
+            Edges {
+                left: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            Edges::from_xdg(8),
+            Edges {
+                right: true,
+                ..Default::default()
+            }
+        );
+        // top-left corner: bits ORed together.
+        assert_eq!(
+            Edges::from_xdg(1 | 4),
+            Edges {
+                top: true,
+                left: true,
+                ..Default::default()
+            }
+        );
+    }
 
     /// Both test constructors sit at the top of the id space, which a
     /// process-wide counter starting at 1 and only ever incrementing can

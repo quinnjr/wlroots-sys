@@ -4,7 +4,7 @@
 //! every handler as `&mut S`. Every method is defaulted, so a consumer
 //! implements only what they use.
 
-use crate::{KeyEvent, Output, OutputId, Toplevel, ToplevelId};
+use crate::{Edges, KeyEvent, Output, OutputId, Toplevel, ToplevelId};
 
 /// Output lifecycle and frame events.
 ///
@@ -142,6 +142,11 @@ pub trait LoopHandler {
 /// `impl ToplevelHandler for MyState {}` written against 0.20.1 still
 /// compiles unchanged.
 ///
+/// `request_maximize`, `request_fullscreen`, `request_move` and
+/// `request_resize` were added in 0.20.7, additively for the same reason:
+/// every one of them is defaulted, so an impl written against any earlier
+/// 0.20.x still compiles.
+///
 /// # Panics
 ///
 /// As for [`OutputHandler`]: every method runs underneath an `extern "C"`
@@ -211,6 +216,57 @@ pub trait ToplevelHandler {
     /// a map, never indexing.
     fn toplevel_destroyed(&mut self, id: ToplevelId) {
         let _ = id;
+    }
+
+    /// The client asked to (un)maximize (`xdg_toplevel.set_maximized` /
+    /// `unset_maximized`). `maximize` is the requested state.
+    ///
+    /// xdg-shell requires the compositor to answer *every* such request
+    /// with a configure, whether or not it grants it — ignoring the request
+    /// is legal, ignoring the configure is not. This default does nothing,
+    /// and it is still protocol-correct: the guarantee lives in the
+    /// **dispatch layer**, not here. After this method returns, dispatch
+    /// unconditionally schedules a bare configure on this toplevel
+    /// ([`Runtime::configure_toplevel`](crate::Runtime::configure_toplevel))
+    /// — a default trait method has no `Runtime` to send one with itself.
+    /// wlroots coalesces a second scheduled configure into whatever this
+    /// call already staged (`Runtime::set_toplevel_*`), so overriding this
+    /// method to honour the request costs nothing extra: the dispatch
+    /// layer's schedule after it returns is harmless, not a duplicate send.
+    fn request_maximize(&mut self, toplevel: &Toplevel<'_>, maximize: bool) {
+        let _ = (toplevel, maximize);
+    }
+
+    /// The client asked to (un)fullscreen (`xdg_toplevel.set_fullscreen` /
+    /// `unset_fullscreen`). Same contract as
+    /// [`request_maximize`](ToplevelHandler::request_maximize): the
+    /// dispatch layer, not this default, guarantees the answering
+    /// configure.
+    fn request_fullscreen(&mut self, toplevel: &Toplevel<'_>, fullscreen: bool) {
+        let _ = (toplevel, fullscreen);
+    }
+
+    /// Interactive move request (`xdg_toplevel.move`).
+    ///
+    /// Unlike the two methods above, ignoring this is legal on its own
+    /// terms — an interactive move that never starts is not a protocol
+    /// violation — so there is no configure guarantee to keep and no
+    /// dispatch-layer follow-up after it.
+    ///
+    /// The seat and serial the wire event carries are deliberately not
+    /// passed through: this crate does not forward them, so a compositor
+    /// wanting interactive move/resize enforces its own pointer-pressed
+    /// policy rather than trusting the client's claim of an active grab.
+    fn request_move(&mut self, id: ToplevelId) {
+        let _ = id;
+    }
+
+    /// Interactive resize request (`xdg_toplevel.resize`). `edges` is which
+    /// edge(s) the client reported dragging. Same no-guarantee contract as
+    /// [`request_move`](ToplevelHandler::request_move), and the same reason
+    /// seat/serial are absent.
+    fn request_resize(&mut self, id: ToplevelId, edges: Edges) {
+        let _ = (id, edges);
     }
 }
 

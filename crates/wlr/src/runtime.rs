@@ -1373,6 +1373,34 @@ impl Runtime {
         Some(())
     }
 
+    /// Schedules a bare configure — the protocol-required answer to a state
+    /// request ([`ToplevelHandler::request_maximize`](crate::ToplevelHandler::request_maximize)
+    /// / [`request_fullscreen`](crate::ToplevelHandler::request_fullscreen))
+    /// the compositor declines, or otherwise ignores.
+    ///
+    /// "Schedules", not "sends", same as every configure this crate
+    /// produces: it goes out from an idle source, and wlroots coalesces
+    /// this with any configure already staged by
+    /// `Runtime::set_toplevel_*` in the same turn into one wire message
+    /// rather than two — so calling this after already staging state is
+    /// harmless, not a duplicate send.
+    ///
+    /// `None` for an unknown or stale id; see `set_toplevel_size`'s doc.
+    pub fn configure_toplevel(&self, id: ToplevelId) -> Option<()> {
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: an entry is removed by the destroy callback, which
+        // wlroots runs before it frees the toplevel, so a present entry
+        // names a live one, and a live `wlr_xdg_toplevel` always has a
+        // non-null `base` (its owning `wlr_xdg_surface`), set once at
+        // role-object creation and never cleared while the toplevel is
+        // alive — the same argument `Toplevel::current_size` documents.
+        unsafe {
+            let base = (*entry.raw.as_ptr()).base;
+            sys::wlr_xdg_surface_schedule_configure(base);
+        }
+        Some(())
+    }
+
     /// Ask the client to close.
     ///
     /// A request, not a destruction: a well-behaved client may prompt the

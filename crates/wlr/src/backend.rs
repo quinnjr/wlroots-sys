@@ -378,10 +378,11 @@ struct OutputEntry {
     _destroy: Registration,
 }
 
-/// One live toplevel's listeners: the surface's commit/map/unmap and the
-/// toplevel's own set_title/destroy. Field order is not load-bearing here —
+/// One live toplevel's listeners: the surface's commit/map/unmap, the
+/// toplevel's own set_title/destroy, and its four client-request signals
+/// (maximize/fullscreen/move/resize). Field order is not load-bearing here —
 /// unlike [`OutputEntry`], nothing here owns the `Bound` any of the others
-/// recover their session from — but all five must drop, and so unlink, as
+/// recover their session from — but all nine must drop, and so unlink, as
 /// part of removing the entry, which happens while the toplevel is still
 /// alive.
 struct ToplevelListeners {
@@ -390,6 +391,10 @@ struct ToplevelListeners {
     _unmap: Registration,
     _set_title: Registration,
     _destroy: Registration,
+    _request_maximize: Registration,
+    _request_fullscreen: Registration,
+    _request_move: Registration,
+    _request_resize: Registration,
 }
 
 /// Clears `Runtime`'s toplevel tables when the `run_inner` call holding this
@@ -1238,6 +1243,27 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         Event::ToplevelUnmapped(id) => state.unmapped(id),
         Event::ToplevelTitleChanged(id) => with_toplevel(session, id, |t| state.title_changed(t)),
         Event::ToplevelDestroyed(id) => state.toplevel_destroyed(id),
+        Event::RequestMaximize(id, maximize) => {
+            with_toplevel(session, id, |t| state.request_maximize(t, maximize));
+            // xdg-shell requires an answer to *every* maximize/fullscreen
+            // request, whether or not the compositor grants it — and the
+            // trait default has no `Runtime` to send one with, so this is
+            // the dispatch layer discharging that guarantee instead.
+            // Unconditional, not "only if the handler staged nothing":
+            // wlroots coalesces a second scheduled configure into whatever
+            // the handler above already staged through `Runtime::
+            // set_toplevel_*`, so scheduling here as well is harmless, and
+            // "harmless every time" is simpler and no less correct than
+            // probing for whether it was needed this time.
+            session.runtime.configure_toplevel(id);
+        }
+        Event::RequestFullscreen(id, fullscreen) => {
+            with_toplevel(session, id, |t| state.request_fullscreen(t, fullscreen));
+            // As above.
+            session.runtime.configure_toplevel(id);
+        }
+        Event::RequestMove(id) => state.request_move(id),
+        Event::RequestResize(id, edges) => state.request_resize(id, edges),
         Event::Key {
             keysym,
             modifiers_raw,
@@ -1629,6 +1655,38 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             None,
             Some(id),
         );
+        let request_maximize = Registration::link(
+            &raw mut (*toplevel).events.request_maximize,
+            on_toplevel_request_maximize::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            None,
+            Some(id),
+        );
+        let request_fullscreen = Registration::link(
+            &raw mut (*toplevel).events.request_fullscreen,
+            on_toplevel_request_fullscreen::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            None,
+            Some(id),
+        );
+        let request_move = Registration::link(
+            &raw mut (*toplevel).events.request_move,
+            on_toplevel_request_move::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            None,
+            Some(id),
+        );
+        let request_resize = Registration::link(
+            &raw mut (*toplevel).events.request_resize,
+            on_toplevel_request_resize::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            None,
+            Some(id),
+        );
 
         // The registrations own the callbacks' backing memory, so they live in
         // the session's table alongside the entry, and are dropped when it is
@@ -1644,6 +1702,10 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
                 _unmap: unmap,
                 _set_title: set_title,
                 _destroy: destroy,
+                _request_maximize: request_maximize,
+                _request_fullscreen: request_fullscreen,
+                _request_move: request_move,
+                _request_resize: request_resize,
             },
         );
         drop(displaced);
@@ -1795,6 +1857,110 @@ unsafe extern "C" fn on_toplevel_destroy<S: Handlers>(
         (*session)
             .dispatcher
             .emit(&*session, Event::ToplevelDestroyed(id), deliver);
+    }
+}
+
+/// The client asked to (un)maximize.
+unsafe extern "C" fn on_toplevel_request_maximize<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_toplevel` into `wlr_xdg_toplevel.events.
+    // request_maximize`, unlinked from `on_toplevel_destroy` before the
+    // toplevel is freed. `_data` is deliberately unused: this crate reads
+    // the requested state through the toplevel entry the runtime already
+    // tracks — the same "do not trust `data`'s identity, resolve by id
+    // instead" discipline `on_toplevel_set_title` and its siblings already
+    // follow, applied here to the *payload* rather than just the id, so
+    // this callback makes no claim at all about what wlroots puts in
+    // `data` for this signal.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).toplevel else { return };
+        let Some(entry) = (*session).runtime.toplevel_entry(id) else {
+            return;
+        };
+        let maximize = (*entry.raw.as_ptr()).requested.maximized;
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::RequestMaximize(id, maximize), deliver);
+    }
+}
+
+/// The client asked to (un)fullscreen.
+unsafe extern "C" fn on_toplevel_request_fullscreen<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_toplevel_request_maximize`, on `wlr_xdg_toplevel.
+    // events.request_fullscreen`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).toplevel else { return };
+        let Some(entry) = (*session).runtime.toplevel_entry(id) else {
+            return;
+        };
+        let fullscreen = (*entry.raw.as_ptr()).requested.fullscreen;
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::RequestFullscreen(id, fullscreen),
+            deliver,
+        );
+    }
+}
+
+/// Interactive move request.
+unsafe extern "C" fn on_toplevel_request_move<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_toplevel` into `wlr_xdg_toplevel.events.
+    // request_move`. `_data` carries a `wlr_xdg_toplevel_move_event` (seat +
+    // serial), deliberately ignored: this crate does not forward them to
+    // the consumer, by design — see `ToplevelHandler::request_move`'s own
+    // doc. Only the id, from `Bound::toplevel`, is needed.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).toplevel else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::RequestMove(id), deliver);
+    }
+}
+
+/// Interactive resize request.
+unsafe extern "C" fn on_toplevel_request_resize<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_toplevel` into `wlr_xdg_toplevel.events.
+    // request_resize`, whose `data` is a live `wlr_xdg_toplevel_resize_event`
+    // (`wlr_xdg_shell.h`) for the duration of this emission. Seat and serial
+    // are ignored for the same reason `on_toplevel_request_move` ignores
+    // them; only `edges` is read. Guarded against null anyway, on the same
+    // "an `extern "C"` frame does not get to panic" footing as every other
+    // callback in this file — reading a null pointer would abort the
+    // process just as surely as a panic would.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).toplevel else { return };
+        let event = data.cast::<sys::wlr_xdg_toplevel_resize_event>();
+        let edges = if event.is_null() {
+            crate::Edges::default()
+        } else {
+            crate::Edges::from_xdg((*event).edges)
+        };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::RequestResize(id, edges), deliver);
     }
 }
 
@@ -2463,6 +2629,10 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::ToplevelUnmapped(..)
         | Event::ToplevelTitleChanged(..)
         | Event::ToplevelDestroyed(..)
+        | Event::RequestMaximize(..)
+        | Event::RequestFullscreen(..)
+        | Event::RequestMove(..)
+        | Event::RequestResize(..)
         | Event::Key { .. }
         | Event::PointerMotion { .. }
         | Event::PointerButton { .. } => {}
