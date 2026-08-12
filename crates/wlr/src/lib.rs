@@ -76,6 +76,7 @@
 pub(crate) mod sys;
 
 mod backend;
+mod buffer;
 mod dispatch;
 mod display;
 mod error;
@@ -89,6 +90,7 @@ mod seat;
 mod toplevel;
 
 pub use backend::{Backend, Until};
+pub use buffer::BufferId;
 pub use display::{Display, EventLoop};
 pub use error::{Error, Result};
 pub use handler::{FdHandler, Handlers, LoopHandler, OutputHandler, SeatHandler, ToplevelHandler};

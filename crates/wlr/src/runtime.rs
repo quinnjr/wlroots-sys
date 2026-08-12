@@ -33,9 +33,10 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+use crate::buffer::create_pixel_buffer;
 use crate::id::{SourceId, next_id};
 use crate::scene::RectId;
-use crate::{Backend, Display, Error, Interest, Output, Result, ToplevelId, sys};
+use crate::{Backend, BufferId, Display, Error, Interest, Output, Result, ToplevelId, sys};
 
 /// A declared fd source: the descriptor, what it wants, and its id.
 ///
@@ -70,6 +71,10 @@ pub(crate) struct RuntimeInner {
     pub(crate) graphics: RefCell<Option<Graphics>>,
 
     pub(crate) rects: RefCell<HashMap<RectId, RectEntry>>,
+
+    /// Every live RGBA pixel-buffer scene node. Same shape and same purge
+    /// rules as `rects` — see [`BufferEntry`]'s own doc.
+    pub(crate) buffers: RefCell<HashMap<BufferId, BufferEntry>>,
 
     /// Every fd source currently registered with the event loop, keyed by
     /// the id its declaration in `sources` carries.
@@ -177,6 +182,24 @@ pub(crate) struct RectEntry {
     pub(crate) parent: Option<ToplevelId>,
 }
 
+/// A live RGBA pixel-buffer scene node: the node wlroots created for it, and
+/// which toplevel (if any) it is parented into.
+///
+/// Mirrors [`RectEntry`] exactly, including the parent tracking and its
+/// purge rules: see [`Runtime::forget_toplevel`] and
+/// [`Runtime::clear_toplevels`], both of which purge buffer entries
+/// alongside rect entries, without destroying the node — wlroots already
+/// destroys it recursively as part of freeing the parent tree.
+#[derive(Clone, Copy)]
+pub(crate) struct BufferEntry {
+    pub(crate) node: NonNull<sys::wlr_scene_buffer>,
+    /// `Some(id)` for a buffer [`Runtime::add_buffer_in_toplevel`] created,
+    /// parented into that toplevel's own scene tree. `None` for a root
+    /// buffer [`Runtime::add_buffer`] created, parented into the scene's
+    /// root tree instead.
+    pub(crate) parent: Option<ToplevelId>,
+}
+
 /// The scene graph, output layout, renderer and allocator — everything
 /// [`Runtime::init_graphics`] creates in one call and every later graphics
 /// operation reads.
@@ -259,6 +282,7 @@ impl Runtime {
                 sources: RefCell::new(Vec::new()),
                 graphics: RefCell::new(None),
                 rects: RefCell::new(HashMap::new()),
+                buffers: RefCell::new(HashMap::new()),
                 live_sources: RefCell::new(HashMap::new()),
                 pending_close: RefCell::new(Vec::new()),
                 xdg_shell: RefCell::new(None),
@@ -855,6 +879,192 @@ impl Runtime {
         self.inner.rects.borrow().get(&id).map(|e| e.raw)
     }
 
+    /// Add a scene node showing owned RGBA8888 pixels (bytes R, G, B, A per
+    /// pixel, row-major, stride = `width * 4`), at the root, at (0, 0) until
+    /// [`set_buffer_position`](Runtime::set_buffer_position) says otherwise
+    /// and on top of everything already in the scene — call
+    /// [`lower_buffer_to_bottom`](Runtime::lower_buffer_to_bottom) for a
+    /// background.
+    ///
+    /// Pixels are copied: `rgba` need not outlive this call.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] if `rgba.len() != (width * height * 4) as usize`
+    /// or either dimension is less than 1 — checked before anything is
+    /// allocated or handed to wlroots. [`Error::Create`] if
+    /// [`init_graphics`](Runtime::init_graphics) has not run yet (mirroring
+    /// [`add_rect`](Runtime::add_rect); see that method's own doc for why
+    /// this names the Rust entry point rather than a C function), or if
+    /// wlroots could not create the node.
+    pub fn add_buffer(&self, width: i32, height: i32, rgba: &[u8]) -> Result<BufferId> {
+        if width < 1 || height < 1 || rgba.len() != (width as usize) * (height as usize) * 4 {
+            return Err(Error::Operation("pixel length"));
+        }
+        let scene = {
+            let g = self.inner.graphics.borrow();
+            match g.as_ref() {
+                Some(g) => g.scene,
+                None => return Err(Error::Create("Runtime::add_buffer before init_graphics")),
+            }
+        };
+        let buf = create_pixel_buffer(width, height, rgba);
+        // SAFETY: the scene is this runtime's own and outlives the call;
+        // `buf` is a freshly leaked, fully initialised `wlr_buffer` from
+        // `create_pixel_buffer`, at `n_locks == 0` and not yet dropped. On
+        // success `wlr_scene_buffer_create` takes its own consumer lock on
+        // `buf` before this returns; on failure it never does. Either way
+        // `wlr_buffer_drop` below is the correct, unconditional next call —
+        // see `buffer.rs`'s own "Refcount story" doc for the full argument,
+        // including why this never leaks or double-frees on the failure
+        // path.
+        let node = unsafe { sys::wlr_scene_buffer_create(&raw mut (*scene.as_ptr()).tree, buf) };
+        // SAFETY: as above — releases this call's own producer reference,
+        // regardless of whether `wlr_scene_buffer_create` succeeded.
+        unsafe { sys::wlr_buffer_drop(buf) };
+        let node = NonNull::new(node).ok_or(Error::Create("wlr_scene_buffer_create"))?;
+        let id = BufferId(next_id());
+        self.inner
+            .buffers
+            .borrow_mut()
+            .insert(id, BufferEntry { node, parent: None });
+        Ok(id)
+    }
+
+    /// Add a pixel buffer parented into `toplevel`'s own scene tree, in the
+    /// same RGBA shape [`add_buffer`](Runtime::add_buffer) takes.
+    /// Coordinates given to
+    /// [`set_buffer_position`](Runtime::set_buffer_position) afterward are
+    /// relative to the tree's own origin, not the scene root's.
+    ///
+    /// The buffer node is destroyed automatically when `toplevel` is, the
+    /// same way [`add_rect_in_toplevel`](Runtime::add_rect_in_toplevel)'s
+    /// rects are — see that method's own doc for the detail. Once that
+    /// happens the returned [`BufferId`] goes stale, and every mutator on
+    /// this page reports `None` for it from then on.
+    ///
+    /// `None` if this runtime has no live toplevel with that id (including a
+    /// stale one), or on any of [`add_buffer`](Runtime::add_buffer)'s error
+    /// conditions (wrong pixel length, a non-positive dimension, or wlroots
+    /// refusing to create the node).
+    pub fn add_buffer_in_toplevel(
+        &self,
+        toplevel: ToplevelId,
+        width: i32,
+        height: i32,
+        rgba: &[u8],
+    ) -> Option<BufferId> {
+        if width < 1 || height < 1 || rgba.len() != (width as usize) * (height as usize) * 4 {
+            return None;
+        }
+        let entry = self.toplevel_entry(toplevel)?;
+        let buf = create_pixel_buffer(width, height, rgba);
+        // SAFETY: a present entry names a live tree (its destroy callback
+        // removes the entry before wlroots frees it); the refcount argument
+        // for the `wlr_buffer_drop` pairing is identical to `add_buffer`'s —
+        // see that method's own comment and `buffer.rs`'s module doc.
+        let node = unsafe { sys::wlr_scene_buffer_create(entry.tree.as_ptr(), buf) };
+        // SAFETY: as for `add_buffer`.
+        unsafe { sys::wlr_buffer_drop(buf) };
+        let node = NonNull::new(node)?;
+        let id = BufferId(next_id());
+        self.inner.buffers.borrow_mut().insert(
+            id,
+            BufferEntry {
+                node,
+                parent: Some(toplevel),
+            },
+        );
+        Some(id)
+    }
+
+    /// Replace a buffer node's pixels (and intrinsic size) with a fresh
+    /// copy, in the same RGBA shape [`add_buffer`](Runtime::add_buffer)
+    /// takes.
+    ///
+    /// `None` if this runtime never issued `buffer`, or on
+    /// [`add_buffer`](Runtime::add_buffer)'s validation error conditions
+    /// (wrong pixel length, or a non-positive dimension).
+    pub fn update_buffer(
+        &self,
+        buffer: BufferId,
+        width: i32,
+        height: i32,
+        rgba: &[u8],
+    ) -> Option<()> {
+        if width < 1 || height < 1 || rgba.len() != (width as usize) * (height as usize) * 4 {
+            return None;
+        }
+        let node = self.buffer_ptr(buffer)?;
+        let buf = create_pixel_buffer(width, height, rgba);
+        // SAFETY: `buffer_ptr` resolving `buffer` means its `BufferEntry` is
+        // still in the table, so `node` names a node wlroots has not yet
+        // destroyed (see `buffer_ptr`'s own doc for the fuller argument,
+        // mirroring `rect_ptr`'s). `wlr_scene_buffer_set_buffer` locks `buf`
+        // (its own new consumer reference) and unlocks whatever buffer the
+        // node held before, exactly mirroring the create-time handoff —
+        // see `buffer.rs`'s module doc.
+        unsafe { sys::wlr_scene_buffer_set_buffer(node.as_ptr(), buf) };
+        // SAFETY: as above — releases this call's own producer reference.
+        unsafe { sys::wlr_buffer_drop(buf) };
+        Some(())
+    }
+
+    /// Move a buffer node. `None` if this runtime never issued `buffer`.
+    pub fn set_buffer_position(&self, buffer: BufferId, x: i32, y: i32) -> Option<()> {
+        let node = self.buffer_ptr(buffer)?;
+        // SAFETY: as for `update_buffer`.
+        unsafe { sys::wlr_scene_node_set_position(&raw mut (*node.as_ptr()).node, x, y) };
+        Some(())
+    }
+
+    /// Scale a buffer node's on-screen size independently of its pixel
+    /// size. `None` if this runtime never issued `buffer`.
+    pub fn set_buffer_dest_size(&self, buffer: BufferId, width: i32, height: i32) -> Option<()> {
+        let node = self.buffer_ptr(buffer)?;
+        // SAFETY: as for `update_buffer`.
+        unsafe { sys::wlr_scene_buffer_set_dest_size(node.as_ptr(), width, height) };
+        Some(())
+    }
+
+    /// Put a buffer node behind everything else in the scene. `None` if
+    /// this runtime never issued `buffer`.
+    pub fn lower_buffer_to_bottom(&self, buffer: BufferId) -> Option<()> {
+        let node = self.buffer_ptr(buffer)?;
+        // SAFETY: as for `update_buffer`.
+        unsafe { sys::wlr_scene_node_lower_to_bottom(&raw mut (*node.as_ptr()).node) };
+        Some(())
+    }
+
+    /// Destroy a buffer node's scene node, whether it is a root buffer from
+    /// [`add_buffer`](Runtime::add_buffer) or one parented into a toplevel
+    /// via [`add_buffer_in_toplevel`](Runtime::add_buffer_in_toplevel).
+    ///
+    /// `None` if this runtime never issued `buffer`, including one already
+    /// removed (by this call or by its parent toplevel's own teardown) —
+    /// double-removal misses cleanly rather than double-destroying the
+    /// node.
+    pub fn remove_buffer(&self, buffer: BufferId) -> Option<()> {
+        let entry = self.inner.buffers.borrow_mut().remove(&buffer)?;
+        // SAFETY: `entry.node` came from `add_buffer`/`add_buffer_in_toplevel`
+        // and the table entry naming it is only ever removed once — by this
+        // call, or (without a matching destroy; see their own comments) by
+        // `forget_toplevel`'s per-toplevel purge or `clear_toplevels`'
+        // run-granularity purge — so the node has not been destroyed yet.
+        // Destroying the node unlocks its buffer, which — since this
+        // module's own handoff already dropped the producer's reference —
+        // is what finally frees it (see `buffer.rs`'s module doc).
+        unsafe { sys::wlr_scene_node_destroy(&raw mut (*entry.node.as_ptr()).node) };
+        Some(())
+    }
+
+    /// The buffer node `id` names, with the table borrow released before
+    /// returning — every caller then re-enters wlroots, which can emit a
+    /// signal, which can take this same `RefCell` mutably.
+    fn buffer_ptr(&self, id: BufferId) -> Option<NonNull<sys::wlr_scene_buffer>> {
+        self.inner.buffers.borrow().get(&id).map(|e| e.node)
+    }
+
     /// Advertise `xdg_wm_base` at `version`.
     ///
     /// **Call [`init_graphics`](Runtime::init_graphics) first.** A shell
@@ -949,6 +1159,12 @@ impl Runtime {
             .rects
             .borrow_mut()
             .retain(|_, entry| entry.parent != Some(id));
+        // Same reasoning, for buffer nodes `add_buffer_in_toplevel` parented
+        // into this toplevel's tree — see `BufferEntry`'s own doc.
+        self.inner
+            .buffers
+            .borrow_mut()
+            .retain(|_, entry| entry.parent != Some(id));
 
         let entry = self.inner.toplevels.borrow_mut().remove(&id);
         if let Some(entry) = entry {
@@ -999,6 +1215,15 @@ impl Runtime {
     pub(crate) fn clear_toplevels(&self) {
         self.inner
             .rects
+            .borrow_mut()
+            .retain(|_, entry| entry.parent.is_none());
+        // Mirrors the rect purge just above, for buffer entries — the
+        // identical hazard `RectEntry` closes applies verbatim to
+        // `BufferEntry`: a `BufferId` is only as good as the `ToplevelId`
+        // it was parented under, and that id is going stale in the very
+        // next statement.
+        self.inner
+            .buffers
             .borrow_mut()
             .retain(|_, entry| entry.parent.is_none());
         self.inner.toplevels.borrow_mut().clear();
