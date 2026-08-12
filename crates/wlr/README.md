@@ -24,6 +24,28 @@ follows on the same branches, not because they are on crates.io yet.
 The API is held identical across all four, so once they ship, moving between
 them is a version change rather than a code change.
 
+## 0.20.8
+
+xdg-decoration.
+
+- `Runtime::create_xdg_decoration_manager` / `Runtime::set_decoration_mode`
+  — the zxdg_decoration_manager_v1 global and per-toplevel mode setting.
+- `ToplevelHandler::request_decoration_mode` — additive, defaulted; the
+  dispatch layer answers server-side when the handler stays silent.
+- A decoration's mode is answered at the toplevel's *initial commit*, not
+  when the client's request arrives: wlroots cannot be told a mode before
+  the surface's first role commit initializes it, so `set_decoration_mode`
+  stages the choice and the initial commit flushes it. Last write wins, and
+  the staging is invisible to the caller. A toplevel whose client never
+  states a preference still gets the handler its say at that commit, with
+  `client_side_preferred: None`; handler silence means server-side.
+- `Runtime::configure_toplevel` (0.20.7) is now covered by the same
+  pre-initialization guard: called before its toplevel's initial commit it
+  is a no-op returning `Some(())`, rather than tripping wlroots'
+  `surface->initialized` assertion. Nothing is lost — the initial commit
+  schedules a configure of its own, carrying any state that was staged.
+  Behavior hardening of a documented contract, not a semantic break.
+
 ## 0.20.7
 
 Client-driven state requests.
