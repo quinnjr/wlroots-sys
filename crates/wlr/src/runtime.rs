@@ -282,7 +282,7 @@ pub(crate) struct LayerSurfaceEntry {
 
 /// A named scene band a rect (or, in principle, anything else this crate
 /// later parents by band) can live in — the same five stacking bands
-/// [`Graphics`] creates, plus [`Band::Toplevel`] for the band every
+/// `Graphics` creates, plus [`Band::Toplevel`] for the band every
 /// toplevel's own tree lives in.
 ///
 /// Deliberately **not** [`Layer`]: `Layer` is the public four-variant
@@ -295,15 +295,15 @@ pub(crate) struct LayerSurfaceEntry {
 /// [`Runtime::add_rect_in_band`] can target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Band {
-    /// Beneath everything — [`Graphics::background_band`].
+    /// Beneath everything — `Graphics::background_band`.
     Background,
-    /// Above `Background`, beneath every toplevel — [`Graphics::bottom_band`].
+    /// Above `Background`, beneath every toplevel — `Graphics::bottom_band`.
     Bottom,
-    /// Where every toplevel's own tree lives — [`Graphics::toplevel_band`].
+    /// Where every toplevel's own tree lives — `Graphics::toplevel_band`.
     Toplevel,
-    /// Above every toplevel, beneath `Overlay` — [`Graphics::top_band`].
+    /// Above every toplevel, beneath `Overlay` — `Graphics::top_band`.
     Top,
-    /// Above everything — [`Graphics::overlay_band`].
+    /// Above everything — `Graphics::overlay_band`.
     Overlay,
 }
 
@@ -1340,9 +1340,11 @@ impl Runtime {
         Ok(id)
     }
 
-    /// Destroy a rect's scene node, whether it is a root rect from
-    /// [`add_rect`](Runtime::add_rect) or one parented into a toplevel via
-    /// [`add_rect_in_toplevel`](Runtime::add_rect_in_toplevel).
+    /// Destroy a rect's scene node — a root rect from
+    /// [`add_rect`](Runtime::add_rect), one parented into a toplevel via
+    /// [`add_rect_in_toplevel`](Runtime::add_rect_in_toplevel), or one
+    /// parented into a band via
+    /// [`add_rect_in_band`](Runtime::add_rect_in_band).
     ///
     /// `None` if this runtime never issued `rect`, including a rect already
     /// removed (by this call or by its parent toplevel's own teardown) —
@@ -1350,12 +1352,13 @@ impl Runtime {
     /// node.
     pub fn remove_rect(&self, rect: RectId) -> Option<()> {
         let entry = self.inner.rects.borrow_mut().remove(&rect)?;
-        // SAFETY: `entry.raw` came from `add_rect`/`add_rect_in_toplevel`
-        // and the table entry naming it is only ever removed once — by
-        // this call, or (without a matching destroy; see their own
-        // comments) by `forget_toplevel`'s per-toplevel purge or
-        // `clear_toplevels`' run-granularity purge — so the node has not
-        // been destroyed yet.
+        // SAFETY: `entry.raw` came from `add_rect`/`add_rect_in_toplevel`/
+        // `add_rect_in_band`, and the table entry naming it is only ever
+        // removed once — by this call, or (without a matching destroy; see
+        // their own comments) by `forget_toplevel`'s per-toplevel purge or
+        // `clear_toplevels`' run-granularity purge (neither of which ever
+        // touches a band rect's entry — see `RectParent::Band`'s own doc) —
+        // so the node has not been destroyed yet.
         unsafe { sys::wlr_scene_node_destroy(&raw mut (*entry.raw.as_ptr()).node) };
         Some(())
     }
