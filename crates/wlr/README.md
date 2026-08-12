@@ -23,3 +23,95 @@ follows on the same branches, not because they are on crates.io yet.
 
 The API is held identical across all four, so once they ship, moving between
 them is a version change rather than a code change.
+
+## 0.20.4
+
+Seat, keyboard and pointer input.
+
+- `SeatHandler` gains `key`, `pointer_motion` and `pointer_button`. All
+  defaulted, so an empty impl written against 0.20.1 keeps compiling.
+- `KeyEvent<'h>` and `Modifiers` — a key's layout-agnostic, unshifted keysym
+  and modifier state.
+- `Runtime::create_seat`, `focus_toplevel_keyboard`, `clear_keyboard_focus`,
+  `toplevel_at` (the scene hit test — the window under a point, and the
+  point's position *within that window*, in the same coordinates
+  `set_toplevel_position` uses) and `pointer_position`.
+
+`SeatHandler::key` returns `true` to consume a key and keep it from the
+focused client. Consumption is best-effort by design: a key that arrives
+while another handler is running is forwarded before this can answer, so a
+binding must not depend on the client never seeing the key.
+
+`focus_toplevel_keyboard` reports a miss (`None`) for an **unmapped**
+toplevel, the same as for an unknown id — there is no unmapped-surface
+concept elsewhere in this crate's model, so this is the one place a
+by-id caller could otherwise have asked wlroots to focus a surface no
+client is rendering to.
+
+**Bug fix, on a frozen surface:** `ToplevelId::dangling_nth_for_test(n)`'s
+*value* changes for `n >= 2^32` (previously `u64::MAX - n`, unclamped; now
+folded into a fixed 2^32-wide band via `u64::MAX - (n % 2^32)`). `n = 0` and
+every `n` this crate's own tests or any reasonable caller would pass
+(`n <= 8` is the documented range) are bit-for-bit unaffected — only a caller
+already passing `n` in the billions, which no known caller does, would see a
+different id than before. Fixed because the unclamped subtraction could wrap
+into real-id space for a large enough `n`, contradicting the "no live
+toplevel can have this id" guarantee `dangling_nth_for_test`'s own doc makes.
+
+## 0.20.3
+
+Testing utility, no protocol surface.
+
+- `ToplevelId::dangling_nth_for_test(n)`: like `dangling_for_test`, an id no
+  live toplevel can ever have, but distinguishable by `n` -- a consumer
+  driving handler logic for more than one toplevel without a real client
+  needs ids that compare unequal to each other, which a single fixed
+  dangling value can't give it. `n = 0` collides with `dangling_for_test`'s
+  value on purpose (both sit at the top of the same reserved id band); pass
+  `n >= 1` for an id distinct from that one too.
+
+The seat (`SeatHandler`'s methods) is still 0.20.1's empty trait; it did not
+land in this release and remains planned for a later 0.20.x.
+
+## 0.20.2
+
+xdg-shell.
+
+- `ToplevelHandler` gains `new_toplevel`, `initial_commit`, `mapped`,
+  `unmapped`, `title_changed` and `toplevel_destroyed`. All defaulted, so an
+  empty impl written against 0.20.1 keeps compiling.
+- `Toplevel<'h>` and `ToplevelId`: borrow-scoped handle, storable id.
+- `Runtime::create_xdg_shell`, and the by-id operations —
+  `set_toplevel_size`, `set_toplevel_activated`, `set_toplevel_maximized`,
+  `set_toplevel_fullscreen`, `set_toplevel_position`, `set_toplevel_visible`,
+  `raise_toplevel`, `close_toplevel`.
+
+Toplevels are inserted into the scene graph by the library; the consumer
+positions them by id.
+
+Two ordering rules are worth reading before you write against this:
+`create_xdg_shell` requires `init_graphics` to have run (it returns
+`Error::Operation` rather than leaving you with clients that never map), and
+a `ToplevelId` resolves only for the `Backend::run_all` call that announced
+it — every by-id operation returns `None` for one held past that point.
+
+## 0.20.1
+
+Event sources and the scene graph.
+
+- `Runtime` — the long-lived handle a compositor keeps: fd sources, the scene
+  graph, the output layout, the renderer, and every by-id operation.
+- `Interest`, `Readiness`, `SourceId`, `FdHandler` — file-descriptor sources,
+  registered by each `run_all` and re-armed by the next one.
+- `LoopHandler`, `Until`, `Backend::run_all` — a blocking entry point that
+  stops when the consumer says so, and flushes clients every turn.
+- `ToplevelHandler` and `SeatHandler` are declared here with no methods, so
+  that `Handlers`' supertrait list is fixed from the first release; their
+  methods arrive additively in later 0.20.x releases (`ToplevelHandler`'s in
+  0.20.2; `SeatHandler`'s are still pending).
+- `RectId` and the `Runtime::*_rect` family — solid-colour scene nodes.
+- `Output::size`, `Output::schedule_frame`,
+  `Output::enable_with_preferred_mode`, `Display::add_socket_auto`,
+  `Display::flush_clients`.
+
+`Backend::run` is unchanged and stays forever as the output-only path.

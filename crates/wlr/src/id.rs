@@ -26,6 +26,25 @@ pub struct OutputId(pub(crate) u64);
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Identifies an fd source for as long as the consumer chooses to remember it.
+///
+/// Unlike [`OutputId`] this is **not** backed by a `wlr_addon`, and it cannot
+/// be: an fd source is a libwayland `wl_event_source`, not a wlroots object,
+/// so there is no addon set to attach to and nothing that announces its own
+/// death. It is drawn from the same process-wide monotonic counter instead, so
+/// no `SourceId` can ever collide with itself, and ids are never reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourceId(pub(crate) u64);
+
+/// The next value from the counter that backs every id in this crate.
+///
+/// Shared with [`attach_id`] deliberately: one counter means an id printed in
+/// a log is unambiguous about which object it names, and it costs one atomic
+/// increment either way.
+pub(crate) fn next_id() -> u64 {
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Our addon payload: a `wlr_addon` header followed by the id.
 ///
 /// `#[repr(C)]` with the addon first so `id_addon_from_raw` can recover the
@@ -129,7 +148,7 @@ pub(crate) unsafe fn attach_id(set: *mut sys::wlr_addon_set) -> u64 {
             "an id addon is already attached to this object"
         );
 
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let id = next_id();
         let payload = Box::into_raw(Box::new(IdAddon {
             addon: std::mem::zeroed(),
             id,

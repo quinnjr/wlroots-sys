@@ -44,7 +44,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
-use crate::OutputId;
+use crate::{OutputId, ToplevelId};
 
 /// An event awaiting delivery.
 ///
@@ -55,6 +55,43 @@ pub(crate) enum Event {
     NewOutput(OutputId),
     OutputFrame(OutputId),
     OutputDestroyed(OutputId),
+
+    /// An fd source is ready. Carries the readiness mask rather than a
+    /// [`Readiness`](crate::Readiness) so the enum stays `Copy` and `Eq`
+    /// without exporting a public type into a private one.
+    FdReady(crate::SourceId, u32),
+
+    NewToplevel(ToplevelId),
+    ToplevelInitialCommit(ToplevelId),
+    ToplevelMapped(ToplevelId),
+    ToplevelUnmapped(ToplevelId),
+    ToplevelTitleChanged(ToplevelId),
+    ToplevelDestroyed(ToplevelId),
+
+    Key {
+        keysym: u32,
+        modifiers_raw: u32,
+        pressed: bool,
+        time_msec: u32,
+    },
+    /// Coordinates are thousandths of a pixel in an `i64` rather than `f64`:
+    /// `Event` derives `Eq` (this module's own reentrancy tests compare it
+    /// with `assert_eq!`), and an `f64` field would force that derive off,
+    /// since `f64` implements neither `Eq` nor `Hash`. Delivery converts
+    /// back (`x_milli as f64 / 1000.0`); sub-milli-pixel precision has no
+    /// consumer.
+    PointerMotion {
+        x_milli: i64,
+        y_milli: i64,
+        time_msec: u32,
+    },
+    PointerButton {
+        x_milli: i64,
+        y_milli: i64,
+        button: u32,
+        pressed: bool,
+        time_msec: u32,
+    },
 }
 
 thread_local! {
@@ -146,6 +183,17 @@ impl<S> Dispatcher<S> {
             in_dispatch: Cell::new(false),
             deferred: RefCell::new(VecDeque::new()),
         }
+    }
+
+    /// The state pointer, for `run_inner`'s between-turn `should_stop` check.
+    ///
+    /// `pub(crate)` and returning a raw pointer rather than a reference: the
+    /// caller has to state, at its own call site, that no handler is running
+    /// — which is the only thing that makes a `&mut S` derived from this
+    /// sound — and a safe accessor returning `&mut S` would make that
+    /// obligation invisible.
+    pub(crate) fn state_ptr(&self) -> *mut S {
+        self.state
     }
 
     /// Deliver `ev`, or queue it if a handler is already running.

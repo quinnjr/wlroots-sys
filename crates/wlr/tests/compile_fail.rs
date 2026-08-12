@@ -1,6 +1,6 @@
 //! Compile-fail proofs backing this crate's central safety claim: a consumer
-//! cannot mint an `Output` handle with a lifetime of their own choosing,
-//! because its only constructor is `pub(crate)`.
+//! cannot mint a handle — `Output` or `Toplevel` — with a lifetime of their
+//! own choosing, because the only constructor of each is `pub(crate)`.
 //!
 //! `from_raw_is_not_reachable_outside_the_crate` is the case that actually
 //! proves that claim — it fails only because `Output::from_raw` is private,
@@ -50,4 +50,22 @@ fn output_lifetime_parameter_and_calling_convention_are_pinned() {
 fn from_raw_is_not_reachable_outside_the_crate() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/output_from_raw_is_private.rs");
+}
+
+/// The `Toplevel` half of the pair above, and for the same reasons: this is
+/// the weaker, regression-only case, pinning the calling convention and the
+/// single lifetime parameter.
+#[test]
+fn toplevel_lifetime_parameter_and_calling_convention_are_pinned() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/toplevel_escapes_handler.rs");
+}
+
+/// The case that actually proves a consumer cannot mint a `Toplevel`. It
+/// would start compiling — and so fail as a test — the moment
+/// `Toplevel::from_raw_with_id` were ever widened to `pub`.
+#[test]
+fn toplevel_from_raw_with_id_is_not_reachable_outside_the_crate() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/toplevel_from_raw_is_private.rs");
 }

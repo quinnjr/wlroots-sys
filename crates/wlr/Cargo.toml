@@ -4,7 +4,7 @@ name = "wlr"
 # tells consumers and how `wlr-sys` is versioned. Not a semver-from-zero
 # sequence: publishing a 0.1.0 would make that promise false on the first
 # release and leave no way back to 0.20 without an unexplained jump.
-version = "0.20.0"
+version = "0.20.4"
 description = "Safe bindings to wlroots"
 keywords = ["wayland", "wlroots", "compositor"]
 categories = ["api-bindings", "gui"]
@@ -21,6 +21,11 @@ rust-version.workspace = true
 # workspace. Older wlroots minors live on `support/*` branches, each with its
 # own `wlr` minor — cargo cannot resolve a manifest listing two of them.
 wlr-sys = { version = "0.20", path = "../wlr-sys" }
+# The same xkbcommon this branch's wlr-sys blocklists and re-imports, so the
+# `xkb_state`/`xkb_keymap` pointers on `wlr_keyboard` are the same nominal
+# types here as they are there. Naming a different version would silently
+# produce look-alike types (see wlr-sys's own tests/interop.rs).
+xkbcommon-sys = "1.4"
 
 [dev-dependencies]
 trybuild = "1.0"
@@ -30,3 +35,7 @@ trybuild = "1.0"
 # varies with whether `rust-src` is installed. That made the fixture pass
 # locally and fail in CI's container. This asserts the property itself.
 static_assertions = "1.1"
+# Borrowed-fd I/O for the fd-source tests and examples. A dev-dependency
+# only: the crate itself never reads a consumer's fd, it only hands the
+# borrow to `FdHandler::fd_ready`.
+rustix = { version = "1", features = ["pipe", "std"] }

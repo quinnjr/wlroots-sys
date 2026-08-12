@@ -1,0 +1,10 @@
+error[E0621]: explicit lifetime required in the type of `toplevel`
+  --> tests/ui/toplevel_escapes_handler.rs:11:5
+   |
+11 |     sink.push(toplevel);
+   |     ^^^^^^^^^^^^^^^^^^^ lifetime `'h` required
+   |
+help: add explicit lifetime `'h` to the type of `toplevel`
+   |
+ 9 | fn handler<'h>(toplevel: &'h Toplevel<'h>, sink: &mut Vec<&'h Toplevel<'h>>) {
+   |                           ++

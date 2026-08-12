@@ -165,6 +165,91 @@ impl<'h> Output<'h> {
             }
         }
     }
+
+    /// The output's current mode size in pixels as `(width, height)`, or
+    /// `(0, 0)` before it has one.
+    ///
+    /// Reads `wlr_output.width`/`height`, which wlroots keeps in step with the
+    /// committed mode, so this is the size the scene renders at rather than a
+    /// requested one.
+    pub fn size(&self) -> (i32, i32) {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        unsafe {
+            let raw = self.raw.as_ptr();
+            ((*raw).width, (*raw).height)
+        }
+    }
+
+    /// Enable the output at its preferred mode and commit.
+    ///
+    /// The one call that turns an announced output into one that produces
+    /// frames. A backend's outputs arrive disabled and modeless; until this
+    /// (or an equivalent) runs, `frame` is never emitted and
+    /// [`commit`](Output::commit) is observably a no-op.
+    ///
+    /// "Preferred" is `wlr_output_preferred_mode`, which is the mode wlroots
+    /// itself would pick — the backend's native mode on DRM, the window size
+    /// under a nested backend, and the configured size for headless. Outputs
+    /// with no modes at all (some headless and X11 configurations) are enabled
+    /// without a mode, which is correct for them rather than an error.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] if wlroots rejected the commit.
+    pub fn enable_with_preferred_mode(&self) -> Result<()> {
+        // SAFETY: the handle's lifetime guarantees the output is live. The
+        // state is initialised before any field is set and finished before it
+        // drops, as wlroots requires; `wlr_output_preferred_mode` returns null
+        // for a modeless output, which `set_mode` must not be called with.
+        unsafe {
+            let mut state = std::mem::MaybeUninit::<sys::wlr_output_state>::uninit();
+            sys::wlr_output_state_init(state.as_mut_ptr());
+            let mut state = state.assume_init();
+            sys::wlr_output_state_set_enabled(&raw mut state, true);
+
+            let mode = sys::wlr_output_preferred_mode(self.raw.as_ptr());
+            if !mode.is_null() {
+                sys::wlr_output_state_set_mode(&raw mut state, mode);
+            }
+
+            let ok = sys::wlr_output_commit_state(self.raw.as_ptr(), &raw const state);
+            sys::wlr_output_state_finish(&raw mut state);
+
+            if ok {
+                Ok(())
+            } else {
+                Err(Error::Operation("wlr_output_commit_state"))
+            }
+        }
+    }
+
+    /// Ask the backend for one more `frame` event on this output.
+    ///
+    /// The scene reschedules itself whenever it has new damage, so a
+    /// compositor whose content changes never needs this — see
+    /// [`Runtime::commit_output`](crate::Runtime::commit_output), which
+    /// deliberately does not reschedule on every commit. This is the one-time
+    /// kick for an output that has gone idle and needs to repaint anyway:
+    /// most notably straight after
+    /// [`Runtime::init_output`](crate::Runtime::init_output) on a backend
+    /// whose enable commit did not itself produce a frame.
+    ///
+    /// Infallible because `wlr_output_schedule_frame` returns nothing:
+    /// wlroots either has a frame pending already or asks the backend for
+    /// one, and reports neither back.
+    ///
+    /// Safe to call from inside a handler, including
+    /// [`OutputHandler::frame`](crate::OutputHandler::frame) — it only marks
+    /// the output, it does not dispatch.
+    pub fn schedule_frame(&self) {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        unsafe { sys::wlr_output_schedule_frame(self.raw.as_ptr()) };
+    }
+
+    /// The raw output, for the in-crate callers that pass it to wlroots.
+    pub(crate) fn as_ptr(&self) -> *mut sys::wlr_output {
+        self.raw.as_ptr()
+    }
 }
 
 #[cfg(test)]
@@ -267,5 +352,19 @@ mod tests {
         // SAFETY: as in the test above.
         let handle = unsafe { Output::from_raw(output.0) };
         let _ = handle.id();
+    }
+
+    /// `size` reads through to the struct rather than reporting a constant.
+    #[test]
+    fn size_reports_the_outputs_own_dimensions() {
+        let output = ScratchOutput::new();
+        // SAFETY: `output.0` is exclusively owned by this test and live.
+        unsafe {
+            (*output.0).width = 1280;
+            (*output.0).height = 720;
+        }
+        // SAFETY: as in the tests above.
+        let handle = unsafe { Output::from_raw(output.0) };
+        assert_eq!(handle.size(), (1280, 720));
     }
 }

@@ -43,7 +43,83 @@ impl Display {
         Ok(Display { raw })
     }
 
+    /// Create a Wayland socket with the first free `wayland-N` name and
+    /// return that name.
+    ///
+    /// The name is what a client's `WAYLAND_DISPLAY` must be set to. libwayland
+    /// owns the returned string for the display's life, so it is copied out
+    /// rather than borrowed — a `&str` tied to `&self` would be a lifetime
+    /// this crate cannot actually prove.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] if libwayland could not bind any socket name,
+    /// which in practice means `XDG_RUNTIME_DIR` is unset or full.
+    pub fn add_socket_auto(&self) -> Result<String> {
+        use sys::wayland_sys::ffi_dispatch;
+        // `allow`, not `expect`: unused only under the `dlopen` expansion of
+        // `ffi_dispatch!`. See the identical comment on `Display::new`.
+        #[allow(unused_imports)]
+        use sys::wayland_sys::server::*;
+
+        // SAFETY: `self` is live, so its display is.
+        let name = unsafe {
+            ffi_dispatch!(
+                sys::wayland_sys::server::wayland_server_handle(),
+                wl_display_add_socket_auto,
+                self.raw.as_ptr()
+            )
+        };
+        if name.is_null() {
+            return Err(Error::Operation("wl_display_add_socket_auto"));
+        }
+        // SAFETY: libwayland returned a non-null, NUL-terminated C string that
+        // it owns for the display's life; this reads it and copies it out
+        // before returning, and never frees it.
+        let name = unsafe { std::ffi::CStr::from_ptr(name) };
+        Ok(name.to_string_lossy().into_owned())
+    }
+
+    /// Push queued protocol messages out to every client.
+    ///
+    /// Necessary on every turn of a hand-driven loop, and easy to forget:
+    /// libwayland's own `wl_display_run` does this for you, but this crate
+    /// drives `wl_event_loop_dispatch` directly, so nothing else will.
+    /// [`Backend::run_all`](crate::Backend::run_all) calls it once per turn,
+    /// which is why a consumer using that entry point never has to.
+    ///
+    /// Infallible: libwayland reports per-client flush failures by killing the
+    /// offending client, and returns nothing to the caller.
+    pub fn flush_clients(&self) {
+        use sys::wayland_sys::ffi_dispatch;
+        #[allow(unused_imports)]
+        use sys::wayland_sys::server::*;
+
+        // SAFETY: `self` is live, so its display is.
+        unsafe {
+            ffi_dispatch!(
+                sys::wayland_sys::server::wayland_server_handle(),
+                wl_display_flush_clients,
+                self.raw.as_ptr()
+            )
+        };
+    }
+
+    /// The raw display, for the one in-crate caller that has to compare it
+    /// against a backend's event loop.
+    pub(crate) fn as_ptr(&self) -> *mut sys::wl_display {
+        self.raw.as_ptr()
+    }
+
     /// The display's event loop.
+    ///
+    /// # Panics
+    ///
+    /// Panics if libwayland reports that this display has no event loop.
+    /// Unreachable in normal use: `wl_display_create` creates the loop and
+    /// libwayland never tears it down separately, so a null here would mean
+    /// libwayland broke its own contract. Threading it through a [`Result`]
+    /// every caller would have to unwrap would be the worse trade.
     pub fn event_loop(&self) -> EventLoop<'_> {
         use sys::wayland_sys::ffi_dispatch;
         // `allow`, not `expect`: unused only under the `dlopen` expansion of
@@ -206,5 +282,30 @@ mod tests {
             Ok(()),
             "no handler is running, so there is nothing to refuse"
         );
+    }
+
+    /// The socket name is the thing a client's `WAYLAND_DISPLAY` is set to,
+    /// so it has to come back as an owned, non-empty `wayland-N`.
+    #[test]
+    fn a_display_can_bind_an_automatic_socket() {
+        let display = Display::new().expect("wl_display_create failed");
+        match display.add_socket_auto() {
+            Ok(name) => assert!(
+                name.starts_with("wayland-"),
+                "libwayland names automatic sockets wayland-N, got {name:?}"
+            ),
+            // CI containers without an XDG_RUNTIME_DIR cannot bind at all,
+            // and that is a property of the machine rather than of this code.
+            Err(e) => assert_eq!(e, Error::Operation("wl_display_add_socket_auto")),
+        }
+    }
+
+    /// Flushing with no clients connected must be a harmless no-op rather
+    /// than a fault — `run_all` calls it on every single turn.
+    #[test]
+    fn flushing_a_clientless_display_is_harmless() {
+        let display = Display::new().expect("wl_display_create failed");
+        display.flush_clients();
+        display.flush_clients();
     }
 }

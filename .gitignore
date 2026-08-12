@@ -28,3 +28,6 @@ Cargo.lock
 *.pdb
 
 # End of https://www.toptal.com/developers/gitignore/api/rust
+
+# Claude Code local profile marker (machine-local, not shared)
+.claude-profile
