@@ -436,6 +436,17 @@ impl Drop for ToplevelTableGuard<'_> {
     }
 }
 
+/// Clears `Runtime`'s `outputs` table when the `run_inner` call holding this
+/// guard returns, on every exit path. Mirrors [`ToplevelTableGuard`] exactly,
+/// for the identical reason: see `Runtime::clear_outputs`'s own doc.
+struct OutputTableGuard<'r>(&'r Runtime);
+
+impl Drop for OutputTableGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear_outputs();
+    }
+}
+
 /// Clears `Runtime`'s `live_sources` table when the `run_inner` call holding
 /// this guard returns, on every exit path — the same "declared once,
 /// registered and torn down per run" rule [`ToplevelTableGuard`] enforces
@@ -803,6 +814,9 @@ impl<'d> Backend<'d> {
         // here depends on that relative order — clearing the table touches
         // no signal and nothing any `Registration::drop` reads.
         let _toplevel_table_guard = ToplevelTableGuard(runtime);
+
+        // Same reasoning, for `outputs`; see that guard's own doc.
+        let _output_table_guard = OutputTableGuard(runtime);
 
         // Same reasoning, for `live_sources`; see that guard's own doc.
         // Declared alongside `_toplevel_table_guard` for the same reason:
@@ -1555,6 +1569,15 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
         );
         drop(displaced);
 
+        // Recorded in `Runtime`'s own table too, alongside the session-local
+        // listeners above: `output_layout_box`/`set_output_position` are
+        // called through a `Runtime` clone, which cannot reach `session`.
+        // Before the handler is told, mirroring `record_toplevel`'s own
+        // ordering, for the same reason (see that call site's comment).
+        if let Some(raw) = NonNull::new(output) {
+            (*session).runtime.record_output(id, raw);
+        }
+
         let deliver = (*session).deliver;
         (*session)
             .dispatcher
@@ -1617,6 +1640,9 @@ unsafe extern "C" fn on_output_destroy<S: OutputHandler>(
         // freed output. Removing it here means the lookup simply misses.
         let entry = (*session).outputs.borrow_mut().remove(&id);
         drop(entry);
+        // Mirrors the removal above, in `Runtime`'s own table — see
+        // `record_output`'s call site for why both exist.
+        (*session).runtime.forget_output(id);
 
         let deliver = (*session).deliver;
         (*session)

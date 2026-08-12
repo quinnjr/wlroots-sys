@@ -37,7 +37,9 @@ use crate::buffer::create_pixel_buffer;
 use crate::decoration::{DecorationEntry, DecorationMode};
 use crate::id::{SourceId, next_id};
 use crate::scene::RectId;
-use crate::{Backend, BufferId, Display, Error, Interest, Output, Result, ToplevelId, sys};
+use crate::{
+    Backend, BufferId, Display, Error, Interest, Output, OutputId, Result, ToplevelId, sys,
+};
 
 /// A declared fd source: the descriptor, what it wants, and its id.
 ///
@@ -180,6 +182,20 @@ pub(crate) struct RuntimeInner {
     /// Every live pointer the backend has announced. Same shape and same
     /// pruning as `keyboards`, for [`Runtime::has_pointer`].
     pub(crate) pointers: RefCell<Vec<NonNull<sys::wlr_pointer>>>,
+
+    /// Every output this run has announced, so a by-id mutator
+    /// ([`Runtime::output_layout_box`], [`Runtime::set_output_position`])
+    /// can resolve an [`OutputId`] back to the `*mut wlr_output` it names.
+    ///
+    /// Mirrors `toplevels` exactly, including its lifetime: recorded by
+    /// `backend.rs`'s `on_new_output` before the handler is told, purged
+    /// synchronously by `on_output_destroy` before wlroots frees the
+    /// output, and cleared wholesale when the `run_all` call that populated
+    /// it returns (`OutputTableGuard`, the same "per-run, not per-`Runtime`"
+    /// rule `ToplevelTableGuard` enforces — see that guard's own doc). An
+    /// `OutputId` kept past that point reports `None` here rather than
+    /// resolving to a pointer wlroots may have already reused or freed.
+    pub(crate) outputs: RefCell<HashMap<OutputId, NonNull<sys::wlr_output>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -318,6 +334,7 @@ impl Runtime {
                 cursor_image_loaded: std::cell::Cell::new(false),
                 keyboards: RefCell::new(Vec::new()),
                 pointers: RefCell::new(Vec::new()),
+                outputs: RefCell::new(HashMap::new()),
             }),
         })
     }
@@ -733,6 +750,72 @@ impl Runtime {
             sys::wlr_scene_output_send_frame_done(scene_output, &raw mut now);
         }
         Ok(())
+    }
+
+    /// The output's box in layout coordinates: `(x, y, width, height)`.
+    /// Added in 0.20.10, alongside [`set_output_position`](Runtime::set_output_position).
+    ///
+    /// `None` on an unknown or stale id — **an [`OutputId`] is only good for
+    /// the [`Backend::run_all`](crate::Backend::run_all) call that announced
+    /// it**, the same rule [`set_toplevel_size`](Runtime::set_toplevel_size)
+    /// documents for [`ToplevelId`] — or on an id this crate does know but
+    /// whose output was never placed in the layout: neither
+    /// [`init_output`](Runtime::init_output) (auto placement) nor
+    /// [`set_output_position`](Runtime::set_output_position) (explicit
+    /// placement) has run for it yet, or
+    /// [`init_graphics`](Runtime::init_graphics) itself has not run.
+    /// `wlr_output_layout_get_box` reports that case as an empty box —
+    /// `width == 0 && height == 0` — rather than a null pointer or an error
+    /// code, so that is what this checks to turn it into `None`.
+    pub fn output_layout_box(&self, id: OutputId) -> Option<(i32, i32, i32, i32)> {
+        let raw = self.output_ptr(id)?;
+        // Copied out and the borrow dropped before the wlroots call below,
+        // matching `init_output`/`commit_output`: nothing here can re-enter
+        // this crate, but holding a `RefCell` borrow across an FFI call this
+        // crate does not control is the one habit worth never forming.
+        let layout = self.inner.graphics.borrow().as_ref().map(|g| g.layout)?;
+
+        // SAFETY: a present `outputs` entry names an output still linked
+        // into that table — removed synchronously, before wlroots frees it,
+        // by `forget_output` — so `raw` is live; `layout` is this runtime's
+        // own, created by `init_graphics` and never freed by this crate
+        // (see [`Graphics`]'s own doc). `wlr_output_layout_get_box` always
+        // fully initialises `dest_box`, including the empty-box case, so
+        // reading it back after the call is sound regardless of whether
+        // `raw` is in the layout.
+        let wbox = unsafe {
+            let mut wbox = std::mem::MaybeUninit::<sys::wlr_box>::uninit();
+            sys::wlr_output_layout_get_box(layout.as_ptr(), raw.as_ptr(), wbox.as_mut_ptr());
+            wbox.assume_init()
+        };
+        if wbox.width == 0 && wbox.height == 0 {
+            None
+        } else {
+            Some((wbox.x, wbox.y, wbox.width, wbox.height))
+        }
+    }
+
+    /// Pin the output at an explicit layout position, `(x, y)`, removing
+    /// auto placement for it — `wlr_output_layout_add`'s own doc: an output
+    /// already in the layout "will become manually configured and will be
+    /// moved to the specified coordinates".
+    ///
+    /// `None` on an unknown or stale id (see
+    /// [`output_layout_box`](Runtime::output_layout_box)'s own doc for that
+    /// rule) or if [`init_graphics`](Runtime::init_graphics) has not run, or
+    /// if wlroots itself rejected the placement.
+    pub fn set_output_position(&self, id: OutputId, x: i32, y: i32) -> Option<()> {
+        let raw = self.output_ptr(id)?;
+        let layout = self.inner.graphics.borrow().as_ref().map(|g| g.layout)?;
+
+        // SAFETY: as for `output_layout_box`.
+        let layout_output =
+            unsafe { sys::wlr_output_layout_add(layout.as_ptr(), raw.as_ptr(), x, y) };
+        if layout_output.is_null() {
+            None
+        } else {
+            Some(())
+        }
     }
 
     /// Add a solid-colour rect to the scene, at the root, in RGBA where each
@@ -1362,6 +1445,41 @@ impl Runtime {
         // Mirrors `forget_toplevel`'s own decoration purge, at run
         // granularity instead of per-toplevel — see that method's comment.
         self.inner.decorations.borrow_mut().clear();
+    }
+
+    /// Record a newly-announced output's raw pointer under `id`.
+    ///
+    /// Called from `backend.rs`'s `on_new_output`, before the handler is
+    /// told, mirroring [`record_toplevel`](Runtime::record_toplevel).
+    pub(crate) fn record_output(&self, id: OutputId, raw: NonNull<sys::wlr_output>) {
+        self.inner.outputs.borrow_mut().insert(id, raw);
+    }
+
+    /// Remove `id` from the output table. Called from `on_output_destroy`
+    /// before the output is freed, mirroring
+    /// [`forget_toplevel`](Runtime::forget_toplevel).
+    pub(crate) fn forget_output(&self, id: OutputId) {
+        self.inner.outputs.borrow_mut().remove(&id);
+    }
+
+    /// This id's recorded raw output, with the borrow released before
+    /// returning — see [`toplevel_entry`](Runtime::toplevel_entry)'s own
+    /// doc for why.
+    pub(crate) fn output_ptr(&self, id: OutputId) -> Option<NonNull<sys::wlr_output>> {
+        self.inner.outputs.borrow().get(&id).copied()
+    }
+
+    /// Drop every output this runtime knows of, without touching wlroots.
+    ///
+    /// Called once, by `backend.rs`'s `run_inner`, when the `run_all` call
+    /// that populated this table returns — the exact rule
+    /// [`clear_toplevels`](Runtime::clear_toplevels) documents for
+    /// toplevels, and for the identical reason: an `OutputId` is only
+    /// meaningful for the call that announced it, because the per-output
+    /// destroy listener that would otherwise remove a stale entry is torn
+    /// down with that call's `Session`.
+    pub(crate) fn clear_outputs(&self) {
+        self.inner.outputs.borrow_mut().clear();
     }
 
     /// Record a newly-announced decoration under the id of the toplevel it
