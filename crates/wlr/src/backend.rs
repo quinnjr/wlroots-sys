@@ -36,10 +36,11 @@ use std::rc::Rc;
 
 use crate::dispatch::{Dispatcher, Event};
 use crate::id::{SourceId, attach_id, find_id};
+use crate::layer::Layer;
 use crate::seat::{KeyEvent, Modifiers};
 use crate::{
-    Display, Error, EventLoop, Handlers, LoopHandler, Output, OutputHandler, OutputId, Result,
-    Runtime, Toplevel, ToplevelId, sys,
+    Display, Error, EventLoop, Handlers, LayerSurface, LayerSurfaceId, LoopHandler, Output,
+    OutputHandler, OutputId, Result, Runtime, Toplevel, ToplevelId, sys,
 };
 
 /// `wl_seat.capability` bit values from `wayland.xml`. Not bound by
@@ -188,6 +189,22 @@ struct Bound {
     /// would cost every one of them a match arm for a case that can never
     /// apply to it.
     toplevel: Option<ToplevelId>,
+
+    /// The layer surface this listener belongs to, for the four per-layer-
+    /// surface listeners `on_new_layer_surface` links (commit/map/unmap on
+    /// the base `wlr_surface`, destroy on the layer surface's own
+    /// `events.destroy`); `None` for every other listener in this file.
+    ///
+    /// A fourth id field alongside `id`/`toplevel` rather than a shared enum,
+    /// for the identical reason `toplevel`'s own doc gives for not folding
+    /// into `id`: `Bound` is private to this module, so widening it costs
+    /// nothing outside it, and every other call site wants its own exact
+    /// type. wlroots emits `wlr_surface.events.map`/`.unmap` with a null
+    /// `data` for a layer surface's base surface too — the same discipline
+    /// `toplevel`'s doc documents for `on_toplevel_map`/`on_toplevel_unmap`
+    /// applies verbatim here, which is why `on_layer_surface_map`/`_unmap`
+    /// read this field rather than `data`.
+    layer: Option<LayerSurfaceId>,
 }
 
 // `bound_of`'s cast is sound only while `listener` is `Bound`'s first field, at
@@ -227,6 +244,7 @@ impl Registration {
         alive: *const Cell<bool>,
         id: Option<OutputId>,
         toplevel: Option<ToplevelId>,
+        layer: Option<LayerSurfaceId>,
     ) -> Self {
         let mut bound = Box::new(Bound {
             listener: sys::wl_listener {
@@ -242,6 +260,7 @@ impl Registration {
             alive,
             id,
             toplevel,
+            layer,
         });
 
         // SAFETY: the caller guarantees `signal` is an initialised `wl_signal`,
@@ -353,6 +372,11 @@ struct Session<'r, S> {
     /// why both exist.
     decorations: RefCell<HashMap<ToplevelId, DecorationListeners>>,
 
+    /// This run's listeners on every live layer surface. Removed, and so
+    /// unlinked, from `on_layer_surface_destroy` — before the layer surface
+    /// is freed, mirroring `toplevels` above.
+    layers: RefCell<HashMap<LayerSurfaceId, LayerSurfaceListeners>>,
+
     /// This run's listeners on every live input device, one [`InputDevice`]
     /// per device, keyed by the device's own `*mut wlr_input_device` address
     /// (as `usize`) — unlike the destroy-only removal `outputs` and
@@ -420,6 +444,28 @@ struct ToplevelListeners {
 struct DecorationListeners {
     _request_mode: Registration,
     _destroy: Registration,
+}
+
+/// One live layer surface's listeners: the base surface's commit/map/unmap,
+/// and the layer surface's own `destroy`. Field order is not load-bearing,
+/// as for [`ToplevelListeners`].
+struct LayerSurfaceListeners {
+    _commit: Registration,
+    _map: Registration,
+    _unmap: Registration,
+    _destroy: Registration,
+}
+
+/// Clears `Runtime`'s layer-surface table when the `run_inner` call holding
+/// this guard returns, on every exit path. Mirrors [`ToplevelTableGuard`]
+/// exactly, for the identical reason: see
+/// `Runtime::clear_layer_surfaces`'s own doc.
+struct LayerSurfaceTableGuard<'r>(&'r Runtime);
+
+impl Drop for LayerSurfaceTableGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear_layer_surfaces();
+    }
 }
 
 /// Clears `Runtime`'s toplevel tables when the `run_inner` call holding this
@@ -548,6 +594,7 @@ impl<'d> Backend<'d> {
                 on_backend_destroy,
                 std::ptr::null(),
                 &raw const *alive,
+                None,
                 None,
                 None,
             )
@@ -797,6 +844,7 @@ impl<'d> Backend<'d> {
             outputs: RefCell::new(HashMap::new()),
             toplevels: RefCell::new(HashMap::new()),
             decorations: RefCell::new(HashMap::new()),
+            layers: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime,
@@ -814,6 +862,9 @@ impl<'d> Backend<'d> {
         // here depends on that relative order — clearing the table touches
         // no signal and nothing any `Registration::drop` reads.
         let _toplevel_table_guard = ToplevelTableGuard(runtime);
+
+        // Same reasoning, for `layer_surfaces`; see that guard's own doc.
+        let _layer_surface_table_guard = LayerSurfaceTableGuard(runtime);
 
         // Same reasoning, for `outputs`; see that guard's own doc.
         let _output_table_guard = OutputTableGuard(runtime);
@@ -848,6 +899,7 @@ impl<'d> Backend<'d> {
                 on_new_output::<S>,
                 (&raw const session).cast::<()>(),
                 &raw const *self.alive,
+                None,
                 None,
                 None,
             )
@@ -1048,6 +1100,7 @@ impl<'d> Backend<'d> {
                     std::ptr::null(),
                     None,
                     None,
+                    None,
                 )
             });
         }
@@ -1063,6 +1116,25 @@ impl<'d> Backend<'d> {
                     on_new_toplevel_decoration::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     std::ptr::null(),
+                    None,
+                    None,
+                    None,
+                )
+            });
+        }
+
+        if let Some(shell) = runtime.layer_shell_ptr() {
+            // SAFETY: `create_layer_shell` returned a non-null
+            // `wlr_layer_shell_v1` owned by the display, which this call
+            // requires to outlive it, exactly as for the xdg shell above;
+            // the same reasoning applies verbatim.
+            regs.push(unsafe {
+                Registration::link(
+                    &raw mut (*shell.as_ptr()).events.new_surface,
+                    on_new_layer_surface::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                    None,
                     None,
                     None,
                 )
@@ -1083,6 +1155,7 @@ impl<'d> Backend<'d> {
                     on_new_input::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     &raw const *self.alive,
+                    None,
                     None,
                     None,
                 )
@@ -1350,6 +1423,15 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
                     .set_decoration_mode(id, crate::DecorationMode::ServerSide);
             }
         }
+        Event::NewLayerSurface(id) => {
+            with_layer_surface(session, id, |s| state.new_layer_surface(s))
+        }
+        Event::LayerSurfaceCommit(id) => {
+            with_layer_surface(session, id, |s| state.layer_surface_commit(s))
+        }
+        Event::LayerSurfaceMapped(id) => state.layer_surface_mapped(id),
+        Event::LayerSurfaceUnmapped(id) => state.layer_surface_unmapped(id),
+        Event::LayerSurfaceDestroyed(id) => state.layer_surface_destroyed(id),
         Event::Key {
             keysym,
             modifiers_raw,
@@ -1413,6 +1495,24 @@ fn with_toplevel<S>(session: &Session<'_, S>, id: ToplevelId, f: impl FnOnce(&To
     // dispatcher's handler flag is set for exactly this window).
     let toplevel = unsafe { Toplevel::from_raw_with_id(entry.raw.as_ptr(), id) };
     f(&toplevel);
+}
+
+/// Borrow the layer surface `id` names, if this runtime still knows of one.
+/// Mirrors [`with_toplevel`] exactly, including its obligations on `f`.
+fn with_layer_surface<S>(
+    session: &Session<'_, S>,
+    id: LayerSurfaceId,
+    f: impl FnOnce(&LayerSurface<'_>),
+) {
+    let Some(raw) = session.runtime.layer_surface_ptr(id) else {
+        return;
+    };
+    // SAFETY: an entry is removed by `on_layer_surface_destroy`, which
+    // wlroots runs before it frees the layer surface, so a present entry
+    // names a live one. The handle is created and dropped inside this call,
+    // exactly as `with_toplevel`'s does.
+    let surface = unsafe { LayerSurface::from_raw_with_id(raw.as_ptr(), id) };
+    f(&surface);
 }
 
 /// # Safety
@@ -1539,6 +1639,7 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
             std::ptr::null(),
             Some(id),
             None,
+            None,
         );
         let destroy = Registration::link(
             &raw mut (*output).events.destroy,
@@ -1546,6 +1647,7 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
             (*bound).session,
             std::ptr::null(),
             Some(id),
+            None,
             None,
         );
 
@@ -1720,6 +1822,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             std::ptr::null(),
             None,
             Some(id),
+            None,
         );
         let map = Registration::link(
             &raw mut (*surface).events.map,
@@ -1728,6 +1831,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             std::ptr::null(),
             None,
             Some(id),
+            None,
         );
         let unmap = Registration::link(
             &raw mut (*surface).events.unmap,
@@ -1736,6 +1840,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             std::ptr::null(),
             None,
             Some(id),
+            None,
         );
         let set_title = Registration::link(
             &raw mut (*toplevel).events.set_title,
@@ -1744,6 +1849,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             std::ptr::null(),
             None,
             Some(id),
+            None,
         );
         let destroy = Registration::link(
             &raw mut (*toplevel).events.destroy,
@@ -1752,6 +1858,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             std::ptr::null(),
             None,
             Some(id),
+            None,
         );
         let request_maximize = Registration::link(
             &raw mut (*toplevel).events.request_maximize,
@@ -1760,6 +1867,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             std::ptr::null(),
             None,
             Some(id),
+            None,
         );
         let request_fullscreen = Registration::link(
             &raw mut (*toplevel).events.request_fullscreen,
@@ -1768,6 +1876,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             std::ptr::null(),
             None,
             Some(id),
+            None,
         );
         let request_move = Registration::link(
             &raw mut (*toplevel).events.request_move,
@@ -1776,6 +1885,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             std::ptr::null(),
             None,
             Some(id),
+            None,
         );
         let request_resize = Registration::link(
             &raw mut (*toplevel).events.request_resize,
@@ -1784,6 +1894,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             std::ptr::null(),
             None,
             Some(id),
+            None,
         );
 
         // The registrations own the callbacks' backing memory, so they live in
@@ -1825,6 +1936,17 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
 unsafe fn toplevel_id_of_surface(surface: *mut sys::wlr_surface) -> Option<ToplevelId> {
     // SAFETY: the caller guarantees the surface is live.
     unsafe { find_id(&raw const (*surface).addons).map(ToplevelId) }
+}
+
+/// Recover the [`LayerSurfaceId`] a surface's id addon carries, if any.
+/// Mirrors [`toplevel_id_of_surface`] exactly.
+///
+/// # Safety
+///
+/// `surface` must be a live `wlr_surface` with an initialised addon set.
+unsafe fn layer_surface_id_of_surface(surface: *mut sys::wlr_surface) -> Option<LayerSurfaceId> {
+    // SAFETY: the caller guarantees the surface is live.
+    unsafe { find_id(&raw const (*surface).addons).map(LayerSurfaceId) }
 }
 
 unsafe extern "C" fn on_surface_commit<S: Handlers>(
@@ -2085,6 +2207,7 @@ unsafe extern "C" fn on_new_toplevel_decoration<S: Handlers>(
             std::ptr::null(),
             None,
             Some(id),
+            None,
         );
         let destroy = Registration::link(
             &raw mut (*decoration).events.destroy,
@@ -2093,6 +2216,7 @@ unsafe extern "C" fn on_new_toplevel_decoration<S: Handlers>(
             std::ptr::null(),
             None,
             Some(id),
+            None,
         );
 
         let displaced = (*session).decorations.borrow_mut().insert(
@@ -2233,6 +2357,242 @@ unsafe extern "C" fn on_toplevel_decoration_destroy<S: Handlers>(
         (*session).runtime.forget_decoration(id);
         let listeners = (*session).decorations.borrow_mut().remove(&id);
         drop(listeners);
+    }
+}
+
+/// A client created a wlr-layer-shell surface (`get_layer_surface`). Give it
+/// an id and a scene tree before anyone is told about it — mirrors
+/// `on_new_toplevel` exactly, with `wlr_scene_layer_surface_v1_create` in
+/// place of `wlr_scene_xdg_surface_create` and the once-at-creation band
+/// placement [`Layer`]'s own doc describes.
+unsafe extern "C" fn on_new_layer_surface<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener
+    // `register_toplevel_and_input` linked into
+    // `wlr_layer_shell_v1.events.new_surface`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a `*mut wlr_layer_surface_v1`, live and fully initialised —
+    // its `surface` included — at the point wlroots announces it.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ls = data.cast::<sys::wlr_layer_surface_v1>();
+        let surface = (*ls).surface;
+        if surface.is_null() {
+            return;
+        }
+
+        // The id lives on the surface's addon set, mirroring
+        // `on_new_toplevel`'s identical choice and for the identical
+        // reason: the role object itself carries no addon set of its own.
+        let id = LayerSurfaceId(ensure_id_raw(&raw mut (*surface).addons));
+
+        // No scene to insert into if `init_graphics` was never called.
+        // Drop the announcement rather than dereference a null tree — the
+        // same choice `on_new_toplevel` makes for the identical situation.
+        let Some(scene) = (*session).runtime.scene_ptr() else {
+            return;
+        };
+
+        let scene_layer_surface =
+            sys::wlr_scene_layer_surface_v1_create(&raw mut (*scene.as_ptr()).tree, ls);
+        let Some(scene_layer_surface) = NonNull::new(scene_layer_surface) else {
+            return;
+        };
+        let Some(scene_tree) = NonNull::new((*scene_layer_surface.as_ptr()).tree) else {
+            return;
+        };
+        let Some(raw) = NonNull::new(ls) else {
+            return;
+        };
+
+        // The once-at-creation two-band approximation [`Layer`]'s own doc
+        // describes: everything below toplevels goes to the very bottom,
+        // everything above goes to the very top, in creation order within
+        // each half.
+        match Layer::from_raw((*ls).pending.layer.0) {
+            Layer::Background | Layer::Bottom => {
+                sys::wlr_scene_node_lower_to_bottom(&raw mut (*scene_tree.as_ptr()).node);
+            }
+            Layer::Top | Layer::Overlay => {
+                sys::wlr_scene_node_raise_to_top(&raw mut (*scene_tree.as_ptr()).node);
+            }
+        }
+
+        // Four listeners, all with a null liveness flag: each is dropped
+        // from inside the destroy emission, while the object is still
+        // alive — the same reasoning `on_new_toplevel`'s five listeners
+        // document. `commit`/`map`/`unmap` are the base `wlr_surface`'s
+        // signals (wlr-layer-shell has no signals of its own for these, the
+        // same "role object defers to its surface" shape xdg-shell has),
+        // carrying `id` in `Bound::layer` rather than trusting `data` — see
+        // that field's own doc for why.
+        let commit = Registration::link(
+            &raw mut (*surface).events.commit,
+            on_layer_surface_commit::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            None,
+            None,
+            Some(id),
+        );
+        let map = Registration::link(
+            &raw mut (*surface).events.map,
+            on_layer_surface_map::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            None,
+            None,
+            Some(id),
+        );
+        let unmap = Registration::link(
+            &raw mut (*surface).events.unmap,
+            on_layer_surface_unmap::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            None,
+            None,
+            Some(id),
+        );
+        let destroy = Registration::link(
+            &raw mut (*ls).events.destroy,
+            on_layer_surface_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            None,
+            None,
+            Some(id),
+        );
+
+        let displaced = (*session).layers.borrow_mut().insert(
+            id,
+            LayerSurfaceListeners {
+                _commit: commit,
+                _map: map,
+                _unmap: unmap,
+                _destroy: destroy,
+            },
+        );
+        drop(displaced);
+
+        (*session).runtime.record_layer_surface(id, raw, scene_tree);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::NewLayerSurface(id), deliver);
+    }
+}
+
+unsafe extern "C" fn on_layer_surface_commit<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_layer_surface` into this surface's
+    // `events.commit`, unlinked (from `on_layer_surface_destroy`) before the
+    // surface is freed; `data` is the `wlr_surface`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let surface = data.cast::<sys::wlr_surface>();
+        let Some(id) = layer_surface_id_of_surface(surface) else {
+            return;
+        };
+        let Some(raw) = (*session).runtime.layer_surface_ptr(id) else {
+            return;
+        };
+
+        // Delivered for **every** commit, not only the first — see
+        // `Event::LayerSurfaceCommit`'s own doc for why. A handler running
+        // from this event sees `initialized` already true (the same
+        // argument `on_surface_commit` makes for `base.initialized`), so a
+        // `Runtime::configure_layer_surface` call made from inside it takes
+        // the immediate branch regardless of what happens below.
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::LayerSurfaceCommit(id), deliver);
+
+        // The first point at which flushing a staged configure is safe —
+        // see `layer.rs`'s own module doc for the full argument. If the
+        // handler above already answered through
+        // `Runtime::configure_layer_surface` (now immediate, since
+        // `initialized` is true), that call already cleared this, so
+        // `take_staged_layer_configure` finds nothing and this is a no-op
+        // rather than a second, stale configure.
+        if (*raw.as_ptr()).initial_commit
+            && let Some((width, height)) = (*session).runtime.take_staged_layer_configure(id)
+        {
+            sys::wlr_layer_surface_v1_configure(raw.as_ptr(), width, height);
+        }
+    }
+}
+
+unsafe extern "C" fn on_layer_surface_map<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_toplevel_map` — linked by `on_new_layer_surface`
+    // into this surface's `events.map`, which wlroots emits with a **null**
+    // `data`, so the id comes from `Bound::layer`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).layer else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::LayerSurfaceMapped(id), deliver);
+    }
+}
+
+unsafe extern "C" fn on_layer_surface_unmap<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_layer_surface_map`, on `events.unmap`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).layer else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::LayerSurfaceUnmapped(id), deliver);
+    }
+}
+
+/// A layer surface is about to be freed. Forget it *now*, whatever the
+/// handler does — mirrors `on_toplevel_destroy` exactly.
+unsafe extern "C" fn on_layer_surface_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_layer_surface` into the layer surface's own
+    // `events.destroy`; the layer surface is still alive for the duration
+    // of the emission. `_data` unused: the id comes from `Bound::layer`,
+    // the same "resolve by id carried at link time, not by re-deriving it"
+    // discipline `on_toplevel_destroy` follows.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).layer else { return };
+
+        // Purge before emitting — the same ordering argument
+        // `on_toplevel_destroy` and `on_output_destroy` both make: a
+        // destroy queued behind a running handler is delivered long after
+        // wlroots freed the object, so resolving at delivery time would
+        // dereference freed memory. Clearing here means it simply misses.
+        (*session).runtime.forget_layer_surface(id);
+        let listeners = (*session).layers.borrow_mut().remove(&id);
+        drop(listeners);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::LayerSurfaceDestroyed(id), deliver);
     }
 }
 
@@ -2511,6 +2871,7 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
             &raw const *alive,
             None,
             None,
+            None,
         );
 
         let mut listeners = Vec::new();
@@ -2553,12 +2914,14 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                         &raw const *alive,
                         None,
                         None,
+                        None,
                     ));
                     listeners.push(Registration::link(
                         &raw mut (*kb).events.modifiers,
                         on_modifiers::<S>,
                         (*bound).session,
                         &raw const *alive,
+                        None,
                         None,
                         None,
                     ));
@@ -2581,6 +2944,7 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                         &raw const *alive,
                         None,
                         None,
+                        None,
                     ));
                     listeners.push(Registration::link(
                         &raw mut (*raw_pointer).events.motion_absolute,
@@ -2589,12 +2953,14 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                         &raw const *alive,
                         None,
                         None,
+                        None,
                     ));
                     listeners.push(Registration::link(
                         &raw mut (*raw_pointer).events.button,
                         on_pointer_button::<S>,
                         (*bound).session,
                         &raw const *alive,
+                        None,
                         None,
                         None,
                     ));
@@ -3008,6 +3374,11 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::RequestMove(..)
         | Event::RequestResize(..)
         | Event::RequestDecorationMode(..)
+        | Event::NewLayerSurface(..)
+        | Event::LayerSurfaceCommit(..)
+        | Event::LayerSurfaceMapped(..)
+        | Event::LayerSurfaceUnmapped(..)
+        | Event::LayerSurfaceDestroyed(..)
         | Event::Key { .. }
         | Event::PointerMotion { .. }
         | Event::PointerButton { .. } => {}
@@ -3093,6 +3464,7 @@ mod tests {
                 &raw const (*hp).alive,
                 None,
                 None,
+                None,
             );
             assert!(is_linked(hp, noop), "link must register the listener");
 
@@ -3119,8 +3491,9 @@ mod tests {
         fn link_then_fail(signal: *mut sys::wl_signal, alive: *const Cell<bool>) -> Result<()> {
             // SAFETY: the caller owns a live signal and flag that both outlive
             // this call.
-            let _reg =
-                unsafe { Registration::link(signal, noop, std::ptr::null(), alive, None, None) };
+            let _reg = unsafe {
+                Registration::link(signal, noop, std::ptr::null(), alive, None, None, None)
+            };
             failing_dispatch()?;
             Ok(())
         }
@@ -3158,6 +3531,7 @@ mod tests {
                 noop,
                 std::ptr::null(),
                 &raw const (*hp).alive,
+                None,
                 None,
                 None,
             );
@@ -3203,6 +3577,7 @@ mod tests {
                 on_backend_destroy,
                 std::ptr::null(),
                 &raw const (*hp).alive,
+                None,
                 None,
                 None,
             );
@@ -3423,6 +3798,7 @@ mod tests {
                 outputs: RefCell::new(HashMap::new()),
                 toplevels: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
+                layers: RefCell::new(HashMap::new()),
                 inputs: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
                 runtime: &runtime,
@@ -3438,6 +3814,7 @@ mod tests {
                 on_new_output::<Recorder>,
                 (&raw const session).cast::<()>(),
                 &raw const (*hp).alive,
+                None,
                 None,
                 None,
             );
@@ -3595,6 +3972,7 @@ mod tests {
             outputs: RefCell::new(HashMap::new()),
             toplevels: RefCell::new(HashMap::new()),
             decorations: RefCell::new(HashMap::new()),
+            layers: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime: &runtime,
@@ -3722,6 +4100,7 @@ mod tests {
                 std::ptr::null(),
                 None,
                 None,
+                None,
             )
         };
         let modifiers = unsafe {
@@ -3730,6 +4109,7 @@ mod tests {
                 noop,
                 std::ptr::null(),
                 std::ptr::null(),
+                None,
                 None,
                 None,
             )
@@ -3745,6 +4125,7 @@ mod tests {
                 on_kb_destroy,
                 regs_ptr,
                 std::ptr::null(),
+                None,
                 None,
                 None,
             )

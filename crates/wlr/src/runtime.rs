@@ -38,7 +38,8 @@ use crate::decoration::{DecorationEntry, DecorationMode};
 use crate::id::{SourceId, next_id};
 use crate::scene::RectId;
 use crate::{
-    Backend, BufferId, Display, Error, Interest, Output, OutputId, Result, ToplevelId, sys,
+    Backend, BufferId, Display, Error, Interest, LayerSurfaceId, Output, OutputId, Result,
+    ToplevelId, sys,
 };
 
 /// A declared fd source: the descriptor, what it wants, and its id.
@@ -138,6 +139,23 @@ pub(crate) struct RuntimeInner {
     /// any entry here for the toplevel it is forgetting.
     pub(crate) decorations: RefCell<HashMap<ToplevelId, DecorationEntry>>,
 
+    /// The layer shell, once created. `Option` for the same reason
+    /// `xdg_shell` is: a consumer that never calls
+    /// [`Runtime::create_layer_shell`] never advertises
+    /// `zwlr_layer_shell_v1`, and a second call would advertise a second
+    /// one.
+    pub(crate) layer_shell: RefCell<Option<NonNull<sys::wlr_layer_shell_v1>>>,
+
+    /// Every live layer surface: the role object and the scene tree
+    /// [`wlr_scene_layer_surface_v1_create`](sys::wlr_scene_layer_surface_v1_create)
+    /// created for it. Mirrors `toplevels` in shape and in lifetime — purged
+    /// synchronously by `backend.rs`'s `on_layer_surface_destroy` before
+    /// wlroots frees the role object, and cleared wholesale by
+    /// `LayerSurfaceTableGuard` when the `run_all` call that populated it
+    /// returns, the same "an id is only good for the call that announced it"
+    /// rule every other by-id table here follows.
+    pub(crate) layer_surfaces: RefCell<HashMap<LayerSurfaceId, LayerSurfaceEntry>>,
+
     /// Reverse lookup for the scene hit test, which finds a `wlr_scene_tree`
     /// and has to name the toplevel it belongs to. Keyed by the tree pointer
     /// because that is what `wlr_scene_node_at` walks back to.
@@ -202,6 +220,28 @@ pub(crate) struct RuntimeInner {
 pub(crate) struct ToplevelEntry {
     pub(crate) raw: NonNull<sys::wlr_xdg_toplevel>,
     pub(crate) tree: NonNull<sys::wlr_scene_tree>,
+}
+
+/// A live layer surface: the role object, the scene tree
+/// `wlr_scene_layer_surface_v1_create` created for it, and any configure
+/// size waiting for this surface's initial commit to become safe to send.
+///
+/// Not `Copy`, unlike [`ToplevelEntry`]: `staged_configure` is a `Cell`, and
+/// `Cell` is never `Copy` regardless of what it holds. Every accessor that
+/// needs to read `raw`/`scene_tree` outside a held borrow copies just that
+/// field out — `layer_surface_ptr`/`layer_surface_scene_ptr` — the same
+/// narrowing [`crate::decoration::DecorationEntry`]'s own accessors do for
+/// the identical reason.
+pub(crate) struct LayerSurfaceEntry {
+    pub(crate) raw: NonNull<sys::wlr_layer_surface_v1>,
+    pub(crate) scene_tree: NonNull<sys::wlr_scene_tree>,
+
+    /// A size [`Runtime::configure_layer_surface`] recorded instead of
+    /// sending, because the surface was not yet initialized when the call
+    /// was made. See `layer.rs`'s own module doc for the full argument, and
+    /// `backend.rs`'s `on_layer_surface_commit` for where this is taken and
+    /// actually sent.
+    pub(crate) staged_configure: std::cell::Cell<Option<(u32, u32)>>,
 }
 
 /// A live scene rect: the node wlroots created for it, and which toplevel
@@ -327,6 +367,8 @@ impl Runtime {
                 xdg_decoration_manager: RefCell::new(None),
                 toplevels: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
+                layer_shell: RefCell::new(None),
+                layer_surfaces: RefCell::new(HashMap::new()),
                 tree_to_toplevel: RefCell::new(HashMap::new()),
                 seat: RefCell::new(None),
                 cursor: RefCell::new(None),
@@ -1857,6 +1899,266 @@ impl Runtime {
         if let Some(entry) = self.inner.decorations.borrow().get(&id) {
             entry.staged.set(None);
         }
+    }
+
+    /// Advertise `zwlr_layer_shell_v1`.
+    ///
+    /// Call once at boot, after [`create_xdg_shell`](Runtime::create_xdg_shell)
+    /// — nothing here actually requires an xdg shell to exist (layer surfaces
+    /// are independent of it), but this crate places layer surfaces into the
+    /// same scene [`init_graphics`](Runtime::init_graphics) creates, and
+    /// pairing the two calls keeps a compositor's boot sequence in one
+    /// order. Unlike `create_xdg_shell`, `init_graphics` having run is
+    /// *not* checked here: a scene is only needed once a client actually
+    /// creates a surface (`backend.rs`'s `on_new_layer_surface` drops the
+    /// announcement if there is none yet), not at the point the global
+    /// itself is advertised — mirroring
+    /// [`create_xdg_decoration_manager`](Runtime::create_xdg_decoration_manager)'s
+    /// own reasoning for the same omission.
+    ///
+    /// Registration of the `new_surface` listener happens inside
+    /// [`Backend::run_all`](crate::Backend::run_all) and lives for that
+    /// call, so creating the shell after a run has started has no effect
+    /// until the next one — the rule every global-advertising call in this
+    /// crate follows.
+    ///
+    /// `version` is a parameter for the same reason
+    /// [`create_xdg_shell`](Runtime::create_xdg_shell)'s is; pass 4 unless
+    /// you know otherwise.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] if a layer shell already exists on this runtime;
+    /// [`Error::Create`] if wlroots could not create it.
+    pub fn create_layer_shell(&self, display: &Display, version: u32) -> Result<()> {
+        if self.inner.layer_shell.borrow().is_some() {
+            return Err(Error::Operation("Runtime::create_layer_shell called twice"));
+        }
+        // SAFETY: `display` is live for the call; the returned shell is
+        // owned by the display and destroyed with it, so this crate never
+        // frees it.
+        let raw = unsafe { sys::wlr_layer_shell_v1_create(display.as_ptr(), version) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_layer_shell_v1_create"))?;
+        *self.inner.layer_shell.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    pub(crate) fn layer_shell_ptr(&self) -> Option<NonNull<sys::wlr_layer_shell_v1>> {
+        *self.inner.layer_shell.borrow()
+    }
+
+    /// Record a newly-announced layer surface under `id`.
+    pub(crate) fn record_layer_surface(
+        &self,
+        id: LayerSurfaceId,
+        raw: NonNull<sys::wlr_layer_surface_v1>,
+        scene_tree: NonNull<sys::wlr_scene_tree>,
+    ) {
+        self.inner.layer_surfaces.borrow_mut().insert(
+            id,
+            LayerSurfaceEntry {
+                raw,
+                scene_tree,
+                staged_configure: std::cell::Cell::new(None),
+            },
+        );
+    }
+
+    /// Remove `id`'s entry. Called from `on_layer_surface_destroy` before
+    /// the layer surface is freed, mirroring
+    /// [`forget_toplevel`](Runtime::forget_toplevel).
+    pub(crate) fn forget_layer_surface(&self, id: LayerSurfaceId) {
+        self.inner.layer_surfaces.borrow_mut().remove(&id);
+    }
+
+    /// This id's recorded raw layer surface, with the borrow released before
+    /// returning — see [`toplevel_entry`](Runtime::toplevel_entry)'s own doc
+    /// for why.
+    pub(crate) fn layer_surface_ptr(
+        &self,
+        id: LayerSurfaceId,
+    ) -> Option<NonNull<sys::wlr_layer_surface_v1>> {
+        self.inner.layer_surfaces.borrow().get(&id).map(|e| e.raw)
+    }
+
+    /// This id's recorded scene tree, with the borrow released before
+    /// returning — as [`layer_surface_ptr`](Runtime::layer_surface_ptr).
+    pub(crate) fn layer_surface_scene_ptr(
+        &self,
+        id: LayerSurfaceId,
+    ) -> Option<NonNull<sys::wlr_scene_tree>> {
+        self.inner
+            .layer_surfaces
+            .borrow()
+            .get(&id)
+            .map(|e| e.scene_tree)
+    }
+
+    /// Record a size for `id` to send once its surface is initialized,
+    /// overwriting whatever was staged before — the same "last write wins"
+    /// shape [`set_toplevel_size`](Runtime::set_toplevel_size) has for the
+    /// base xdg-shell configure.
+    fn stage_layer_configure(&self, id: LayerSurfaceId, width: u32, height: u32) {
+        if let Some(entry) = self.inner.layer_surfaces.borrow().get(&id) {
+            entry.staged_configure.set(Some((width, height)));
+        }
+    }
+
+    /// Take (and clear) the size staged for `id`, if any. Called by
+    /// `backend.rs`'s `on_layer_surface_commit` at the surface's initial
+    /// commit, and by [`configure_layer_surface`](Runtime::configure_layer_surface)'s
+    /// own immediate branch — see that method's own doc for why an
+    /// immediate send also clears this.
+    pub(crate) fn take_staged_layer_configure(&self, id: LayerSurfaceId) -> Option<(u32, u32)> {
+        self.inner
+            .layer_surfaces
+            .borrow()
+            .get(&id)
+            .and_then(|e| e.staged_configure.take())
+    }
+
+    /// Drop every layer surface this runtime knows of, without touching
+    /// wlroots. Called once, by `backend.rs`'s `run_inner`, when the
+    /// `run_all` call that populated this table returns — mirroring
+    /// [`clear_toplevels`](Runtime::clear_toplevels), and for the identical
+    /// reason.
+    pub(crate) fn clear_layer_surfaces(&self) {
+        self.inner.layer_surfaces.borrow_mut().clear();
+    }
+
+    /// Answer a layer surface's (re)configure with the size the compositor
+    /// chose, in surface-local pixels.
+    ///
+    /// **Staged, not always sent.** See `layer.rs`'s own module doc for the
+    /// full argument: this crate could not confirm firsthand whether
+    /// `wlr_layer_surface_v1_configure` asserts on `initialized` the way
+    /// `wlr_xdg_surface_schedule_configure` does, so it treats the hazard as
+    /// real defensively. This method sends immediately only if the surface
+    /// is already initialized; otherwise it records `width`/`height` for
+    /// `backend.rs`'s `on_layer_surface_commit` to send for real at the
+    /// surface's initial commit. Either way this returns `Some(())`; the
+    /// difference is invisible to a caller.
+    ///
+    /// The immediate branch also clears any earlier staged value (there
+    /// should not be one — a caller only reaches the immediate branch once
+    /// `initialized` has gone true, at which point `on_layer_surface_commit`
+    /// has either already flushed whatever was staged or found nothing to
+    /// flush — but doing so unconditionally is what stops a stale staged
+    /// size from being sent a second time by a *later* commit if this
+    /// method is ever called more than once for the same surface before its
+    /// first commit lands).
+    ///
+    /// `None` if this runtime has no live layer surface with that id. **A
+    /// `LayerSurfaceId` is only good for the
+    /// [`Backend::run_all`](crate::Backend::run_all) call that announced
+    /// it** — the same rule every by-id mutator in this crate follows; see
+    /// [`set_toplevel_size`](Runtime::set_toplevel_size)'s own doc.
+    pub fn configure_layer_surface(
+        &self,
+        id: LayerSurfaceId,
+        width: u32,
+        height: u32,
+    ) -> Option<()> {
+        let raw = self.layer_surface_ptr(id)?;
+        // SAFETY: an entry is removed by `on_layer_surface_destroy`, which
+        // wlroots runs before it frees the layer surface, so a present
+        // entry names a live one.
+        let initialized = unsafe { (*raw.as_ptr()).initialized };
+        if initialized {
+            // SAFETY: `initialized` being true is exactly the precondition
+            // this method's own doc describes as making the call safe.
+            unsafe { sys::wlr_layer_surface_v1_configure(raw.as_ptr(), width, height) };
+            self.take_staged_layer_configure(id);
+        } else {
+            self.stage_layer_configure(id, width, height);
+        }
+        Some(())
+    }
+
+    /// Position the layer surface's scene node in layout coordinates.
+    ///
+    /// This is a compositor-side move only, exactly like
+    /// [`set_toplevel_position`](Runtime::set_toplevel_position): it
+    /// repositions what is drawn and where the pointer hit test finds it,
+    /// and sends the client nothing. A compositor implementing anchoring
+    /// itself calls this from
+    /// [`ToplevelHandler::layer_surface_commit`](crate::ToplevelHandler::layer_surface_commit),
+    /// after reading [`LayerSurface::anchor`](crate::LayerSurface::anchor)
+    /// and the surface's actual size.
+    ///
+    /// `None` for an unknown or stale id; see
+    /// [`set_toplevel_size`](Runtime::set_toplevel_size)'s own doc for what
+    /// "stale" means.
+    pub fn set_layer_surface_position(&self, id: LayerSurfaceId, x: i32, y: i32) -> Option<()> {
+        let tree = self.layer_surface_scene_ptr(id)?;
+        // SAFETY: the tree is created by this crate when the layer surface
+        // is announced and destroyed with it (wlroots' own
+        // `wlr_scene_layer_surface_v1` links its tree's destruction to the
+        // layer surface's own), so a present entry names a live tree.
+        unsafe { sys::wlr_scene_node_set_position(&raw mut (*tree.as_ptr()).node, x, y) };
+        Some(())
+    }
+
+    /// Give the keyboard focus to `id`.
+    ///
+    /// Mirrors [`focus_toplevel_keyboard`](Runtime::focus_toplevel_keyboard)
+    /// exactly, targeting a layer surface's `wlr_surface` instead of a
+    /// toplevel's — same idempotence, same modifier/held-key replay on
+    /// enter, and the same reasons for each. The next call to
+    /// [`focus_toplevel_keyboard`](Runtime::focus_toplevel_keyboard) or
+    /// [`clear_keyboard_focus`](Runtime::clear_keyboard_focus) replaces
+    /// this focus, exactly as it would replace another toplevel's — this
+    /// crate's model has no separate "layer focus" slot, only "whatever the
+    /// seat's keyboard focus currently is".
+    ///
+    /// `None` if this runtime has no seat, no live layer surface with that
+    /// id, or the surface is **not currently mapped** — the identical
+    /// "resolves or it does not" reasoning
+    /// [`focus_toplevel_keyboard`](Runtime::focus_toplevel_keyboard)'s own
+    /// doc gives for its toplevel counterpart, checked against
+    /// `wlr_surface::mapped` here too rather than tracked separately.
+    pub fn focus_layer_keyboard(&self, id: LayerSurfaceId) -> Option<()> {
+        let seat = *self.inner.seat.borrow();
+        let seat = seat?;
+        let raw = self.layer_surface_ptr(id)?;
+
+        // SAFETY: a present entry names a live layer surface (its destroy
+        // callback removes the entry before wlroots frees it), so
+        // `.surface` is either null (checked below) or a live surface.
+        // `wlr_seat_get_keyboard` returns null when no keyboard is
+        // attached, which the enter call tolerates by taking no keycodes —
+        // the identical shape `focus_toplevel_keyboard` follows.
+        unsafe {
+            let surface = (*raw.as_ptr()).surface;
+            if surface.is_null() {
+                return None;
+            }
+            if !(*surface).mapped {
+                return None;
+            }
+            if (*seat.as_ptr()).keyboard_state.focused_surface == surface {
+                return Some(());
+            }
+            let kb = sys::wlr_seat_get_keyboard(seat.as_ptr());
+            if kb.is_null() {
+                sys::wlr_seat_keyboard_notify_enter(
+                    seat.as_ptr(),
+                    surface,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                );
+            } else {
+                sys::wlr_seat_keyboard_notify_enter(
+                    seat.as_ptr(),
+                    surface,
+                    (*kb).keycodes.as_ptr(),
+                    (*kb).num_keycodes,
+                    &raw mut (*kb).modifiers,
+                );
+            }
+        }
+        Some(())
     }
 
     /// Create the seat, its cursor, and the cursor theme.

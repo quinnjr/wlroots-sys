@@ -4,7 +4,10 @@
 //! every handler as `&mut S`. Every method is defaulted, so a consumer
 //! implements only what they use.
 
-use crate::{DecorationMode, Edges, KeyEvent, Output, OutputId, Toplevel, ToplevelId};
+use crate::{
+    DecorationMode, Edges, KeyEvent, LayerSurface, LayerSurfaceId, Output, OutputId, Toplevel,
+    ToplevelId,
+};
 
 /// Output lifecycle and frame events.
 ///
@@ -146,6 +149,14 @@ pub trait LoopHandler {
 /// `request_resize` were added in 0.20.7, additively for the same reason:
 /// every one of them is defaulted, so an impl written against any earlier
 /// 0.20.x still compiles.
+///
+/// `new_layer_surface`, `layer_surface_commit`, `layer_surface_mapped`,
+/// `layer_surface_unmapped` and `layer_surface_destroyed` were added in
+/// 0.20.11, on the same additive terms — wlr-layer-shell surfaces are not
+/// xdg-shell toplevels, but they share this trait rather than getting their
+/// own for the identical reason `request_decoration_mode` does: one more
+/// defaulted method costs an implementor nothing, and a second trait would
+/// cost every consumer a second (also-empty) `impl` block.
 ///
 /// # Panics
 ///
@@ -316,6 +327,66 @@ pub trait ToplevelHandler {
     /// for), so the default is conditional rather than unconditional.
     fn request_decoration_mode(&mut self, id: ToplevelId, preference: Option<DecorationMode>) {
         let _ = (id, preference);
+    }
+
+    /// A client created a wlr-layer-shell surface (`get_layer_surface`).
+    ///
+    /// Added in 0.20.11, additively, on this trait rather than a new one —
+    /// see this trait's own doc for why `request_maximize` and its 0.20.7
+    /// siblings live here rather than on a `LayerShellHandler`: every method
+    /// is defaulted, so an `impl ToplevelHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged.
+    ///
+    /// Like [`new_toplevel`](ToplevelHandler::new_toplevel), the surface is
+    /// not mapped yet and has no buffer. Answer with
+    /// [`Runtime::configure_layer_surface`](crate::Runtime::configure_layer_surface)
+    /// from here (or later, from
+    /// [`layer_surface_commit`](ToplevelHandler::layer_surface_commit)) —
+    /// see that method's own doc for what happens if nothing ever answers.
+    /// Record [`LayerSurface::id`] if you need to refer to this surface
+    /// later; the handle is valid only for this call.
+    fn new_layer_surface(&mut self, surface: &LayerSurface<'_>) {
+        let _ = surface;
+    }
+
+    /// The client committed to this layer surface's underlying `wl_surface`.
+    ///
+    /// Unlike [`initial_commit`](ToplevelHandler::initial_commit), this
+    /// fires on **every** commit, not only the first — wlr-layer-shell
+    /// clients routinely re-anchor, resize their exclusive zone, or change
+    /// margins after mapping, each by way of another `wl_surface.commit`,
+    /// and a compositor generally wants to see all of them, not just the
+    /// one that maps the surface. Use
+    /// [`LayerSurface::layer`]/[`anchor`](LayerSurface::anchor)/etc. to read
+    /// whatever changed.
+    fn layer_surface_commit(&mut self, surface: &LayerSurface<'_>) {
+        let _ = surface;
+    }
+
+    /// The layer surface has a buffer and should be displayed. Only the id,
+    /// mirroring [`mapped`](ToplevelHandler::mapped)'s toplevel counterpart
+    /// — the crate has already inserted this surface into the scene graph
+    /// by this point.
+    fn layer_surface_mapped(&mut self, id: LayerSurfaceId) {
+        let _ = id;
+    }
+
+    /// The layer surface should not be displayed any more. Not the same as
+    /// destruction — mirrors
+    /// [`unmapped`](ToplevelHandler::unmapped)'s toplevel counterpart
+    /// exactly, including that a layer surface can unmap and remap while
+    /// keeping its id.
+    fn layer_surface_unmapped(&mut self, id: LayerSurfaceId) {
+        let _ = id;
+    }
+
+    /// The layer surface is gone. Only the id, for the identical reason
+    /// [`toplevel_destroyed`](ToplevelHandler::toplevel_destroyed) documents
+    /// — including that **`id` may be one you were never told about**, on
+    /// the same "queued behind a running handler" grounds. Write this so an
+    /// unknown id is harmless.
+    fn layer_surface_destroyed(&mut self, id: LayerSurfaceId) {
+        let _ = id;
     }
 }
 

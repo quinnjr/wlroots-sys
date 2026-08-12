@@ -44,7 +44,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
-use crate::{DecorationMode, Edges, OutputId, ToplevelId};
+use crate::{DecorationMode, Edges, LayerSurfaceId, OutputId, ToplevelId};
 
 /// An event awaiting delivery.
 ///
@@ -89,6 +89,16 @@ pub(crate) enum Event {
     /// at delivery, so a deferred event still reports what the client
     /// actually asked for.
     RequestDecorationMode(ToplevelId, Option<DecorationMode>),
+
+    NewLayerSurface(LayerSurfaceId),
+    /// Fires on **every** commit of a layer surface's underlying
+    /// `wlr_surface`, not only the first — unlike `ToplevelInitialCommit`,
+    /// wlr-layer-shell surfaces routinely change their anchor, margins or
+    /// exclusive zone after mapping and a compositor needs to see each one.
+    LayerSurfaceCommit(LayerSurfaceId),
+    LayerSurfaceMapped(LayerSurfaceId),
+    LayerSurfaceUnmapped(LayerSurfaceId),
+    LayerSurfaceDestroyed(LayerSurfaceId),
 
     Key {
         keysym: u32,
