@@ -1308,18 +1308,28 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         Event::RequestMove(id) => state.request_move(id),
         Event::RequestResize(id, edges) => state.request_resize(id, edges),
         Event::RequestDecorationMode(id, preference) => {
+            // Cleared here, immediately before the handler runs, rather
+            // than back in `on_decoration_request_mode` at emit time — see
+            // `DecorationEntry::mode_set_this_dispatch`'s own doc. This is
+            // what makes clear-then-check correct even if this event is
+            // ever deferred (queued behind an outer handler, or delivered
+            // from the synthetic "no `request_mode` ever fired" path
+            // `on_surface_commit` drives at initial commit): the clear and
+            // the check below now bracket exactly one handler invocation,
+            // never a different one's.
+            session.runtime.clear_decoration_dispatch_flag(id);
             state.request_decoration_mode(id, preference);
             // wlroots requires a mode be set before the initial commit is
-            // answered. The handler may have already answered through
-            // `Runtime::set_decoration_mode`, which sets this same flag —
-            // see `on_decoration_request_mode`'s own doc for where it was
-            // cleared, and `DecorationEntry::mode_set_this_dispatch` for the
-            // full mechanism. Unlike `RequestMaximize`'s bare configure,
-            // this follow-up is *conditional*: sending a second `set_mode`
-            // after the handler already sent one would tell the client
-            // server-side and then, in the same turn, whatever the handler
-            // asked for — not "harmless, coalesced" the way a second
-            // configure is.
+            // answered — see `Runtime::set_decoration_mode`'s own doc for
+            // how that requirement is actually satisfied (staged, not sent,
+            // until the surface is initialized). The handler may have
+            // already answered through `Runtime::set_decoration_mode`,
+            // which sets this same flag; unlike `RequestMaximize`'s bare
+            // configure, this follow-up is *conditional*: sending a second
+            // `set_mode` after the handler already sent (or staged) one
+            // would tell the client server-side and then, in the same turn,
+            // whatever the handler asked for — not "harmless, coalesced"
+            // the way a second configure is.
             if !session.runtime.decoration_dispatch_flag(id) {
                 session.runtime.set_decoration_mode(id, true);
             }
@@ -1816,10 +1826,46 @@ unsafe extern "C" fn on_surface_commit<S: Handlers>(
             .dispatcher
             .emit(&*session, Event::ToplevelInitialCommit(id), deliver);
 
+        // If this toplevel has a decoration, this is the first point at
+        // which answering it is safe: `wlr_xdg_surface_schedule_configure`
+        // — which both `Runtime::set_decoration_mode` and the client's own
+        // `set_mode` request funnel into — asserts `surface->initialized`,
+        // and `initial_commit` handling (above `base.initial_commit`'s
+        // gate at the top of this function) is exactly what just made that
+        // true. See `Runtime::set_decoration_mode`'s own doc for the full
+        // argument. Two cases follow from whether a `request_mode` already
+        // ran for this decoration before this commit:
+        if let Some(server_side) = (*session).runtime.take_staged_decoration_mode(id) {
+            // It did: the client called `set_mode`/`unset_mode` before
+            // committing, `on_decoration_request_mode` already gave the
+            // handler its say, and the resulting decision — the handler's,
+            // or the dispatch-layer default — was staged rather than sent
+            // because the surface was not yet initialized then. Flush it
+            // now; `set_decoration_mode` takes the immediate path this
+            // time, since `initialized` just went true.
+            (*session).runtime.set_decoration_mode(id, server_side);
+        } else if let Some(preference) = (*session).runtime.decoration_requested_preference(id) {
+            // It did not: a decoration exists (`preference` would be
+            // `None` above otherwise) but the client never called
+            // `set_mode` — legal, and what a client that wants the
+            // compositor to just decide does. Nothing has consulted the
+            // handler for it yet, so do that now, through the same event a
+            // real `request_mode` would produce. `deliver_all`'s arm
+            // answers it, and — since `initialized` is already true here —
+            // that answer is sent immediately rather than staged again.
+            (*session).dispatcher.emit(
+                &*session,
+                Event::RequestDecorationMode(id, preference),
+                deliver,
+            );
+        }
+
         // xdg-shell requires an answer to the first commit. The handler may
         // already have staged one through `Runtime::set_toplevel_*`, in which
         // case wlroots coalesces this into that same configure; if it staged
-        // nothing, this is what stops the client waiting forever.
+        // nothing, this is what stops the client waiting forever. This also
+        // picks up whichever decoration configure the block above just sent,
+        // coalesced into the same wire message.
         sys::wlr_xdg_surface_schedule_configure(base);
     }
 }
@@ -1916,11 +1962,18 @@ unsafe extern "C" fn on_toplevel_destroy<S: Handlers>(
         // its toplevel can die in; see `RuntimeInner::decorations`'s own
         // doc. `forget_toplevel` just purged the data-side table above —
         // this purges this run's listener registrations for the same id, if
-        // any. The decoration object itself is not freed by this (wlroots
-        // only clears its `toplevel` field), so dropping — and so
-        // unlinking — these registrations here is not a use-after-free; it
-        // only stops this crate delivering any further event for a
-        // decoration whose toplevel is already gone.
+        // any. wlroots *does* eventually free the decoration in this order
+        // too — it posts the `orphaned` protocol error and destroys the
+        // resource — but not from inside this emission: that happens from
+        // wlroots' own `toplevel_destroy` listener on the decoration, which
+        // was registered after this crate's (`get_toplevel_decoration` runs
+        // after `on_new_toplevel`, and `wl_signal_add` appends), so it
+        // fires *after* this callback returns. The decoration is therefore
+        // still alive right now, so dropping — and so unlinking — these
+        // registrations here is not a use-after-free; it is what makes
+        // wlroots' later `assert`-on-empty-listener-lists (see
+        // `on_toplevel_decoration_destroy`'s own doc) hold once that
+        // listener does run.
         let decoration_listeners = (*session).decorations.borrow_mut().remove(&id);
         drop(decoration_listeners);
 
@@ -2034,12 +2087,11 @@ unsafe extern "C" fn on_decoration_request_mode<S: Handlers>(
         let session = (*bound).session.cast::<Session<'_, S>>();
         let Some(id) = (*bound).toplevel else { return };
 
-        // Cleared right before this request is delivered, per toplevel —
-        // see `DecorationEntry::mode_set_this_dispatch`'s own doc for the
-        // full mechanism this is one half of. `deliver_all` reads it back
-        // once the handler returns.
-        (*session).runtime.clear_decoration_dispatch_flag(id);
-
+        // The `mode_set_this_dispatch` flag is cleared in `deliver_all`,
+        // immediately before it calls the handler — not here. See
+        // `DecorationEntry::mode_set_this_dispatch`'s own doc for why that
+        // placement, rather than this one, is what keeps clear-then-check
+        // correct under deferral and reentrancy.
         let Some(decoration) = (*session).runtime.decoration_ptr(id) else {
             return;
         };
@@ -2061,6 +2113,13 @@ unsafe extern "C" fn on_decoration_request_mode<S: Handlers>(
 /// here even though no event is emitted for this signal at all: there is
 /// nothing for [`crate::ToplevelHandler`] to be told (the toplevel itself
 /// may still be alive and unaffected), only bookkeeping to do.
+///
+/// Unlinking both of this decoration's listeners is not optional cleanup:
+/// wlroots' own `toplevel_decoration_handle_resource_destroy` emits
+/// `events.destroy` and then **asserts both of the decoration's signal
+/// listener lists are empty** (`wlr_xdg_decoration_v1.c`). A wrapper that
+/// left either of these two linked past this point would abort wlroots on
+/// every decoration a client destroys.
 unsafe extern "C" fn on_toplevel_decoration_destroy<S: Handlers>(
     l: *mut sys::wl_listener,
     _data: *mut std::ffi::c_void,

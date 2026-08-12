@@ -1292,10 +1292,17 @@ impl Runtime {
         // The toplevel dying first is one of the two orders a decoration and
         // its toplevel can die in (see `RuntimeInner::decorations`'s own
         // doc); this is the half of that purge owned by the toplevel side.
-        // The decoration object itself is not touched — wlroots does not
-        // free it just because its toplevel died, only clears its own
-        // `toplevel` field — this only stops this crate naming an id that
-        // is about to mean nothing.
+        // wlroots does free the decoration in this order too — it posts the
+        // `orphaned` protocol error and destroys the resource — but only
+        // *after* this callback returns and wlroots' own internal
+        // `toplevel_destroy` listener on the decoration runs, which is
+        // registered after this crate's own (`get_toplevel_decoration` runs
+        // after `on_new_toplevel`, and `wl_signal_add` appends), so this
+        // crate's purge — of both this table and, at the call site, the
+        // session's decoration registrations — is guaranteed to run first.
+        // That ordering is what this table entry existing at all depends
+        // on: it must be gone before wlroots frees the decoration, not
+        // merely before this function returns.
         self.inner.decorations.borrow_mut().remove(&id);
     }
 
@@ -1369,6 +1376,7 @@ impl Runtime {
             DecorationEntry {
                 raw,
                 mode_set_this_dispatch: std::cell::Cell::new(false),
+                staged: std::cell::Cell::new(None),
             },
         );
     }
@@ -1413,6 +1421,38 @@ impl Runtime {
             .get(&id)
             .map(|e| e.mode_set_this_dispatch.get())
             .unwrap_or(false)
+    }
+
+    /// Take (and clear) the mode staged for `id`'s decoration by a
+    /// [`Runtime::set_decoration_mode`] call that landed before the surface
+    /// was initialized. `None` if nothing is staged — no decoration, or
+    /// every staged decision has already been flushed. Called by
+    /// `backend.rs`'s `on_surface_commit` at the toplevel's initial commit;
+    /// see [`DecorationEntry`](crate::decoration::DecorationEntry)'s own doc
+    /// for the full mechanism.
+    pub(crate) fn take_staged_decoration_mode(&self, id: ToplevelId) -> Option<bool> {
+        self.inner
+            .decorations
+            .borrow()
+            .get(&id)
+            .and_then(|e| e.staged.take())
+    }
+
+    /// Whether `id` has a decoration, and if so, the client's current
+    /// stated preference for it — read fresh from
+    /// `wlr_xdg_toplevel_decoration_v1::requested_mode` through
+    /// [`crate::decoration::client_side_preference`], not cached, since the
+    /// only caller (`on_surface_commit`'s "nothing has ever asked for this
+    /// decoration" path) wants whatever is true *now*.
+    pub(crate) fn decoration_requested_preference(&self, id: ToplevelId) -> Option<Option<bool>> {
+        let raw = self.decoration_ptr(id)?;
+        // SAFETY: a present `decorations` entry names a decoration still
+        // linked into the table — removed synchronously, before wlroots
+        // frees it, by whichever of `forget_decoration`/`forget_toplevel`
+        // runs first (see `RuntimeInner::decorations`'s own doc) — so `raw`
+        // is live.
+        let requested = unsafe { (*raw.as_ptr()).requested_mode };
+        Some(crate::decoration::client_side_preference(requested))
     }
 
     /// Stage a size on the toplevel's next configure, in **content**
@@ -1522,6 +1562,23 @@ impl Runtime {
     /// harmless, not a duplicate send.
     ///
     /// `None` for an unknown or stale id; see `set_toplevel_size`'s doc.
+    ///
+    /// A no-op — returning `Some(())`, not `None` — if the toplevel's
+    /// surface has not had its initial commit yet. A client is free to send
+    /// `xdg_toplevel.set_maximized`/`set_fullscreen` (and so trigger
+    /// [`ToplevelHandler::request_maximize`](crate::ToplevelHandler::request_maximize)/
+    /// [`request_fullscreen`](crate::ToplevelHandler::request_fullscreen), whose
+    /// dispatch-layer follow-up calls this) before that first commit;
+    /// wlroots asserts `surface->initialized` inside
+    /// `wlr_xdg_surface_schedule_configure`, and that flag only flips true
+    /// during the first commit, so calling through unconditionally would
+    /// abort wlroots on that (legal) client ordering. Nothing is lost by
+    /// skipping instead: `backend.rs`'s `on_surface_commit` unconditionally
+    /// schedules a configure of its own once that first commit lands, and
+    /// any state this call would have flushed — `set_toplevel_maximized`/
+    /// `set_toplevel_fullscreen` only ever write *pending* fields, with no
+    /// schedule of their own — rides that same configure regardless of
+    /// whether this method ran before it.
     pub fn configure_toplevel(&self, id: ToplevelId) -> Option<()> {
         let entry = self.toplevel_entry(id)?;
         // SAFETY: an entry is removed by the destroy callback, which
@@ -1532,6 +1589,9 @@ impl Runtime {
         // alive — the same argument `Toplevel::current_size` documents.
         unsafe {
             let base = (*entry.raw.as_ptr()).base;
+            if !(*base).initialized {
+                return Some(());
+            }
             sys::wlr_xdg_surface_schedule_configure(base);
         }
         Some(())
@@ -1564,22 +1624,55 @@ impl Runtime {
     /// default (see `request_decoration_mode`'s own doc) does not also fire
     /// once the handler returns.
     ///
+    /// **Staged, not always sent.** wlroots asserts `surface->initialized`
+    /// inside `wlr_xdg_surface_schedule_configure`, which
+    /// `wlr_xdg_toplevel_decoration_v1_set_mode` calls internally, and that
+    /// flag only flips true during the toplevel's first role commit — which
+    /// has not necessarily happened yet: the normal client sequence calls
+    /// `set_mode` (firing `request_decoration_mode`) *before* its initial
+    /// `wl_surface.commit`. So this method sends immediately only if the
+    /// surface is already initialized; otherwise it records `server_side`
+    /// for `backend.rs`'s `on_surface_commit` to send for real at the
+    /// toplevel's initial commit — overwriting whatever was staged before,
+    /// the same "last write wins" shape [`set_toplevel_size`](Runtime::set_toplevel_size)
+    /// already has for the base configure. Either way this returns
+    /// `Some(())` and marks the request answered; the difference is
+    /// invisible to a caller and exists only to keep this crate from
+    /// aborting wlroots on the ordinary decoration-negotiation sequence.
+    ///
     /// `None` if `id` is unknown, stale, or names a toplevel with no
     /// decoration object — a client that never created one, or whose
     /// decoration has since been destroyed. See `set_toplevel_size`'s own
     /// doc for what "stale" means for a `ToplevelId` in general.
     pub fn set_decoration_mode(&self, id: ToplevelId, server_side: bool) -> Option<()> {
         let raw = self.decoration_ptr(id)?;
-        let mode = if server_side {
-            sys::wlr_xdg_toplevel_decoration_v1_mode::WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE
-        } else {
-            sys::wlr_xdg_toplevel_decoration_v1_mode::WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
-        };
-        // SAFETY: a present entry names a decoration that is still linked
-        // into `self.inner.decorations` — removed synchronously, before
-        // wlroots frees it, by `forget_decoration`/`forget_toplevel` (see
-        // `RuntimeInner::decorations`'s own doc) — so `raw` is live.
-        unsafe { sys::wlr_xdg_toplevel_decoration_v1_set_mode(raw.as_ptr(), mode) };
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: a present `decorations` entry implies a live toplevel too
+        // — both halves of `RuntimeInner::decorations`' purge remove the
+        // decoration entry the moment either object dies — and a live
+        // `wlr_xdg_toplevel` always has a non-null `base`; see
+        // `configure_toplevel`'s identical argument for that second claim.
+        let initialized = unsafe { (*(*entry.raw.as_ptr()).base).initialized };
+
+        if initialized {
+            let mode = if server_side {
+                sys::wlr_xdg_toplevel_decoration_v1_mode::WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE
+            } else {
+                sys::wlr_xdg_toplevel_decoration_v1_mode::WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
+            };
+            // SAFETY: a present entry names a decoration that is still
+            // linked into `self.inner.decorations` — removed synchronously,
+            // before wlroots frees it, by
+            // `forget_decoration`/`forget_toplevel` (see
+            // `RuntimeInner::decorations`'s own doc) — so `raw` is live,
+            // and `initialized` being true means the
+            // `assert(surface->initialized)` this method's own doc
+            // describes cannot fire.
+            unsafe { sys::wlr_xdg_toplevel_decoration_v1_set_mode(raw.as_ptr(), mode) };
+        } else if let Some(entry) = self.inner.decorations.borrow().get(&id) {
+            entry.staged.set(Some(server_side));
+        }
+
         if let Some(entry) = self.inner.decorations.borrow().get(&id) {
             entry.mode_set_this_dispatch.set(true);
         }
@@ -2087,6 +2180,178 @@ mod tests {
             "clear_toplevels must purge a rect parented into a toplevel it \
              just forgot, the same way forget_toplevel does within a \
              single run"
+        );
+    }
+
+    /// One of the two orders a decoration and its toplevel can die in: the
+    /// decoration dies first (the client destroys the resource). Only
+    /// `forget_decoration`'s own table is purged; the toplevel is
+    /// untouched. `record_decoration`/`forget_decoration` never dereference
+    /// the pointer they store, only insert/remove by id (the same argument
+    /// `clear_toplevels_makes_every_recorded_id_resolve_to_nothing` makes
+    /// for `record_toplevel`), so a dangling `NonNull` exercises the real
+    /// code path without a live wlroots object.
+    #[test]
+    fn forget_decoration_purges_the_decoration_entry_and_leaves_the_toplevel_alone() {
+        let rt = Runtime::new().expect("runtime");
+        let id = ToplevelId(next_id());
+        rt.record_toplevel(
+            id,
+            NonNull::<sys::wlr_xdg_toplevel>::dangling(),
+            NonNull::<sys::wlr_scene_tree>::dangling(),
+        );
+        rt.record_decoration(
+            id,
+            NonNull::<sys::wlr_xdg_toplevel_decoration_v1>::dangling(),
+        );
+        assert!(rt.decoration_ptr(id).is_some(), "must be recorded first");
+
+        rt.forget_decoration(id);
+
+        assert!(
+            rt.decoration_ptr(id).is_none(),
+            "forget_decoration must make the id resolve to no decoration"
+        );
+        assert!(
+            rt.toplevel_entry(id).is_some(),
+            "the decoration dying first must not touch the toplevel table"
+        );
+    }
+
+    /// The other order: the toplevel dies first. `forget_toplevel` must
+    /// purge the decoration table too — see `RuntimeInner::decorations`'s
+    /// own doc for why this is load-bearing rather than tidiness (wlroots'
+    /// own destroy handler for the decoration asserts its listener lists
+    /// are empty, which is `backend.rs`'s job, but this is the data-side
+    /// half of the same purge).
+    #[test]
+    fn forget_toplevel_also_purges_its_decoration_entry() {
+        let rt = Runtime::new().expect("runtime");
+        let id = ToplevelId(next_id());
+        rt.record_toplevel(
+            id,
+            NonNull::<sys::wlr_xdg_toplevel>::dangling(),
+            NonNull::<sys::wlr_scene_tree>::dangling(),
+        );
+        rt.record_decoration(
+            id,
+            NonNull::<sys::wlr_xdg_toplevel_decoration_v1>::dangling(),
+        );
+        assert!(rt.decoration_ptr(id).is_some(), "must be recorded first");
+
+        rt.forget_toplevel(id);
+
+        assert!(
+            rt.toplevel_entry(id).is_none(),
+            "forget_toplevel must make the id resolve to no toplevel"
+        );
+        assert!(
+            rt.decoration_ptr(id).is_none(),
+            "forget_toplevel must also purge the decoration recorded under \
+             the same id — the toplevel-first half of the two-sided purge"
+        );
+    }
+
+    /// `clear_toplevels` (the run-granularity purge, not the per-toplevel
+    /// one) must take decorations with it too, for the identical reason it
+    /// takes rects and buffers: a `ToplevelId` is going stale in the very
+    /// next statement, and a decoration entry keyed by it must not outlive
+    /// that.
+    #[test]
+    fn clear_toplevels_also_purges_decorations() {
+        let rt = Runtime::new().expect("runtime");
+        let id = ToplevelId(next_id());
+        rt.record_toplevel(
+            id,
+            NonNull::<sys::wlr_xdg_toplevel>::dangling(),
+            NonNull::<sys::wlr_scene_tree>::dangling(),
+        );
+        rt.record_decoration(
+            id,
+            NonNull::<sys::wlr_xdg_toplevel_decoration_v1>::dangling(),
+        );
+
+        rt.clear_toplevels();
+
+        assert!(
+            rt.decoration_ptr(id).is_none(),
+            "clear_toplevels must purge decorations at run granularity too"
+        );
+    }
+
+    /// `set_decoration_mode`'s central hazard (see its own doc): calling
+    /// straight through to `wlr_xdg_toplevel_decoration_v1_set_mode` before
+    /// the toplevel's surface is initialized asserts inside wlroots. This
+    /// cannot be exercised end-to-end without a live client (same
+    /// limitation the crate's own integration test doc states), but the
+    /// staging decision itself is plain Rust bookkeeping — it reads
+    /// `toplevel->base->initialized` and, when false, never dereferences
+    /// the decoration pointer at all — so a fake but real (zeroed,
+    /// heap-allocated) `wlr_xdg_surface`/`wlr_xdg_toplevel` pair exercises
+    /// it exactly, with a dangling decoration pointer standing in safely
+    /// for the reason `forget_decoration_purges_the_decoration_entry_and_leaves_the_toplevel_alone`
+    /// already relies on: nothing on this path reads through it.
+    #[test]
+    fn set_decoration_mode_stages_rather_than_sends_before_the_surface_is_initialized() {
+        use std::alloc::{Layout, alloc_zeroed};
+
+        let rt = Runtime::new().expect("runtime");
+        let id = ToplevelId(next_id());
+
+        // Allocated rather than `std::mem::zeroed`-ed, for the reason
+        // `backend.rs`'s `ScratchOutput` documents: both structs embed
+        // `wl_listener`s whose bare function pointers are UB to
+        // *materialise* as a zero value, so the bytes are only ever
+        // touched through a raw pointer, and `initialized`/`base` are the
+        // only two fields this test — or the code path it exercises — ever
+        // reads.
+        //
+        // SAFETY: both layouts are non-zero-sized, so `alloc_zeroed`
+        // returns either null (checked below) or a suitably aligned, zeroed
+        // allocation of exactly that size, for the duration of this test
+        // (leaked deliberately; a scratch fixture, not a `wlr_*` object
+        // this crate ever tears down).
+        let surface = unsafe { alloc_zeroed(Layout::new::<sys::wlr_xdg_surface>()) }
+            .cast::<sys::wlr_xdg_surface>();
+        assert!(!surface.is_null(), "allocation failed");
+        let toplevel = unsafe { alloc_zeroed(Layout::new::<sys::wlr_xdg_toplevel>()) }
+            .cast::<sys::wlr_xdg_toplevel>();
+        assert!(!toplevel.is_null(), "allocation failed");
+        // SAFETY: both allocations are freshly zeroed and exclusively owned;
+        // `initialized` (a `bool`) and `base` (a `*mut wlr_xdg_surface`) are
+        // both in bounds, and zero is already their correct starting value
+        // for this test (`initialized = false`) or is about to be
+        // overwritten (`base`).
+        unsafe {
+            (*surface).initialized = false;
+            (*toplevel).base = surface;
+        }
+
+        let toplevel_raw = NonNull::new(toplevel).expect("allocation succeeded, so non-null");
+        rt.record_toplevel(id, toplevel_raw, NonNull::<sys::wlr_scene_tree>::dangling());
+        rt.record_decoration(
+            id,
+            NonNull::<sys::wlr_xdg_toplevel_decoration_v1>::dangling(),
+        );
+
+        assert_eq!(
+            rt.set_decoration_mode(id, true),
+            Some(()),
+            "staging still reports success to the caller"
+        );
+        assert!(
+            rt.decoration_dispatch_flag(id),
+            "the request-answered flag is set even when the send is only staged"
+        );
+        assert_eq!(
+            rt.take_staged_decoration_mode(id),
+            Some(true),
+            "the staged decision must be retrievable, and must be the value passed in"
+        );
+        assert_eq!(
+            rt.take_staged_decoration_mode(id),
+            None,
+            "taking it clears it, so a second flush cannot resend a stale decision"
         );
     }
 }
