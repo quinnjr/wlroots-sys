@@ -2397,31 +2397,30 @@ unsafe extern "C" fn on_new_layer_surface<S: Handlers>(
             return;
         };
         let Some(scene_tree) = NonNull::new((*scene_layer_surface.as_ptr()).tree) else {
-            // m-2: do not abandon the `wlr_scene_layer_surface_v1` wlroots
-            // just allocated on this path — free it rather than leak it.
+            // m-2/N-4: this abandons the `wlr_scene_layer_surface_v1` wlroots
+            // just allocated on this path, exactly as `on_new_toplevel` does
+            // for the identical situation — deliberately, not an oversight.
             //
-            // Disassembling `wlr_scene_layer_surface_v1_create` in
-            // `libwlroots-0.20.so` shows it is allocated with a bare
-            // `calloc(1, sizeof(*scene_layer_surface))`, its `tree` field is
-            // the very first thing written into it, and every path that
-            // could leave `tree` null already calls `free` on the same
-            // pointer and returns null itself before this crate ever sees
-            // it — so a *non-null* `scene_layer_surface` with a null `tree`
-            // does not occur in the shipped binary today. Nothing in this
-            // crate's ABI checks pin that shape, though, and a future
-            // wlroots could change it, so this stays a real guard rather
-            // than an `unreachable!()`.
-            //
-            // SAFETY: `scene_layer_surface` is a pointer this call just
-            // received from `wlr_scene_layer_surface_v1_create`, allocated
-            // (per the disassembly above) by glibc's `calloc` and not yet
-            // handed to anything else this crate or wlroots could hold a
-            // second reference to — no listener has been linked into it on
-            // this path (linking only happens after both the tree and its
-            // subsurface tree are confirmed non-null in the real function),
-            // so nothing observes it being freed. `libc::free` is the exact
-            // counterpart to the `calloc` that produced it.
-            libc::free(scene_layer_surface.as_ptr().cast());
+            // An earlier fix instead called `libc::free` on it, reasoning
+            // that disassembly of `wlr_scene_layer_surface_v1_create` in
+            // `libwlroots-0.20.so` shows it allocated with a bare
+            // `calloc(1, sizeof(*scene_layer_surface))` and no listener
+            // linked into it yet on this path — so freeing was sound today.
+            // Re-review reverted that: the path is unreachable in the
+            // shipped binary (every real way `tree` could end up null
+            // already frees the struct and returns null itself, before this
+            // crate ever sees a non-null pointer here), so the fix traded a
+            // hypothetical leak for a hard runtime dependency (`libc`) added
+            // to the published crate on the eve of its freeze, and inverted
+            // `on_new_toplevel`'s own precedent for no live benefit. Worse,
+            // the trade only gets worse if wlroots ever *does* change shape
+            // here: the most plausible way `tree` becomes null on some
+            // future version is a reordering that leaves other state
+            // (listeners, the subsurface tree) partially set up, and a bare
+            // `libc::free` on that is a use-after-free on the next signal
+            // emission, not merely a leak. A leak is the safe failure mode
+            // for a guard that exists only for a future this crate cannot
+            // observe.
             return;
         };
         let Some(raw) = NonNull::new(ls) else {

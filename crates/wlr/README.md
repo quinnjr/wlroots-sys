@@ -50,6 +50,14 @@ panel stays above every toplevel regardless of creation order or any
 `raise_toplevel` call — so there is no `raise_layer_surface` method, and
 none is needed. See `Layer`'s own doc for the full design.
 
+One observable delta from banding: a root-level rect/buffer added with
+`add_rect`/`add_buffer` and never lowered now sits permanently above every
+toplevel and every layer surface, `Overlay` included — because it is a
+sibling of the (fixed) bands rather than a sibling of individual toplevels.
+Previously a toplevel created after such a rect/buffer would append above
+it. `lower_rect_to_bottom`/`lower_buffer_to_bottom` are unaffected either
+way and remain the way to get a background.
+
 **Answering `new_layer_surface`/`layer_surface_commit` with
 `Runtime::configure_layer_surface` is mandatory, not optional.** Unlike
 xdg-shell, nothing in this crate's dispatch layer sends a fallback

@@ -162,16 +162,18 @@ impl LayerSurfaceId {
 /// make the cross-band ordering structural rather than something any raise
 /// call needs to maintain — see that method's own doc for the detail.
 ///
-/// This replaces the two-band approximation earlier 0.20.11 pre-releases of
-/// this crate shipped (collapsing all four layers into "below toplevels" /
-/// "above toplevels" by raising or lowering once at creation), which broke
-/// the instant a second toplevel was created after a `Top` panel: new
-/// toplevels appended above every existing sibling, including that panel,
-/// and [`crate::Runtime::raise_toplevel`] raised a toplevel above every
-/// sibling too, `Top`/`Overlay` layer surfaces included — exactly the
-/// panel-above-windows case a real compositor needs and the case the old
-/// doc here incorrectly called rare. The banded-tree design has no such
-/// failure mode: a `Top`/`Overlay` layer surface's node can never become a
+/// This is the design 0.20.11 ships with. It replaces a two-band
+/// approximation that existed only on unpublished, pre-freeze commits of
+/// this crate (collapsing all four layers into "below toplevels" / "above
+/// toplevels" by raising or lowering once at creation) — never released,
+/// caught before publish. That approximation broke the instant a second
+/// toplevel was created after a `Top` panel: new toplevels appended above
+/// every existing sibling, including that panel, and
+/// [`crate::Runtime::raise_toplevel`] raised a toplevel above every sibling
+/// too, `Top`/`Overlay` layer surfaces included — exactly the
+/// panel-above-windows case a real compositor needs, which is why it never
+/// shipped. The banded-tree design has no such failure mode: a `Top`/`Overlay`
+/// layer surface's node can never become a
 /// descendant of the toplevel band, and a toplevel's node can never become
 /// a descendant of `Top`/`Overlay`, regardless of creation order, raise
 /// calls, or how many toplevels or layer surfaces come and go afterward.

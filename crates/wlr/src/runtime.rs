@@ -334,9 +334,10 @@ pub(crate) struct Graphics {
     /// (see [`Runtime::init_graphics`]), and never reordered or reparented
     /// afterward.
     ///
-    /// This is the fix for the two-band approximation 0.20.11 shipped
-    /// (see `layer.rs`'s [`Layer`](crate::Layer) doc for the full argument
-    /// this replaces): every toplevel now lives inside `toplevel_band`
+    /// This is the design 0.20.11 ships with, chosen over a two-band
+    /// approximation that was caught and replaced before publish — never
+    /// released (see `layer.rs`'s [`Layer`](crate::Layer) doc for the full
+    /// argument): every toplevel now lives inside `toplevel_band`
     /// (`backend.rs`'s `on_new_toplevel`) instead of directly under the
     /// scene root, and every layer surface lives inside the band matching
     /// its own [`Layer`](crate::Layer) (`on_new_layer_surface`, reparented
@@ -947,7 +948,11 @@ impl Runtime {
     /// Positioned at (0, 0) until [`set_rect_position`](Runtime::set_rect_position)
     /// says otherwise, and on top of everything already in the scene — call
     /// [`lower_rect_to_bottom`](Runtime::lower_rect_to_bottom) for a
-    /// background.
+    /// background. And stays above them: root rects are siblings of the
+    /// stacking bands (see [`Layer`](crate::Layer)'s banded-tree doc), so
+    /// unlike pre-band versions of this scene, a later toplevel no longer
+    /// appends above one — an un-lowered root rect now sits permanently
+    /// above every toplevel and every layer surface, `Overlay` included.
     ///
     /// # Errors
     ///
@@ -1129,7 +1134,11 @@ impl Runtime {
     /// [`set_buffer_position`](Runtime::set_buffer_position) says otherwise
     /// and on top of everything already in the scene — call
     /// [`lower_buffer_to_bottom`](Runtime::lower_buffer_to_bottom) for a
-    /// background.
+    /// background. And stays above them: root buffers are siblings of the
+    /// stacking bands (see [`Layer`](crate::Layer)'s banded-tree doc), so
+    /// unlike pre-band versions of this scene, a later toplevel no longer
+    /// appends above one — an un-lowered root buffer now sits permanently
+    /// above every toplevel and every layer surface, `Overlay` included.
     ///
     /// Pixels are copied: `rgba` need not outlive this call.
     ///
@@ -2246,6 +2255,16 @@ impl Runtime {
     /// [`Backend::run_all`](crate::Backend::run_all) call that announced
     /// it** — the same rule every by-id mutator in this crate follows; see
     /// [`set_toplevel_size`](Runtime::set_toplevel_size)'s own doc.
+    ///
+    /// **If nothing ever calls this for a given layer surface, that
+    /// surface's client blocks forever** — unlike xdg-shell, nothing in this
+    /// crate's dispatch layer sends a fallback configure, because there is
+    /// no universally sane default size to invent for a surface that asked
+    /// for `0x0`. Call this from
+    /// [`ToplevelHandler::new_layer_surface`](crate::ToplevelHandler::new_layer_surface)
+    /// or [`ToplevelHandler::layer_surface_commit`](crate::ToplevelHandler::layer_surface_commit)
+    /// for every layer surface this crate hands you; see `layer.rs`'s "Answering
+    /// `new_layer_surface` is mandatory" module section for the full argument.
     pub fn configure_layer_surface(
         &self,
         id: LayerSurfaceId,

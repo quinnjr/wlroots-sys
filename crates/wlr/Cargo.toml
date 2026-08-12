@@ -26,12 +26,6 @@ wlr-sys = { version = "0.20", path = "../wlr-sys" }
 # types here as they are there. Naming a different version would silently
 # produce look-alike types (see wlr-sys's own tests/interop.rs).
 xkbcommon-sys = "1.4"
-# Used once, in `backend.rs`'s `on_new_layer_surface`: `free`, the exact
-# counterpart to the `calloc` wlroots itself uses to allocate a
-# `wlr_scene_layer_surface_v1` — see the m-2 fix on that call site's own
-# comment for why this crate needs to reach glibc's allocator directly
-# rather than through any wlroots-exposed destructor (there isn't one).
-libc = "0.2"
 
 [dev-dependencies]
 trybuild = "1.0"
