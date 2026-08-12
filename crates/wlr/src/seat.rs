@@ -118,6 +118,16 @@ impl<'h> KeyEvent<'h> {
     /// announced (see `backend.rs`'s `on_new_input`), so in practice this
     /// only happens if that compile itself failed — or if the keycode has no
     /// symbol at level 0 of layout 0.
+    ///
+    /// With more than one keyboard attached, this is read from **the seat's
+    /// active keyboard** (`wlr_seat_get_keyboard`), not necessarily the
+    /// physical device that produced this particular event — every keyboard
+    /// funnels through one logical keyboard identity at the seat (see
+    /// `backend.rs`'s `on_key`), which is what lets a client see one
+    /// keyboard regardless of how many are plugged in. The practical
+    /// consequence: two keyboards compiled with different layouts do not
+    /// each report their own layout's keysym for the same physical key —
+    /// both report whichever keyboard is currently active at the seat.
     pub fn keysym(&self) -> u32 {
         self.keysym
     }

@@ -109,18 +109,21 @@ pub(crate) struct RuntimeInner {
     /// never gets a pointer device should not pay for it.
     pub(crate) cursor_image_loaded: std::cell::Cell<bool>,
 
-    /// Every keyboard the backend has announced, so capabilities can be
+    /// Every live keyboard the backend has announced, so capabilities can be
     /// recomputed as devices arrive and leave.
     ///
     /// Never dereferenced — only its length is read, by
-    /// [`Runtime::has_keyboard`], to decide whether the seat should advertise
-    /// the keyboard capability. That is what makes a stale entry (a keyboard
-    /// this vec still names after it was unplugged; nothing in this release
-    /// watches a keyboard's own destroy to remove it) harmless rather than a
-    /// dangling-pointer hazard: the count is wrong in that case, not unsound.
-    /// A future release that needs to read through these pointers would have
-    /// to close that gap first.
+    /// [`Runtime::has_keyboard`], to decide whether the seat should
+    /// advertise the keyboard capability. Pruned by `backend.rs`'s
+    /// `on_input_destroy` — the same per-device destroy watch that unlinks
+    /// the keyboard's `key`/`modifiers` listeners before wlroots' own
+    /// `wlr_keyboard_finish` asserts they are gone — so this never carries a
+    /// stale entry for longer than the device itself lives.
     pub(crate) keyboards: RefCell<Vec<NonNull<sys::wlr_keyboard>>>,
+
+    /// Every live pointer the backend has announced. Same shape and same
+    /// pruning as `keyboards`, for [`Runtime::has_pointer`].
+    pub(crate) pointers: RefCell<Vec<NonNull<sys::wlr_pointer>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -219,6 +222,7 @@ impl Runtime {
                 xcursor: RefCell::new(None),
                 cursor_image_loaded: std::cell::Cell::new(false),
                 keyboards: RefCell::new(Vec::new()),
+                pointers: RefCell::new(Vec::new()),
             }),
         })
     }
@@ -934,17 +938,27 @@ impl Runtime {
         unsafe { sys::wlr_seat_keyboard_notify_clear_focus(seat.as_ptr()) };
     }
 
-    /// The topmost toplevel at scene coordinates `(x, y)`, and the position
-    /// within it.
+    /// The topmost **toplevel** at scene coordinates `(x, y)`, and the
+    /// position of `(x, y)` **within the leaf node `wlr_scene_node_at`
+    /// actually struck** — a subsurface's or a popup's own buffer node
+    /// several levels below the toplevel's root, not the toplevel's own
+    /// origin. Both halves of that are load-bearing for a caller: the id
+    /// names the *window* (what a compositor keys its own state by), and the
+    /// coordinates are relative to whatever *specific surface* was hit, and
+    /// the two are not the same surface whenever the hit lands on a
+    /// subsurface or a popup.
+    ///
+    /// This is why pointer forwarding in `backend.rs` does **not** use this
+    /// method: notifying the toplevel's own root surface with leaf-relative
+    /// coordinates would deliver a click to the wrong surface (a popup menu
+    /// gets no input at all) or at a skewed offset (a subsurface). It uses
+    /// `leaf_surface_at` instead, which resolves the actual struck surface
+    /// rather than assuming it is the toplevel's own. This method exists for
+    /// a caller that wants "which window", not "which surface" — raising or
+    /// closing whatever is under the pointer, say.
     ///
     /// Walks the scene with `wlr_scene_node_at` and then walks *up* from
-    /// whatever node it found to the tree this crate created for a toplevel —
-    /// a hit almost always lands on a surface node several levels down (a
-    /// subsurface, a popup), and the compositor cares about the window, not
-    /// the node. The returned `(f64, f64)` is whatever `wlr_scene_node_at`
-    /// reported relative to the node it actually hit — surface-local
-    /// coordinates for the leaf that was struck, which is what
-    /// `wlr_seat_pointer_notify_*` wants.
+    /// whatever node it found to the tree this crate created for a toplevel.
     ///
     /// `None` when nothing is there, which includes hitting the background
     /// rect, and when [`init_graphics`](Runtime::init_graphics) has not run
@@ -987,6 +1001,72 @@ impl Runtime {
             tree = unsafe { (*tree).node.parent };
         }
         None
+    }
+
+    /// The actual surface under `(x, y)`, and the position within *that*
+    /// surface — as opposed to [`toplevel_at`](Runtime::toplevel_at), which
+    /// answers "which window" and reports coordinates relative to whichever
+    /// leaf happened to be struck, not necessarily the surface named.
+    ///
+    /// A hit inside a subsurface or a popup lands on a different
+    /// `wlr_surface` than the toplevel's own root, at different local
+    /// coordinates; this resolves the node `wlr_scene_node_at` struck all
+    /// the way down to the specific surface it belongs to
+    /// (`wlr_scene_buffer_from_node` then `wlr_scene_surface_try_from_buffer`
+    /// — the pattern wlroots' own `tinywl` uses), which is what pointer
+    /// forwarding needs: notifying the wrong surface either loses the input
+    /// entirely (a popup menu that never receives a click) or delivers it at
+    /// a skewed offset (a subsurface notified with its parent's coordinates).
+    ///
+    /// `None` when nothing is there, or the struck node is not a buffer —
+    /// confirmed against wlroots 0.20's own `wlr_scene.c`, a hit can also
+    /// land on a `WLR_SCENE_NODE_RECT` (this crate's own background rect,
+    /// say), which `wlr_scene_buffer_from_node` documents itself as
+    /// undefined behaviour to call on — or the buffer is not backed by any
+    /// surface at all.
+    pub(crate) fn leaf_surface_at(&self, x: f64, y: f64) -> Option<(*mut sys::wlr_surface, f64, f64)> {
+        let scene = self.scene_ptr()?;
+        let mut nx = 0.0;
+        let mut ny = 0.0;
+        // SAFETY: the scene is this runtime's own and outlives the call; the
+        // two out-parameters are live stack locals.
+        let node = unsafe {
+            sys::wlr_scene_node_at(
+                &raw mut (*scene.as_ptr()).tree.node,
+                x,
+                y,
+                &raw mut nx,
+                &raw mut ny,
+            )
+        };
+        if node.is_null() {
+            return None;
+        }
+        // SAFETY: `node` is a live node in this scene (just returned by
+        // `wlr_scene_node_at` above); reading `type_` is always sound, and
+        // the check below is exactly what makes the following
+        // `wlr_scene_buffer_from_node` call legal — its own doc requires the
+        // node to represent a `wlr_scene_buffer`, which only
+        // `WLR_SCENE_NODE_BUFFER` does (a hit can also land on
+        // `WLR_SCENE_NODE_RECT`, per `wlr_scene.c`'s own hit-test
+        // candidates, which this guards against).
+        unsafe {
+            if (*node).type_ != sys::wlr_scene_node_type::WLR_SCENE_NODE_BUFFER {
+                return None;
+            }
+            let buffer = sys::wlr_scene_buffer_from_node(node);
+            let scene_surface = sys::wlr_scene_surface_try_from_buffer(buffer);
+            if scene_surface.is_null() {
+                // A buffer node not backed by a surface at all (a plain
+                // texture, say) — nothing for the seat to notify.
+                return None;
+            }
+            let surface = (*scene_surface).surface;
+            if surface.is_null() {
+                return None;
+            }
+            Some((surface, nx, ny))
+        }
     }
 
     /// Where the cursor is, in scene coordinates. `(0.0, 0.0)` with no seat.
@@ -1039,13 +1119,39 @@ impl Runtime {
         self.inner.keyboards.borrow_mut().push(kb);
     }
 
-    /// Whether this runtime has ever been told of a keyboard. Used to decide
-    /// whether the seat should advertise the keyboard capability; see
-    /// `RuntimeInner::keyboards`'s own doc for why a stale entry (one whose
-    /// device has since been unplugged) does not make this unsound, only
-    /// occasionally generous.
+    /// Forget a keyboard, called from `backend.rs`'s `on_input_destroy` once
+    /// its device's own destroy has fired, so
+    /// [`has_keyboard`](Runtime::has_keyboard) stops counting a device that
+    /// is gone.
+    pub(crate) fn forget_keyboard(&self, kb: NonNull<sys::wlr_keyboard>) {
+        self.inner.keyboards.borrow_mut().retain(|&recorded| recorded != kb);
+    }
+
+    /// Whether this runtime currently has a live keyboard. Used to decide
+    /// whether the seat should advertise the keyboard capability.
     pub(crate) fn has_keyboard(&self) -> bool {
         !self.inner.keyboards.borrow().is_empty()
+    }
+
+    /// Record a pointer the backend announced, for
+    /// [`has_pointer`](Runtime::has_pointer) to count.
+    pub(crate) fn record_pointer(&self, p: NonNull<sys::wlr_pointer>) {
+        self.inner.pointers.borrow_mut().push(p);
+    }
+
+    /// Forget a pointer; see [`forget_keyboard`](Runtime::forget_keyboard).
+    pub(crate) fn forget_pointer(&self, p: NonNull<sys::wlr_pointer>) {
+        self.inner.pointers.borrow_mut().retain(|&recorded| recorded != p);
+    }
+
+    /// Whether this runtime currently has a live pointer. Used to decide
+    /// whether the seat should advertise the pointer capability — mirroring
+    /// [`has_keyboard`](Runtime::has_keyboard), which the original release of
+    /// this method advertised the pointer capability unconditionally instead
+    /// of gating on: a seat with no pointer attached was still telling
+    /// clients it had one.
+    pub(crate) fn has_pointer(&self) -> bool {
+        !self.inner.pointers.borrow().is_empty()
     }
 }
 

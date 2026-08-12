@@ -235,12 +235,19 @@ mod tests {
     /// that call.
     #[test]
     fn nth_for_test_stays_in_band_at_the_extremes() {
+        // The exact band the fold promises: `u64::MAX - (n % 2^32)` can
+        // never land below `u64::MAX - (2^32 - 1)`, so a tighter bound than
+        // "somewhere above u32::MAX" is both possible and worth asserting —
+        // it is the difference between "still large" and "provably inside
+        // the documented 2^32-wide reserved band".
+        let band_floor = u64::MAX - ((1u64 << 32) - 1);
         for n in [u64::MAX, u64::MAX - 5] {
             let id = ToplevelId::dangling_nth_for_test(n);
             assert!(
-                id.0 > u32::MAX as u64,
-                "n = {n} produced {:#x}, which is not in the reserved band",
-                id.0
+                id.0 >= band_floor,
+                "n = {n} produced {:#x}, which is below the reserved band's floor {:#x}",
+                id.0,
+                band_floor
             );
         }
     }

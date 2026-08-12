@@ -335,12 +335,15 @@ struct Session<'r, S> {
     /// `outputs` above.
     toplevels: RefCell<HashMap<ToplevelId, ToplevelListeners>>,
 
-    /// This run's listeners on every announced input device, one
-    /// [`InputDevice`] per device. Unlike `outputs` and `toplevels` this is
-    /// not keyed — nothing in this release needs to name one device's
-    /// listeners individually, only to keep every one of them linked for the
-    /// run and drop them (and so unlink) when it ends.
-    inputs: RefCell<Vec<InputDevice>>,
+    /// This run's listeners on every live input device, one [`InputDevice`]
+    /// per device, keyed by the device's own `*mut wlr_input_device` address
+    /// (as `usize`) — unlike the destroy-only removal `outputs` and
+    /// `toplevels` do at the *end* of a run, `on_input_destroy` must find
+    /// and remove one specific device's entry synchronously, mid-run, the
+    /// moment that device is unplugged (see [`InputDevice`]'s own doc for
+    /// why), and the device pointer is exactly the key
+    /// `wlr_input_device_finish` hands that callback.
+    inputs: RefCell<HashMap<usize, InputDevice>>,
 
     /// Whether the most recently delivered [`Event::Key`] was consumed by the
     /// handler. `on_key` cannot get a return value back through
@@ -732,7 +735,7 @@ impl<'d> Backend<'d> {
             dispatcher: Dispatcher::new(&raw mut *state),
             outputs: RefCell::new(HashMap::new()),
             toplevels: RefCell::new(HashMap::new()),
-            inputs: RefCell::new(Vec::new()),
+            inputs: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime,
             deliver: hooks.deliver,
@@ -1682,37 +1685,96 @@ unsafe extern "C" fn on_toplevel_destroy<S: Handlers>(
     }
 }
 
-/// One live input device: its own liveness flag, and every registration
-/// linked against it.
+/// One live input device: its own liveness flag, its keyboard/pointer
+/// identity (for pruning `Runtime`'s counts on destroy), and every
+/// registration linked against it.
+///
+/// # Why this exists, and why the destroy path is synchronous
 ///
 /// A device can be unplugged mid-run independently of the backend dying —
 /// nothing else in this crate ties a keyboard or pointer's lifetime to
-/// anything longer-lived — so each one gets the same watch-your-own-destroy
-/// treatment [`Backend::alive`] gives the backend itself: `_destroy` clears
-/// `alive` from `events.destroy`, which wlroots emits before freeing
-/// anything, and every other registration below carries `alive` as its own
-/// liveness flag so [`Registration::drop`] knows to skip unlinking from a
-/// signal that no longer exists.
+/// anything longer-lived. wlroots 0.20's `wlr_input_device_finish` — called
+/// by `wlr_keyboard_finish`/`wlr_pointer_finish`, which every backend's own
+/// device-removal path calls — does this, in order (confirmed against
+/// wlroots 0.20's own `types/wlr_input_device.c`, `types/wlr_keyboard.c` and
+/// `types/wlr_pointer.c`):
+///
+/// 1. `wl_signal_emit_mutable(&device->events.destroy, device)`
+/// 2. `assert(wl_list_empty(&device->events.destroy.listener_list))`
+/// 3. (keyboard/pointer only) `assert(wl_list_empty(&kb->events.key...))`,
+///    and likewise for `modifiers`/`motion`/`motion_absolute`/`button` and
+///    every other per-type signal.
+///
+/// Both asserts are **live** in the installed libwlroots (confirmed via
+/// `nm`/`strings` on the shared library this crate links against — this is
+/// not a debug-only check). Merely recording that the device died (clearing
+/// a `Cell<bool>`, as this crate's earlier drafts did) does nothing to
+/// satisfy either assert: they fire regardless of what *our* code does,
+/// because they inspect wlroots' own intrusive lists, not any flag of ours.
+/// The only thing that keeps them from firing is unlinking every listener on
+/// the device **synchronously, from inside step 1's emission** — which is
+/// exactly `on_input_destroy`'s job: it removes this `InputDevice` from
+/// `Session::inputs`, and dropping it drops `_destroy` (this very listener —
+/// sound because `wl_signal_emit_mutable` has already advanced its cursor
+/// past the firing listener, the same idiom `on_toplevel_destroy` and
+/// `on_output_destroy` already rely on) and every listener in `_listeners`,
+/// unlinking all of them before step 2 or 3 can observe otherwise. Skipping
+/// this — as an earlier draft of this file did, relying on `alive` alone —
+/// means the first real hot-unplug, or a VT switch (`libinput_suspend`
+/// emits `LIBINPUT_EVENT_DEVICE_REMOVED` for every device), reaches
+/// `__assert_fail` and aborts the whole compositor process.
+///
+/// `alive` is kept anyway, as a **backstop only**: if `on_input_destroy`
+/// somehow failed to find this entry (a bug in the key it looks up by, say),
+/// `alive` at least keeps `Registration::drop` — reached only later, when
+/// `Session` itself tears down — from unlinking against memory wlroots may
+/// have already freed by then. It is not, and cannot be, a substitute for
+/// the synchronous removal above.
 struct InputDevice {
+    /// See this struct's own doc for why this is a backstop, not the
+    /// primary mechanism.
+    ///
     /// `Rc`, not `Box`, for the same reason [`Backend::alive`] is: the flag's
     /// address must survive this struct moving — `Session::inputs` is a
-    /// `Vec`, which reallocates — because every other field's `Registration`
-    /// holds a raw pointer into it.
-    ///
-    /// Never read through this field directly (hence `#[allow(dead_code)]`):
-    /// every access is through the raw pointers handed to `Registration::link`
-    /// at construction time. Its only job here is to keep the `Cell`'s
-    /// allocation alive for as long as this `InputDevice` is, which the type
-    /// system already guarantees without reading it.
+    /// `HashMap`, which reallocates — because every other field's
+    /// `Registration` holds a raw pointer into it.
     #[allow(dead_code)]
     alive: Rc<Cell<bool>>,
+    /// This device's keyboard identity, if it is one — recorded so
+    /// `on_input_destroy` can call [`Runtime::forget_keyboard`] and keep
+    /// [`Runtime::has_keyboard`] truthful once this device is gone.
+    keyboard: Option<NonNull<sys::wlr_keyboard>>,
+    /// As `keyboard`, for [`Runtime::forget_pointer`]/[`Runtime::has_pointer`].
+    pointer: Option<NonNull<sys::wlr_pointer>>,
     _destroy: Registration,
     /// The device's own signals: two for a keyboard (`key`, `modifiers`),
     /// three for a pointer (`motion`, `motion_absolute`, `button`), zero for
     /// a device type this crate does not yet wire up (the destroy watch
-    /// above is still linked, so `has_keyboard`/capabilities stay correct
-    /// even for an ignored device type).
+    /// above is still linked, so this entry is still found and removed on
+    /// destroy even for an ignored device type).
     _listeners: Vec<Registration>,
+}
+
+/// Recompute and push the seat's capabilities from what `runtime` currently
+/// has recorded. Called from both `on_new_input` (a device arrived) and
+/// `on_input_destroy` (one left) — a seat that still advertises a keyboard
+/// or pointer capability after the only one of that kind was unplugged is
+/// exactly the same bug `has_keyboard`/`has_pointer` exist to prevent on the
+/// way in.
+///
+/// A no-op with no seat.
+fn update_seat_capabilities(runtime: &Runtime) {
+    let Some(seat) = runtime.seat_ptr() else { return };
+    let mut caps = 0;
+    if runtime.has_pointer() {
+        caps |= WL_SEAT_CAPABILITY_POINTER;
+    }
+    if runtime.has_keyboard() {
+        caps |= WL_SEAT_CAPABILITY_KEYBOARD;
+    }
+    // SAFETY: the seat is this runtime's own (created by `create_seat`) and
+    // live for as long as this runtime can be used.
+    unsafe { sys::wlr_seat_set_capabilities(seat.as_ptr(), caps) };
 }
 
 /// The layout-agnostic, unshifted keysym for `keycode` (evdev numbering) on
@@ -1776,21 +1838,24 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
 
         let alive = Rc::new(Cell::new(true));
         // Registered before anything else on this device, mirroring
-        // `Backend::autocreate`'s own death watch: wlroots emits a device's
-        // `events.destroy` synchronously before freeing it, so this is
-        // linked while the device is certainly still live, and nothing
-        // between here and the device's eventual removal can observe it
-        // freed without this flag having already been cleared first.
+        // `Backend::autocreate`'s own death watch — and, unlike that one,
+        // this is load-bearing for more than the flag: see `InputDevice`'s
+        // own doc for why `on_input_destroy` (not `on_backend_destroy`,
+        // which this device-watch reused before this was found unsound)
+        // must unlink this device's other listeners synchronously, from
+        // inside the very emission this registers for.
         let destroy = Registration::link(
             &raw mut (*device).events.destroy,
-            on_backend_destroy,
-            std::ptr::null(),
+            on_input_destroy::<S>,
+            (*bound).session,
             &raw const *alive,
             None,
             None,
         );
 
         let mut listeners = Vec::new();
+        let mut keyboard = None;
+        let mut pointer = None;
 
         match (*device).type_ {
             sys::wlr_input_device_type::WLR_INPUT_DEVICE_KEYBOARD => {
@@ -1817,7 +1882,9 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                     if let Some(seat) = runtime.seat_ptr() {
                         sys::wlr_seat_set_keyboard(seat.as_ptr(), kb);
                     }
-                    runtime.record_keyboard(NonNull::new_unchecked(kb));
+                    let kb_nn = NonNull::new_unchecked(kb);
+                    runtime.record_keyboard(kb_nn);
+                    keyboard = Some(kb_nn);
 
                     listeners.push(Registration::link(
                         &raw mut (*kb).events.key,
@@ -1841,10 +1908,14 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                 if let Some(cursor) = runtime.cursor_ptr() {
                     sys::wlr_cursor_attach_input_device(cursor.as_ptr(), device);
                 }
-                let pointer = sys::wlr_pointer_from_input_device(device);
-                if !pointer.is_null() {
+                let raw_pointer = sys::wlr_pointer_from_input_device(device);
+                if !raw_pointer.is_null() {
+                    let p_nn = NonNull::new_unchecked(raw_pointer);
+                    runtime.record_pointer(p_nn);
+                    pointer = Some(p_nn);
+
                     listeners.push(Registration::link(
-                        &raw mut (*pointer).events.motion,
+                        &raw mut (*raw_pointer).events.motion,
                         on_pointer_motion::<S>,
                         (*bound).session,
                         &raw const *alive,
@@ -1852,7 +1923,7 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                         None,
                     ));
                     listeners.push(Registration::link(
-                        &raw mut (*pointer).events.motion_absolute,
+                        &raw mut (*raw_pointer).events.motion_absolute,
                         on_pointer_motion_absolute::<S>,
                         (*bound).session,
                         &raw const *alive,
@@ -1860,7 +1931,7 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                         None,
                     ));
                     listeners.push(Registration::link(
-                        &raw mut (*pointer).events.button,
+                        &raw mut (*raw_pointer).events.button,
                         on_pointer_button::<S>,
                         (*bound).session,
                         &raw const *alive,
@@ -1872,22 +1943,72 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
             _ => {}
         }
 
-        (*session).inputs.borrow_mut().push(InputDevice {
-            alive,
-            _destroy: destroy,
-            _listeners: listeners,
-        });
+        // Keyed by the device pointer's own address, which is exactly the
+        // `data` `on_input_destroy` receives (`wlr_input_device_finish`
+        // emits `events.destroy` with `wlr_device` itself as data — the
+        // same pointer this signal was linked against), so that callback
+        // recovers this same key with no side channel needed.
+        (*session).inputs.borrow_mut().insert(
+            device as usize,
+            InputDevice {
+                alive,
+                keyboard,
+                pointer,
+                _destroy: destroy,
+                _listeners: listeners,
+            },
+        );
 
         // Capabilities are recomputed rather than accumulated: a seat that
-        // advertises a keyboard it does not have makes clients wait for a
-        // keymap that never arrives.
-        if let Some(seat) = runtime.seat_ptr() {
-            let mut caps = WL_SEAT_CAPABILITY_POINTER;
-            if runtime.has_keyboard() {
-                caps |= WL_SEAT_CAPABILITY_KEYBOARD;
+        // advertises a keyboard or pointer it does not have makes clients
+        // wait for input that never arrives.
+        update_seat_capabilities(runtime);
+    }
+}
+
+/// A device is being removed — unplugged, or a VT switch's
+/// `libinput_suspend` tearing every device down. Unlink every one of this
+/// device's listeners **now**, synchronously, before returning: see
+/// [`InputDevice`]'s own doc for why wlroots aborts the process if this
+/// doesn't happen before this emission returns.
+unsafe extern "C" fn on_input_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a device's own `events.destroy`.
+    // `data` is the same `*mut wlr_input_device` `wlr_input_device_finish`
+    // was called on — confirmed against wlroots 0.20's own
+    // `types/wlr_input_device.c`, which emits with `wlr_device` itself as
+    // the signal data — and so, cast to `usize`, recovers the exact key
+    // `on_new_input` inserted this entry under. The device (and the
+    // keyboard/pointer struct embedding it, if any) is still live memory at
+    // this point: `wlr_input_device_finish`'s own asserts, which this
+    // exists to satisfy, run *after* this emission returns, and freeing the
+    // struct is the removing backend's job, done only after `*_finish`
+    // itself returns.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let key = data as usize;
+
+        // Removed, not merely looked up: dropping the entry (below) unlinks
+        // `_destroy` — this very listener, sound for the same reason
+        // `on_toplevel_destroy` unlinking itself is (`wl_signal_emit_mutable`
+        // has already advanced its cursor past the firing listener) — and
+        // every listener in `_listeners`, all before this call returns.
+        let removed = (*session).inputs.borrow_mut().remove(&key);
+        if let Some(entry) = removed {
+            if let Some(kb) = entry.keyboard {
+                runtime.forget_keyboard(kb);
             }
-            sys::wlr_seat_set_capabilities(seat.as_ptr(), caps);
+            if let Some(p) = entry.pointer {
+                runtime.forget_pointer(p);
+            }
+            drop(entry);
         }
+
+        update_seat_capabilities(runtime);
     }
 }
 
@@ -1914,6 +2035,20 @@ unsafe extern "C" fn on_key<S: Handlers>(l: *mut sys::wl_listener, data: *mut st
         let keysym = keysym_for_keycode(kb, (*ev).keycode);
         let modifiers_raw = sys::wlr_keyboard_get_modifiers(kb);
         let pressed = (*ev).state == sys::wl_keyboard_key_state::WL_KEYBOARD_KEY_STATE_PRESSED;
+
+        // Reset *before* `emit`, not read stale after it: `emit` only calls
+        // `deliver_all` (which is what sets this to the handler's actual
+        // answer) synchronously when no other handler is already running.
+        // If this key is deferred — queued behind one that is — `emit`
+        // returns immediately without touching the flag at all, and it
+        // would otherwise still hold whatever the *previous* key's answer
+        // was. A previous key that was consumed would then silently drop
+        // this one on the floor instead of forwarding it, contradicting the
+        // "a deferred key is forwarded" guarantee below. Defaulting to
+        // "not consumed" here is what makes that guarantee actually true:
+        // a deferred key is forwarded unless and until `deliver_all` says
+        // otherwise.
+        (*session).last_key_consumed.set(false);
 
         let deliver = (*session).deliver;
         (*session).dispatcher.emit(
@@ -1964,8 +2099,8 @@ unsafe extern "C" fn on_modifiers<S: Handlers>(
     }
 }
 
-/// Move the pointer focus and forward a motion/button to whatever the cursor
-/// is over, or clear pointer focus if it is over nothing. Shared by
+/// Move the pointer focus and forward a motion to whatever the cursor is
+/// over, or clear pointer focus if it is over nothing. Shared by
 /// `on_pointer_motion`, `on_pointer_motion_absolute` and `on_pointer_button`
 /// rather than factored differently: each caller already has the seat and
 /// the cursor's current position in hand, and this only names the repeated
@@ -1973,38 +2108,34 @@ unsafe extern "C" fn on_modifiers<S: Handlers>(
 /// the forwarding call itself (which differs per caller: motion sends a
 /// motion, a button sends nothing here at all).
 ///
+/// Routed through [`Runtime::leaf_surface_at`], **not**
+/// [`Runtime::toplevel_at`]: the latter answers "which window" with
+/// coordinates relative to whatever leaf was struck, which is only the same
+/// surface named by the id when the hit lands on the toplevel's own root —
+/// never true for a click on a popup or a subsurface. Using it here would
+/// notify the toplevel's root surface with another surface's local
+/// coordinates: a popup gets no input at all, and a subsurface gets a
+/// skewed one. `leaf_surface_at` resolves the actual struck surface, so
+/// this always notifies the right one.
+///
 /// # Safety
 ///
 /// `seat` must be a live `wlr_seat`.
-unsafe fn enter_surface_under_cursor<S>(
-    session: &Session<'_, S>,
+unsafe fn enter_surface_under_cursor(
+    runtime: &Runtime,
     seat: *mut sys::wlr_seat,
     x: f64,
     y: f64,
     time_msec: u32,
 ) {
-    match session.runtime.toplevel_at(x, y) {
-        Some((id, sx, sy)) => {
-            let Some(entry) = session.runtime.toplevel_entry(id) else {
-                // SAFETY: the seat is live, per this function's contract.
-                unsafe { sys::wlr_seat_pointer_notify_clear_focus(seat) };
-                return;
-            };
-            // SAFETY: a present entry names a live toplevel (its destroy
-            // callback removes the entry before wlroots frees it), so
-            // `base->surface` is a live surface. The seat is live per this
-            // function's own contract.
-            unsafe {
-                let base = (*entry.raw.as_ptr()).base;
-                let surface = if base.is_null() { std::ptr::null_mut() } else { (*base).surface };
-                if surface.is_null() {
-                    sys::wlr_seat_pointer_notify_clear_focus(seat);
-                    return;
-                }
-                sys::wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
-                sys::wlr_seat_pointer_notify_motion(seat, time_msec, sx, sy);
-            }
-        }
+    match runtime.leaf_surface_at(x, y) {
+        // SAFETY: `leaf_surface_at` reads `surface` out of a live
+        // `wlr_scene_surface` found in this runtime's own scene, which
+        // outlives the call; the seat is live per this function's contract.
+        Some((surface, sx, sy)) => unsafe {
+            sys::wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
+            sys::wlr_seat_pointer_notify_motion(seat, time_msec, sx, sy);
+        },
         // SAFETY: as above.
         None => unsafe { sys::wlr_seat_pointer_notify_clear_focus(seat) },
     }
@@ -2040,7 +2171,7 @@ unsafe extern "C" fn on_pointer_motion<S: Handlers>(
         );
 
         if let Some(seat) = runtime.seat_ptr() {
-            enter_surface_under_cursor(&*session, seat.as_ptr(), x, y, (*ev).time_msec);
+            enter_surface_under_cursor(runtime, seat.as_ptr(), x, y, (*ev).time_msec);
             sys::wlr_seat_pointer_notify_frame(seat.as_ptr());
         }
     }
@@ -2077,7 +2208,7 @@ unsafe extern "C" fn on_pointer_motion_absolute<S: Handlers>(
         );
 
         if let Some(seat) = runtime.seat_ptr() {
-            enter_surface_under_cursor(&*session, seat.as_ptr(), x, y, (*ev).time_msec);
+            enter_surface_under_cursor(runtime, seat.as_ptr(), x, y, (*ev).time_msec);
             sys::wlr_seat_pointer_notify_frame(seat.as_ptr());
         }
     }
@@ -2121,7 +2252,7 @@ unsafe extern "C" fn on_pointer_button<S: Handlers>(
             // motion would, so a click on a window that never got a prior
             // motion event (the pointer warped there, say) still has pointer
             // focus before the button reaches it.
-            enter_surface_under_cursor(&*session, seat.as_ptr(), x, y, (*ev).time_msec);
+            enter_surface_under_cursor(runtime, seat.as_ptr(), x, y, (*ev).time_msec);
             sys::wlr_seat_pointer_notify_button(seat.as_ptr(), (*ev).time_msec, (*ev).button, (*ev).state);
             sys::wlr_seat_pointer_notify_frame(seat.as_ptr());
         }
@@ -2612,7 +2743,7 @@ mod tests {
                 dispatcher: Dispatcher::new(state),
                 outputs: RefCell::new(HashMap::new()),
                 toplevels: RefCell::new(HashMap::new()),
-                inputs: RefCell::new(Vec::new()),
+                inputs: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
                 runtime: &runtime,
                 deliver: deliver::<Recorder>,
@@ -2783,7 +2914,7 @@ mod tests {
             dispatcher: Dispatcher::new(std::ptr::null_mut()),
             outputs: RefCell::new(HashMap::new()),
             toplevels: RefCell::new(HashMap::new()),
-            inputs: RefCell::new(Vec::new()),
+            inputs: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime: &runtime,
             deliver: deliver::<Recorder>,
@@ -2804,5 +2935,166 @@ mod tests {
             "destruction is the one event that needs no object, so it is \
              delivered even though the lookup would miss"
         );
+    }
+
+    /// Pins the `wl_seat.capability` bit values this module's own doc
+    /// comment claims are core-Wayland-protocol-stable, per `wayland.xml`'s
+    /// `wl_seat::capability` enum (`pointer = 1`, `keyboard = 2`, `touch =
+    /// 4`) — checked here rather than trusted from that comment alone, the
+    /// same reasoning `seat.rs`'s `modifier_bit_values_match_wlroots_headers`
+    /// already applies to the `wlr_keyboard_modifier` bits.
+    #[test]
+    fn capability_bits_match_the_wayland_protocol() {
+        assert_eq!(WL_SEAT_CAPABILITY_POINTER, 1);
+        assert_eq!(WL_SEAT_CAPABILITY_KEYBOARD, 2);
+    }
+
+    /// Reproduces, at the smallest possible scale and with no `Session`,
+    /// `Backend` or `Display` involved, the exact mechanism
+    /// `on_input_destroy` relies on to keep a hot-unplug from aborting the
+    /// process.
+    ///
+    /// wlroots' own `wlr_keyboard_finish` (confirmed against wlroots 0.20's
+    /// `types/wlr_keyboard.c`) does, in order: emit `kb->base.events.destroy`
+    /// (via `wlr_input_device_finish`), assert that signal's listener list is
+    /// now empty, then assert `kb->events.key`/`.modifiers`/`.keymap`/
+    /// `.repeat_info`'s listener lists are all empty too — with nothing in
+    /// between the emission and those asserts that could unlink anything on
+    /// our behalf. A destroy watch that only records the death (clears a
+    /// flag) leaves every one of those lists non-empty and every assert
+    /// fires, aborting the process — there is no way for a test to catch
+    /// that and report a clean failure; the symptom is the test binary
+    /// itself dying, which is exactly what a real hot-unplug or VT switch
+    /// would do to a compositor built the same way.
+    ///
+    /// This test builds a bare `wlr_keyboard` with `wlr_keyboard_init` (no
+    /// backend needed — it only initialises the struct and its own
+    /// signals), links `key` and `modifiers` listeners the way `on_new_input`
+    /// does, and links a destroy watch that removes and drops all three
+    /// `Registration`s — itself included — synchronously, from inside the
+    /// destroy emission, exactly as `on_input_destroy` does for a real
+    /// device. If that is sufficient, `wlr_keyboard_finish` returns
+    /// normally and this test passes; if it is not, the process aborts and
+    /// no assertion in this function is ever reached.
+    #[test]
+    fn a_synchronous_destroy_watch_satisfies_wlroots_finish_asserts() {
+        /// What the destroy watch reaches through `Bound::session` to unlink
+        /// every registration on this keyboard — itself included, the same
+        /// way `on_input_destroy` drops the `InputDevice` entry that owns
+        /// its own `_destroy` registration.
+        struct KbRegistrations {
+            key: Option<Registration>,
+            modifiers: Option<Registration>,
+            destroy: Option<Registration>,
+        }
+
+        unsafe extern "C" fn on_kb_destroy(
+            l: *mut sys::wl_listener,
+            _data: *mut std::ffi::c_void,
+        ) {
+            // SAFETY: linked below into `kb.base.events.destroy`, whose
+            // `session` is the `*const RefCell<KbRegistrations>` set up
+            // before `wlr_keyboard_finish` is called.
+            unsafe {
+                let bound = bound_of(l);
+                let regs = (*bound).session.cast::<RefCell<KbRegistrations>>();
+                let mut regs = (*regs).borrow_mut();
+                // Dropping each `Registration` unlinks it. `destroy` last,
+                // and its drop is unlinking the very listener this callback
+                // is running through — sound because `wl_signal_emit_mutable`
+                // has already advanced its cursor past it before calling us,
+                // the same idiom `on_toplevel_destroy`/`on_output_destroy`/
+                // `on_input_destroy` all rely on elsewhere in this file.
+                regs.key.take();
+                regs.modifiers.take();
+                regs.destroy.take();
+            }
+        }
+
+        // SAFETY: `kb` is exclusively owned by this test and never moves
+        // again after this point; `wlr_keyboard_init` fully overwrites it
+        // (`*kb = (struct wlr_keyboard){ .. }` in wlroots' own source), so
+        // the zeroed value handed in is never read before being replaced.
+        let mut kb: sys::wlr_keyboard = unsafe { std::mem::zeroed() };
+        let kb_impl = sys::wlr_keyboard_impl {
+            name: c"test-keyboard".as_ptr(),
+            led_update: None,
+        };
+        // SAFETY: `kb` and `kb_impl` are both live, exclusively-owned locals
+        // for the rest of this function.
+        unsafe { sys::wlr_keyboard_init(&raw mut kb, &raw const kb_impl, c"test".as_ptr()) };
+
+        let regs = RefCell::new(KbRegistrations {
+            key: None,
+            modifiers: None,
+            destroy: None,
+        });
+        let regs_ptr = (&raw const regs).cast::<()>();
+
+        // SAFETY: `kb.events.key`/`.modifiers` are initialised by
+        // `wlr_keyboard_init` above and live for the rest of this function;
+        // `noop` matches every registration's `S`-free signature (there is
+        // no `Session<S>` in this test at all, so `session` is null for
+        // these two — `noop` never reads it).
+        let key = unsafe {
+            Registration::link(
+                &raw mut kb.events.key,
+                noop,
+                std::ptr::null(),
+                std::ptr::null(),
+                None,
+                None,
+            )
+        };
+        let modifiers = unsafe {
+            Registration::link(
+                &raw mut kb.events.modifiers,
+                noop,
+                std::ptr::null(),
+                std::ptr::null(),
+                None,
+                None,
+            )
+        };
+        // SAFETY: `kb.base.events.destroy` is initialised by
+        // `wlr_input_device_init` (called from `wlr_keyboard_init` above)
+        // and live for the rest of this function; `regs_ptr` outlives the
+        // registration (it is a local that is not dropped until after
+        // `wlr_keyboard_finish` returns, below).
+        let destroy = unsafe {
+            Registration::link(
+                &raw mut kb.base.events.destroy,
+                on_kb_destroy,
+                regs_ptr,
+                std::ptr::null(),
+                None,
+                None,
+            )
+        };
+
+        {
+            let mut regs = regs.borrow_mut();
+            regs.key = Some(key);
+            regs.modifiers = Some(modifiers);
+            regs.destroy = Some(destroy);
+        }
+
+        // The whole point: if `on_kb_destroy` did not unlink synchronously,
+        // this call aborts the process (via wlroots' own `assert`) and
+        // nothing after it ever runs.
+        //
+        // SAFETY: `kb` is fully initialised and has no pressed keys
+        // (`num_keycodes` is 0, so `wlr_keyboard_finish`'s "release pressed
+        // keys" loop is a no-op and never touches a seat), and nothing else
+        // holds a reference to it.
+        unsafe { sys::wlr_keyboard_finish(&raw mut kb) };
+
+        // Reaching this line at all is the proof. The registrations were
+        // already taken (and so already dropped/unlinked) by `on_kb_destroy`
+        // during the call above; asserting that here is a belt-and-braces
+        // check on this test's own setup, not part of what's being proven.
+        assert!(regs.borrow().key.is_none());
+        assert!(regs.borrow().modifiers.is_none());
+        assert!(regs.borrow().destroy.is_none());
     }
 }

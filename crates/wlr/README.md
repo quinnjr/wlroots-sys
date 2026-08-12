@@ -24,6 +24,33 @@ follows on the same branches, not because they are on crates.io yet.
 The API is held identical across all four, so once they ship, moving between
 them is a version change rather than a code change.
 
+## 0.20.4
+
+Seat, keyboard and pointer input.
+
+- `SeatHandler` gains `key`, `pointer_motion` and `pointer_button`. All
+  defaulted, so an empty impl written against 0.20.1 keeps compiling.
+- `KeyEvent<'h>` and `Modifiers` — a key's layout-agnostic, unshifted keysym
+  and modifier state.
+- `Runtime::create_seat`, `focus_toplevel_keyboard`, `clear_keyboard_focus`,
+  `toplevel_at` (the scene hit test) and `pointer_position`.
+
+`focus_toplevel_keyboard` reports a miss (`None`) for an **unmapped**
+toplevel, the same as for an unknown id — there is no unmapped-surface
+concept elsewhere in this crate's model, so this is the one place a
+by-id caller could otherwise have asked wlroots to focus a surface no
+client is rendering to.
+
+**Bug fix, on a frozen surface:** `ToplevelId::dangling_nth_for_test(n)`'s
+*value* changes for `n >= 2^32` (previously `u64::MAX - n`, unclamped; now
+folded into a fixed 2^32-wide band via `u64::MAX - (n % 2^32)`). `n = 0` and
+every `n` this crate's own tests or any reasonable caller would pass
+(`n <= 8` is the documented range) are bit-for-bit unaffected — only a caller
+already passing `n` in the billions, which no known caller does, would see a
+different id than before. Fixed because the unclamped subtraction could wrap
+into real-id space for a large enough `n`, contradicting the "no live
+toplevel can have this id" guarantee `dangling_nth_for_test`'s own doc makes.
+
 ## 0.20.3
 
 Testing utility, no protocol surface.
