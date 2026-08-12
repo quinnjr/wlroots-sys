@@ -92,6 +92,20 @@ pub struct Toplevel<'h> {
     _scope: PhantomData<&'h ()>,
 }
 
+/// Hand-written rather than derived, for the same reason
+/// [`KeyEvent`](crate::KeyEvent)'s is: the `PhantomData` scope marker has no
+/// value to print, and a raw pointer printed by a derive is neither useful
+/// nor stable across runs. Named fields only: `id`, `title`, `app_id`.
+impl std::fmt::Debug for Toplevel<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Toplevel")
+            .field("id", &self.id)
+            .field("title", &self.title())
+            .field("app_id", &self.app_id())
+            .finish()
+    }
+}
+
 impl<'h> Toplevel<'h> {
     /// # Safety
     ///
@@ -125,6 +139,39 @@ impl<'h> Toplevel<'h> {
     pub fn app_id(&self) -> Option<String> {
         // SAFETY: as for `title`.
         unsafe { cstr_field((*self.raw.as_ptr()).app_id) }
+    }
+
+    /// The client's current surface size, in content (client-owned) pixels —
+    /// the counterpart to the size
+    /// [`Runtime::set_toplevel_size`](crate::Runtime::set_toplevel_size)
+    /// stages: that call sets what the *next* configure asks for, this
+    /// reads what the client's most recent commit actually produced.
+    ///
+    /// `(0, 0)` before the client's first commit, since that is what
+    /// wlroots' own `wlr_surface_state` starts zeroed at and this reads it
+    /// directly rather than tracking a separate "has it mapped yet" flag of
+    /// its own.
+    ///
+    /// # Panics
+    ///
+    /// Never: the handle's lifetime guarantees the toplevel is live, and a
+    /// live `wlr_xdg_toplevel` always has a non-null `base` (its owning
+    /// `wlr_xdg_surface`) and a non-null `base->surface` — both are set once
+    /// at role-object creation, before this crate ever hands a `Toplevel` to
+    /// a handler, and neither is ever cleared while the toplevel itself is
+    /// still alive.
+    pub fn current_size(&self) -> (i32, i32) {
+        // SAFETY: as this method's own `# Panics` section argues: the
+        // handle's lifetime guarantees the toplevel is live, so `base` and
+        // `base->surface` are non-null, and `current` is a plain embedded
+        // struct (not a pointer) that is always initialised once the
+        // surface exists.
+        unsafe {
+            let base = (*self.raw.as_ptr()).base;
+            let surface = (*base).surface;
+            let current = &(*surface).current;
+            (current.width, current.height)
+        }
     }
 
     /// The pid of the client that owns this toplevel.

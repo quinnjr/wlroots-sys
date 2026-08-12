@@ -2,10 +2,11 @@
 //!
 //! A `wlr_scene_rect` is owned by the scene tree it was created in and is
 //! freed with it, so this crate stores only the pointer and never a `Drop`.
-//! There is no removal by id in 0.20.1: a rect lives as long as the
-//! [`Runtime`](crate::Runtime) that made it. That is exactly what the two
-//! consumers need — a background, and (at parity) decoration strips — and
-//! adding removal later is additive.
+//! [`Runtime::remove_rect`](crate::Runtime::remove_rect) (0.20.5) destroys
+//! one explicitly; short of that, a rect lives as long as the
+//! [`Runtime`](crate::Runtime) that made it, or as long as the toplevel it
+//! is parented into for one created by
+//! [`Runtime::add_rect_in_toplevel`](crate::Runtime::add_rect_in_toplevel).
 
 /// Identifies a solid-colour rect in the scene.
 ///

@@ -406,6 +406,22 @@ impl Drop for ToplevelTableGuard<'_> {
     }
 }
 
+/// Clears `Runtime`'s `live_sources` table when the `run_inner` call holding
+/// this guard returns, on every exit path — the same "declared once,
+/// registered and torn down per run" rule [`ToplevelTableGuard`] enforces
+/// for toplevels. The sources themselves are already removed from the event
+/// loop by this point, each by its own [`FdRegistration`]'s `Drop`; this
+/// only stops the table naming a `SourceId` whose registration is gone,
+/// which would otherwise let a later [`Runtime::remove_fd`] attempt a
+/// second `wl_event_source_remove` on it.
+struct LiveSourcesGuard<'r>(&'r Runtime);
+
+impl Drop for LiveSourcesGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear_live_sources();
+    }
+}
+
 thread_local! {
     /// Set while a [`Backend::run`] call is on the stack.
     ///
@@ -753,6 +769,14 @@ impl<'d> Backend<'d> {
         // no signal and nothing any `Registration::drop` reads.
         let _toplevel_table_guard = ToplevelTableGuard(runtime);
 
+        // Same reasoning, for `live_sources`; see that guard's own doc.
+        // Declared alongside `_toplevel_table_guard` for the same reason:
+        // nothing here depends on drop order relative to the registrations
+        // below, but declaring the clear-on-exit guards together up front
+        // keeps every "cleared on every exit path" table's guard in one
+        // place.
+        let _live_sources_guard = LiveSourcesGuard(runtime);
+
         // Declared after `session`, so it drops — and therefore decides
         // about unlinking — while the session it names is still alive. Bound
         // to a named `_new_output` rather than to `_`, which would drop it at
@@ -795,15 +819,6 @@ impl<'d> Backend<'d> {
         // point would emit them into an empty signal; see `ensure_started`.
         self.ensure_started()?;
 
-        // SAFETY: `self.loop_` was taken from the `EventLoop<'d>` handed to
-        // `autocreate`, so it names a live loop belonging to a display that
-        // outlives `'d` — and `&self` keeps that borrow alive for this call.
-        //
-        // Dispatching here is not the re-entry `EventLoop::dispatch` refuses:
-        // `run_inner` is not a handler, and the flag that refusal consults is
-        // set only for the duration of a delivery, strictly inside the
-        // `loop_.dispatch(timeout)` call below rather than around it.
-        let loop_ = unsafe { EventLoop::from_raw(self.loop_) };
         let (timeout, mut remaining) = match until {
             Until::Turns(n) => (0, Some(n)),
             Until::Stop => (-1, None),
@@ -813,7 +828,48 @@ impl<'d> Backend<'d> {
             if let Some(0) = remaining {
                 return Ok(());
             }
-            loop_.dispatch(timeout)?;
+            // Called directly via `wl_event_loop_dispatch`, rather than
+            // through `EventLoop::dispatch`, so a signal landing mid-poll
+            // (`EINTR`) can be retried with the same timeout instead of
+            // surfacing as a spurious `Error::Operation` — libwayland's own
+            // `wl_event_loop_dispatch` does not retry this itself, and a
+            // compositor process fields plenty of signals (`SIGCHLD` from a
+            // reaped client, a `SIGUSR1` a consumer installs) that have
+            // nothing to do with the loop having failed.
+            //
+            // SAFETY: `self.loop_` was taken from the `EventLoop<'d>` handed
+            // to `autocreate`, so it names a live loop belonging to a
+            // display that outlives `'d` — and `&self` keeps that borrow
+            // alive for this call. Dispatching here is not the re-entry
+            // `EventLoop::dispatch` refuses: `run_inner` is not a handler,
+            // and the flag that refusal consults is set only for the
+            // duration of a delivery, strictly inside this call rather than
+            // around it.
+            loop {
+                use sys::wayland_sys::ffi_dispatch;
+                #[allow(unused_imports)]
+                use sys::wayland_sys::server::*;
+                let n = unsafe {
+                    ffi_dispatch!(
+                        sys::wayland_sys::server::wayland_server_handle(),
+                        wl_event_loop_dispatch,
+                        self.loop_.as_ptr(),
+                        timeout
+                    )
+                };
+                if n >= 0 {
+                    break;
+                }
+                let errno = std::io::Error::last_os_error();
+                // 4 is `EINTR` on every platform this crate builds for
+                // (Linux); the crate has no `libc` dependency to name the
+                // constant, so the value is pinned here.
+                if errno.raw_os_error() != Some(4) {
+                    return Err(Error::Operation("wl_event_loop_dispatch"));
+                }
+                // EINTR: a signal landed mid-poll; retry with the same
+                // timeout.
+            }
             if let Some(display) = display {
                 display.flush_clients();
             }
@@ -829,8 +885,9 @@ impl<'d> Backend<'d> {
             // non-dangling regardless of what `hooks.should_stop` does with
             // it. No handler is running at this point — `Dispatcher::emit`
             // clears its guard before returning, and the only calls into
-            // `emit` happen inside `loop_.dispatch` above, which has already
-            // returned — so `hooks.should_stop` (which derefs the pointer) is
+            // `emit` happen inside the `wl_event_loop_dispatch` call above,
+            // which has already returned — so `hooks.should_stop` (which
+            // derefs the pointer) is
             // the sole reader here and sees no other `&mut S` live. This is
             // the discharge site `state_ptr`'s own doc requires: the caller
             // states, right here, why no handler is on the stack.
@@ -886,10 +943,18 @@ impl<'d> Backend<'d> {
                     (&raw const *ctx).cast::<std::ffi::c_void>().cast_mut()
                 )
             };
-            if source.is_null() {
+            let Some(non_null) = NonNull::new(source) else {
                 return Err(Error::Operation("wl_event_loop_add_fd"));
-            }
-            out.push(FdRegistration { source, _ctx: ctx });
+            };
+            // Recorded so `Runtime::remove_fd` can find and remove this
+            // registration mid-run; see that method's own doc.
+            runtime.record_live_source(id, non_null);
+            out.push(FdRegistration {
+                source,
+                id,
+                runtime: runtime.clone(),
+                _ctx: ctx,
+            });
         }
         Ok(out)
     }
@@ -1006,9 +1071,17 @@ struct RunHooks<'d, S> {
 ///
 /// Removed from the loop by `Drop`, for the same reason [`Registration`]
 /// unlinks there: an early `?` return in the middle of `run_inner` must not
-/// leave a live source pointing at a freed context.
+/// leave a live source pointing at a freed context. That removal is
+/// conditional — see the `Drop` impl below — because
+/// [`Runtime::remove_fd`](crate::Runtime::remove_fd) may have already done
+/// it mid-run.
 struct FdRegistration {
     source: *mut sys::wl_event_source,
+    id: SourceId,
+    /// Cloned rather than borrowed — one `Rc` bump (see [`Runtime`]'s own
+    /// doc) — so this struct needs no lifetime parameter of its own for
+    /// what is otherwise a plain, `'static`-shaped registration handle.
+    runtime: Runtime,
     // Declared after `source` so it is dropped after the source is removed,
     // never while libwayland could still dispatch through it.
     _ctx: Box<FdCtx>,
@@ -1025,13 +1098,27 @@ struct FdCtx {
 
 impl Drop for FdRegistration {
     fn drop(&mut self) {
+        // `Runtime::remove_fd` may have already removed this exact source
+        // mid-run — the motivating case is a consumer calling it from
+        // inside this very source's own `fd_ready`. `take_live_source` is
+        // the single choke point that decides which of the two removers
+        // actually calls `wl_event_source_remove`; see its own doc. `None`
+        // here means `remove_fd` already claimed and removed it, so this
+        // teardown has nothing left to do — calling
+        // `wl_event_source_remove` a second time would be a use-after-free
+        // on a `wl_event_source` libwayland has already freed.
+        if self.runtime.take_live_source(self.id).is_none() {
+            return;
+        }
+
         use sys::wayland_sys::ffi_dispatch;
         #[allow(unused_imports)]
         use sys::wayland_sys::server::*;
 
         // SAFETY: `source` came from `wl_event_loop_add_fd` on a loop that
-        // outlives this run (the `Display` borrow guarantees it), and is
-        // removed exactly once, here.
+        // outlives this run (the `Display` borrow guarantees it), and the
+        // `take_live_source` call above establishes this is the first (and
+        // by construction, only) removal of it.
         let _ = unsafe {
             ffi_dispatch!(
                 sys::wayland_sys::server::wayland_server_handle(),

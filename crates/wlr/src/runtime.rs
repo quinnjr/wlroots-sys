@@ -69,7 +69,22 @@ pub(crate) struct RuntimeInner {
     /// attached to a scene no output will ever be attached to.
     pub(crate) graphics: RefCell<Option<Graphics>>,
 
-    pub(crate) rects: RefCell<HashMap<RectId, NonNull<sys::wlr_scene_rect>>>,
+    pub(crate) rects: RefCell<HashMap<RectId, RectEntry>>,
+
+    /// Every fd source currently registered with the event loop, keyed by
+    /// the id its declaration in `sources` carries.
+    ///
+    /// Populated by `backend.rs`'s `register_fd_sources` right after each
+    /// source is handed to `wl_event_loop_add_fd`, and cleared by
+    /// `run_inner`'s teardown guard when that call returns — the same
+    /// "declared here, registered and unregistered per run" split
+    /// `sources` documents on [`Runtime::add_fd`]. [`Runtime::remove_fd`]
+    /// consults this to decide whether a live registration needs
+    /// `wl_event_source_remove` in addition to dropping the declaration:
+    /// a source declared but not yet registered (no run has started, or
+    /// the removal races the read of this table before a run's
+    /// `register_fd_sources` runs) has nothing here to remove.
+    pub(crate) live_sources: RefCell<HashMap<SourceId, NonNull<sys::wl_event_source>>>,
 
     /// The xdg shell, once created. `Option` because a consumer that only
     /// wants a scene never makes one, and because a second one would
@@ -130,6 +145,22 @@ pub(crate) struct RuntimeInner {
 pub(crate) struct ToplevelEntry {
     pub(crate) raw: NonNull<sys::wlr_xdg_toplevel>,
     pub(crate) tree: NonNull<sys::wlr_scene_tree>,
+}
+
+/// A live scene rect: the node wlroots created for it, and which toplevel
+/// (if any) it is parented into.
+#[derive(Clone, Copy)]
+pub(crate) struct RectEntry {
+    pub(crate) raw: NonNull<sys::wlr_scene_rect>,
+    /// `Some(id)` for a rect [`Runtime::add_rect_in_toplevel`] created,
+    /// parented into that toplevel's own scene tree. `None` for a root
+    /// rect [`Runtime::add_rect`] created, parented into the scene's root
+    /// tree instead.
+    ///
+    /// Read by [`Runtime::forget_toplevel`] to purge every rect that dies
+    /// along with a destroyed toplevel's tree, without double-destroying
+    /// the node wlroots is about to free recursively.
+    pub(crate) parent: Option<ToplevelId>,
 }
 
 /// The scene graph, output layout, renderer and allocator — everything
@@ -214,6 +245,7 @@ impl Runtime {
                 sources: RefCell::new(Vec::new()),
                 graphics: RefCell::new(None),
                 rects: RefCell::new(HashMap::new()),
+                live_sources: RefCell::new(HashMap::new()),
                 xdg_shell: RefCell::new(None),
                 toplevels: RefCell::new(HashMap::new()),
                 tree_to_toplevel: RefCell::new(HashMap::new()),
@@ -246,6 +278,97 @@ impl Runtime {
             .borrow_mut()
             .push(FdSource { fd, interest, id });
         id
+    }
+
+    /// Remove `id`'s declaration, and — if a run currently has it
+    /// registered with the event loop — the installed `wl_event_source`
+    /// too, so no further [`FdHandler::fd_ready`](crate::FdHandler::fd_ready)
+    /// fires for it.
+    ///
+    /// The descriptor itself is closed as a consequence: it is owned by the
+    /// declaration this removes from `sources`, and dropping that entry
+    /// drops the `OwnedFd` with it.
+    ///
+    /// Safe to call from inside `id`'s own `fd_ready` callback — the
+    /// motivating case, and the one
+    /// [`FdHandler::fd_ready`](crate::FdHandler::fd_ready)'s own doc
+    /// promises works: `wl_event_source_remove` is documented safe to call
+    /// on the very source whose callback is calling it, and this method
+    /// takes no borrow that a re-entrant call into this `Runtime` would
+    /// conflict with.
+    ///
+    /// `None` if this runtime never issued `id`, or `id` was already
+    /// removed — the second call of a double removal misses cleanly.
+    pub fn remove_fd(&self, id: SourceId) -> Option<()> {
+        let existed = {
+            let mut sources = self.inner.sources.borrow_mut();
+            let before = sources.len();
+            sources.retain(|s| s.id != id);
+            sources.len() != before
+        };
+        if !existed {
+            return None;
+        }
+        if let Some(source) = self.take_live_source(id) {
+            use sys::wayland_sys::ffi_dispatch;
+            #[allow(unused_imports)]
+            use sys::wayland_sys::server::*;
+            // SAFETY: `source` came from `wl_event_loop_add_fd` (recorded by
+            // `register_fd_sources`), and `take_live_source` returning
+            // `Some` here is the one and only removal of this id from
+            // `live_sources` for this source's whole life — `FdRegistration`'s
+            // own `Drop` makes the identical call through the identical
+            // `take_live_source` at end-of-run, and finding this id already
+            // gone is exactly what stops it repeating this call on a source
+            // this branch has already removed (see that `Drop` impl's own
+            // comment). So `source` has not been removed yet.
+            let _ = unsafe {
+                ffi_dispatch!(
+                    sys::wayland_sys::server::wayland_server_handle(),
+                    wl_event_source_remove,
+                    source.as_ptr()
+                )
+            };
+        }
+        Some(())
+    }
+
+    /// Record a source `backend.rs`'s `register_fd_sources` just registered
+    /// with the event loop, so [`remove_fd`](Runtime::remove_fd) and
+    /// `backend.rs`'s `FdRegistration` teardown can find — and claim — it.
+    pub(crate) fn record_live_source(&self, id: SourceId, source: NonNull<sys::wl_event_source>) {
+        self.inner.live_sources.borrow_mut().insert(id, source);
+    }
+
+    /// Remove and return `id`'s live registration, if it still has one.
+    ///
+    /// The single choke point both removers of a live source go through —
+    /// [`remove_fd`](Runtime::remove_fd), for a mid-run removal, and
+    /// `backend.rs`'s `FdRegistration::drop`, for the run's own end-of-call
+    /// teardown — so that whichever runs first is the one that actually
+    /// calls `wl_event_source_remove`, and the other sees `None` and does
+    /// nothing. Without a single shared table to race on, both sites would
+    /// each call `wl_event_source_remove` on the same source: the second
+    /// call is a use-after-free, since libwayland has already freed the
+    /// `wl_event_source` the first call removed.
+    pub(crate) fn take_live_source(&self, id: SourceId) -> Option<NonNull<sys::wl_event_source>> {
+        self.inner.live_sources.borrow_mut().remove(&id)
+    }
+
+    /// Forget every live source, called once by `backend.rs`'s `run_inner`
+    /// when the run that registered them returns. In the ordinary case
+    /// there is nothing left to forget — every entry `record_live_source`
+    /// added has already been claimed by exactly one call to
+    /// [`take_live_source`](Runtime::take_live_source) by this point, from
+    /// either `remove_fd` or `FdRegistration`'s own `Drop` (dropped before
+    /// this guard runs; see `run_inner`'s declaration order). This exists
+    /// as the belt for that suspenders: a table entry surviving past its
+    /// registering run would let a later [`remove_fd`](Runtime::remove_fd)
+    /// call resolve a stale `SourceId` to a pointer libwayland may since
+    /// have reused, the same hazard
+    /// [`clear_toplevels`](Runtime::clear_toplevels) closes for toplevels.
+    pub(crate) fn clear_live_sources(&self) {
+        self.inner.live_sources.borrow_mut().clear();
     }
 
     /// The descriptor `id` names, borrowed for the callback that resolves it.
@@ -555,8 +678,77 @@ impl Runtime {
         };
         let raw = NonNull::new(raw).ok_or(Error::Create("wlr_scene_rect_create"))?;
         let id = RectId(next_id());
-        self.inner.rects.borrow_mut().insert(id, raw);
+        self.inner
+            .rects
+            .borrow_mut()
+            .insert(id, RectEntry { raw, parent: None });
         Ok(id)
+    }
+
+    /// Add a solid-colour rect parented into `toplevel`'s own scene tree,
+    /// in the same premultiplied RGBA [`add_rect`](Runtime::add_rect)
+    /// takes. Coordinates given to
+    /// [`set_rect_position`](Runtime::set_rect_position) afterward are
+    /// relative to the tree's own origin — the same origin
+    /// [`set_toplevel_position`](Runtime::set_toplevel_position) moves —
+    /// not the scene root's.
+    ///
+    /// The rect is destroyed automatically when `toplevel` is: wlroots
+    /// frees every child of a scene tree recursively when the tree itself
+    /// is destroyed, and this crate destroys a toplevel's tree as part of
+    /// tearing the toplevel down. Once that happens the returned
+    /// [`RectId`] goes stale, the same way a
+    /// [`ToplevelId`](crate::ToplevelId) does — every mutator on this page
+    /// reports `None` for it from then on, including
+    /// [`remove_rect`](Runtime::remove_rect).
+    ///
+    /// `None` if this runtime has no live toplevel with that id (including
+    /// a stale one — see [`set_toplevel_size`](Runtime::set_toplevel_size)'s
+    /// doc), or if wlroots could not create the node.
+    pub fn add_rect_in_toplevel(
+        &self,
+        toplevel: ToplevelId,
+        width: i32,
+        height: i32,
+        color: [f32; 4],
+    ) -> Option<RectId> {
+        let entry = self.toplevel_entry(toplevel)?;
+        // SAFETY: a present entry names a live tree (its destroy callback
+        // removes the entry before wlroots frees it); `color` is a live
+        // four-float array for the duration of the call, which is all
+        // `wlr_scene_rect_create` reads (it copies the value).
+        let raw = unsafe {
+            sys::wlr_scene_rect_create(entry.tree.as_ptr(), width, height, color.as_ptr())
+        };
+        let raw = NonNull::new(raw)?;
+        let id = RectId(next_id());
+        self.inner.rects.borrow_mut().insert(
+            id,
+            RectEntry {
+                raw,
+                parent: Some(toplevel),
+            },
+        );
+        Some(id)
+    }
+
+    /// Destroy a rect's scene node, whether it is a root rect from
+    /// [`add_rect`](Runtime::add_rect) or one parented into a toplevel via
+    /// [`add_rect_in_toplevel`](Runtime::add_rect_in_toplevel).
+    ///
+    /// `None` if this runtime never issued `rect`, including a rect already
+    /// removed (by this call or by its parent toplevel's own teardown) —
+    /// double-removal misses cleanly rather than double-destroying the
+    /// node.
+    pub fn remove_rect(&self, rect: RectId) -> Option<()> {
+        let entry = self.inner.rects.borrow_mut().remove(&rect)?;
+        // SAFETY: `entry.raw` came from `add_rect`/`add_rect_in_toplevel`
+        // and the table entry naming it is only ever removed once — by
+        // this call, or (without a matching destroy, see
+        // `forget_toplevel`'s own comment) by the toplevel teardown that
+        // purges it first — so the node has not been destroyed yet.
+        unsafe { sys::wlr_scene_node_destroy(&raw mut (*entry.raw.as_ptr()).node) };
+        Some(())
     }
 
     /// Move a rect. `None` if this runtime never issued `rect`.
@@ -599,7 +791,7 @@ impl Runtime {
     /// every caller then re-enters wlroots, which can emit a signal, which can
     /// take this same `RefCell` mutably.
     fn rect_ptr(&self, id: RectId) -> Option<NonNull<sys::wlr_scene_rect>> {
-        self.inner.rects.borrow().get(&id).copied()
+        self.inner.rects.borrow().get(&id).map(|e| e.raw)
     }
 
     /// Advertise `xdg_wm_base` at `version`.
@@ -682,6 +874,21 @@ impl Runtime {
     /// Remove `id` from both tables. Called from `on_toplevel_destroy` before
     /// the toplevel is freed.
     pub(crate) fn forget_toplevel(&self, id: ToplevelId) {
+        // Every rect `add_rect_in_toplevel` parented into this toplevel's
+        // tree dies with that tree: wlroots destroys a scene tree's
+        // children recursively when the tree itself is destroyed, which is
+        // about to happen (this runs from `on_toplevel_destroy`, before
+        // wlroots frees the toplevel and its tree). So these entries are
+        // dropped from the table here, without calling
+        // `wlr_scene_node_destroy` on any of them — the node is destroyed
+        // once, by wlroots, as part of destroying the parent tree; calling
+        // it again here would be a double free of memory wlroots has
+        // already reclaimed.
+        self.inner
+            .rects
+            .borrow_mut()
+            .retain(|_, entry| entry.parent != Some(id));
+
         let entry = self.inner.toplevels.borrow_mut().remove(&id);
         if let Some(entry) = entry {
             self.inner
