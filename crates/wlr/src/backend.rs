@@ -2192,11 +2192,9 @@ unsafe extern "C" fn on_toplevel_request_fullscreen<S: Handlers>(
         };
         let fullscreen = (*entry.raw.as_ptr()).requested.fullscreen;
         let deliver = (*session).deliver;
-        (*session).dispatcher.emit(
-            &*session,
-            Event::RequestFullscreen(id, fullscreen),
-            deliver,
-        );
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::RequestFullscreen(id, fullscreen), deliver);
     }
 }
 

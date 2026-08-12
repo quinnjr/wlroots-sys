@@ -28,9 +28,7 @@ fn graphics_runtime() -> wlr::Runtime {
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = wlr::Runtime::new().expect("runtime");
-    runtime
-        .init_graphics(&display, &backend)
-        .expect("graphics");
+    runtime.init_graphics(&display, &backend).expect("graphics");
     // Leaked deliberately: this helper's only job is handing back a runtime
     // with a live scene to attach buffer nodes to, and `Runtime`'s own
     // lifetime obligation (see its doc) is that it must not outlive the

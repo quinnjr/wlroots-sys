@@ -69,7 +69,12 @@ fn removing_a_live_source_stops_its_callbacks() {
     impl wlr::ToplevelHandler for App {}
     impl wlr::SeatHandler for App {}
     impl wlr::FdHandler for App {
-        fn fd_ready(&mut self, source: wlr::SourceId, fd: std::os::fd::BorrowedFd<'_>, _r: wlr::Readiness) {
+        fn fd_ready(
+            &mut self,
+            source: wlr::SourceId,
+            fd: std::os::fd::BorrowedFd<'_>,
+            _r: wlr::Readiness,
+        ) {
             let mut buf = [0u8; 16];
             let _ = rustix::io::read(fd, &mut buf); // drain so level-triggering stops
             if source == self.doomed {
@@ -154,7 +159,12 @@ fn removed_fd_stays_valid_for_the_rest_of_its_own_callback() {
     impl wlr::ToplevelHandler for App {}
     impl wlr::SeatHandler for App {}
     impl wlr::FdHandler for App {
-        fn fd_ready(&mut self, source: wlr::SourceId, fd: std::os::fd::BorrowedFd<'_>, _r: wlr::Readiness) {
+        fn fd_ready(
+            &mut self,
+            source: wlr::SourceId,
+            fd: std::os::fd::BorrowedFd<'_>,
+            _r: wlr::Readiness,
+        ) {
             assert_eq!(source, self.id);
             assert_eq!(self.runtime.remove_fd(self.id), Some(()));
             // `fd`'s borrow does not end until this call returns; the
@@ -187,7 +197,10 @@ fn removed_fd_stays_valid_for_the_rest_of_its_own_callback() {
         .expect("run");
 
     match app.after_remove.expect("fd_ready must have fired") {
-        Ok(n) => assert_eq!(n, 1, "the byte written before the run must still be readable"),
+        Ok(n) => assert_eq!(
+            n, 1,
+            "the byte written before the run must still be readable"
+        ),
         Err(e) => panic!(
             "reading `fd` after `remove_fd` failed with {e:?} — if this is \
              `BADF`, the descriptor was closed while a live `BorrowedFd` \
@@ -198,7 +211,12 @@ fn removed_fd_stays_valid_for_the_rest_of_its_own_callback() {
 
 #[test]
 fn key_event_for_test_reports_what_it_was_given() {
-    let ev = wlr::KeyEvent::for_test(0xff1b /* XKB_KEY_Escape */, wlr::Modifiers::default(), true, 42);
+    let ev = wlr::KeyEvent::for_test(
+        0xff1b, /* XKB_KEY_Escape */
+        wlr::Modifiers::default(),
+        true,
+        42,
+    );
     assert_eq!(ev.keysym(), 0xff1b);
     assert!(ev.pressed());
     assert_eq!(ev.time_msec(), 42);
