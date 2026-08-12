@@ -286,6 +286,29 @@ pub trait ToplevelHandler {
     fn request_resize(&mut self, id: ToplevelId, edges: Edges) {
         let _ = (id, edges);
     }
+
+    /// The client (un)stated a decoration-mode preference for this toplevel,
+    /// via `zxdg_decoration_manager_v1`/`zxdg_toplevel_decoration_v1`.
+    ///
+    /// `client_side_preferred`: `Some(true)` means the client asked for
+    /// client-side decorations, `Some(false)` means it asked for
+    /// server-side, and `None` means it stated no preference at all
+    /// (`requested_mode` reads `WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_NONE`).
+    ///
+    /// Answer with
+    /// [`Runtime::set_decoration_mode`](crate::Runtime::set_decoration_mode)
+    /// from inside this call. wlroots requires a mode be set before the
+    /// toplevel's initial commit is answered, so — same coalescing pattern
+    /// as [`request_maximize`](ToplevelHandler::request_maximize)'s bare
+    /// configure — the dispatch layer sends the server-side default after
+    /// this method returns, but *only* if this method sent nothing itself:
+    /// unlike the configure case, sending twice here is not harmless (it
+    /// would tell the client server-side and then, in the same turn,
+    /// whatever this method asked for), so the default is conditional
+    /// rather than unconditional.
+    fn request_decoration_mode(&mut self, id: ToplevelId, client_side_preferred: Option<bool>) {
+        let _ = (id, client_side_preferred);
+    }
 }
 
 /// Seat, keyboard and pointer input.

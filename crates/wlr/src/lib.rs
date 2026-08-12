@@ -77,6 +77,7 @@ pub(crate) mod sys;
 
 mod backend;
 mod buffer;
+mod decoration;
 mod dispatch;
 mod display;
 mod error;

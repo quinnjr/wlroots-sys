@@ -162,9 +162,12 @@ struct Bound {
     /// whole design exists to prevent.
     id: Option<OutputId>,
 
-    /// The toplevel this listener belongs to, for the five per-toplevel
-    /// listeners `on_new_toplevel` links; `None` for every other listener in
-    /// this file.
+    /// The toplevel this listener belongs to, for the nine per-toplevel
+    /// listeners `on_new_toplevel` links plus the two per-decoration
+    /// listeners `on_new_toplevel_decoration` links (keyed by the toplevel
+    /// the decoration was created for, not by any id of the decoration's
+    /// own — this crate mints no such id); `None` for every other listener
+    /// in this file.
     ///
     /// This is what makes `on_toplevel_map`, `on_toplevel_unmap`,
     /// `on_toplevel_set_title` and `on_toplevel_destroy` sound at all: wlroots
@@ -172,12 +175,18 @@ struct Bound {
     /// `wlr_xdg_toplevel.events.set_title`/`.destroy` with a **null** `data`
     /// argument (confirmed against the C sources — `wlr_compositor.c` and
     /// `wlr_xdg_toplevel.c`), so a callback that read the id out of `data`
-    /// would dereference a null pointer on the first real client. `Bound` is
-    /// private to this module, so widening it with a second id field costs
-    /// nothing outside it — unlike `Bound::id`, which stays `Option<OutputId>`
-    /// rather than being generalised, because every output-side call site
-    /// still wants that exact type and a shared enum would cost every one of
-    /// them a match arm for a case that can never apply to it.
+    /// would dereference a null pointer on the first real client. The two
+    /// decoration listeners follow the identical discipline for a different
+    /// reason: `on_toplevel_decoration_destroy` can fire after wlroots has
+    /// already cleared `wlr_xdg_toplevel_decoration_v1::toplevel` to null
+    /// (when the toplevel died first), so re-deriving the id from the
+    /// decoration itself would be unsound exactly when it matters most.
+    /// `Bound` is private to this module, so widening it with a second id
+    /// field costs nothing outside it — unlike `Bound::id`, which stays
+    /// `Option<OutputId>` rather than being generalised, because every
+    /// output-side call site still wants that exact type and a shared enum
+    /// would cost every one of them a match arm for a case that can never
+    /// apply to it.
     toplevel: Option<ToplevelId>,
 }
 
@@ -335,6 +344,15 @@ struct Session<'r, S> {
     /// `outputs` above.
     toplevels: RefCell<HashMap<ToplevelId, ToplevelListeners>>,
 
+    /// This run's listeners on every live decoration object, keyed by the
+    /// toplevel it belongs to. Removed, and so unlinked, from
+    /// `on_toplevel_decoration_destroy` when the decoration dies, and from
+    /// `on_toplevel_destroy` when its toplevel dies first — mirroring
+    /// `toplevels`' own destroy-triggered removal, but from two independent
+    /// sites instead of one; see `RuntimeInner::decorations`'s own doc for
+    /// why both exist.
+    decorations: RefCell<HashMap<ToplevelId, DecorationListeners>>,
+
     /// This run's listeners on every live input device, one [`InputDevice`]
     /// per device, keyed by the device's own `*mut wlr_input_device` address
     /// (as `usize`) — unlike the destroy-only removal `outputs` and
@@ -395,6 +413,13 @@ struct ToplevelListeners {
     _request_fullscreen: Registration,
     _request_move: Registration,
     _request_resize: Registration,
+}
+
+/// One live decoration object's two listeners: its own `request_mode` and
+/// `destroy`. Field order is not load-bearing, as for `ToplevelListeners`.
+struct DecorationListeners {
+    _request_mode: Registration,
+    _destroy: Registration,
 }
 
 /// Clears `Runtime`'s toplevel tables when the `run_inner` call holding this
@@ -760,6 +785,7 @@ impl<'d> Backend<'d> {
             dispatcher: Dispatcher::new(&raw mut *state),
             outputs: RefCell::new(HashMap::new()),
             toplevels: RefCell::new(HashMap::new()),
+            decorations: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime,
@@ -1004,6 +1030,23 @@ impl<'d> Backend<'d> {
                 Registration::link(
                     &raw mut (*shell.as_ptr()).events.new_toplevel,
                     on_new_toplevel::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                    None,
+                    None,
+                )
+            });
+        }
+
+        if let Some(manager) = runtime.xdg_decoration_manager_ptr() {
+            // SAFETY: `create_xdg_decoration_manager` returned a non-null
+            // `wlr_xdg_decoration_manager_v1` owned by the display, which
+            // this call requires to outlive it, exactly as for the xdg
+            // shell just above; the same reasoning applies verbatim.
+            regs.push(unsafe {
+                Registration::link(
+                    &raw mut (*manager.as_ptr()).events.new_toplevel_decoration,
+                    on_new_toplevel_decoration::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     std::ptr::null(),
                     None,
@@ -1264,6 +1307,23 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         }
         Event::RequestMove(id) => state.request_move(id),
         Event::RequestResize(id, edges) => state.request_resize(id, edges),
+        Event::RequestDecorationMode(id, preference) => {
+            state.request_decoration_mode(id, preference);
+            // wlroots requires a mode be set before the initial commit is
+            // answered. The handler may have already answered through
+            // `Runtime::set_decoration_mode`, which sets this same flag —
+            // see `on_decoration_request_mode`'s own doc for where it was
+            // cleared, and `DecorationEntry::mode_set_this_dispatch` for the
+            // full mechanism. Unlike `RequestMaximize`'s bare configure,
+            // this follow-up is *conditional*: sending a second `set_mode`
+            // after the handler already sent one would tell the client
+            // server-side and then, in the same turn, whatever the handler
+            // asked for — not "harmless, coalesced" the way a second
+            // configure is.
+            if !session.runtime.decoration_dispatch_flag(id) {
+                session.runtime.set_decoration_mode(id, true);
+            }
+        }
         Event::Key {
             keysym,
             modifiers_raw,
@@ -1852,11 +1912,179 @@ unsafe extern "C" fn on_toplevel_destroy<S: Handlers>(
         (*session).runtime.forget_toplevel(id);
         let listeners = (*session).toplevels.borrow_mut().remove(&id);
         drop(listeners);
+        // The toplevel dying first is one of the two orders a decoration and
+        // its toplevel can die in; see `RuntimeInner::decorations`'s own
+        // doc. `forget_toplevel` just purged the data-side table above —
+        // this purges this run's listener registrations for the same id, if
+        // any. The decoration object itself is not freed by this (wlroots
+        // only clears its `toplevel` field), so dropping — and so
+        // unlinking — these registrations here is not a use-after-free; it
+        // only stops this crate delivering any further event for a
+        // decoration whose toplevel is already gone.
+        let decoration_listeners = (*session).decorations.borrow_mut().remove(&id);
+        drop(decoration_listeners);
 
         let deliver = (*session).deliver;
         (*session)
             .dispatcher
             .emit(&*session, Event::ToplevelDestroyed(id), deliver);
+    }
+}
+
+/// A client created a decoration object for an already-announced toplevel.
+unsafe extern "C" fn on_new_toplevel_decoration<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener
+    // `register_toplevel_and_input` linked into
+    // `wlr_xdg_decoration_manager_v1.events.new_toplevel_decoration`, whose
+    // `session` is the `*const Session<'_, S>` paired with this
+    // instantiation. The signal carries a `*mut wlr_xdg_toplevel_decoration_v1`,
+    // live and fully initialised at the point wlroots announces it —
+    // including `toplevel`, which is non-null here: a client can only reach
+    // `get_toplevel_decoration` by naming a live toplevel resource, and
+    // wlroots resolves that reference before emitting this signal.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let decoration = data.cast::<sys::wlr_xdg_toplevel_decoration_v1>();
+
+        let toplevel = (*decoration).toplevel;
+        if toplevel.is_null() {
+            return;
+        }
+        let base = (*toplevel).base;
+        if base.is_null() {
+            return;
+        }
+        let surface = (*base).surface;
+        if surface.is_null() {
+            return;
+        }
+        // The id is looked up, not minted: `on_new_toplevel` already
+        // attached one to this surface when the toplevel itself was
+        // announced, and a decoration cannot exist for a toplevel that was
+        // not — `get_toplevel_decoration` names an existing toplevel
+        // resource. A miss here means the surface's id addon is somehow
+        // absent, which this callback cannot recover from soundly (there is
+        // no `ToplevelId` to key either table by), so the announcement is
+        // dropped rather than minting a fresh, disconnected id.
+        let Some(id) = toplevel_id_of_surface(surface) else {
+            return;
+        };
+        let Some(raw) = NonNull::new(decoration) else {
+            return;
+        };
+
+        // Two listeners, both keyed by `Bound::toplevel` rather than by
+        // re-deriving the id from `data` at callback time — the same
+        // discipline `on_new_toplevel`'s five listeners follow, and for the
+        // same underlying reason: `destroy` on this object may fire after
+        // its `toplevel` field has already been cleared to null by wlroots,
+        // at which point re-deriving the id from `(*decoration).toplevel`
+        // would read a null pointer instead of resolving to anything.
+        let request_mode = Registration::link(
+            &raw mut (*decoration).events.request_mode,
+            on_decoration_request_mode::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            None,
+            Some(id),
+        );
+        let destroy = Registration::link(
+            &raw mut (*decoration).events.destroy,
+            on_toplevel_decoration_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            None,
+            Some(id),
+        );
+
+        let displaced = (*session).decorations.borrow_mut().insert(
+            id,
+            DecorationListeners {
+                _request_mode: request_mode,
+                _destroy: destroy,
+            },
+        );
+        drop(displaced);
+
+        (*session).runtime.record_decoration(id, raw);
+    }
+}
+
+/// The client asked for a decoration mode (`set_mode` on
+/// `zxdg_toplevel_decoration_v1`, or the implicit request an `unset_mode`
+/// leaves behind).
+unsafe extern "C" fn on_decoration_request_mode<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_toplevel_decoration` into this decoration's
+    // `events.request_mode`, unlinked (from `on_toplevel_decoration_destroy`
+    // or `on_toplevel_destroy`) before the decoration or its toplevel is
+    // freed. `_data` is deliberately unused, on the same "resolve by id
+    // through the table the runtime already tracks" discipline
+    // `on_toplevel_request_maximize` documents: the requested mode is read
+    // from the decoration entry below, not from whatever wlroots put in
+    // `data` for this signal.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).toplevel else { return };
+
+        // Cleared right before this request is delivered, per toplevel —
+        // see `DecorationEntry::mode_set_this_dispatch`'s own doc for the
+        // full mechanism this is one half of. `deliver_all` reads it back
+        // once the handler returns.
+        (*session).runtime.clear_decoration_dispatch_flag(id);
+
+        let Some(decoration) = (*session).runtime.decoration_ptr(id) else {
+            return;
+        };
+        let requested = (*decoration.as_ptr()).requested_mode;
+        let preference = crate::decoration::client_side_preference(requested);
+
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::RequestDecorationMode(id, preference),
+            deliver,
+        );
+    }
+}
+
+/// The decoration object is about to be freed. Forget it *now*, whatever the
+/// handler does — the same "purge before emitting, not after" rule
+/// `on_toplevel_destroy` and `on_output_destroy` already follow, applied
+/// here even though no event is emitted for this signal at all: there is
+/// nothing for [`crate::ToplevelHandler`] to be told (the toplevel itself
+/// may still be alive and unaffected), only bookkeeping to do.
+unsafe extern "C" fn on_toplevel_decoration_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_toplevel_decoration` into this decoration's
+    // `events.destroy`; the decoration is still alive for the duration of
+    // this emission. `_data` unused for the same reason
+    // `on_toplevel_set_title` leaves its `_data` unused — the id comes from
+    // `Bound::toplevel`, set at link time, since re-deriving it from the
+    // decoration's own `toplevel` field would read null if the toplevel
+    // already died first.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).toplevel else { return };
+
+        // The decoration dying first is the other of the two orders a
+        // decoration and its toplevel can die in; see
+        // `RuntimeInner::decorations`'s own doc. This is the half of the
+        // purge owned by the decoration side — the toplevel, if still
+        // alive, is entirely untouched.
+        (*session).runtime.forget_decoration(id);
+        let listeners = (*session).decorations.borrow_mut().remove(&id);
+        drop(listeners);
     }
 }
 
@@ -2633,6 +2861,7 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::RequestFullscreen(..)
         | Event::RequestMove(..)
         | Event::RequestResize(..)
+        | Event::RequestDecorationMode(..)
         | Event::Key { .. }
         | Event::PointerMotion { .. }
         | Event::PointerButton { .. } => {}
@@ -3047,6 +3276,7 @@ mod tests {
                 dispatcher: Dispatcher::new(state),
                 outputs: RefCell::new(HashMap::new()),
                 toplevels: RefCell::new(HashMap::new()),
+                decorations: RefCell::new(HashMap::new()),
                 inputs: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
                 runtime: &runtime,
@@ -3218,6 +3448,7 @@ mod tests {
             dispatcher: Dispatcher::new(std::ptr::null_mut()),
             outputs: RefCell::new(HashMap::new()),
             toplevels: RefCell::new(HashMap::new()),
+            decorations: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime: &runtime,

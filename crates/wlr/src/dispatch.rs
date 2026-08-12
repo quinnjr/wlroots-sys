@@ -82,6 +82,14 @@ pub(crate) enum Event {
     /// reported dragging.
     RequestResize(ToplevelId, Edges),
 
+    /// The client asked for a decoration mode on a toplevel's
+    /// `zxdg_toplevel_decoration_v1`. The `Option<bool>` is read from
+    /// `wlr_xdg_toplevel_decoration_v1::requested_mode` at emission time —
+    /// see [`crate::decoration::client_side_preference`] — not re-read at
+    /// delivery, so a deferred event still reports what the client actually
+    /// asked for.
+    RequestDecorationMode(ToplevelId, Option<bool>),
+
     Key {
         keysym: u32,
         modifiers_raw: u32,

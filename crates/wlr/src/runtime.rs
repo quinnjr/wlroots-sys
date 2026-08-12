@@ -34,6 +34,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::buffer::create_pixel_buffer;
+use crate::decoration::DecorationEntry;
 use crate::id::{SourceId, next_id};
 use crate::scene::RectId;
 use crate::{Backend, BufferId, Display, Error, Interest, Output, Result, ToplevelId, sys};
@@ -110,9 +111,30 @@ pub(crate) struct RuntimeInner {
     /// advertise a second `xdg_wm_base` global.
     pub(crate) xdg_shell: RefCell<Option<NonNull<sys::wlr_xdg_shell>>>,
 
+    /// The xdg-decoration manager, once created. `Option` for the same
+    /// reason `xdg_shell` is: a consumer that never negotiates decorations
+    /// never calls [`Runtime::create_xdg_decoration_manager`], and a second
+    /// call would advertise a second `zxdg_decoration_manager_v1` global.
+    pub(crate) xdg_decoration_manager: RefCell<Option<NonNull<sys::wlr_xdg_decoration_manager_v1>>>,
+
     /// Every live toplevel: the role object, its scene tree, and the surface
     /// its id addon lives on.
     pub(crate) toplevels: RefCell<HashMap<ToplevelId, ToplevelEntry>>,
+
+    /// Every live decoration object, keyed by the toplevel it was created
+    /// for. At most one entry per [`ToplevelId`] — a client can only ever
+    /// hold one `zxdg_toplevel_decoration_v1` per toplevel, since wlroots
+    /// itself refuses a second `get_toplevel_decoration` on the same
+    /// surface.
+    ///
+    /// A decoration and its toplevel can die in either order (a decoration
+    /// resource outlives its toplevel if the client destroys the toplevel
+    /// first, and wlroots merely clears `decoration->toplevel` to null when
+    /// that happens), so this table is purged from two independent places:
+    /// [`Runtime::forget_decoration`], called when the decoration's own
+    /// `destroy` fires, and [`Runtime::forget_toplevel`], which also drops
+    /// any entry here for the toplevel it is forgetting.
+    pub(crate) decorations: RefCell<HashMap<ToplevelId, DecorationEntry>>,
 
     /// Reverse lookup for the scene hit test, which finds a `wlr_scene_tree`
     /// and has to name the toplevel it belongs to. Keyed by the tree pointer
@@ -286,7 +308,9 @@ impl Runtime {
                 live_sources: RefCell::new(HashMap::new()),
                 pending_close: RefCell::new(Vec::new()),
                 xdg_shell: RefCell::new(None),
+                xdg_decoration_manager: RefCell::new(None),
                 toplevels: RefCell::new(HashMap::new()),
+                decorations: RefCell::new(HashMap::new()),
                 tree_to_toplevel: RefCell::new(HashMap::new()),
                 seat: RefCell::new(None),
                 cursor: RefCell::new(None),
@@ -1158,6 +1182,48 @@ impl Runtime {
         *self.inner.xdg_shell.borrow()
     }
 
+    /// Advertise `zxdg_decoration_manager_v1`.
+    ///
+    /// Call once, after [`create_xdg_shell`](Runtime::create_xdg_shell) —
+    /// decorations are negotiated per toplevel, so a decoration manager with
+    /// no shell to hand out toplevels has nothing to attach to. Not checked
+    /// here (unlike `create_xdg_shell`'s own `init_graphics` prerequisite):
+    /// `wlr_xdg_decoration_manager_v1_create` does not itself require a
+    /// shell to exist yet, only that a client's later
+    /// `get_toplevel_decoration` name a real toplevel, which is enforced by
+    /// wlroots at that point, not by this call.
+    ///
+    /// Registration of the `new_toplevel_decoration` listener happens inside
+    /// [`Backend::run_all`](crate::Backend::run_all) and lives for that
+    /// call, so creating the manager after a run has started has no effect
+    /// until the next one — the same rule [`create_xdg_shell`](Runtime::create_xdg_shell)
+    /// follows.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] if a manager already exists on this runtime;
+    /// [`Error::Create`] if wlroots could not create it.
+    pub fn create_xdg_decoration_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.xdg_decoration_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_xdg_decoration_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is
+        // owned by the display and destroyed with it, so this crate never
+        // frees it.
+        let raw = unsafe { sys::wlr_xdg_decoration_manager_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_xdg_decoration_manager_v1_create"))?;
+        *self.inner.xdg_decoration_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    pub(crate) fn xdg_decoration_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_xdg_decoration_manager_v1>> {
+        *self.inner.xdg_decoration_manager.borrow()
+    }
+
     /// The scene's root tree, for the callbacks in `backend.rs` that insert a
     /// toplevel into it.
     ///
@@ -1222,6 +1288,15 @@ impl Runtime {
                 .borrow_mut()
                 .remove(&(entry.tree.as_ptr() as usize));
         }
+
+        // The toplevel dying first is one of the two orders a decoration and
+        // its toplevel can die in (see `RuntimeInner::decorations`'s own
+        // doc); this is the half of that purge owned by the toplevel side.
+        // The decoration object itself is not touched — wlroots does not
+        // free it just because its toplevel died, only clears its own
+        // `toplevel` field — this only stops this crate naming an id that
+        // is about to mean nothing.
+        self.inner.decorations.borrow_mut().remove(&id);
     }
 
     /// The entry `id` names, with the borrow released before returning — the
@@ -1277,6 +1352,67 @@ impl Runtime {
             .retain(|_, entry| entry.parent.is_none());
         self.inner.toplevels.borrow_mut().clear();
         self.inner.tree_to_toplevel.borrow_mut().clear();
+        // Mirrors `forget_toplevel`'s own decoration purge, at run
+        // granularity instead of per-toplevel — see that method's comment.
+        self.inner.decorations.borrow_mut().clear();
+    }
+
+    /// Record a newly-announced decoration under the id of the toplevel it
+    /// was created for.
+    pub(crate) fn record_decoration(
+        &self,
+        id: ToplevelId,
+        raw: NonNull<sys::wlr_xdg_toplevel_decoration_v1>,
+    ) {
+        self.inner.decorations.borrow_mut().insert(
+            id,
+            DecorationEntry {
+                raw,
+                mode_set_this_dispatch: std::cell::Cell::new(false),
+            },
+        );
+    }
+
+    /// Remove `id`'s decoration entry. Called from `on_toplevel_decoration_destroy`
+    /// before the decoration is freed — the other half of the two-sided
+    /// purge `RuntimeInner::decorations` documents.
+    pub(crate) fn forget_decoration(&self, id: ToplevelId) {
+        self.inner.decorations.borrow_mut().remove(&id);
+    }
+
+    /// The decoration `id`'s toplevel names, with the table borrow released
+    /// before returning — the same "copy the pointer, drop the borrow"
+    /// discipline every other by-id lookup here follows.
+    pub(crate) fn decoration_ptr(
+        &self,
+        id: ToplevelId,
+    ) -> Option<NonNull<sys::wlr_xdg_toplevel_decoration_v1>> {
+        self.inner.decorations.borrow().get(&id).map(|e| e.raw)
+    }
+
+    /// Clear the "a mode was set for the request currently in flight" flag
+    /// on `id`'s decoration, if it has one. Called right before this
+    /// toplevel's `request_mode` event is delivered — see
+    /// [`DecorationEntry`](crate::decoration::DecorationEntry)'s own doc for
+    /// the full mechanism this is one half of.
+    pub(crate) fn clear_decoration_dispatch_flag(&self, id: ToplevelId) {
+        if let Some(entry) = self.inner.decorations.borrow().get(&id) {
+            entry.mode_set_this_dispatch.set(false);
+        }
+    }
+
+    /// Whether [`Runtime::set_decoration_mode`] has already answered the
+    /// request currently in flight for `id`. `false` for an id with no
+    /// decoration, which is the correct answer for "nothing has set a mode
+    /// on it" whether that is because none was requested or because the
+    /// decoration is gone.
+    pub(crate) fn decoration_dispatch_flag(&self, id: ToplevelId) -> bool {
+        self.inner
+            .decorations
+            .borrow()
+            .get(&id)
+            .map(|e| e.mode_set_this_dispatch.get())
+            .unwrap_or(false)
     }
 
     /// Stage a size on the toplevel's next configure, in **content**
@@ -1414,6 +1550,39 @@ impl Runtime {
         // SAFETY: as for `set_toplevel_size`; this only sends a protocol
         // event and cannot free the toplevel synchronously.
         unsafe { sys::wlr_xdg_toplevel_send_close(entry.raw.as_ptr()) };
+        Some(())
+    }
+
+    /// Set the decoration mode for a toplevel that has a decoration object.
+    ///
+    /// Call this from
+    /// [`ToplevelHandler::request_decoration_mode`](crate::ToplevelHandler::request_decoration_mode)
+    /// to answer the client's request. `server_side` is the mode to send —
+    /// `true` for `WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE`, `false`
+    /// for `..._CLIENT_SIDE` — not a toggle. Calling this marks the request
+    /// currently in flight as answered, so the dispatch layer's server-side
+    /// default (see `request_decoration_mode`'s own doc) does not also fire
+    /// once the handler returns.
+    ///
+    /// `None` if `id` is unknown, stale, or names a toplevel with no
+    /// decoration object — a client that never created one, or whose
+    /// decoration has since been destroyed. See `set_toplevel_size`'s own
+    /// doc for what "stale" means for a `ToplevelId` in general.
+    pub fn set_decoration_mode(&self, id: ToplevelId, server_side: bool) -> Option<()> {
+        let raw = self.decoration_ptr(id)?;
+        let mode = if server_side {
+            sys::wlr_xdg_toplevel_decoration_v1_mode::WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE
+        } else {
+            sys::wlr_xdg_toplevel_decoration_v1_mode::WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
+        };
+        // SAFETY: a present entry names a decoration that is still linked
+        // into `self.inner.decorations` — removed synchronously, before
+        // wlroots frees it, by `forget_decoration`/`forget_toplevel` (see
+        // `RuntimeInner::decorations`'s own doc) — so `raw` is live.
+        unsafe { sys::wlr_xdg_toplevel_decoration_v1_set_mode(raw.as_ptr(), mode) };
+        if let Some(entry) = self.inner.decorations.borrow().get(&id) {
+            entry.mode_set_this_dispatch.set(true);
+        }
         Some(())
     }
 
