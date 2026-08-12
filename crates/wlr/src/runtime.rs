@@ -939,23 +939,33 @@ impl Runtime {
     }
 
     /// The topmost **toplevel** at scene coordinates `(x, y)`, and the
-    /// position of `(x, y)` **within the leaf node `wlr_scene_node_at`
-    /// actually struck** — a subsurface's or a popup's own buffer node
-    /// several levels below the toplevel's root, not the toplevel's own
-    /// origin. Both halves of that are load-bearing for a caller: the id
-    /// names the *window* (what a compositor keys its own state by), and the
-    /// coordinates are relative to whatever *specific surface* was hit, and
-    /// the two are not the same surface whenever the hit lands on a
-    /// subsurface or a popup.
+    /// position of `(x, y)` **within that toplevel** — relative to the same
+    /// origin [`set_toplevel_position`](Runtime::set_toplevel_position) sets,
+    /// so a caller that has just been handed a click never has to look the
+    /// window's position up and subtract it itself.
     ///
-    /// This is why pointer forwarding in `backend.rs` does **not** use this
-    /// method: notifying the toplevel's own root surface with leaf-relative
-    /// coordinates would deliver a click to the wrong surface (a popup menu
-    /// gets no input at all) or at a skewed offset (a subsurface). It uses
-    /// `leaf_surface_at` instead, which resolves the actual struck surface
-    /// rather than assuming it is the toplevel's own. This method exists for
-    /// a caller that wants "which window", not "which surface" — raising or
-    /// closing whatever is under the pointer, say.
+    /// Both halves name the same thing on purpose. `wlr_scene_node_at`'s own
+    /// out-parameters are relative to the *leaf node it struck* — a
+    /// subsurface's or a popup's buffer node, several levels below the
+    /// toplevel's root — which is a different surface from the one the
+    /// returned id names whenever the hit is not on the toplevel's own
+    /// buffer. Reporting those raw would make the tuple mean two
+    /// unrelated things at once, and a caller computing a drag offset from
+    /// them would see the window jump the moment a click landed on a
+    /// client-side decoration. The leaf offset is subtracted back out here:
+    /// the toplevel's scene tree is a direct child of the scene root (see
+    /// `backend.rs`'s `wlr_scene_xdg_surface_create` call), so its node's
+    /// `x`/`y` *are* its scene-absolute origin, and `(x, y)` minus that is
+    /// the window-relative position regardless of how deep the struck leaf
+    /// was.
+    ///
+    /// This is **not** the method pointer forwarding uses, and a caller must
+    /// not build one out of it: notifying the toplevel's own root surface
+    /// when the hit landed on a popup delivers the click to the wrong
+    /// surface (a popup menu gets no input at all). `backend.rs` uses
+    /// `leaf_surface_at` for that, which resolves the actual struck surface.
+    /// This method answers "which window, and where in it" — raising,
+    /// focusing or starting a move on whatever is under the pointer.
     ///
     /// Walks the scene with `wlr_scene_node_at` and then walks *up* from
     /// whatever node it found to the tree this crate created for a toplevel.
@@ -981,6 +991,9 @@ impl Runtime {
         if node.is_null() {
             return None;
         }
+        // `nx`/`ny` are leaf-relative and deliberately go unused: see this
+        // method's own doc for why they are not what a caller is given.
+        let _ = (nx, ny);
 
         // The borrow is taken and released inside the loop rather than held
         // across it: nothing in the loop calls out, but the rule is absolute.
@@ -995,7 +1008,12 @@ impl Runtime {
                 .get(&(tree as usize))
                 .copied();
             if let Some(id) = found {
-                return Some((id, nx, ny));
+                // SAFETY: `tree` is a live scene tree — it is in this
+                // runtime's table, whose entries are removed when the
+                // toplevel is destroyed, and it was just reached by walking
+                // live parent pointers.
+                let (tx, ty) = unsafe { ((*tree).node.x, (*tree).node.y) };
+                return Some((id, x - f64::from(tx), y - f64::from(ty)));
             }
             // SAFETY: as above.
             tree = unsafe { (*tree).node.parent };
@@ -1005,8 +1023,10 @@ impl Runtime {
 
     /// The actual surface under `(x, y)`, and the position within *that*
     /// surface — as opposed to [`toplevel_at`](Runtime::toplevel_at), which
-    /// answers "which window" and reports coordinates relative to whichever
-    /// leaf happened to be struck, not necessarily the surface named.
+    /// answers "which window, and where in that window". A hit on a popup
+    /// belonging to a toplevel is reported here as the popup's own surface
+    /// and the popup's own local coordinates; `toplevel_at` reports the
+    /// owning window and a position relative to the window.
     ///
     /// A hit inside a subsurface or a popup lands on a different
     /// `wlr_surface` than the toplevel's own root, at different local

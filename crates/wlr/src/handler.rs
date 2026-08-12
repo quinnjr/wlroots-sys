@@ -236,6 +236,23 @@ pub trait SeatHandler {
     /// presses must check [`KeyEvent::pressed`] and return `false` otherwise,
     /// or the matching release never reaches the client and it will believe
     /// the key is still held.
+    ///
+    /// # A deferred key is forwarded whatever you return
+    ///
+    /// Events are queued behind a handler that is already running (see
+    /// [`OutputHandler::frame`]'s own note on deferral, which is the same
+    /// mechanism), and a key that is queued has already had its forwarding
+    /// decided by the time this runs: the library forwards it, because the
+    /// compositor's answer is not known yet and dropping a keystroke is
+    /// worse than sending one. So a binding that happens to fire from a
+    /// deferred key still fires — this method is always called — but the
+    /// client sees the key as well.
+    ///
+    /// It is rare, since it needs a key to arrive during a handler, and it
+    /// is not fixable without holding wlroots' emission open across a
+    /// second `&mut Self`. Do not write a binding whose correctness depends
+    /// on the client never seeing the key; treat consumption as an
+    /// optimisation, not a guarantee.
     fn key(&mut self, event: &KeyEvent<'_>) -> bool {
         let _ = event;
         false

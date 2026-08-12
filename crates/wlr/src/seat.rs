@@ -77,6 +77,19 @@ pub struct KeyEvent<'h> {
     _scope: PhantomData<&'h ()>,
 }
 
+/// Hand-written rather than derived so the `PhantomData` scope marker — an
+/// implementation detail with no value to print — stays out of the output.
+impl std::fmt::Debug for KeyEvent<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyEvent")
+            .field("keysym", &format_args!("{:#x}", self.keysym))
+            .field("modifiers", &self.modifiers)
+            .field("pressed", &self.pressed)
+            .field("time_msec", &self.time_msec)
+            .finish()
+    }
+}
+
 impl<'h> KeyEvent<'h> {
     pub(crate) fn new(
         keysym: u32,
@@ -195,5 +208,19 @@ mod tests {
         assert!(ev.pressed());
         assert_eq!(ev.time_msec(), 12345);
         assert_eq!(ev.modifiers(), Modifiers::default());
+    }
+
+    /// Every public type is `Debug` (Rust API guidelines C-DEBUG), and a
+    /// compositor logging an unmatched key wants the keysym in hex — it is
+    /// how every keysym table, `xkbcommon-keysyms.h` included, spells them.
+    /// The `PhantomData` scope marker must not appear.
+    #[test]
+    fn a_key_event_prints_its_keysym_in_hex_and_hides_the_scope_marker() {
+        let ev = KeyEvent::new(0xff1b, Modifiers::from_mask(0), true, 7);
+        let s = format!("{ev:?}");
+        assert!(s.contains("keysym: 0xff1b"), "{s}");
+        assert!(s.contains("pressed: true"), "{s}");
+        assert!(!s.contains("PhantomData"), "{s}");
+        assert!(!s.contains("_scope"), "{s}");
     }
 }

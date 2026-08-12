@@ -2109,14 +2109,13 @@ unsafe extern "C" fn on_modifiers<S: Handlers>(
 /// motion, a button sends nothing here at all).
 ///
 /// Routed through [`Runtime::leaf_surface_at`], **not**
-/// [`Runtime::toplevel_at`]: the latter answers "which window" with
-/// coordinates relative to whatever leaf was struck, which is only the same
-/// surface named by the id when the hit lands on the toplevel's own root —
-/// never true for a click on a popup or a subsurface. Using it here would
-/// notify the toplevel's root surface with another surface's local
-/// coordinates: a popup gets no input at all, and a subsurface gets a
-/// skewed one. `leaf_surface_at` resolves the actual struck surface, so
-/// this always notifies the right one.
+/// [`Runtime::toplevel_at`]: the latter answers "which window, and where in
+/// that window", and the window's root surface is not the surface that was
+/// struck whenever the hit lands on a popup or a subsurface. Using it here
+/// would notify the toplevel's root surface for a click that belongs to a
+/// popup — which gets no input at all — and at a window-relative offset
+/// rather than the struck surface's own. `leaf_surface_at` resolves the
+/// actual struck surface, so this always notifies the right one.
 ///
 /// # Safety
 ///

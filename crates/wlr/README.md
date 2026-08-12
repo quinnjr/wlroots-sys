@@ -33,7 +33,14 @@ Seat, keyboard and pointer input.
 - `KeyEvent<'h>` and `Modifiers` — a key's layout-agnostic, unshifted keysym
   and modifier state.
 - `Runtime::create_seat`, `focus_toplevel_keyboard`, `clear_keyboard_focus`,
-  `toplevel_at` (the scene hit test) and `pointer_position`.
+  `toplevel_at` (the scene hit test — the window under a point, and the
+  point's position *within that window*, in the same coordinates
+  `set_toplevel_position` uses) and `pointer_position`.
+
+`SeatHandler::key` returns `true` to consume a key and keep it from the
+focused client. Consumption is best-effort by design: a key that arrives
+while another handler is running is forwarded before this can answer, so a
+binding must not depend on the client never seeing the key.
 
 `focus_toplevel_keyboard` reports a miss (`None`) for an **unmapped**
 toplevel, the same as for an unknown id — there is no unmapped-surface
