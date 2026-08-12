@@ -291,7 +291,10 @@ pub trait SeatHandler {
 /// The blanket impl also means this trait cannot be implemented manually: any
 /// hand-written impl would overlap it. That is deliberate — it is what keeps
 /// the supertrait list, rather than each consumer's idea of it, the contract.
-pub trait Handlers: OutputHandler + ToplevelHandler + SeatHandler + FdHandler + LoopHandler {}
+pub trait Handlers:
+    OutputHandler + ToplevelHandler + SeatHandler + FdHandler + LoopHandler
+{
+}
 
 impl<T> Handlers for T where
     T: OutputHandler + ToplevelHandler + SeatHandler + FdHandler + LoopHandler

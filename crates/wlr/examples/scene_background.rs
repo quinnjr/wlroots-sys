@@ -52,7 +52,10 @@ fn main() -> wlr::Result<()> {
     let socket = display.add_socket_auto()?;
     println!("listening on {socket}");
 
-    let mut app = App { runtime: runtime.clone(), frames: 0 };
+    let mut app = App {
+        runtime: runtime.clone(),
+        frames: 0,
+    };
     backend.run_all(&display, &mut app, &runtime, wlr::Until::Stop)?;
     println!("drew {} frames", app.frames);
     Ok(())

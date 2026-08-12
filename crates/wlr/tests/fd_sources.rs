@@ -107,7 +107,10 @@ fn a_registered_fd_wakes_its_handler_and_should_stop_ends_the_run() {
         .expect("run_all");
 
     assert_eq!(app.woke, vec![source], "exactly the registered source woke");
-    assert_eq!(app.readable, 1, "the readiness passed to the handler says readable");
+    assert_eq!(
+        app.readable, 1,
+        "the readiness passed to the handler says readable"
+    );
     assert_eq!(app.bytes, b"q", "the handler got the very fd it registered");
     let _ = read_fd;
 }
@@ -126,7 +129,10 @@ fn turns_bounds_a_run_that_nothing_ever_stops() {
         .run_all(&display, &mut app, &runtime, wlr::Until::Turns(3))
         .expect("run_all");
 
-    assert!(app.woke.is_empty(), "nothing was registered, so nothing woke");
+    assert!(
+        app.woke.is_empty(),
+        "nothing was registered, so nothing woke"
+    );
 }
 
 #[test]

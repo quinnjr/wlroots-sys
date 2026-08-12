@@ -79,7 +79,11 @@ impl wlr::ToplevelHandler for App {
     }
 
     fn title_changed(&mut self, toplevel: &wlr::Toplevel<'_>) {
-        println!("title changed {:?} title={:?}", toplevel.id(), toplevel.title());
+        println!(
+            "title changed {:?} title={:?}",
+            toplevel.id(),
+            toplevel.title()
+        );
     }
 
     fn unmapped(&mut self, id: wlr::ToplevelId) {

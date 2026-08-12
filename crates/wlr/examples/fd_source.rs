@@ -26,7 +26,10 @@ impl wlr::FdHandler for App {
         // Level-triggered: a handler that reads nothing is called again next
         // turn, forever.
         let n = rustix::io::read(fd, &mut buf).unwrap_or(0);
-        println!("source {source:?} woke: readable={} bytes={n}", readiness.readable());
+        println!(
+            "source {source:?} woke: readable={} bytes={n}",
+            readiness.readable()
+        );
         self.stop = true;
     }
 }

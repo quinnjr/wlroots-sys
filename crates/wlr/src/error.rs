@@ -111,7 +111,10 @@ mod tests {
     #[test]
     fn a_mismatch_is_distinguishable_from_every_other_failure() {
         let m = Error::Mismatch("Backend::run_all");
-        assert_eq!(m.to_string(), "Backend::run_all was given mismatched arguments");
+        assert_eq!(
+            m.to_string(),
+            "Backend::run_all was given mismatched arguments"
+        );
         assert_ne!(m, Error::Operation("wlr_backend_start"));
         assert_ne!(m, Error::Destroyed("wlr_backend"));
         assert_ne!(m, Error::Reentrant("Backend::run"));

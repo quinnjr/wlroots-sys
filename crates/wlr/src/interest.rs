@@ -188,7 +188,10 @@ mod tests {
             .expect("run_all");
 
         let readiness = app.seen.expect("the write end must have woken");
-        assert!(readiness.writable(), "a fresh pipe's write end must be writable");
+        assert!(
+            readiness.writable(),
+            "a fresh pipe's write end must be writable"
+        );
     }
 
     /// Pins [`Readiness::hangup`] against a real event loop. The peer (the

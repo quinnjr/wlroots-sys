@@ -73,7 +73,10 @@ fn creating_the_seat_twice_is_refused() {
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime.create_seat(&display, "seat0").expect("first");
     assert!(
-        matches!(runtime.create_seat(&display, "seat1"), Err(wlr::Error::Operation(_))),
+        matches!(
+            runtime.create_seat(&display, "seat1"),
+            Err(wlr::Error::Operation(_))
+        ),
         "a second wl_seat global would make the compositor advertise two"
     );
 }

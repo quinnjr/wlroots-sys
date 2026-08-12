@@ -115,7 +115,10 @@ fn creating_the_shell_twice_is_refused_rather_than_leaking_a_second_global() {
     runtime.init_graphics(&display, &backend).expect("graphics");
     runtime.create_xdg_shell(&display, 6).expect("first");
     assert!(
-        matches!(runtime.create_xdg_shell(&display, 6), Err(wlr::Error::Operation(_))),
+        matches!(
+            runtime.create_xdg_shell(&display, 6),
+            Err(wlr::Error::Operation(_))
+        ),
         "a second xdg_wm_base global would make the compositor advertise two"
     );
 }
@@ -125,7 +128,10 @@ fn creating_the_shell_before_init_graphics_is_refused_rather_than_hanging_every_
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     assert!(
-        matches!(runtime.create_xdg_shell(&display, 6), Err(wlr::Error::Operation(_))),
+        matches!(
+            runtime.create_xdg_shell(&display, 6),
+            Err(wlr::Error::Operation(_))
+        ),
         "a shell with nowhere to put a toplevel in the scene must be refused \
          at setup time, not leave every client hanging on an unanswered \
          initial commit"

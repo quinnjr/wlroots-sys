@@ -31,7 +31,9 @@ impl wlr::LoopHandler for App {
 impl wlr::OutputHandler for App {
     fn new_output(&mut self, output: &wlr::Output<'_>) {
         self.outputs.push(output.id());
-        let Some(runtime) = self.runtime.as_ref() else { return };
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
         // Never `unwrap` in a handler: this runs under an `extern "C"` frame.
         if let Err(e) = output.enable_with_preferred_mode() {
             self.init_errors.push(e);
@@ -51,7 +53,9 @@ impl wlr::OutputHandler for App {
     }
 
     fn frame(&mut self, output: &wlr::Output<'_>) {
-        let Some(runtime) = self.runtime.as_ref() else { return };
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
         // `commit_output` deliberately never reschedules on its own — the
         // scene reschedules itself when it has new damage (see that
         // method's own doc). Recolouring the background here is what

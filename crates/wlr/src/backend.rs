@@ -1190,7 +1190,9 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
 /// which can; whoever adds a method that can owes this line an answer,
 /// because the handle would name freed memory for the rest of `f`.
 fn with_toplevel<S>(session: &Session<'_, S>, id: ToplevelId, f: impl FnOnce(&Toplevel<'_>)) {
-    let Some(entry) = session.runtime.toplevel_entry(id) else { return };
+    let Some(entry) = session.runtime.toplevel_entry(id) else {
+        return;
+    };
     // SAFETY: an entry is removed by `on_toplevel_destroy`, which wlroots runs
     // before it frees the toplevel, so a present entry names a live one. The
     // handle is created and dropped inside this call, so it cannot outlive
@@ -1457,13 +1459,19 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
         // possible if a consumer creates the shell without it, and not this
         // callback's mistake to recover from. Drop the announcement rather
         // than dereference a null tree.
-        let Some(scene) = (*session).runtime.scene_ptr() else { return };
+        let Some(scene) = (*session).runtime.scene_ptr() else {
+            return;
+        };
 
         // Insert into the scene before the handler runs, so that a handler
         // positioning the window by id finds a node to position.
         let tree = sys::wlr_scene_xdg_surface_create(&raw mut (*scene.as_ptr()).tree, base);
-        let Some(tree) = NonNull::new(tree) else { return };
-        let Some(raw) = NonNull::new(toplevel) else { return };
+        let Some(tree) = NonNull::new(tree) else {
+            return;
+        };
+        let Some(raw) = NonNull::new(toplevel) else {
+            return;
+        };
 
         // Five listeners, all with a null liveness flag: each is dropped from
         // inside the destroy emission, while the object is still alive, which
@@ -1569,8 +1577,12 @@ unsafe extern "C" fn on_surface_commit<S: Handlers>(
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let surface = data.cast::<sys::wlr_surface>();
-        let Some(id) = toplevel_id_of_surface(surface) else { return };
-        let Some(entry) = (*session).runtime.toplevel_entry(id) else { return };
+        let Some(id) = toplevel_id_of_surface(surface) else {
+            return;
+        };
+        let Some(entry) = (*session).runtime.toplevel_entry(id) else {
+            return;
+        };
         let base = (*entry.raw.as_ptr()).base;
         if base.is_null() || !(*base).initial_commit {
             return;
@@ -1764,7 +1776,9 @@ struct InputDevice {
 ///
 /// A no-op with no seat.
 fn update_seat_capabilities(runtime: &Runtime) {
-    let Some(seat) = runtime.seat_ptr() else { return };
+    let Some(seat) = runtime.seat_ptr() else {
+        return;
+    };
     let mut caps = 0;
     if runtime.has_pointer() {
         caps |= WL_SEAT_CAPABILITY_POINTER;
@@ -1803,8 +1817,13 @@ unsafe fn keysym_for_keycode(kb: *mut sys::wlr_keyboard, keycode: u32) -> u32 {
         }
         let xkb_keycode = keycode + 8; // evdev -> xkb numbering
         let mut syms: *const xkbcommon_sys::xkb_keysym_t = std::ptr::null();
-        let count =
-            xkbcommon_sys::xkb_keymap_key_get_syms_by_level(keymap, xkb_keycode, 0, 0, &raw mut syms);
+        let count = xkbcommon_sys::xkb_keymap_key_get_syms_by_level(
+            keymap,
+            xkb_keycode,
+            0,
+            0,
+            &raw mut syms,
+        );
         if count <= 0 || syms.is_null() {
             return 0;
         }
@@ -2020,7 +2039,9 @@ unsafe extern "C" fn on_key<S: Handlers>(l: *mut sys::wl_listener, data: *mut st
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_keyboard_key_event>();
-        let Some(seat) = (*session).runtime.seat_ptr() else { return };
+        let Some(seat) = (*session).runtime.seat_ptr() else {
+            return;
+        };
         // The seat's *active* keyboard, not necessarily the one that fired
         // this signal: with more than one keyboard attached, every key
         // event is still funnelled through one logical keyboard identity at
@@ -2090,7 +2111,9 @@ unsafe extern "C" fn on_modifiers<S: Handlers>(
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
-        let Some(seat) = (*session).runtime.seat_ptr() else { return };
+        let Some(seat) = (*session).runtime.seat_ptr() else {
+            return;
+        };
         let kb = sys::wlr_seat_get_keyboard(seat.as_ptr());
         if kb.is_null() {
             return;
@@ -2151,7 +2174,9 @@ unsafe extern "C" fn on_pointer_motion<S: Handlers>(
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_pointer_motion_event>();
         let runtime = (*session).runtime;
-        let Some(cursor) = runtime.cursor_ptr() else { return };
+        let Some(cursor) = runtime.cursor_ptr() else {
+            return;
+        };
 
         let device = &raw mut (*(*ev).pointer).base;
         sys::wlr_cursor_move(cursor.as_ptr(), device, (*ev).delta_x, (*ev).delta_y);
@@ -2188,7 +2213,9 @@ unsafe extern "C" fn on_pointer_motion_absolute<S: Handlers>(
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_pointer_motion_absolute_event>();
         let runtime = (*session).runtime;
-        let Some(cursor) = runtime.cursor_ptr() else { return };
+        let Some(cursor) = runtime.cursor_ptr() else {
+            return;
+        };
 
         let device = &raw mut (*(*ev).pointer).base;
         sys::wlr_cursor_warp_absolute(cursor.as_ptr(), device, (*ev).x, (*ev).y);
@@ -2224,7 +2251,9 @@ unsafe extern "C" fn on_pointer_button<S: Handlers>(
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_pointer_button_event>();
         let runtime = (*session).runtime;
-        let Some(cursor) = runtime.cursor_ptr() else { return };
+        let Some(cursor) = runtime.cursor_ptr() else {
+            return;
+        };
         runtime.ensure_cursor_image();
 
         let (x, y) = ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y);
@@ -2252,7 +2281,12 @@ unsafe extern "C" fn on_pointer_button<S: Handlers>(
             // motion event (the pointer warped there, say) still has pointer
             // focus before the button reaches it.
             enter_surface_under_cursor(runtime, seat.as_ptr(), x, y, (*ev).time_msec);
-            sys::wlr_seat_pointer_notify_button(seat.as_ptr(), (*ev).time_msec, (*ev).button, (*ev).state);
+            sys::wlr_seat_pointer_notify_button(
+                seat.as_ptr(),
+                (*ev).time_msec,
+                (*ev).button,
+                (*ev).state,
+            );
             sys::wlr_seat_pointer_notify_frame(seat.as_ptr());
         }
     }
@@ -2987,10 +3021,7 @@ mod tests {
             destroy: Option<Registration>,
         }
 
-        unsafe extern "C" fn on_kb_destroy(
-            l: *mut sys::wl_listener,
-            _data: *mut std::ffi::c_void,
-        ) {
+        unsafe extern "C" fn on_kb_destroy(l: *mut sys::wl_listener, _data: *mut std::ffi::c_void) {
             // SAFETY: linked below into `kb.base.events.destroy`, whose
             // `session` is the `*const RefCell<KbRegistrations>` set up
             // before `wlr_keyboard_finish` is called.

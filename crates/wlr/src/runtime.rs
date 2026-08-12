@@ -241,7 +241,10 @@ impl Runtime {
     /// as the runtime.
     pub fn add_fd(&self, fd: OwnedFd, interest: Interest) -> SourceId {
         let id = SourceId(next_id());
-        self.inner.sources.borrow_mut().push(FdSource { fd, interest, id });
+        self.inner
+            .sources
+            .borrow_mut()
+            .push(FdSource { fd, interest, id });
         id
     }
 
@@ -259,7 +262,10 @@ impl Runtime {
         // call back into this runtime and take the same `RefCell` mutably.
         let raw = {
             let sources = self.inner.sources.borrow();
-            sources.iter().find(|s| s.id == id).map(|s| s.fd.as_raw_fd())
+            sources
+                .iter()
+                .find(|s| s.id == id)
+                .map(|s| s.fd.as_raw_fd())
         }?;
         // SAFETY: `raw` came from an `OwnedFd` this runtime owns, and this
         // handle keeps that `OwnedFd` alive for the whole call — nothing
@@ -355,7 +361,13 @@ impl Runtime {
                 return Err(Error::Create("wlr_data_device_manager_create"));
             }
 
-            Graphics { scene, layout, scene_layout, renderer, allocator }
+            Graphics {
+                scene,
+                layout,
+                scene_layout,
+                renderer,
+                allocator,
+            }
         };
         *self.inner.graphics.borrow_mut() = Some(graphics);
         Ok(())
@@ -384,7 +396,11 @@ impl Runtime {
             let g = self.inner.graphics.borrow();
             match g.as_ref() {
                 Some(g) => (g.renderer, g.allocator, g.layout, g.scene, g.scene_layout),
-                None => return Err(Error::Operation("Runtime::init_output before init_graphics")),
+                None => {
+                    return Err(Error::Operation(
+                        "Runtime::init_output before init_graphics",
+                    ));
+                }
             }
         };
 
@@ -456,7 +472,11 @@ impl Runtime {
             let g = self.inner.graphics.borrow();
             match g.as_ref() {
                 Some(g) => g.scene,
-                None => return Err(Error::Operation("Runtime::commit_output before init_graphics")),
+                None => {
+                    return Err(Error::Operation(
+                        "Runtime::commit_output before init_graphics",
+                    ));
+                }
             }
         };
         // SAFETY: the handle's lifetime guarantees the output is live, and the
@@ -649,8 +669,14 @@ impl Runtime {
         raw: NonNull<sys::wlr_xdg_toplevel>,
         tree: NonNull<sys::wlr_scene_tree>,
     ) {
-        self.inner.toplevels.borrow_mut().insert(id, ToplevelEntry { raw, tree });
-        self.inner.tree_to_toplevel.borrow_mut().insert(tree.as_ptr() as usize, id);
+        self.inner
+            .toplevels
+            .borrow_mut()
+            .insert(id, ToplevelEntry { raw, tree });
+        self.inner
+            .tree_to_toplevel
+            .borrow_mut()
+            .insert(tree.as_ptr() as usize, id);
     }
 
     /// Remove `id` from both tables. Called from `on_toplevel_destroy` before
@@ -658,7 +684,10 @@ impl Runtime {
     pub(crate) fn forget_toplevel(&self, id: ToplevelId) {
         let entry = self.inner.toplevels.borrow_mut().remove(&id);
         if let Some(entry) = entry {
-            self.inner.tree_to_toplevel.borrow_mut().remove(&(entry.tree.as_ptr() as usize));
+            self.inner
+                .tree_to_toplevel
+                .borrow_mut()
+                .remove(&(entry.tree.as_ptr() as usize));
         }
     }
 
@@ -1044,7 +1073,11 @@ impl Runtime {
     /// say), which `wlr_scene_buffer_from_node` documents itself as
     /// undefined behaviour to call on — or the buffer is not backed by any
     /// surface at all.
-    pub(crate) fn leaf_surface_at(&self, x: f64, y: f64) -> Option<(*mut sys::wlr_surface, f64, f64)> {
+    pub(crate) fn leaf_surface_at(
+        &self,
+        x: f64,
+        y: f64,
+    ) -> Option<(*mut sys::wlr_surface, f64, f64)> {
         let scene = self.scene_ptr()?;
         let mut nx = 0.0;
         let mut ny = 0.0;
@@ -1092,7 +1125,9 @@ impl Runtime {
     /// Where the cursor is, in scene coordinates. `(0.0, 0.0)` with no seat.
     pub fn pointer_position(&self) -> (f64, f64) {
         let cursor = *self.inner.cursor.borrow();
-        let Some(cursor) = cursor else { return (0.0, 0.0) };
+        let Some(cursor) = cursor else {
+            return (0.0, 0.0);
+        };
         // SAFETY: the cursor was created by `create_seat` and lives as long
         // as this runtime.
         unsafe { ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y) }
@@ -1144,7 +1179,10 @@ impl Runtime {
     /// [`has_keyboard`](Runtime::has_keyboard) stops counting a device that
     /// is gone.
     pub(crate) fn forget_keyboard(&self, kb: NonNull<sys::wlr_keyboard>) {
-        self.inner.keyboards.borrow_mut().retain(|&recorded| recorded != kb);
+        self.inner
+            .keyboards
+            .borrow_mut()
+            .retain(|&recorded| recorded != kb);
     }
 
     /// Whether this runtime currently has a live keyboard. Used to decide
@@ -1161,7 +1199,10 @@ impl Runtime {
 
     /// Forget a pointer; see [`forget_keyboard`](Runtime::forget_keyboard).
     pub(crate) fn forget_pointer(&self, p: NonNull<sys::wlr_pointer>) {
-        self.inner.pointers.borrow_mut().retain(|&recorded| recorded != p);
+        self.inner
+            .pointers
+            .borrow_mut()
+            .retain(|&recorded| recorded != p);
     }
 
     /// Whether this runtime currently has a live pointer. Used to decide
