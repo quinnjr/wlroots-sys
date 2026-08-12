@@ -4,7 +4,7 @@ name = "wlr"
 # tells consumers and how `wlr-sys` is versioned. Not a semver-from-zero
 # sequence: publishing a 0.1.0 would make that promise false on the first
 # release and leave no way back to 0.20 without an unexplained jump.
-version = "0.20.9"
+version = "0.20.10"
 description = "Safe bindings to wlroots"
 keywords = ["wayland", "wlroots", "compositor"]
 categories = ["api-bindings", "gui"]

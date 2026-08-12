@@ -24,6 +24,13 @@ follows on the same branches, not because they are on crates.io yet.
 The API is held identical across all four, so once they ship, moving between
 them is a version change rather than a code change.
 
+## 0.20.10
+
+Output layout.
+
+- `Runtime::output_layout_box` — an output's layout-coordinate box, by id.
+- `Runtime::set_output_position` — pin an output at an explicit position.
+
 ## 0.20.9
 
 xdg-decoration. Supersedes the yanked 0.20.8 — use this one.
