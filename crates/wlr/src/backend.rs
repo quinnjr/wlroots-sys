@@ -271,6 +271,82 @@ impl Registration {
 
         Registration { bound }
     }
+
+    /// Link a listener that routes no per-entity event: the backend-level
+    /// signals and the per-input-device ones, which resolve their target some
+    /// way other than a `Bound` id field (or route nothing at all, like the
+    /// destroy watch). Fixes all three id slots to `None` so no call site has
+    /// to spell the empty slots out.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`], to which every argument is forwarded
+    /// verbatim.
+    unsafe fn link_bare(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        alive: *const Cell<bool>,
+    ) -> Self {
+        // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
+        unsafe { Self::link(signal, notify, session, alive, None, None, None) }
+    }
+
+    /// Link a per-output listener, carrying the [`OutputId`] its callback reads
+    /// back from [`Bound::id`]. Fixes the toplevel and layer slots to `None`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`], to which the shared arguments are
+    /// forwarded verbatim.
+    unsafe fn link_output(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        alive: *const Cell<bool>,
+        id: OutputId,
+    ) -> Self {
+        // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
+        unsafe { Self::link(signal, notify, session, alive, Some(id), None, None) }
+    }
+
+    /// Link a per-toplevel (or per-decoration) listener, carrying the
+    /// [`ToplevelId`] its callback reads back from [`Bound::toplevel`]. Fixes
+    /// the output and layer slots to `None`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`], to which the shared arguments are
+    /// forwarded verbatim.
+    unsafe fn link_toplevel(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        alive: *const Cell<bool>,
+        toplevel: ToplevelId,
+    ) -> Self {
+        // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
+        unsafe { Self::link(signal, notify, session, alive, None, Some(toplevel), None) }
+    }
+
+    /// Link a per-layer-surface listener, carrying the [`LayerSurfaceId`] its
+    /// callback reads back from [`Bound::layer`]. Fixes the output and toplevel
+    /// slots to `None`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`], to which the shared arguments are
+    /// forwarded verbatim.
+    unsafe fn link_layer(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        alive: *const Cell<bool>,
+        layer: LayerSurfaceId,
+    ) -> Self {
+        // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
+        unsafe { Self::link(signal, notify, session, alive, None, None, Some(layer)) }
+    }
 }
 
 impl Drop for Registration {
@@ -589,14 +665,11 @@ impl<'d> Backend<'d> {
         // never reads `session` or `id`, so null and `None` are the honest
         // values for them.
         let death_watch = unsafe {
-            Registration::link(
+            Registration::link_bare(
                 &raw mut (*raw.as_ptr()).events.destroy,
                 on_backend_destroy,
                 std::ptr::null(),
                 &raw const *alive,
-                None,
-                None,
-                None,
             )
         };
 
@@ -894,14 +967,11 @@ impl<'d> Backend<'d> {
         // never moved after this point, so the address stays valid for the
         // call.
         let _new_output = unsafe {
-            Registration::link(
+            Registration::link_bare(
                 &raw mut (*self.raw.as_ptr()).events.new_output,
                 on_new_output::<S>,
                 (&raw const session).cast::<()>(),
                 &raw const *self.alive,
-                None,
-                None,
-                None,
             )
         };
 
@@ -1093,14 +1163,11 @@ impl<'d> Backend<'d> {
             // liveness flag is needed: the shell's owner (the display)
             // cannot predecease this call.
             regs.push(unsafe {
-                Registration::link(
+                Registration::link_bare(
                     &raw mut (*shell.as_ptr()).events.new_toplevel,
                     on_new_toplevel::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     std::ptr::null(),
-                    None,
-                    None,
-                    None,
                 )
             });
         }
@@ -1111,14 +1178,11 @@ impl<'d> Backend<'d> {
             // this call requires to outlive it, exactly as for the xdg
             // shell just above; the same reasoning applies verbatim.
             regs.push(unsafe {
-                Registration::link(
+                Registration::link_bare(
                     &raw mut (*manager.as_ptr()).events.new_toplevel_decoration,
                     on_new_toplevel_decoration::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     std::ptr::null(),
-                    None,
-                    None,
-                    None,
                 )
             });
         }
@@ -1129,14 +1193,11 @@ impl<'d> Backend<'d> {
             // requires to outlive it, exactly as for the xdg shell above;
             // the same reasoning applies verbatim.
             regs.push(unsafe {
-                Registration::link(
+                Registration::link_bare(
                     &raw mut (*shell.as_ptr()).events.new_surface,
                     on_new_layer_surface::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     std::ptr::null(),
-                    None,
-                    None,
-                    None,
                 )
             });
         }
@@ -1150,14 +1211,11 @@ impl<'d> Backend<'d> {
             // as the liveness flag. `session` is paired with `on_new_input`
             // at the same `S`, as above.
             regs.push(unsafe {
-                Registration::link(
+                Registration::link_bare(
                     &raw mut (*self.raw.as_ptr()).events.new_input,
                     on_new_input::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     &raw const *self.alive,
-                    None,
-                    None,
-                    None,
                 )
             });
         }
@@ -1632,23 +1690,19 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
         // `(*bound).session` is forwarded verbatim rather than re-derived, so
         // these two callbacks are instantiated at the `S` that pointer already
         // belongs to — the pairing `Bound::session` documents.
-        let frame = Registration::link(
+        let frame = Registration::link_output(
             &raw mut (*output).events.frame,
             on_frame::<S>,
             (*bound).session,
             std::ptr::null(),
-            Some(id),
-            None,
-            None,
+            id,
         );
-        let destroy = Registration::link(
+        let destroy = Registration::link_output(
             &raw mut (*output).events.destroy,
             on_output_destroy::<S>,
             (*bound).session,
             std::ptr::null(),
-            Some(id),
-            None,
-            None,
+            id,
         );
 
         // Registered before the handler is told, so that a handler asking about
@@ -1820,86 +1874,68 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
         // toplevel) get to use `data` for identity; the other four use the
         // `Bound` instead. See `Bound::toplevel`'s own doc for the fuller
         // argument.
-        let commit = Registration::link(
+        let commit = Registration::link_toplevel(
             &raw mut (*surface).events.commit,
             on_surface_commit::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
-            None,
+            id,
         );
-        let map = Registration::link(
+        let map = Registration::link_toplevel(
             &raw mut (*surface).events.map,
             on_toplevel_map::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
-            None,
+            id,
         );
-        let unmap = Registration::link(
+        let unmap = Registration::link_toplevel(
             &raw mut (*surface).events.unmap,
             on_toplevel_unmap::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
-            None,
+            id,
         );
-        let set_title = Registration::link(
+        let set_title = Registration::link_toplevel(
             &raw mut (*toplevel).events.set_title,
             on_toplevel_set_title::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
-            None,
+            id,
         );
-        let destroy = Registration::link(
+        let destroy = Registration::link_toplevel(
             &raw mut (*toplevel).events.destroy,
             on_toplevel_destroy::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
-            None,
+            id,
         );
-        let request_maximize = Registration::link(
+        let request_maximize = Registration::link_toplevel(
             &raw mut (*toplevel).events.request_maximize,
             on_toplevel_request_maximize::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
-            None,
+            id,
         );
-        let request_fullscreen = Registration::link(
+        let request_fullscreen = Registration::link_toplevel(
             &raw mut (*toplevel).events.request_fullscreen,
             on_toplevel_request_fullscreen::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
-            None,
+            id,
         );
-        let request_move = Registration::link(
+        let request_move = Registration::link_toplevel(
             &raw mut (*toplevel).events.request_move,
             on_toplevel_request_move::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
-            None,
+            id,
         );
-        let request_resize = Registration::link(
+        let request_resize = Registration::link_toplevel(
             &raw mut (*toplevel).events.request_resize,
             on_toplevel_request_resize::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
-            None,
+            id,
         );
 
         // The registrations own the callbacks' backing memory, so they live in
@@ -1970,50 +2006,73 @@ unsafe extern "C" fn on_surface_commit<S: Handlers>(
             .dispatcher
             .emit(&*session, Event::ToplevelInitialCommit(id), deliver);
 
-        // If this toplevel has a decoration, this is the first point at
-        // which answering it is safe: `wlr_xdg_surface_schedule_configure`
-        // — which both `Runtime::set_decoration_mode` and the client's own
-        // `set_mode` request funnel into — asserts `surface->initialized`,
-        // and `initial_commit` handling (above `base.initial_commit`'s
-        // gate at the top of this function) is exactly what just made that
-        // true. See `Runtime::set_decoration_mode`'s own doc for the full
-        // argument. Two cases follow from whether a `request_mode` already
-        // ran for this decoration before this commit:
-        if let Some(mode) = (*session).runtime.take_staged_decoration_mode(id) {
-            // It did: the client called `set_mode`/`unset_mode` before
-            // committing, `on_decoration_request_mode` already gave the
-            // handler its say, and the resulting decision — the handler's,
-            // or the dispatch-layer default — was staged rather than sent
-            // because the surface was not yet initialized then. Flush it
-            // now; `set_decoration_mode` takes the immediate path this
-            // time, since `initialized` just went true.
-            (*session).runtime.set_decoration_mode(id, mode);
-        } else if !(*session).runtime.decoration_answered(id) {
-            // It did not, *and* nothing else has answered this decoration
-            // either. The guard is `decoration_answered`, not "nothing is
-            // staged": the `ToplevelInitialCommit` emitted just above runs
-            // with `initialized` already true, so a handler that answers
-            // from `initial_commit` sends immediately and leaves `staged`
-            // empty — indistinguishable, to a staged-only check, from a
-            // decoration nobody has touched. 0.20.8 made exactly that
-            // mistake and overrode such an answer with the server-side
-            // default one statement later. `answered` latches on both of
-            // `set_decoration_mode`'s branches, so it separates the two.
-            if let Some(preference) = (*session).runtime.decoration_requested_preference(id) {
-                // A decoration exists (`decoration_requested_preference`
-                // returns `None` for a toplevel without one) but the client
-                // never called `set_mode` — legal, and what a client that
-                // wants the compositor to just decide does. Nothing has
-                // consulted the handler for it yet, so do that now, through
-                // the same event a real `request_mode` would produce.
-                // `deliver_all`'s arm answers it, and — since `initialized`
-                // is already true here — that answer is sent immediately
-                // rather than staged again.
-                (*session).dispatcher.emit(
-                    &*session,
-                    Event::RequestDecorationMode(id, preference),
-                    deliver,
-                );
+        // The decoration default-answer synthesis below reads
+        // `take_staged_decoration_mode`/`decoration_answered` *after* the
+        // `ToplevelInitialCommit` emit above and assumes that emit delivered
+        // synchronously — that the handler has already run, so this state
+        // reflects whatever it negotiated. That holds on the only path any
+        // public API reaches: a first commit driven from the event loop with
+        // no handler on the stack, where `emit` runs `deliver` inline.
+        //
+        // It does *not* hold if this callback ever fires re-entrantly from
+        // inside a running handler (a nested synchronous commit).
+        // `Dispatcher::emit` would then see `in_dispatch` already set, queue
+        // `ToplevelInitialCommit` for `deliver_all` to run *after* the outer
+        // handler returns, and come back here before the handler has run —
+        // so synthesizing now would answer from pre-handler state and could
+        // re-send a `ServerSide` default over the answer the deferred handler
+        // is about to negotiate (the 0.20.8 bug class). Gating on
+        // `in_handler()` keeps the synthesis on the synchronous path only; in
+        // the deferred case it is skipped and the queued
+        // `ToplevelInitialCommit` still reaches the handler through
+        // `deliver_all`. No public API produces that nested commit today, so
+        // this is latent — the gate is what stops it becoming live.
+        if !crate::dispatch::in_handler() {
+            // If this toplevel has a decoration, this is the first point at
+            // which answering it is safe: `wlr_xdg_surface_schedule_configure`
+            // — which both `Runtime::set_decoration_mode` and the client's own
+            // `set_mode` request funnel into — asserts `surface->initialized`,
+            // and `initial_commit` handling (above `base.initial_commit`'s
+            // gate at the top of this function) is exactly what just made that
+            // true. See `Runtime::set_decoration_mode`'s own doc for the full
+            // argument. Two cases follow from whether a `request_mode` already
+            // ran for this decoration before this commit:
+            if let Some(mode) = (*session).runtime.take_staged_decoration_mode(id) {
+                // It did: the client called `set_mode`/`unset_mode` before
+                // committing, `on_decoration_request_mode` already gave the
+                // handler its say, and the resulting decision — the handler's,
+                // or the dispatch-layer default — was staged rather than sent
+                // because the surface was not yet initialized then. Flush it
+                // now; `set_decoration_mode` takes the immediate path this
+                // time, since `initialized` just went true.
+                (*session).runtime.set_decoration_mode(id, mode);
+            } else if !(*session).runtime.decoration_answered(id) {
+                // It did not, *and* nothing else has answered this decoration
+                // either. The guard is `decoration_answered`, not "nothing is
+                // staged": the `ToplevelInitialCommit` emitted just above runs
+                // with `initialized` already true, so a handler that answers
+                // from `initial_commit` sends immediately and leaves `staged`
+                // empty — indistinguishable, to a staged-only check, from a
+                // decoration nobody has touched. 0.20.8 made exactly that
+                // mistake and overrode such an answer with the server-side
+                // default one statement later. `answered` latches on both of
+                // `set_decoration_mode`'s branches, so it separates the two.
+                if let Some(preference) = (*session).runtime.decoration_requested_preference(id) {
+                    // A decoration exists (`decoration_requested_preference`
+                    // returns `None` for a toplevel without one) but the client
+                    // never called `set_mode` — legal, and what a client that
+                    // wants the compositor to just decide does. Nothing has
+                    // consulted the handler for it yet, so do that now, through
+                    // the same event a real `request_mode` would produce.
+                    // `deliver_all`'s arm answers it, and — since `initialized`
+                    // is already true here — that answer is sent immediately
+                    // rather than staged again.
+                    (*session).dispatcher.emit(
+                        &*session,
+                        Event::RequestDecorationMode(id, preference),
+                        deliver,
+                    );
+                }
             }
         }
 
@@ -2194,23 +2253,19 @@ unsafe extern "C" fn on_new_toplevel_decoration<S: Handlers>(
         // its `toplevel` field has already been cleared to null by wlroots,
         // at which point re-deriving the id from `(*decoration).toplevel`
         // would read a null pointer instead of resolving to anything.
-        let request_mode = Registration::link(
+        let request_mode = Registration::link_toplevel(
             &raw mut (*decoration).events.request_mode,
             on_decoration_request_mode::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
-            None,
+            id,
         );
-        let destroy = Registration::link(
+        let destroy = Registration::link_toplevel(
             &raw mut (*decoration).events.destroy,
             on_toplevel_decoration_destroy::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            Some(id),
-            None,
+            id,
         );
 
         let displaced = (*session).decorations.borrow_mut().insert(
@@ -2435,41 +2490,33 @@ unsafe extern "C" fn on_new_layer_surface<S: Handlers>(
         // same "role object defers to its surface" shape xdg-shell has),
         // carrying `id` in `Bound::layer` rather than trusting `data` — see
         // that field's own doc for why.
-        let commit = Registration::link(
+        let commit = Registration::link_layer(
             &raw mut (*surface).events.commit,
             on_layer_surface_commit::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            None,
-            Some(id),
+            id,
         );
-        let map = Registration::link(
+        let map = Registration::link_layer(
             &raw mut (*surface).events.map,
             on_layer_surface_map::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            None,
-            Some(id),
+            id,
         );
-        let unmap = Registration::link(
+        let unmap = Registration::link_layer(
             &raw mut (*surface).events.unmap,
             on_layer_surface_unmap::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            None,
-            Some(id),
+            id,
         );
-        let destroy = Registration::link(
+        let destroy = Registration::link_layer(
             &raw mut (*ls).events.destroy,
             on_layer_surface_destroy::<S>,
             (*bound).session,
             std::ptr::null(),
-            None,
-            None,
-            Some(id),
+            id,
         );
 
         let displaced = (*session).layers.borrow_mut().insert(
@@ -2547,7 +2594,24 @@ unsafe extern "C" fn on_layer_surface_commit<S: Handlers>(
         // `initialized` is true), that call already cleared this, so
         // `take_staged_layer_configure` finds nothing and this is a no-op
         // rather than a second, stale configure.
-        if (*raw.as_ptr()).initial_commit
+        //
+        // Gated on `!in_handler()` for the same reason `on_surface_commit`'s
+        // decoration synthesis is: this reads `take_staged_layer_configure`
+        // *after* the `LayerSurfaceCommit` emit above and assumes it delivered
+        // synchronously — that the handler has already had its chance to stage
+        // (or immediately send) a configure. That holds on the only path a
+        // public API reaches, a commit driven from the event loop with no
+        // handler on the stack. If this callback ever fired re-entrantly from
+        // inside a running handler, `emit` would queue `LayerSurfaceCommit`
+        // for `deliver_all` and return before the handler ran, so flushing
+        // here would send a stale (or absent) configure ahead of the answer
+        // the deferred handler is about to make. In that case the flush is
+        // skipped; the queued `LayerSurfaceCommit` still reaches the handler
+        // through `deliver_all`, and any configure it stages is flushed by the
+        // next non-nested commit. No public API produces that nested commit
+        // today, so this is latent — the gate keeps it that way.
+        if !crate::dispatch::in_handler()
+            && (*raw.as_ptr()).initial_commit
             && let Some((width, height)) = (*session).runtime.take_staged_layer_configure(id)
         {
             sys::wlr_layer_surface_v1_configure(raw.as_ptr(), width, height);
@@ -2889,14 +2953,11 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
         // which this device-watch reused before this was found unsound)
         // must unlink this device's other listeners synchronously, from
         // inside the very emission this registers for.
-        let destroy = Registration::link(
+        let destroy = Registration::link_bare(
             &raw mut (*device).events.destroy,
             on_input_destroy::<S>,
             (*bound).session,
             &raw const *alive,
-            None,
-            None,
-            None,
         );
 
         let mut listeners = Vec::new();
@@ -2932,23 +2993,17 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                     runtime.record_keyboard(kb_nn);
                     keyboard = Some(kb_nn);
 
-                    listeners.push(Registration::link(
+                    listeners.push(Registration::link_bare(
                         &raw mut (*kb).events.key,
                         on_key::<S>,
                         (*bound).session,
                         &raw const *alive,
-                        None,
-                        None,
-                        None,
                     ));
-                    listeners.push(Registration::link(
+                    listeners.push(Registration::link_bare(
                         &raw mut (*kb).events.modifiers,
                         on_modifiers::<S>,
                         (*bound).session,
                         &raw const *alive,
-                        None,
-                        None,
-                        None,
                     ));
                 }
             }
@@ -2962,32 +3017,23 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                     runtime.record_pointer(p_nn);
                     pointer = Some(p_nn);
 
-                    listeners.push(Registration::link(
+                    listeners.push(Registration::link_bare(
                         &raw mut (*raw_pointer).events.motion,
                         on_pointer_motion::<S>,
                         (*bound).session,
                         &raw const *alive,
-                        None,
-                        None,
-                        None,
                     ));
-                    listeners.push(Registration::link(
+                    listeners.push(Registration::link_bare(
                         &raw mut (*raw_pointer).events.motion_absolute,
                         on_pointer_motion_absolute::<S>,
                         (*bound).session,
                         &raw const *alive,
-                        None,
-                        None,
-                        None,
                     ));
-                    listeners.push(Registration::link(
+                    listeners.push(Registration::link_bare(
                         &raw mut (*raw_pointer).events.button,
                         on_pointer_button::<S>,
                         (*bound).session,
                         &raw const *alive,
-                        None,
-                        None,
-                        None,
                     ));
                 }
             }
@@ -3482,14 +3528,11 @@ mod tests {
         unsafe {
             assert!(!is_linked(hp, noop), "a fresh signal has no listeners");
 
-            let reg = Registration::link(
+            let reg = Registration::link_bare(
                 &raw mut (*hp).signal,
                 noop,
                 std::ptr::null(),
                 &raw const (*hp).alive,
-                None,
-                None,
-                None,
             );
             assert!(is_linked(hp, noop), "link must register the listener");
 
@@ -3516,9 +3559,7 @@ mod tests {
         fn link_then_fail(signal: *mut sys::wl_signal, alive: *const Cell<bool>) -> Result<()> {
             // SAFETY: the caller owns a live signal and flag that both outlive
             // this call.
-            let _reg = unsafe {
-                Registration::link(signal, noop, std::ptr::null(), alive, None, None, None)
-            };
+            let _reg = unsafe { Registration::link_bare(signal, noop, std::ptr::null(), alive) };
             failing_dispatch()?;
             Ok(())
         }
@@ -3551,14 +3592,11 @@ mod tests {
 
         // SAFETY: as in the tests above.
         unsafe {
-            let reg = Registration::link(
+            let reg = Registration::link_bare(
                 &raw mut (*hp).signal,
                 noop,
                 std::ptr::null(),
                 &raw const (*hp).alive,
-                None,
-                None,
-                None,
             );
             let linked_next = (*hp).signal.listener_list.next;
             assert_ne!(
@@ -3597,14 +3635,11 @@ mod tests {
         // null is safe to pass here in a way it would not be for a signal whose
         // handlers dereference it.
         unsafe {
-            let reg = Registration::link(
+            let reg = Registration::link_bare(
                 &raw mut (*hp).signal,
                 on_backend_destroy,
                 std::ptr::null(),
                 &raw const (*hp).alive,
-                None,
-                None,
-                None,
             );
             assert!((*hp).alive.get(), "the flag starts set");
 
@@ -3834,14 +3869,11 @@ mod tests {
 
             // Declared after `session`, so it unlinks while the session it
             // names is still alive — the ordering `run` uses.
-            let _reg = Registration::link(
+            let _reg = Registration::link_bare(
                 &raw mut (*hp).signal,
                 on_new_output::<Recorder>,
                 (&raw const session).cast::<()>(),
                 &raw const (*hp).alive,
-                None,
-                None,
-                None,
             );
 
             sys::wl_signal_emit_mutable(&raw mut (*hp).signal, output.cast());
@@ -4118,25 +4150,19 @@ mod tests {
         // no `Session<S>` in this test at all, so `session` is null for
         // these two — `noop` never reads it).
         let key = unsafe {
-            Registration::link(
+            Registration::link_bare(
                 &raw mut kb.events.key,
                 noop,
                 std::ptr::null(),
                 std::ptr::null(),
-                None,
-                None,
-                None,
             )
         };
         let modifiers = unsafe {
-            Registration::link(
+            Registration::link_bare(
                 &raw mut kb.events.modifiers,
                 noop,
                 std::ptr::null(),
                 std::ptr::null(),
-                None,
-                None,
-                None,
             )
         };
         // SAFETY: `kb.base.events.destroy` is initialised by
@@ -4145,14 +4171,11 @@ mod tests {
         // registration (it is a local that is not dropped until after
         // `wlr_keyboard_finish` returns, below).
         let destroy = unsafe {
-            Registration::link(
+            Registration::link_bare(
                 &raw mut kb.base.events.destroy,
                 on_kb_destroy,
                 regs_ptr,
                 std::ptr::null(),
-                None,
-                None,
-                None,
             )
         };
 

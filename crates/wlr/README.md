@@ -61,7 +61,27 @@ with a window, and `lower_rect_to_bottom` for anything meant to be a
 background. `add_rect_in_band`, the additive way to place a node *between*
 bands, is planned for a later `0.20.x`; there is no way to express it today.
 
-No further exception is sanctioned in the `0.20` line.
+This is also the exception's own caveat, made explicit: within this line,
+"documented" is standing in for "semver-compatible". A consumer pinning
+`^0.20` in their `Cargo.toml` — the normal way to depend on this crate —
+picks up the `raise_toplevel` and un-lowered-rect stacking change described
+above on a plain `cargo update`, with no version bump of their own to
+review against. The disclosure here is what makes that acceptable, not a
+guarantee that nothing observable moved.
+
+**Deferred additive gaps, tracked for a future `0.20.x`:**
+
+- `add_rect_in_band` — see above; no way today to place a scene node
+  *between* the fixed bands rather than pinned to one of them.
+- `set_layer_surface_output` — wlr-layer-shell's own contract puts assigning
+  an output on the compositor when `new_layer_surface` hands one a `None`
+  (see `layer.rs`'s doc on `LayerSurface::output_id`), but this crate
+  exposes no id-keyed way to discharge that; a layer surface left without an
+  output just reports `None` from `output_id` forever rather than crashing
+  anything, so this is safe today, not silently broken. Targeted for the
+  next `0.20.x`.
+
+No further compatibility exception is sanctioned in the `0.20` line.
 
 ## 0.20.11
 

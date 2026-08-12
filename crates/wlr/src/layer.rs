@@ -260,11 +260,12 @@ impl Anchor {
     /// reasoning [`Edges::from_xdg`](crate::Edges::from_xdg) documents for
     /// its own bitmask.
     pub(crate) fn from_bits(bits: u32) -> Anchor {
+        let (top, bottom, left, right) = crate::toplevel::decode_edge_bits(bits);
         Anchor {
-            top: bits & 1 != 0,
-            bottom: bits & 2 != 0,
-            left: bits & 4 != 0,
-            right: bits & 8 != 0,
+            top,
+            bottom,
+            left,
+            right,
         }
     }
 }
@@ -409,6 +410,19 @@ impl<'h> LayerSurface<'h> {
     /// component may be `0`, which wlr-layer-shell defines as "let the
     /// compositor decide" for that axis. Read from `pending`, for the same
     /// reason [`layer`](LayerSurface::layer) is.
+    ///
+    /// **Neither component is bounded above.** This is the client's raw,
+    /// unvalidated `desired_width`/`desired_height`, and wlr-layer-shell puts
+    /// no ceiling on either — a client can send anything up to `u32::MAX`.
+    /// Combined with the `0`-means-"decide" case, that means a caller must
+    /// treat this as an unclamped range on *both* ends before feeding it into
+    /// signed arithmetic: casting an unbounded `u32` to `i32` (or subtracting
+    /// it from one) can go negative or overflow once the value nears 2^31,
+    /// which — if that happens inside a wlroots callback — aborts the whole
+    /// compositor process rather than merely erroring. Clamp to a sane
+    /// maximum (the output's own dimension, or a fixed cap well under
+    /// `i32::MAX`) before use; see `examples/layers.rs`'s
+    /// `new_layer_surface` for the pattern.
     pub fn desired_size(&self) -> (u32, u32) {
         // SAFETY: as `output_id`.
         unsafe {

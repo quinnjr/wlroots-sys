@@ -252,13 +252,29 @@ impl Edges {
     /// there is nowhere to report it from an event handler that returns
     /// nothing.
     pub(crate) fn from_xdg(bits: u32) -> Edges {
+        let (top, bottom, left, right) = decode_edge_bits(bits);
         Edges {
-            top: bits & 1 != 0,
-            bottom: bits & 2 != 0,
-            left: bits & 4 != 0,
-            right: bits & 8 != 0,
+            top,
+            bottom,
+            left,
+            right,
         }
     }
+}
+
+/// Decode a `top`=1/`bottom`=2/`left`=4/`right`=8 edge bitmask into its four
+/// booleans, in that order.
+///
+/// Shared by [`Edges::from_xdg`] and
+/// [`crate::layer::Anchor::from_bits`](crate::layer::Anchor::from_bits):
+/// xdg-shell's `xdg_toplevel_resize_edge` and wlr-layer-shell's
+/// `zwlr_layer_surface_v1_anchor` happen to assign the identical four bits to
+/// the identical four edges, so the decode is one function with two distinct
+/// public result types built from it, rather than the same four lines
+/// maintained twice. `pub(crate)` — both call sites live in this crate; there
+/// is no reason for a consumer to decode this bitmask itself.
+pub(crate) fn decode_edge_bits(bits: u32) -> (bool, bool, bool, bool) {
+    (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0)
 }
 
 /// Copy a wlroots-owned C string field out, or `None` if it is null.
@@ -277,7 +293,111 @@ unsafe fn cstr_field(p: *mut std::os::raw::c_char) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Edges, ToplevelId};
+    use super::{Edges, Toplevel, ToplevelId};
+    use crate::sys;
+    use std::alloc::{Layout, alloc_zeroed, dealloc};
+
+    /// A zeroed, heap-allocated `wlr_xdg_toplevel` chained to a fabricated
+    /// `wlr_xdg_surface` and `wlr_surface`, wired up just enough for
+    /// [`current_size`](Toplevel::current_size) to read a real value through
+    /// the pointer chain its own doc names (`base` -> `base->surface` ->
+    /// `surface->current`).
+    ///
+    /// `alloc_zeroed` rather than `std::mem::zeroed`, for the same reason
+    /// `output.rs`'s `ScratchOutput` uses it: these structs embed
+    /// `wl_signal`/`wl_listener` machinery with bare function pointers, a bit
+    /// pattern `std::mem::zeroed` refuses to produce as a materialised
+    /// *value*. Allocating the bytes directly and only ever touching them
+    /// through a raw pointer -- never loading a whole struct into a Rust
+    /// place -- sidesteps that: nothing here reads a listener's `notify`
+    /// field or any `wl_list` link, only the plain `i32`s `current_size`
+    /// itself reads.
+    struct ScratchToplevel {
+        toplevel: *mut sys::wlr_xdg_toplevel,
+        surface_role: *mut sys::wlr_xdg_surface,
+        surface: *mut sys::wlr_surface,
+    }
+
+    impl ScratchToplevel {
+        fn new(width: i32, height: i32) -> Self {
+            fn alloc_zeroed_of<T>() -> *mut T {
+                let layout = Layout::new::<T>();
+                // SAFETY: every type this is called with here has a nonzero
+                // size, so `alloc_zeroed` returns either null (checked
+                // below) or a suitably aligned, zeroed allocation of exactly
+                // that size.
+                let ptr = unsafe { alloc_zeroed(layout) }.cast::<T>();
+                assert!(!ptr.is_null(), "allocation failed");
+                ptr
+            }
+
+            let surface = alloc_zeroed_of::<sys::wlr_surface>();
+            let surface_role = alloc_zeroed_of::<sys::wlr_xdg_surface>();
+            let toplevel = alloc_zeroed_of::<sys::wlr_xdg_toplevel>();
+
+            // SAFETY: each pointer is a fresh, exclusively-owned, zeroed
+            // allocation sized for its own type; these writes only touch the
+            // specific fields named below, all in bounds of that allocation.
+            unsafe {
+                (*surface).current.width = width;
+                (*surface).current.height = height;
+                (*surface_role).surface = surface;
+                (*toplevel).base = surface_role;
+            }
+
+            Self {
+                toplevel,
+                surface_role,
+                surface,
+            }
+        }
+
+        /// # Safety
+        ///
+        /// The returned handle borrows this `ScratchToplevel`'s allocations
+        /// and must not outlive it. Its id is never read by `current_size`,
+        /// so the fixed placeholder here is fine for this narrow use.
+        unsafe fn toplevel(&self) -> Toplevel<'_> {
+            // SAFETY: `self.toplevel` is a live, fully-wired allocation for
+            // as long as `self` is; the caller upholds the lifetime bound.
+            unsafe { Toplevel::from_raw_with_id(self.toplevel, ToplevelId(0)) }
+        }
+    }
+
+    impl Drop for ScratchToplevel {
+        fn drop(&mut self) {
+            // SAFETY: each pointer was allocated by `alloc_zeroed` with the
+            // matching `Layout::new::<T>()` in `new`, is still exclusively
+            // owned by this struct, and nothing else frees or aliases it.
+            unsafe {
+                dealloc(self.toplevel.cast(), Layout::new::<sys::wlr_xdg_toplevel>());
+                dealloc(
+                    self.surface_role.cast(),
+                    Layout::new::<sys::wlr_xdg_surface>(),
+                );
+                dealloc(self.surface.cast(), Layout::new::<sys::wlr_surface>());
+            }
+        }
+    }
+
+    #[test]
+    fn current_size_reads_the_surfaces_current_committed_size() {
+        let scratch = ScratchToplevel::new(1920, 1080);
+        // SAFETY: `scratch` outlives every use of the handle below.
+        let toplevel = unsafe { scratch.toplevel() };
+        assert_eq!(toplevel.current_size(), (1920, 1080));
+    }
+
+    /// The documented pre-first-commit default: `wlr_surface_state` starts
+    /// zeroed, and `current_size` reads it directly rather than tracking a
+    /// separate "has it mapped yet" flag of its own.
+    #[test]
+    fn current_size_is_zero_before_any_commit() {
+        let scratch = ScratchToplevel::new(0, 0);
+        // SAFETY: as above.
+        let toplevel = unsafe { scratch.toplevel() };
+        assert_eq!(toplevel.current_size(), (0, 0));
+    }
 
     #[test]
     fn from_xdg_decodes_every_bit_and_their_combinations() {

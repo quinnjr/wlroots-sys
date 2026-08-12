@@ -65,31 +65,59 @@ fn set_decoration_mode_on_a_dead_id_is_none() {
 ///
 /// Now both sides speak [`wlr::DecorationMode`], so pass-through *is* the
 /// honouring implementation and the inverted one cannot be written by
-/// accident. This test is that claim made executable: it compiles only
-/// while a preference can be forwarded to the mutator unmodified.
+/// accident. Compiling is necessary but not sufficient evidence of that,
+/// though — a body that compiles but is never actually run proves nothing
+/// about which way values flow through it, which is exactly the gap the
+/// 0.20.8 bug lived in (it compiled too). So this test also *calls*
+/// `request_decoration_mode` directly, bypassing FFI the same way
+/// `runtime.rs`'s own staging tests do for `set_decoration_mode`, and
+/// asserts on what it captures — not on the unrelated fact that the two
+/// variants compare unequal.
+///
+/// `set_decoration_mode` itself is not called here: it stages onto a real
+/// `wlr_xdg_toplevel_decoration_v1`/`wlr_xdg_toplevel` pair (see
+/// `runtime.rs`'s `set_decoration_mode_stages_rather_than_sends_before_...`
+/// tests), and fabricating one well enough to survive that call without a
+/// live client is exactly the FFI risk this test is trying to avoid. So
+/// `App` records the mode it *would* forward to the mutator instead of
+/// calling the mutator — enough to prove the forwarding is unmodified
+/// pass-through, without needing FFI-shaped fixtures to prove it.
 #[test]
 fn honouring_the_client_is_a_pass_through() {
-    struct App;
+    use wlr::ToplevelHandler as _;
+
+    struct App {
+        forwarded: std::cell::Cell<Option<wlr::DecorationMode>>,
+    }
     impl wlr::ToplevelHandler for App {
         fn request_decoration_mode(
             &mut self,
-            id: wlr::ToplevelId,
+            _id: wlr::ToplevelId,
             preference: Option<wlr::DecorationMode>,
         ) {
-            let runtime = wlr::Runtime::new().expect("runtime");
             // No negation, no mapping table, no remembering which way a
-            // bool points — the value the client stated is the value the
-            // compositor answers with.
-            runtime.set_decoration_mode(id, preference.unwrap_or(wlr::DecorationMode::ServerSide));
+            // bool points — the value the client stated is the value this
+            // records as what would be forwarded to `set_decoration_mode`.
+            self.forwarded
+                .set(Some(preference.unwrap_or(wlr::DecorationMode::ServerSide)));
         }
     }
-    let _ = App;
 
-    // And the variants stay distinct values, so "honouring" is observable
-    // rather than vacuous.
-    assert_ne!(
-        wlr::DecorationMode::ClientSide,
-        wlr::DecorationMode::ServerSide
+    let mut app = App {
+        forwarded: std::cell::Cell::new(None),
+    };
+    app.request_decoration_mode(
+        wlr::ToplevelId::dangling_for_test(),
+        Some(wlr::DecorationMode::ClientSide),
+    );
+
+    // The inverted 0.20.8 body would have recorded `ServerSide` here — this
+    // is the assertion that fails on that regression, not `assert_ne!` on
+    // the two variants (which holds regardless of what the handler does).
+    assert_eq!(
+        app.forwarded.get(),
+        Some(wlr::DecorationMode::ClientSide),
+        "the client's stated preference must reach the mutator unmodified"
     );
 }
 

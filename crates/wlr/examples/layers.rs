@@ -66,11 +66,19 @@ impl wlr::ToplevelHandler for App {
         let id = surface.id();
         let desired = surface.desired_size();
         // `0` on either axis means "let the compositor decide"; the client
-        // is trusted otherwise. `.max(1)`/`.max(30)` are this example's own
-        // arbitrary floor, not a protocol requirement, so a client that
-        // never states a size still gets a visible, non-degenerate surface.
-        let width = desired.0.max(1);
-        let height = desired.1.max(30);
+        // is otherwise trusted for the *value*, but not for its *range*:
+        // `desired_size()` is client-controlled and unbounded (see that
+        // method's own doc), and this example later does `ow - w as i32`
+        // against it. A `desired.0` at or above 2^31 would make that `as i32`
+        // cast negative, and the subtraction would overflow — panicking
+        // inside wlroots' `extern "C"` callback frame, which aborts the
+        // whole compositor process. `MAX_DIM` caps both axes well below that
+        // line, and `.clamp(floor, MAX_DIM)` applies this example's own
+        // arbitrary minimum (`1`/`30`, not a protocol requirement, just
+        // "still a visible, non-degenerate surface") in the same step.
+        const MAX_DIM: u32 = i32::MAX as u32 / 2;
+        let width = desired.0.clamp(1, MAX_DIM);
+        let height = desired.1.clamp(30, MAX_DIM);
         println!(
             "new layer surface {id:?} layer={:?} anchor={:?} exclusive_zone={} desired={desired:?} \
              output_id={:?}",

@@ -285,3 +285,44 @@ pub(crate) fn create_pixel_buffer(width: i32, height: i32, rgba: &[u8]) -> *mut 
     // pointer `into_raw` returns here.
     Box::into_raw(pb).cast()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The largest `width` [`validate_pixels`] accepts (with a matching
+    /// `height`/length) is exactly `i32::MAX / 4` — one more, and
+    /// `create_pixel_buffer`'s `stride = width * 4` would overflow `i32`.
+    #[test]
+    fn validate_pixels_accepts_the_widest_width_that_keeps_stride_in_i32_bounds() {
+        let width = i32::MAX / 4;
+        let len = width as u64 * 4;
+        assert!(validate_pixels(width, 1, len as usize));
+    }
+
+    /// One past that bound must be rejected outright, regardless of whether
+    /// `rgba_len` would otherwise "match" — this is the overflow guard, not
+    /// the length check.
+    #[test]
+    fn validate_pixels_rejects_the_width_one_past_the_stride_overflow_bound() {
+        let width = i32::MAX / 4 + 1;
+        // Deliberately not overflow-checked here: this is a plain test
+        // computation, not the guarded path under test.
+        let len = (width as u64) * 4;
+        assert!(!validate_pixels(width, 1, len as usize));
+    }
+
+    /// `height < 1` is rejected independently of `width` or `rgba_len`.
+    #[test]
+    fn validate_pixels_rejects_zero_height() {
+        assert!(!validate_pixels(1, 0, 4));
+    }
+
+    /// A `width`/`height` that are individually fine must still be rejected
+    /// if `rgba_len` doesn't match `width * height * 4` exactly.
+    #[test]
+    fn validate_pixels_rejects_a_mismatched_length() {
+        assert!(!validate_pixels(2, 2, 2 * 2 * 4 - 1));
+        assert!(!validate_pixels(2, 2, 2 * 2 * 4 + 1));
+    }
+}

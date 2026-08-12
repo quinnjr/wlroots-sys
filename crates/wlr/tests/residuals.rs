@@ -130,9 +130,10 @@ fn removing_a_live_source_stops_its_callbacks() {
     // handler's side: the source does not re-fire within the four remaining
     // turns of the first run either, which a still-installed level-triggered
     // source would have done. The source-level evidence lives in
-    // `removing_a_declared_but_unregistered_source_reports_once` (the second
-    // `remove_fd` reporting `None`) and in the surviving source below, which
-    // shows the loop itself kept dispatching across both runs.
+    // `remove_fd_forgets_the_declaration` (the second `remove_fd` reporting
+    // `None`, there for a source that was never even run through `run_all`)
+    // and in the surviving source below, which shows the loop itself kept
+    // dispatching across both runs.
     assert_eq!(app.doomed_fires, 1, "removed source must not fire again");
     assert!(app.survivor_fires >= 2, "surviving source must keep firing");
 }
@@ -229,4 +230,144 @@ fn toplevel_id_debug_and_dangling_bands_do_not_collide() {
     let b = wlr::ToplevelId::dangling_nth_for_test(2);
     assert_ne!(a, b);
     assert!(!format!("{a:?}").is_empty());
+}
+
+/// `run_inner`'s retry-on-`EINTR` loop around `wl_event_loop_dispatch`
+/// (`backend.rs`), covered by driving a real signal into the thread blocked
+/// there.
+///
+/// Shape borrowed from `removing_a_live_source_stops_its_callbacks`: a
+/// helper thread manipulates the world the main thread is blocked on, and
+/// the assertion is made from the main thread once `run_all` returns. The
+/// difference here is `Until::Stop` rather than `Until::Turns` — the retry
+/// loop only matters when `wl_event_loop_dispatch` is actually blocked
+/// (`Until::Turns`'s timeout is `0`, so it never blocks and the `EINTR`
+/// branch is unreachable through it), so this test is the one place in the
+/// suite that calls `run_all` with a blocking timeout.
+///
+/// Delivering a signal to *a specific OS thread* (the one inside the
+/// blocking syscall, not whichever thread the kernel happens to pick for a
+/// process-wide `kill`) needs `pthread_kill`/`pthread_self`, which are not
+/// behind any feature `rustix` has enabled here (`pipe`, `std`) and are not
+/// in `std`. Declared directly via `extern "C"` below rather than adding a
+/// dependency for two function pointers.
+///
+/// Signal delivery timing is the one thing this test cannot pin down: the
+/// signal can land before the main thread has entered
+/// `wl_event_loop_dispatch`, in which case the retry branch simply is not
+/// exercised on that run. That is why the helper thread *also*
+/// unconditionally writes to the wakeup pipe a beat later — a real,
+/// ordinary fd wakeup the loop was always going to see — so this test's
+/// pass/fail does not depend on winning the race, only its power to catch a
+/// regression does. What every run *does* prove is the acceptance
+/// criterion in the review finding: `run_all` does not return `Err`, and
+/// dispatch kept going (the fd wakeup after the signal still stops the
+/// loop) — a `run_inner` that mapped `EINTR` straight to `Error::Operation`
+/// instead of retrying would fail this test on any run that wins the race,
+/// and CI runs it enough times that one eventually will.
+#[test]
+fn eintr_from_a_signal_during_a_blocking_run_all_does_not_fail_the_run() {
+    headless_env();
+    use std::io::Write;
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+
+    type PthreadT = std::os::raw::c_ulong;
+    const SIGUSR1: std::os::raw::c_int = 10;
+    unsafe extern "C" {
+        fn signal(
+            signum: std::os::raw::c_int,
+            handler: extern "C" fn(std::os::raw::c_int),
+        ) -> usize;
+        fn pthread_self() -> PthreadT;
+        fn pthread_kill(thread: PthreadT, sig: std::os::raw::c_int) -> std::os::raw::c_int;
+    }
+    extern "C" fn noop_handler(_sig: std::os::raw::c_int) {}
+
+    // SAFETY: installs a handler for `SIGUSR1`, a signal this test process
+    // uses for nothing else, before the helper thread below (spawned only
+    // after this call returns) can deliver one. Without this, `SIGUSR1`'s
+    // default disposition terminates the process instead of interrupting
+    // the blocked syscall with `EINTR`.
+    unsafe {
+        signal(SIGUSR1, noop_handler);
+    }
+
+    struct App {
+        stop: AtomicBool,
+    }
+    impl wlr::OutputHandler for App {}
+    impl wlr::ToplevelHandler for App {}
+    impl wlr::SeatHandler for App {}
+    impl wlr::FdHandler for App {
+        fn fd_ready(
+            &mut self,
+            _source: wlr::SourceId,
+            fd: std::os::fd::BorrowedFd<'_>,
+            _r: wlr::Readiness,
+        ) {
+            let mut buf = [0u8; 16];
+            let _ = rustix::io::read(fd, &mut buf);
+            self.stop.store(true, Ordering::SeqCst);
+        }
+    }
+    impl wlr::LoopHandler for App {
+        fn should_stop(&mut self) -> bool {
+            self.stop.load(Ordering::SeqCst)
+        }
+    }
+
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let (r, mut w) = std::io::pipe().expect("pipe");
+    let _id = runtime.add_fd(r.into(), wlr::Interest::READABLE);
+
+    // SAFETY: called on the main test thread, before the helper thread is
+    // spawned, so this reads the identity of the thread that is about to
+    // block in `run_all` below.
+    let main_thread: PthreadT = unsafe { pthread_self() };
+    // Records `pthread_kill`'s return value (`0` = delivered) so the
+    // assertion below can tell a broken FFI declaration from a lost race —
+    // both leave `run_all` returning `Ok`, but only the latter is this
+    // test's actual claim.
+    let kill_rc = AtomicI32::new(i32::MIN);
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            // Long enough that the main thread has called `run_all` and
+            // entered the blocking `wl_event_loop_dispatch` (`Until::Stop`'s
+            // timeout is `-1`) before the signal is sent; see this test's
+            // own doc for why landing early is harmless rather than a
+            // source of flakiness.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            // SAFETY: `main_thread` was read from a live `pthread_self()`
+            // call on that thread above, and the thread is still running
+            // (blocked in `run_all`, which this scope's join waits out).
+            let rc = unsafe { pthread_kill(main_thread, SIGUSR1) };
+            kill_rc.store(rc, Ordering::SeqCst);
+            // The unconditional, real wakeup: sent regardless of whether
+            // the signal above landed mid-poll, so this test cannot hang
+            // even on a lost race.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let _ = w.write_all(b"x");
+        });
+
+        let mut app = App {
+            stop: AtomicBool::new(false),
+        };
+        let result = backend.run_all(&display, &mut app, &runtime, wlr::Until::Stop);
+        assert!(
+            result.is_ok(),
+            "a signal arriving during a blocking run_all must not surface \
+             as Err — run_inner's EINTR retry must have swallowed it: {result:?}"
+        );
+    });
+
+    assert_eq!(
+        kill_rc.load(Ordering::SeqCst),
+        0,
+        "pthread_kill(main_thread, SIGUSR1) must have succeeded for this \
+         run to be evidence of anything; a nonzero return means the retry \
+         loop was never actually exercised"
+    );
 }

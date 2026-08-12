@@ -649,6 +649,43 @@ impl Runtime {
         if self.inner.graphics.borrow().is_some() {
             return Err(Error::Operation("Runtime::init_graphics called twice"));
         }
+        // Frees `scene` (and every band already attached to it) if this
+        // function returns early via `?` anywhere after the scene is
+        // created. Nothing else does: `Graphics` has no `Drop`, and none of
+        // the fallible steps below (the five bands, the output layout, the
+        // renderer, the allocator, `wlr_renderer_init_wl_display`, the three
+        // protocol globals) undoes an earlier one's work on its own way out
+        // — without this, a mid-build failure would leak the scene tree and
+        // whichever bands had already been created under it. `disarm`'d
+        // just before `Graphics` is assembled, once every fallible step has
+        // succeeded and `self` is about to take ownership going forward (see
+        // `Graphics`'s own doc on that handoff).
+        struct SceneGuard(Option<NonNull<sys::wlr_scene>>);
+        impl Drop for SceneGuard {
+            fn drop(&mut self) {
+                if let Some(scene) = self.0 {
+                    // SAFETY: this guard is only ever constructed with a
+                    // `scene` pointer this function itself just got back
+                    // from a successful `wlr_scene_create`, and is only
+                    // still armed (this branch only runs) if `init_graphics`
+                    // is unwinding via an early `?` return before handing
+                    // `scene` off to `Graphics` — so nothing else has taken
+                    // a reference to it, taken ownership of it, or freed it
+                    // yet. `wlr_scene_node_destroy` on the scene's own root
+                    // node recursively destroys every band already parented
+                    // under it (`wlr_scene_tree_create` makes each band a
+                    // child of `scene.tree`), which is exactly what needs
+                    // undoing here.
+                    unsafe {
+                        sys::wlr_scene_node_destroy(&raw mut (*scene.as_ptr()).tree.node);
+                    }
+                }
+            }
+        }
+        // Declared outside the `unsafe` block below so it stays in scope —
+        // and so keeps firing its `Drop` — across every early `?` return
+        // inside that block, not just the ones textually after it.
+        let mut scene_guard = SceneGuard(None);
         // SAFETY: `backend` and `display` are live for this call (the backend
         // is necessarily alive, since no run — the only thing that can start
         // it and let it die — has happened yet), and each pointer is
@@ -661,6 +698,10 @@ impl Runtime {
         let graphics = unsafe {
             let scene = sys::wlr_scene_create();
             let scene = NonNull::new(scene).ok_or(Error::Create("wlr_scene_create"))?;
+            // Armed the moment the scene exists — every `?` from here to the
+            // end of this block must now go through the guard on its way
+            // out.
+            scene_guard.0 = Some(scene);
 
             // The five stacking bands, created in bottom-to-top order right
             // after the scene itself and before anything else can be
@@ -717,6 +758,12 @@ impl Runtime {
             if sys::wlr_data_device_manager_create(display.as_ptr()).is_null() {
                 return Err(Error::Create("wlr_data_device_manager_create"));
             }
+
+            // Every fallible step above has now succeeded: `self` is about
+            // to take ownership of `scene` via `Graphics` below, so the
+            // guard must not free it out from under that on the way out of
+            // this block.
+            scene_guard.0 = None;
 
             Graphics {
                 scene,
@@ -891,6 +938,20 @@ impl Runtime {
     /// `wlr_output_layout_get_box` reports that case as an empty box —
     /// `width == 0 && height == 0` — rather than a null pointer or an error
     /// code, so that is what this checks to turn it into `None`.
+    ///
+    /// That check is necessarily ambiguous: this cannot tell "never placed"
+    /// apart from "placed, but its current mode is itself `0x0`" — both
+    /// report the identical empty box, and so both come back `None` here.
+    /// An output has no mode at all until its first successful commit, so
+    /// calling this before that point (even after a successful
+    /// [`init_output`](Runtime::init_output) or
+    /// [`set_output_position`](Runtime::set_output_position)) can observe
+    /// the same `None` a placement failure would. Callers that need to know
+    /// specifically whether *placement* succeeded should trust
+    /// [`set_output_position`](Runtime::set_output_position)'s own return
+    /// value for that, rather than inferring it from this method, and should
+    /// otherwise wait to call this until after the output's first successful
+    /// mode commit.
     pub fn output_layout_box(&self, id: OutputId) -> Option<(i32, i32, i32, i32)> {
         let raw = self.output_ptr(id)?;
         // Copied out and the borrow dropped before the wlroots call below,
@@ -1226,10 +1287,23 @@ impl Runtime {
         height: i32,
         rgba: &[u8],
     ) -> Option<BufferId> {
+        // Resolve `toplevel` before validating pixels: a stale/unknown id is
+        // the routine, expected `None` this method's own doc promises, but a
+        // caller passing bad dimensions or a mismatched `rgba` length against
+        // a *live* toplevel is a caller bug. Validating first would collapse
+        // both into the same silent `None`, hiding the caller bug behind the
+        // benign one; resolving the id first keeps the two apart — the
+        // `debug_assert!` below is what actually surfaces the caller-bug
+        // case in a debug build (mirrors `create_pixel_buffer`'s own
+        // precedent).
+        let entry = self.toplevel_entry(toplevel)?;
+        debug_assert!(
+            crate::buffer::validate_pixels(width, height, rgba.len()),
+            "add_buffer_in_toplevel called with invalid pixel dimensions or length"
+        );
         if !crate::buffer::validate_pixels(width, height, rgba.len()) {
             return None;
         }
-        let entry = self.toplevel_entry(toplevel)?;
         let buf = create_pixel_buffer(width, height, rgba);
         // SAFETY: a present entry names a live tree (its destroy callback
         // removes the entry before wlroots frees it); the refcount argument
@@ -1276,10 +1350,19 @@ impl Runtime {
         height: i32,
         rgba: &[u8],
     ) -> Option<()> {
+        // Resolve `buffer` before validating pixels — same reasoning as
+        // `add_buffer_in_toplevel`'s identical reordering: a stale id must
+        // stay a silent `None`, but bad dimensions against a *live* buffer
+        // is a caller bug the `debug_assert!` below surfaces in a debug
+        // build instead of silently folding into the same `None`.
+        let node = self.buffer_ptr(buffer)?;
+        debug_assert!(
+            crate::buffer::validate_pixels(width, height, rgba.len()),
+            "update_buffer called with invalid pixel dimensions or length"
+        );
         if !crate::buffer::validate_pixels(width, height, rgba.len()) {
             return None;
         }
-        let node = self.buffer_ptr(buffer)?;
         let buf = create_pixel_buffer(width, height, rgba);
         // SAFETY: `buffer_ptr` resolving `buffer` means its `BufferEntry` is
         // still in the table, so `node` names a node wlroots has not yet
@@ -3385,23 +3468,18 @@ mod tests {
     // suite (see `tests/layers.rs`'s own doc for why that is out of reach
     // here).
 
-    /// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once
-    /// for this binary's unit tests — mirrors the integration tests' own
-    /// `headless_env` helper (`tests/scene.rs`, `tests/layers.rs`), each of
-    /// which needs its own copy because each integration-test file is a
-    /// separate binary; this unit-test module is the one copy this binary
-    /// needs.
+    /// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once for
+    /// this whole `--lib` unit-test binary.
+    ///
+    /// Delegates to `interest::tests::headless_env`, the one shared
+    /// `Once`-guarded writer for this binary — see that function's own doc
+    /// for why a second, independent `Once` here would race it rather than
+    /// merely duplicate it. Mirrors the integration tests' own per-binary
+    /// `headless_env` helper (`tests/scene.rs`, `tests/layers.rs`, ...),
+    /// which each need their own copy because each integration-test file is
+    /// a separate binary; this `--lib` binary has exactly one.
     fn headless_env() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            // SAFETY: `Once::call_once` runs this closure at most once and
-            // blocks every other caller until it returns, so no concurrent
-            // `getenv` from another test can observe a torn write.
-            unsafe {
-                std::env::set_var("WLR_BACKENDS", "headless");
-                std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-            }
-        });
+        crate::interest::tests::headless_env();
     }
 
     /// A runtime with a real scene, brought up exactly the way a consumer's
