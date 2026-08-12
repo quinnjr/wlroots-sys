@@ -24,6 +24,19 @@ follows on the same branches, not because they are on crates.io yet.
 The API is held identical across all four, so once they ship, moving between
 them is a version change rather than a code change.
 
+## 0.20.5
+
+Milestone-1 residuals.
+
+- `Runtime::add_rect_in_toplevel` / `Runtime::remove_rect` — rects that live
+  inside a toplevel's scene tree and move/raise/die with it; rect removal
+  by id for root rects too.
+- `Runtime::remove_fd` — fd sources removable by id, live or declared.
+- `wl_event_loop_dispatch` is retried on EINTR instead of failing the run.
+- `KeyEvent::for_test`, `Toplevel::current_size`, `Toplevel: Debug` — test
+  and introspection surface for consumers.
+- `Backend::run`'s docs now steer real compositors to `run_all`.
+
 ## 0.20.4
 
 Seat, keyboard and pointer input.

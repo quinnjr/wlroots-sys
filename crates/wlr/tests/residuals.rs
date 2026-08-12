@@ -116,6 +116,18 @@ fn removing_a_live_source_stops_its_callbacks() {
     backend
         .run_all(&display, &mut app, &runtime, wlr::Until::Turns(4))
         .expect("second run");
+    // Weaker evidence than it looks, and deliberately kept anyway: the
+    // second write above cannot reach `doomed` even if `remove_fd` had left
+    // the source installed, because `remove_fd` also closed the read end, so
+    // this pins "fires exactly once" without on its own proving *which* of
+    // the two mechanisms stopped it. What it does prove — and what a
+    // regression would break — is that the removal is idempotent from the
+    // handler's side: the source does not re-fire within the four remaining
+    // turns of the first run either, which a still-installed level-triggered
+    // source would have done. The source-level evidence lives in
+    // `removing_a_declared_but_unregistered_source_reports_once` (the second
+    // `remove_fd` reporting `None`) and in the surviving source below, which
+    // shows the loop itself kept dispatching across both runs.
     assert_eq!(app.doomed_fires, 1, "removed source must not fire again");
     assert!(app.survivor_fires >= 2, "surviving source must keep firing");
 }

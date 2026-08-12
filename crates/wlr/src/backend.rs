@@ -583,6 +583,10 @@ impl<'d> Backend<'d> {
     /// Wire up handlers, start the backend, and dispatch `iterations` turns of
     /// the event loop.
     ///
+    /// Prefer [`Backend::run_all`] for a real compositor: `run` never installs
+    /// fd sources, the xdg-shell, or the seat, and does not flush clients.
+    /// `run` remains the minimal output-only path and is kept forever.
+    ///
     /// This is the only thing that starts a backend, and it starts it *after*
     /// installing handlers, because `wlr_backend_start` announces the outputs a
     /// backend already has synchronously, before it returns. Starting is done
@@ -861,10 +865,12 @@ impl<'d> Backend<'d> {
                     break;
                 }
                 let errno = std::io::Error::last_os_error();
-                // 4 is `EINTR` on every platform this crate builds for
-                // (Linux); the crate has no `libc` dependency to name the
-                // constant, so the value is pinned here.
-                if errno.raw_os_error() != Some(4) {
+                // `ErrorKind::Interrupted` rather than a hard-coded `4`: the
+                // crate has no `libc` dependency to name `EINTR`, and std's
+                // own mapping of the raw errno to this kind is exactly the
+                // portable spelling of it — no numeric constant pinned in
+                // this crate that a future target could falsify.
+                if errno.kind() != std::io::ErrorKind::Interrupted {
                     return Err(Error::Operation("wl_event_loop_dispatch"));
                 }
                 // EINTR: a signal landed mid-poll; retry with the same
