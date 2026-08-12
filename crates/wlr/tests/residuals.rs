@@ -121,6 +121,70 @@ fn removing_a_live_source_stops_its_callbacks() {
 }
 
 #[test]
+fn removed_fd_stays_valid_for_the_rest_of_its_own_callback() {
+    // The C1 regression test: `remove_fd` must not close the descriptor
+    // while the `BorrowedFd` this very `fd_ready` call was handed is still
+    // live. Calls `remove_fd` *before* touching `fd` — unlike
+    // `removing_a_live_source_stops_its_callbacks`, which happens to drain
+    // first and so never exercises this ordering — and then reads through
+    // the same `fd`, which must not fail with `EBADF` ("Bad file
+    // descriptor"): that specific error is what a closed-out-from-under-it
+    // descriptor produces.
+    headless_env();
+    use std::io::Write;
+    struct App {
+        runtime: wlr::Runtime,
+        id: wlr::SourceId,
+        after_remove: Option<Result<usize, rustix::io::Errno>>,
+        turns: u32,
+    }
+    impl wlr::OutputHandler for App {}
+    impl wlr::ToplevelHandler for App {}
+    impl wlr::SeatHandler for App {}
+    impl wlr::FdHandler for App {
+        fn fd_ready(&mut self, source: wlr::SourceId, fd: std::os::fd::BorrowedFd<'_>, _r: wlr::Readiness) {
+            assert_eq!(source, self.id);
+            assert_eq!(self.runtime.remove_fd(self.id), Some(()));
+            // `fd`'s borrow does not end until this call returns; the
+            // descriptor it names must still be open right now.
+            let mut buf = [0u8; 16];
+            self.after_remove = Some(rustix::io::read(fd, &mut buf));
+        }
+    }
+    impl wlr::LoopHandler for App {
+        fn should_stop(&mut self) -> bool {
+            self.turns += 1;
+            self.turns > 4
+        }
+    }
+
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let (r, mut w) = std::io::pipe().expect("pipe");
+    let id = runtime.add_fd(r.into(), wlr::Interest::READABLE);
+    w.write_all(b"x").expect("wake");
+    let mut app = App {
+        runtime: runtime.clone(),
+        id,
+        after_remove: None,
+        turns: 0,
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, wlr::Until::Turns(4))
+        .expect("run");
+
+    match app.after_remove.expect("fd_ready must have fired") {
+        Ok(n) => assert_eq!(n, 1, "the byte written before the run must still be readable"),
+        Err(e) => panic!(
+            "reading `fd` after `remove_fd` failed with {e:?} — if this is \
+             `BADF`, the descriptor was closed while a live `BorrowedFd` \
+             still named it"
+        ),
+    }
+}
+
+#[test]
 fn key_event_for_test_reports_what_it_was_given() {
     let ev = wlr::KeyEvent::for_test(0xff1b /* XKB_KEY_Escape */, wlr::Modifiers::default(), true, 42);
     assert_eq!(ev.keysym(), 0xff1b);

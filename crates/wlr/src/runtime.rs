@@ -86,6 +86,20 @@ pub(crate) struct RuntimeInner {
     /// `register_fd_sources` runs) has nothing here to remove.
     pub(crate) live_sources: RefCell<HashMap<SourceId, NonNull<sys::wl_event_source>>>,
 
+    /// Descriptors [`Runtime::remove_fd`] has withdrawn but not yet closed,
+    /// because the call happened from inside a handler and closing
+    /// synchronously could invalidate a [`BorrowedFd`](std::os::fd::BorrowedFd)
+    /// that handler's own [`FdHandler::fd_ready`](crate::FdHandler::fd_ready)
+    /// call — or one further up the same synchronous call stack — is still
+    /// holding.
+    ///
+    /// Drained by `backend.rs`'s `run_inner`, once per dispatch turn,
+    /// immediately after `wl_event_loop_dispatch` returns: at that point
+    /// every callback invoked during the turn has returned, so no
+    /// `BorrowedFd` handed out during it can still be alive, and closing is
+    /// safe. See [`Runtime::remove_fd`]'s own doc for the full argument.
+    pub(crate) pending_close: RefCell<Vec<OwnedFd>>,
+
     /// The xdg shell, once created. `Option` because a consumer that only
     /// wants a scene never makes one, and because a second one would
     /// advertise a second `xdg_wm_base` global.
@@ -246,6 +260,7 @@ impl Runtime {
                 graphics: RefCell::new(None),
                 rects: RefCell::new(HashMap::new()),
                 live_sources: RefCell::new(HashMap::new()),
+                pending_close: RefCell::new(Vec::new()),
                 xdg_shell: RefCell::new(None),
                 toplevels: RefCell::new(HashMap::new()),
                 tree_to_toplevel: RefCell::new(HashMap::new()),
@@ -269,8 +284,8 @@ impl Runtime {
     /// Registration with the event loop happens inside
     /// [`Backend::run_all`](crate::Backend::run_all) and lives for exactly
     /// that call, so declaring a source during a run has no effect until the
-    /// next one. There is no removal by id in 0.20.1; a source lives as long
-    /// as the runtime.
+    /// next one. [`Runtime::remove_fd`] (0.20.5) withdraws a source before
+    /// its runtime drops.
     pub fn add_fd(&self, fd: OwnedFd, interest: Interest) -> SourceId {
         let id = SourceId(next_id());
         self.inner
@@ -285,29 +300,45 @@ impl Runtime {
     /// too, so no further [`FdHandler::fd_ready`](crate::FdHandler::fd_ready)
     /// fires for it.
     ///
-    /// The descriptor itself is closed as a consequence: it is owned by the
-    /// declaration this removes from `sources`, and dropping that entry
-    /// drops the `OwnedFd` with it.
+    /// The descriptor itself is closed as a consequence — it is owned by the
+    /// declaration this removes from `sources` — but **not necessarily
+    /// synchronously**. Safe to call from inside `id`'s own `fd_ready`
+    /// callback, which is the motivating case, and that is exactly what
+    /// makes synchronous closing wrong: `fd_ready` is handed a
+    /// [`BorrowedFd`](std::os::fd::BorrowedFd) whose contract is that the
+    /// descriptor stays open for the whole call, and closing it out from
+    /// under a live `BorrowedFd` is unsound even though nothing here is
+    /// `unsafe`. So when this is called from inside a handler
+    /// (`fd_ready`'s or, defensively, any other's), the descriptor is
+    /// queued and closed only once `backend.rs`'s `run_inner` finishes the
+    /// dispatch turn currently on the stack — by which point every
+    /// `BorrowedFd` that turn could have handed out is gone. Called
+    /// outside a handler (no run in progress, or between turns), no
+    /// `BorrowedFd` can be live, so the descriptor closes immediately.
     ///
-    /// Safe to call from inside `id`'s own `fd_ready` callback — the
-    /// motivating case, and the one
-    /// [`FdHandler::fd_ready`](crate::FdHandler::fd_ready)'s own doc
-    /// promises works: `wl_event_source_remove` is documented safe to call
-    /// on the very source whose callback is calling it, and this method
-    /// takes no borrow that a re-entrant call into this `Runtime` would
-    /// conflict with.
+    /// `wl_event_source_remove` itself is documented safe to call on the
+    /// very source whose callback is calling it, and this method takes no
+    /// borrow that a re-entrant call into this `Runtime` would conflict
+    /// with.
     ///
     /// `None` if this runtime never issued `id`, or `id` was already
     /// removed — the second call of a double removal misses cleanly.
     pub fn remove_fd(&self, id: SourceId) -> Option<()> {
-        let existed = {
+        let removed = {
             let mut sources = self.inner.sources.borrow_mut();
-            let before = sources.len();
-            sources.retain(|s| s.id != id);
-            sources.len() != before
+            let pos = sources.iter().position(|s| s.id == id)?;
+            sources.remove(pos)
         };
-        if !existed {
-            return None;
+        // Deferred while a handler could be holding a `BorrowedFd` into
+        // this exact descriptor (see this method's own doc); closed
+        // immediately otherwise, so a consumer calling this outside a run
+        // still sees the descriptor closed synchronously, matching the
+        // pre-0.20.5 behaviour for every case that isn't this one's new
+        // re-entrant hazard.
+        if crate::dispatch::in_handler() {
+            self.inner.pending_close.borrow_mut().push(removed.fd);
+        } else {
+            drop(removed.fd);
         }
         if let Some(source) = self.take_live_source(id) {
             use sys::wayland_sys::ffi_dispatch;
@@ -371,6 +402,18 @@ impl Runtime {
         self.inner.live_sources.borrow_mut().clear();
     }
 
+    /// Close every descriptor [`remove_fd`](Runtime::remove_fd) deferred,
+    /// called once per turn by `backend.rs`'s `run_inner`, immediately
+    /// after `wl_event_loop_dispatch` returns — the point at which every
+    /// handler invoked during that turn has returned, so no
+    /// [`BorrowedFd`](std::os::fd::BorrowedFd) into any of these
+    /// descriptors can still be alive. Dropping each `OwnedFd` is what
+    /// actually closes it; an empty list (the ordinary case — most turns
+    /// remove nothing) drops nothing and costs one empty `Vec::clear`.
+    pub(crate) fn drain_pending_closes(&self) {
+        self.inner.pending_close.borrow_mut().clear();
+    }
+
     /// The descriptor `id` names, borrowed for the callback that resolves it.
     ///
     /// Returns `None` for an id this runtime never issued, which delivery
@@ -390,9 +433,16 @@ impl Runtime {
                 .find(|s| s.id == id)
                 .map(|s| s.fd.as_raw_fd())
         }?;
-        // SAFETY: `raw` came from an `OwnedFd` this runtime owns, and this
-        // handle keeps that `OwnedFd` alive for the whole call — nothing
-        // removes a source in 0.20.1, and `f` cannot reach one if it did.
+        // SAFETY: `raw` came from an `OwnedFd` this runtime owns. `f` runs
+        // from inside a handler (this is only ever called from
+        // `backend.rs`'s `on_fd_ready`), so `crate::dispatch::in_handler()`
+        // is true for the whole call — including if `f` calls
+        // `Runtime::remove_fd` on this very id, the motivating case that
+        // method documents. `remove_fd` checks that same flag and defers
+        // closing the descriptor rather than dropping it synchronously,
+        // specifically so this `OwnedFd` — and so `raw` — stays valid for
+        // the whole of `f`'s call, only closing once `run_inner`'s
+        // end-of-turn drain runs after `f` has already returned.
         let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(raw) };
         Some(f(borrowed))
     }
@@ -744,9 +794,10 @@ impl Runtime {
         let entry = self.inner.rects.borrow_mut().remove(&rect)?;
         // SAFETY: `entry.raw` came from `add_rect`/`add_rect_in_toplevel`
         // and the table entry naming it is only ever removed once — by
-        // this call, or (without a matching destroy, see
-        // `forget_toplevel`'s own comment) by the toplevel teardown that
-        // purges it first — so the node has not been destroyed yet.
+        // this call, or (without a matching destroy; see their own
+        // comments) by `forget_toplevel`'s per-toplevel purge or
+        // `clear_toplevels`' run-granularity purge — so the node has not
+        // been destroyed yet.
         unsafe { sys::wlr_scene_node_destroy(&raw mut (*entry.raw.as_ptr()).node) };
         Some(())
     }
@@ -754,8 +805,15 @@ impl Runtime {
     /// Move a rect. `None` if this runtime never issued `rect`.
     pub fn set_rect_position(&self, rect: RectId, x: i32, y: i32) -> Option<()> {
         let raw = self.rect_ptr(rect)?;
-        // SAFETY: rects live as long as this runtime (nothing removes one),
-        // and the table only ever holds pointers `add_rect` created.
+        // SAFETY: `rect_ptr` resolving `rect` means its `RectEntry` is
+        // still in the table — the *only* three places that remove a row
+        // (`remove_rect`, `forget_toplevel`'s per-toplevel purge, and
+        // `clear_toplevels`' run-granularity purge) all drop the row before
+        // or at the moment they establish the node is going away, and none
+        // of them destroy a node while leaving its row behind. So a
+        // resolvable id names a node wlroots has not yet destroyed,
+        // regardless of whether it came from `add_rect` or
+        // `add_rect_in_toplevel`.
         unsafe { sys::wlr_scene_node_set_position(&raw mut (*raw.as_ptr()).node, x, y) };
         Some(())
     }
@@ -763,7 +821,8 @@ impl Runtime {
     /// Resize a rect. `None` if this runtime never issued `rect`.
     pub fn set_rect_size(&self, rect: RectId, width: i32, height: i32) -> Option<()> {
         let raw = self.rect_ptr(rect)?;
-        // SAFETY: as for `set_rect_position`.
+        // SAFETY: as for `set_rect_position` — see that call's own comment
+        // for the current (post-`remove_rect`) argument.
         unsafe { sys::wlr_scene_rect_set_size(raw.as_ptr(), width, height) };
         Some(())
     }
@@ -773,7 +832,9 @@ impl Runtime {
     /// issued `rect`.
     pub fn set_rect_color(&self, rect: RectId, color: [f32; 4]) -> Option<()> {
         let raw = self.rect_ptr(rect)?;
-        // SAFETY: as above; `color` is live for the call and wlroots copies it.
+        // SAFETY: as for `set_rect_position`; `color` is additionally live
+        // for the call and wlroots copies it rather than retaining the
+        // pointer.
         unsafe { sys::wlr_scene_rect_set_color(raw.as_ptr(), color.as_ptr()) };
         Some(())
     }
@@ -782,7 +843,7 @@ impl Runtime {
     /// never issued `rect`.
     pub fn lower_rect_to_bottom(&self, rect: RectId) -> Option<()> {
         let raw = self.rect_ptr(rect)?;
-        // SAFETY: as above.
+        // SAFETY: as for `set_rect_position`.
         unsafe { sys::wlr_scene_node_lower_to_bottom(&raw mut (*raw.as_ptr()).node) };
         Some(())
     }
@@ -919,7 +980,27 @@ impl Runtime {
     /// returned could see a client destroy its toplevel, then call a by-id
     /// mutator that resolves the now-stale entry and dereferences memory
     /// wlroots already freed.
+    ///
+    /// Also purges every rect [`Runtime::add_rect_in_toplevel`] parented
+    /// into one of these toplevels — mirroring [`forget_toplevel`]'s own
+    /// purge, and for the identical reason, just at run granularity instead
+    /// of per-toplevel: a `RectId` is only as good as the `ToplevelId` it
+    /// was parented under, and that id is going stale in the very next
+    /// statement. Without this, a `RectEntry` whose `parent` names a
+    /// toplevel this call is about to forget would outlive the run with no
+    /// listener left to purge it later — `forget_toplevel`'s own purge only
+    /// ever runs while that toplevel's destroy listener is still installed,
+    /// which ends here — so if that toplevel's tree is freed afterward
+    /// (wlroots frees a toplevel's tree, and every child node in it,
+    /// whenever the toplevel itself is eventually destroyed, in this run or
+    /// a later one), the row would keep naming a node wlroots has already
+    /// destroyed, and [`Runtime::remove_rect`] would call
+    /// `wlr_scene_node_destroy` on it a second time.
     pub(crate) fn clear_toplevels(&self) {
+        self.inner
+            .rects
+            .borrow_mut()
+            .retain(|_, entry| entry.parent.is_none());
         self.inner.toplevels.borrow_mut().clear();
         self.inner.tree_to_toplevel.borrow_mut().clear();
     }
@@ -1494,6 +1575,47 @@ mod tests {
             "clear_toplevels must make every previously-recorded id miss, \
              the same outcome an id from a run that has already returned \
              must produce"
+        );
+    }
+
+    /// Mirrors the test above, for the additional purge `clear_toplevels`
+    /// performs: a rect parented into a toplevel via
+    /// `add_rect_in_toplevel` must not survive its announcing run once the
+    /// toplevel owning its tree is forgotten, or a later `remove_rect`
+    /// could call `wlr_scene_node_destroy` on a node wlroots already freed
+    /// along with that tree. Dangling pointers throughout, for the same
+    /// reason the test above uses one: `clear_toplevels` never
+    /// dereferences a `RectEntry`'s pointer, only inserts/removes rows by
+    /// id, so this exercises the real code path without a live wlroots
+    /// object.
+    #[test]
+    fn clear_toplevels_also_purges_rects_parented_into_those_toplevels() {
+        let rt = Runtime::new().expect("runtime");
+        let toplevel = ToplevelId(next_id());
+        let raw = NonNull::<sys::wlr_xdg_toplevel>::dangling();
+        let tree = NonNull::<sys::wlr_scene_tree>::dangling();
+        rt.record_toplevel(toplevel, raw, tree);
+
+        let rect = RectId(next_id());
+        rt.inner.rects.borrow_mut().insert(
+            rect,
+            RectEntry {
+                raw: NonNull::<sys::wlr_scene_rect>::dangling(),
+                parent: Some(toplevel),
+            },
+        );
+        assert!(
+            rt.inner.rects.borrow().contains_key(&rect),
+            "the rect must be recorded before the purge"
+        );
+
+        rt.clear_toplevels();
+
+        assert!(
+            !rt.inner.rects.borrow().contains_key(&rect),
+            "clear_toplevels must purge a rect parented into a toplevel it \
+             just forgot, the same way forget_toplevel does within a \
+             single run"
         );
     }
 }

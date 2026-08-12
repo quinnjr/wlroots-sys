@@ -870,6 +870,14 @@ impl<'d> Backend<'d> {
                 // EINTR: a signal landed mid-poll; retry with the same
                 // timeout.
             }
+            // Every callback this turn's dispatch could have invoked —
+            // including any `FdHandler::fd_ready` that called
+            // `Runtime::remove_fd` on itself or another source — has
+            // returned by now, so no `BorrowedFd` handed out during this
+            // turn can still be alive. This is the one point per turn
+            // `Runtime::remove_fd`'s deferred-close doc promises a close
+            // will actually happen by.
+            runtime.drain_pending_closes();
             if let Some(display) = display {
                 display.flush_clients();
             }
@@ -887,10 +895,10 @@ impl<'d> Backend<'d> {
             // clears its guard before returning, and the only calls into
             // `emit` happen inside the `wl_event_loop_dispatch` call above,
             // which has already returned — so `hooks.should_stop` (which
-            // derefs the pointer) is
-            // the sole reader here and sees no other `&mut S` live. This is
-            // the discharge site `state_ptr`'s own doc requires: the caller
-            // states, right here, why no handler is on the stack.
+            // derefs the pointer) is the sole reader here and sees no other
+            // `&mut S` live. This is the discharge site `state_ptr`'s own
+            // doc requires: the caller states, right here, why no handler
+            // is on the stack.
             let stop = unsafe { (hooks.should_stop)(session.dispatcher.state_ptr()) };
             if stop {
                 return Ok(());
