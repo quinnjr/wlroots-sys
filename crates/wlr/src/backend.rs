@@ -1331,7 +1331,9 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
             // whatever the handler asked for — not "harmless, coalesced"
             // the way a second configure is.
             if !session.runtime.decoration_dispatch_flag(id) {
-                session.runtime.set_decoration_mode(id, true);
+                session
+                    .runtime
+                    .set_decoration_mode(id, crate::DecorationMode::ServerSide);
             }
         }
         Event::Key {
@@ -1835,7 +1837,7 @@ unsafe extern "C" fn on_surface_commit<S: Handlers>(
         // true. See `Runtime::set_decoration_mode`'s own doc for the full
         // argument. Two cases follow from whether a `request_mode` already
         // ran for this decoration before this commit:
-        if let Some(server_side) = (*session).runtime.take_staged_decoration_mode(id) {
+        if let Some(mode) = (*session).runtime.take_staged_decoration_mode(id) {
             // It did: the client called `set_mode`/`unset_mode` before
             // committing, `on_decoration_request_mode` already gave the
             // handler its say, and the resulting decision — the handler's,
@@ -1843,21 +1845,34 @@ unsafe extern "C" fn on_surface_commit<S: Handlers>(
             // because the surface was not yet initialized then. Flush it
             // now; `set_decoration_mode` takes the immediate path this
             // time, since `initialized` just went true.
-            (*session).runtime.set_decoration_mode(id, server_side);
-        } else if let Some(preference) = (*session).runtime.decoration_requested_preference(id) {
-            // It did not: a decoration exists (`preference` would be
-            // `None` above otherwise) but the client never called
-            // `set_mode` — legal, and what a client that wants the
-            // compositor to just decide does. Nothing has consulted the
-            // handler for it yet, so do that now, through the same event a
-            // real `request_mode` would produce. `deliver_all`'s arm
-            // answers it, and — since `initialized` is already true here —
-            // that answer is sent immediately rather than staged again.
-            (*session).dispatcher.emit(
-                &*session,
-                Event::RequestDecorationMode(id, preference),
-                deliver,
-            );
+            (*session).runtime.set_decoration_mode(id, mode);
+        } else if !(*session).runtime.decoration_answered(id) {
+            // It did not, *and* nothing else has answered this decoration
+            // either. The guard is `decoration_answered`, not "nothing is
+            // staged": the `ToplevelInitialCommit` emitted just above runs
+            // with `initialized` already true, so a handler that answers
+            // from `initial_commit` sends immediately and leaves `staged`
+            // empty — indistinguishable, to a staged-only check, from a
+            // decoration nobody has touched. 0.20.8 made exactly that
+            // mistake and overrode such an answer with the server-side
+            // default one statement later. `answered` latches on both of
+            // `set_decoration_mode`'s branches, so it separates the two.
+            if let Some(preference) = (*session).runtime.decoration_requested_preference(id) {
+                // A decoration exists (`decoration_requested_preference`
+                // returns `None` for a toplevel without one) but the client
+                // never called `set_mode` — legal, and what a client that
+                // wants the compositor to just decide does. Nothing has
+                // consulted the handler for it yet, so do that now, through
+                // the same event a real `request_mode` would produce.
+                // `deliver_all`'s arm answers it, and — since `initialized`
+                // is already true here — that answer is sent immediately
+                // rather than staged again.
+                (*session).dispatcher.emit(
+                    &*session,
+                    Event::RequestDecorationMode(id, preference),
+                    deliver,
+                );
+            }
         }
 
         // xdg-shell requires an answer to the first commit. The handler may
@@ -2064,6 +2079,54 @@ unsafe extern "C" fn on_new_toplevel_decoration<S: Handlers>(
         drop(displaced);
 
         (*session).runtime.record_decoration(id, raw);
+
+        // A decoration created *after* its toplevel's initial commit has
+        // already missed `on_surface_commit`'s "the client never asked"
+        // path, which runs once and has run. That ordering is legal: the
+        // protocol only forbids `get_toplevel_decoration` once a buffer has
+        // been attached, so a client may commit with no buffer, wait for
+        // `xdg_surface.configure`, create its decoration, and wait for a
+        // decoration configure before attaching one. Such a client that
+        // never calls `set_mode` would then wait forever — nothing else
+        // would ever answer it. So give the handler its say here instead,
+        // through the same event, whenever the surface is already
+        // initialized (which is exactly the "we are past that commit" case;
+        // when it is false the commit path has not run yet and will handle
+        // this decoration itself).
+        //
+        // `initialized`, not `initial_commit`: the latter is only true
+        // during the commit that sets it, and this runs outside any commit.
+        //
+        // SAFETY: `toplevel_entry` resolves through the same table
+        // `on_toplevel_destroy` purges before wlroots frees the toplevel, so
+        // a present entry names a live one — and this runs from
+        // `get_toplevel_decoration`, which wlroots only dispatches for a
+        // toplevel resource the client still holds. `base` is set once at
+        // role-object creation and never cleared while the toplevel lives
+        // (`configure_toplevel` documents the same claim); it is null-checked
+        // here anyway, since this path is reached from a client request
+        // rather than from a wlroots callback that guarantees the role is
+        // established. `unwrap_or(false)` makes a missing entry mean "not
+        // initialized", which skips the emission — the safe direction, since
+        // an id with no toplevel has nothing to answer.
+        let initialized = (*session)
+            .runtime
+            .toplevel_entry(id)
+            .map(|e| {
+                let base = (*e.raw.as_ptr()).base;
+                !base.is_null() && (*base).initialized
+            })
+            .unwrap_or(false);
+        if initialized && !(*session).runtime.decoration_answered(id) {
+            let requested = (*raw.as_ptr()).requested_mode;
+            let preference = crate::decoration::requested_preference(requested);
+            let deliver = (*session).deliver;
+            (*session).dispatcher.emit(
+                &*session,
+                Event::RequestDecorationMode(id, preference),
+                deliver,
+            );
+        }
     }
 }
 
@@ -2096,7 +2159,7 @@ unsafe extern "C" fn on_decoration_request_mode<S: Handlers>(
             return;
         };
         let requested = (*decoration.as_ptr()).requested_mode;
-        let preference = crate::decoration::client_side_preference(requested);
+        let preference = crate::decoration::requested_preference(requested);
 
         let deliver = (*session).deliver;
         (*session).dispatcher.emit(

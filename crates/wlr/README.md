@@ -24,27 +24,54 @@ follows on the same branches, not because they are on crates.io yet.
 The API is held identical across all four, so once they ship, moving between
 them is a version change rather than a code change.
 
-## 0.20.8
+## 0.20.9
 
-xdg-decoration.
+xdg-decoration. Supersedes the yanked 0.20.8 — use this one.
 
 - `Runtime::create_xdg_decoration_manager` / `Runtime::set_decoration_mode`
   — the zxdg_decoration_manager_v1 global and per-toplevel mode setting.
 - `ToplevelHandler::request_decoration_mode` — additive, defaulted; the
   dispatch layer answers server-side when the handler stays silent.
+- `DecorationMode` — `ClientSide` / `ServerSide`, spoken by both halves of
+  the negotiation. The client's stated preference arrives as
+  `Option<DecorationMode>` (`None` = stated nothing) and the answer takes a
+  `DecorationMode`, so honoring the client is passing the value straight
+  through. 0.20.8 used a `bool` on each side with *opposite* polarity and is
+  yanked for it; see below.
 - A decoration's mode is answered at the toplevel's *initial commit*, not
   when the client's request arrives: wlroots cannot be told a mode before
   the surface's first role commit initializes it, so `set_decoration_mode`
   stages the choice and the initial commit flushes it. Last write wins, and
   the staging is invisible to the caller. A toplevel whose client never
   states a preference still gets the handler its say at that commit, with
-  `client_side_preferred: None`; handler silence means server-side.
+  `preference: None`; handler silence means server-side.
+- A mode chosen from `ToplevelHandler::initial_commit` is now honored. In
+  0.20.8 the surface was already initialized at that point, so the answer
+  went out immediately and left nothing staged — which the "has this been
+  answered?" check misread as "nobody has answered", and the server-side
+  default overrode the compositor's choice one step later.
+- A decoration created *after* its toplevel's initial commit is now
+  answered. That ordering is legal (the protocol only forbids
+  `get_toplevel_decoration` once a buffer is attached), and in 0.20.8 such a
+  decoration whose client never called `set_mode` was never answered at all,
+  so the client waited forever for a configure it never received.
 - `Runtime::configure_toplevel` (0.20.7) is now covered by the same
   pre-initialization guard: called before its toplevel's initial commit it
   is a no-op returning `Some(())`, rather than tripping wlroots'
   `surface->initialized` assertion. Nothing is lost — the initial commit
   schedules a configure of its own, carrying any state that was staged.
   Behavior hardening of a documented contract, not a semantic break.
+
+## 0.20.8 — yanked
+
+Never use this version. Its decoration API took a `bool` on both sides of
+the negotiation, and the two had opposite polarity: the handler's `true`
+meant client-side while the mutator's `true` meant server-side, so the
+natural "honor what the client asked for" implementation passed the value
+through and silently did the opposite. It compiled without warning. Caught
+by review after publication and yanked with no dependents, which is why
+0.20.9 is free to replace the surface rather than deprecate around it.
+0.20.9 is otherwise the same feature, plus two negotiation fixes.
 
 ## 0.20.7
 

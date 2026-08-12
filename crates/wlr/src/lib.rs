@@ -92,6 +92,7 @@ mod toplevel;
 
 pub use backend::{Backend, Until};
 pub use buffer::BufferId;
+pub use decoration::DecorationMode;
 pub use display::{Display, EventLoop};
 pub use error::{Error, Result};
 pub use handler::{FdHandler, Handlers, LoopHandler, OutputHandler, SeatHandler, ToplevelHandler};

@@ -86,19 +86,23 @@ impl wlr::ToplevelHandler for App {
     fn request_decoration_mode(
         &mut self,
         id: wlr::ToplevelId,
-        client_side_preferred: Option<bool>,
+        preference: Option<wlr::DecorationMode>,
     ) {
         // Logged, then overridden: whatever the client asked for, this
         // compositor draws its own decorations. Calling
         // `set_decoration_mode` here is what stops the dispatch layer's
         // server-side default from firing a second time once this method
         // returns — it would be redundant in this particular example (the
-        // default is server-side too), but a real compositor that wants to
-        // *honour* `client_side_preferred` needs exactly this call.
+        // default is server-side too), but a real compositor needs exactly
+        // this call. One that wanted to *honour* the client instead would
+        // write `set_decoration_mode(id, preference.unwrap_or(ServerSide))`:
+        // the same type comes in and goes out, so there is no polarity to
+        // get backwards.
         println!(
-            "decoration mode requested for {id:?}: client_side_preferred={client_side_preferred:?}, forcing server-side"
+            "decoration mode requested for {id:?}: preference={preference:?}, forcing server-side"
         );
-        self.runtime.set_decoration_mode(id, true);
+        self.runtime
+            .set_decoration_mode(id, wlr::DecorationMode::ServerSide);
     }
 }
 

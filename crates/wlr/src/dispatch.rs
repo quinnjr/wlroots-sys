@@ -44,7 +44,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
-use crate::{Edges, OutputId, ToplevelId};
+use crate::{DecorationMode, Edges, OutputId, ToplevelId};
 
 /// An event awaiting delivery.
 ///
@@ -83,12 +83,12 @@ pub(crate) enum Event {
     RequestResize(ToplevelId, Edges),
 
     /// The client asked for a decoration mode on a toplevel's
-    /// `zxdg_toplevel_decoration_v1`. The `Option<bool>` is read from
-    /// `wlr_xdg_toplevel_decoration_v1::requested_mode` at emission time —
-    /// see [`crate::decoration::client_side_preference`] — not re-read at
-    /// delivery, so a deferred event still reports what the client actually
-    /// asked for.
-    RequestDecorationMode(ToplevelId, Option<bool>),
+    /// `zxdg_toplevel_decoration_v1`. The `Option<DecorationMode>` is read
+    /// from `wlr_xdg_toplevel_decoration_v1::requested_mode` at emission
+    /// time — see [`crate::decoration::requested_preference`] — not re-read
+    /// at delivery, so a deferred event still reports what the client
+    /// actually asked for.
+    RequestDecorationMode(ToplevelId, Option<DecorationMode>),
 
     Key {
         keysym: u32,

@@ -4,7 +4,7 @@
 //! every handler as `&mut S`. Every method is defaulted, so a consumer
 //! implements only what they use.
 
-use crate::{Edges, KeyEvent, Output, OutputId, Toplevel, ToplevelId};
+use crate::{DecorationMode, Edges, KeyEvent, Output, OutputId, Toplevel, ToplevelId};
 
 /// Output lifecycle and frame events.
 ///
@@ -290,24 +290,32 @@ pub trait ToplevelHandler {
     /// The client (un)stated a decoration-mode preference for this toplevel,
     /// via `zxdg_decoration_manager_v1`/`zxdg_toplevel_decoration_v1`.
     ///
-    /// `client_side_preferred`: `Some(true)` means the client asked for
-    /// client-side decorations, `Some(false)` means it asked for
-    /// server-side, and `None` means it stated no preference at all
-    /// (`requested_mode` reads `WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_NONE`).
+    /// `preference` is what the client asked for:
+    /// `Some(`[`DecorationMode::ClientSide`]`)` or
+    /// `Some(`[`DecorationMode::ServerSide`]`)`, or `None` if it stated no
+    /// preference at all (`requested_mode` reads
+    /// `WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_NONE`) — a client that has not
+    /// called `set_mode`, which the protocol allows and which is also how
+    /// this fires for a decoration whose client never asks at all.
     ///
     /// Answer with
     /// [`Runtime::set_decoration_mode`](crate::Runtime::set_decoration_mode)
-    /// from inside this call. wlroots requires a mode be set before the
-    /// toplevel's initial commit is answered, so — same coalescing pattern
-    /// as [`request_maximize`](ToplevelHandler::request_maximize)'s bare
-    /// configure — the dispatch layer sends the server-side default after
-    /// this method returns, but *only* if this method sent nothing itself:
-    /// unlike the configure case, sending twice here is not harmless (it
-    /// would tell the client server-side and then, in the same turn,
-    /// whatever this method asked for), so the default is conditional
-    /// rather than unconditional.
-    fn request_decoration_mode(&mut self, id: ToplevelId, client_side_preferred: Option<bool>) {
-        let _ = (id, client_side_preferred);
+    /// from inside this call. It takes the same [`DecorationMode`], so
+    /// honoring the client is `set_decoration_mode(id, pref)` for whatever
+    /// `pref` arrived — a preference is only a request, though, and
+    /// answering with the other variant is equally valid.
+    ///
+    /// wlroots requires a mode be set before the toplevel's initial commit
+    /// is answered, so — same coalescing pattern as
+    /// [`request_maximize`](ToplevelHandler::request_maximize)'s bare
+    /// configure — the dispatch layer sends
+    /// [`DecorationMode::ServerSide`] after this method returns, but *only*
+    /// if this method sent nothing itself: unlike the configure case,
+    /// sending twice here is not harmless (it would tell the client
+    /// server-side and then, in the same turn, whatever this method asked
+    /// for), so the default is conditional rather than unconditional.
+    fn request_decoration_mode(&mut self, id: ToplevelId, preference: Option<DecorationMode>) {
+        let _ = (id, preference);
     }
 }
 

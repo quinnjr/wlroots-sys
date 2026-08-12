@@ -46,8 +46,50 @@ fn set_decoration_mode_on_a_dead_id_is_none() {
     headless_env();
     let runtime = wlr::Runtime::new().expect("runtime");
     assert_eq!(
-        runtime.set_decoration_mode(wlr::ToplevelId::dangling_for_test(), true),
+        runtime.set_decoration_mode(
+            wlr::ToplevelId::dangling_for_test(),
+            wlr::DecorationMode::ServerSide
+        ),
         None
+    );
+}
+
+/// The polarity trap 0.20.8 shipped, pinned shut by the type system.
+///
+/// In 0.20.8 both sides of the negotiation were `bool` with *opposite*
+/// meanings — the handler's `true` meant client-side, the mutator's `true`
+/// meant server-side — so the natural "honour whatever the client asked
+/// for" body passed the value straight through and did the exact opposite.
+/// It compiled silently; that is why it survived review and reached
+/// crates.io.
+///
+/// Now both sides speak [`wlr::DecorationMode`], so pass-through *is* the
+/// honouring implementation and the inverted one cannot be written by
+/// accident. This test is that claim made executable: it compiles only
+/// while a preference can be forwarded to the mutator unmodified.
+#[test]
+fn honouring_the_client_is_a_pass_through() {
+    struct App;
+    impl wlr::ToplevelHandler for App {
+        fn request_decoration_mode(
+            &mut self,
+            id: wlr::ToplevelId,
+            preference: Option<wlr::DecorationMode>,
+        ) {
+            let runtime = wlr::Runtime::new().expect("runtime");
+            // No negation, no mapping table, no remembering which way a
+            // bool points — the value the client stated is the value the
+            // compositor answers with.
+            runtime.set_decoration_mode(id, preference.unwrap_or(wlr::DecorationMode::ServerSide));
+        }
+    }
+    let _ = App;
+
+    // And the variants stay distinct values, so "honouring" is observable
+    // rather than vacuous.
+    assert_ne!(
+        wlr::DecorationMode::ClientSide,
+        wlr::DecorationMode::ServerSide
     );
 }
 

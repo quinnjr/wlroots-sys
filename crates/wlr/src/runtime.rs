@@ -34,7 +34,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::buffer::create_pixel_buffer;
-use crate::decoration::DecorationEntry;
+use crate::decoration::{DecorationEntry, DecorationMode};
 use crate::id::{SourceId, next_id};
 use crate::scene::RectId;
 use crate::{Backend, BufferId, Display, Error, Interest, Output, Result, ToplevelId, sys};
@@ -1377,6 +1377,7 @@ impl Runtime {
                 raw,
                 mode_set_this_dispatch: std::cell::Cell::new(false),
                 staged: std::cell::Cell::new(None),
+                answered: std::cell::Cell::new(false),
             },
         );
     }
@@ -1430,12 +1431,34 @@ impl Runtime {
     /// `backend.rs`'s `on_surface_commit` at the toplevel's initial commit;
     /// see [`DecorationEntry`](crate::decoration::DecorationEntry)'s own doc
     /// for the full mechanism.
-    pub(crate) fn take_staged_decoration_mode(&self, id: ToplevelId) -> Option<bool> {
+    pub(crate) fn take_staged_decoration_mode(&self, id: ToplevelId) -> Option<DecorationMode> {
         self.inner
             .decorations
             .borrow()
             .get(&id)
             .and_then(|e| e.staged.take())
+    }
+
+    /// Whether `id`'s decoration has ever been given a mode — staged or
+    /// sent, by the handler or by the dispatch layer's own default — since
+    /// it was created.
+    ///
+    /// This is the guard on both synthetic "the client never asked" paths
+    /// (`on_surface_commit`'s initial-commit block and
+    /// `on_new_toplevel_decoration`'s late-creation block). `false` for an
+    /// id with no decoration, which correctly stops either path from
+    /// emitting for a toplevel that has nothing to answer — both check for
+    /// a decoration's existence separately.
+    ///
+    /// See [`DecorationEntry::answered`](crate::decoration::DecorationEntry)
+    /// for why this exists rather than reusing `staged`/`mode_set_this_dispatch`.
+    pub(crate) fn decoration_answered(&self, id: ToplevelId) -> bool {
+        self.inner
+            .decorations
+            .borrow()
+            .get(&id)
+            .map(|e| e.answered.get())
+            .unwrap_or(false)
     }
 
     /// Whether `id` has a decoration, and if so, the client's current
@@ -1444,7 +1467,10 @@ impl Runtime {
     /// [`crate::decoration::client_side_preference`], not cached, since the
     /// only caller (`on_surface_commit`'s "nothing has ever asked for this
     /// decoration" path) wants whatever is true *now*.
-    pub(crate) fn decoration_requested_preference(&self, id: ToplevelId) -> Option<Option<bool>> {
+    pub(crate) fn decoration_requested_preference(
+        &self,
+        id: ToplevelId,
+    ) -> Option<Option<DecorationMode>> {
         let raw = self.decoration_ptr(id)?;
         // SAFETY: a present `decorations` entry names a decoration still
         // linked into the table — removed synchronously, before wlroots
@@ -1452,7 +1478,7 @@ impl Runtime {
         // runs first (see `RuntimeInner::decorations`'s own doc) — so `raw`
         // is live.
         let requested = unsafe { (*raw.as_ptr()).requested_mode };
-        Some(crate::decoration::client_side_preference(requested))
+        Some(crate::decoration::requested_preference(requested))
     }
 
     /// Stage a size on the toplevel's next configure, in **content**
@@ -1617,12 +1643,14 @@ impl Runtime {
     ///
     /// Call this from
     /// [`ToplevelHandler::request_decoration_mode`](crate::ToplevelHandler::request_decoration_mode)
-    /// to answer the client's request. `server_side` is the mode to send —
-    /// `true` for `WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE`, `false`
-    /// for `..._CLIENT_SIDE` — not a toggle. Calling this marks the request
-    /// currently in flight as answered, so the dispatch layer's server-side
-    /// default (see `request_decoration_mode`'s own doc) does not also fire
-    /// once the handler returns.
+    /// to answer the client's request. `mode` is the answer to send, named
+    /// rather than encoded: the same [`DecorationMode`] the handler received
+    /// the client's preference in, so honoring that preference is passing it
+    /// straight through and nothing has to be remembered about which way a
+    /// `bool` points. Calling this marks the request currently in flight as
+    /// answered, so the dispatch layer's server-side default (see
+    /// `request_decoration_mode`'s own doc) does not also fire once the
+    /// handler returns.
     ///
     /// **Staged, not always sent.** wlroots asserts `surface->initialized`
     /// inside `wlr_xdg_surface_schedule_configure`, which
@@ -1631,7 +1659,7 @@ impl Runtime {
     /// has not necessarily happened yet: the normal client sequence calls
     /// `set_mode` (firing `request_decoration_mode`) *before* its initial
     /// `wl_surface.commit`. So this method sends immediately only if the
-    /// surface is already initialized; otherwise it records `server_side`
+    /// surface is already initialized; otherwise it records `mode`
     /// for `backend.rs`'s `on_surface_commit` to send for real at the
     /// toplevel's initial commit — overwriting whatever was staged before,
     /// the same "last write wins" shape [`set_toplevel_size`](Runtime::set_toplevel_size)
@@ -1644,7 +1672,7 @@ impl Runtime {
     /// decoration object — a client that never created one, or whose
     /// decoration has since been destroyed. See `set_toplevel_size`'s own
     /// doc for what "stale" means for a `ToplevelId` in general.
-    pub fn set_decoration_mode(&self, id: ToplevelId, server_side: bool) -> Option<()> {
+    pub fn set_decoration_mode(&self, id: ToplevelId, mode: DecorationMode) -> Option<()> {
         let raw = self.decoration_ptr(id)?;
         let entry = self.toplevel_entry(id)?;
         // SAFETY: a present `decorations` entry implies a live toplevel too
@@ -1655,11 +1683,6 @@ impl Runtime {
         let initialized = unsafe { (*(*entry.raw.as_ptr()).base).initialized };
 
         if initialized {
-            let mode = if server_side {
-                sys::wlr_xdg_toplevel_decoration_v1_mode::WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE
-            } else {
-                sys::wlr_xdg_toplevel_decoration_v1_mode::WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
-            };
             // SAFETY: a present entry names a decoration that is still
             // linked into `self.inner.decorations` — removed synchronously,
             // before wlroots frees it, by
@@ -1668,7 +1691,7 @@ impl Runtime {
             // and `initialized` being true means the
             // `assert(surface->initialized)` this method's own doc
             // describes cannot fire.
-            unsafe { sys::wlr_xdg_toplevel_decoration_v1_set_mode(raw.as_ptr(), mode) };
+            unsafe { sys::wlr_xdg_toplevel_decoration_v1_set_mode(raw.as_ptr(), mode.to_raw()) };
             // This call is now the authoritative, on-the-wire answer, so
             // any earlier staged-but-unflushed decision must not survive
             // it — otherwise `on_surface_commit`'s flush (or a second call
@@ -1680,11 +1703,18 @@ impl Runtime {
             // for why this is pulled out rather than inlined here.
             self.mark_decoration_answered(id);
         } else if let Some(entry) = self.inner.decorations.borrow().get(&id) {
-            entry.staged.set(Some(server_side));
+            entry.staged.set(Some(mode));
         }
 
         if let Some(entry) = self.inner.decorations.borrow().get(&id) {
             entry.mode_set_this_dispatch.set(true);
+            // Latched here, on both branches, because "a mode was chosen"
+            // is true whether it went out on the wire or is waiting for the
+            // initial commit to send it. This is what stops either
+            // synthetic "the client never asked" path from later
+            // overriding this decision with the server-side default; see
+            // `DecorationEntry::answered`'s own doc.
+            entry.answered.set(true);
         }
         Some(())
     }
@@ -2367,7 +2397,7 @@ mod tests {
         );
 
         assert_eq!(
-            rt.set_decoration_mode(id, true),
+            rt.set_decoration_mode(id, DecorationMode::ServerSide),
             Some(()),
             "staging still reports success to the caller"
         );
@@ -2377,7 +2407,7 @@ mod tests {
         );
         assert_eq!(
             rt.take_staged_decoration_mode(id),
-            Some(true),
+            Some(DecorationMode::ServerSide),
             "the staged decision must be retrievable, and must be the value passed in"
         );
         assert_eq!(
@@ -2430,10 +2460,10 @@ mod tests {
             .get(&id)
             .expect("just recorded")
             .staged
-            .set(Some(true));
+            .set(Some(DecorationMode::ServerSide));
         assert_eq!(
             rt.inner.decorations.borrow().get(&id).unwrap().staged.get(),
-            Some(true),
+            Some(DecorationMode::ServerSide),
             "the stage must be visible before `mark_decoration_answered` \
              runs, or this test would not be exercising the hazard at all"
         );
@@ -2448,5 +2478,209 @@ mod tests {
              later flush would resend it and override the answer that was \
              just sent on the immediate branch"
         );
+    }
+
+    /// Record a toplevel with a heap-allocated `wlr_xdg_surface` whose
+    /// `initialized` flag is `init`, plus a decoration for it, and return
+    /// the id.
+    ///
+    /// `alloc_zeroed` rather than `Box::new(mem::zeroed())`, for the reason
+    /// the staged-decision test above already documents: both structs embed
+    /// `wl_listener`s whose bare function pointers are UB to *materialise*
+    /// as a zero value, so the bytes are only ever touched through a raw
+    /// pointer. `initialized` and `base` are the only fields these tests, or
+    /// the code paths they exercise, ever read.
+    ///
+    /// Both allocations are deliberately leaked. These tests never enter
+    /// wlroots, so nothing frees them, and an allocation reclaimed at end of
+    /// scope would leave the table holding a dangling `base` for any later
+    /// assertion.
+    fn record_toplevel_with_surface(rt: &Runtime, init: bool) -> ToplevelId {
+        use std::alloc::{Layout, alloc_zeroed};
+
+        let id = ToplevelId(next_id());
+        // SAFETY: both layouts are non-zero-sized, so `alloc_zeroed` returns
+        // either null (checked) or a suitably aligned, zeroed allocation of
+        // exactly that size.
+        let surface = unsafe { alloc_zeroed(Layout::new::<sys::wlr_xdg_surface>()) }
+            .cast::<sys::wlr_xdg_surface>();
+        assert!(!surface.is_null(), "allocation failed");
+        let toplevel = unsafe { alloc_zeroed(Layout::new::<sys::wlr_xdg_toplevel>()) }
+            .cast::<sys::wlr_xdg_toplevel>();
+        assert!(!toplevel.is_null(), "allocation failed");
+        // SAFETY: both allocations are freshly zeroed and exclusively owned;
+        // `initialized` (a `bool`) and `base` (a `*mut wlr_xdg_surface`) are
+        // both in bounds.
+        unsafe {
+            (*surface).initialized = init;
+            (*toplevel).base = surface;
+        }
+        rt.record_toplevel(
+            id,
+            NonNull::new(toplevel).expect("allocation succeeded"),
+            NonNull::<sys::wlr_scene_tree>::dangling(),
+        );
+        rt.record_decoration(
+            id,
+            NonNull::<sys::wlr_xdg_toplevel_decoration_v1>::dangling(),
+        );
+        id
+    }
+
+    /// H2, at the table level: a decision staged before the initial commit
+    /// marks the decoration answered, and stays answered after the flush
+    /// takes it.
+    ///
+    /// `on_surface_commit` picks between "flush the staged decision" and
+    /// "nobody has answered, so ask the handler" — and in 0.20.8 the second
+    /// arm's guard was "nothing is staged", which the flush itself has just
+    /// made true. `decoration_answered` is the guard that survives the
+    /// flush; this pins that it does.
+    #[test]
+    fn a_staged_decision_marks_the_decoration_answered_and_stays_answered_after_the_flush() {
+        let rt = Runtime::new().expect("runtime");
+        let id = record_toplevel_with_surface(&rt, false);
+
+        assert!(
+            !rt.decoration_answered(id),
+            "a freshly recorded decoration has been answered by nobody"
+        );
+
+        rt.set_decoration_mode(id, DecorationMode::ClientSide);
+        assert!(
+            rt.decoration_answered(id),
+            "staging is answering — the decision exists, it is merely not on the wire yet"
+        );
+
+        assert_eq!(
+            rt.take_staged_decoration_mode(id),
+            Some(DecorationMode::ClientSide),
+            "the flush must retrieve exactly what was staged"
+        );
+        assert!(
+            rt.decoration_answered(id),
+            "and taking the staged value must NOT un-answer the decoration: this is \
+             the 0.20.8 bug — `on_surface_commit` would fall through to the \
+             synthetic-request arm and override a real decision with the server-side default"
+        );
+    }
+
+    /// H2's other half: an *immediate* answer (surface already initialized,
+    /// so nothing is ever staged) also marks the decoration answered.
+    ///
+    /// This is the sequence that actually bit — a handler answering from
+    /// `initial_commit`, where `initialized` is already true. `staged` is
+    /// empty the whole way through, so a staged-only guard cannot tell this
+    /// apart from a decoration nobody touched.
+    ///
+    /// Driven through `mark_decoration_answered` plus the latch rather than
+    /// through `set_decoration_mode`, because the immediate branch makes a
+    /// real FFI call that segfaults on a fabricated surface — see
+    /// `mark_decoration_answered`'s own doc for why that is established
+    /// empirically rather than assumed.
+    #[test]
+    fn an_immediate_answer_leaves_nothing_staged_but_still_reads_as_answered() {
+        let rt = Runtime::new().expect("runtime");
+        let id = record_toplevel_with_surface(&rt, true);
+
+        {
+            let decorations = rt.inner.decorations.borrow();
+            let entry = decorations.get(&id).expect("just recorded");
+            entry.answered.set(true);
+            entry.mode_set_this_dispatch.set(true);
+        }
+        rt.mark_decoration_answered(id);
+
+        assert_eq!(
+            rt.take_staged_decoration_mode(id),
+            None,
+            "an immediate answer stages nothing"
+        );
+        assert!(
+            rt.decoration_answered(id),
+            "yet the decoration is answered — the distinction a staged-only guard \
+             cannot make, and the reason `answered` exists"
+        );
+    }
+
+    /// H3, at the table level: a decoration created after its toplevel's
+    /// initial commit starts out unanswered on an already-initialized
+    /// surface, which is exactly the condition
+    /// `on_new_toplevel_decoration`'s late-creation branch tests before
+    /// giving the handler its say.
+    ///
+    /// Without that branch such a decoration is never answered by anything
+    /// — `on_surface_commit`'s once-only path has already run — and a client
+    /// that never calls `set_mode` waits forever for a configure.
+    #[test]
+    fn a_decoration_created_after_the_initial_commit_starts_unanswered() {
+        let rt = Runtime::new().expect("runtime");
+        let id = record_toplevel_with_surface(&rt, true);
+
+        let entry = rt.toplevel_entry(id).expect("recorded");
+        // SAFETY: `record_toplevel_with_surface` leaked a live, non-null
+        // `base` for this id and nothing has freed it.
+        let initialized = unsafe {
+            let base = (*entry.raw.as_ptr()).base;
+            !base.is_null() && (*base).initialized
+        };
+        assert!(
+            initialized,
+            "the premise of the late-creation branch: the commit has already happened"
+        );
+        assert!(
+            !rt.decoration_answered(id),
+            "and nothing has answered this decoration — so the branch must fire, \
+             or this client never gets a decoration configure at all"
+        );
+
+        // Once answered, the branch must not fire again on any later
+        // trigger. The latch is set directly rather than through
+        // `set_decoration_mode`: this surface is `initialized`, so that call
+        // would take the immediate branch and make the real
+        // `wlr_xdg_toplevel_decoration_v1_set_mode` FFI call, which
+        // segfaults on a fabricated surface — see `mark_decoration_answered`'s
+        // own doc. `set_decoration_mode`'s latching on both branches is
+        // covered by the staged test above.
+        rt.inner
+            .decorations
+            .borrow()
+            .get(&id)
+            .expect("recorded")
+            .answered
+            .set(true);
+        assert!(
+            rt.decoration_answered(id),
+            "the latch holds, so a second announcement cannot re-ask and override"
+        );
+    }
+
+    /// `answered` is per-decoration, not global: answering one toplevel's
+    /// decoration must not suppress the synthetic request for another's.
+    #[test]
+    fn answered_is_scoped_to_one_decoration() {
+        let rt = Runtime::new().expect("runtime");
+        let a = record_toplevel_with_surface(&rt, false);
+        let b = record_toplevel_with_surface(&rt, false);
+
+        rt.set_decoration_mode(a, DecorationMode::ClientSide);
+
+        assert!(rt.decoration_answered(a), "the one that was answered");
+        assert!(
+            !rt.decoration_answered(b),
+            "must not answer for its neighbour, or a second window silently \
+             loses its negotiation"
+        );
+    }
+
+    /// A decoration with no entry at all reads as unanswered.
+    ///
+    /// Both callers check for the decoration's existence separately, so this
+    /// is the safe default: it can only lead to *not* suppressing a request
+    /// that was never going to be emitted.
+    #[test]
+    fn decoration_answered_is_false_for_an_unknown_id() {
+        let rt = Runtime::new().expect("runtime");
+        assert!(!rt.decoration_answered(ToplevelId(next_id())));
     }
 }
