@@ -236,8 +236,8 @@ impl Layer {
 ///
 /// `Default` is every field `false` — anchored to no edge, which
 /// wlr-layer-shell treats as "centered, sized to the surface's own desired
-/// size" — matching [`Edges`]' own `Default`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// size" — matching [`Edges`](crate::Edges)' own `Default`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Anchor {
     /// Anchored to the output's top edge.
     pub top: bool,
