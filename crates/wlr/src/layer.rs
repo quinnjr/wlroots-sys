@@ -351,9 +351,15 @@ impl<'h> LayerSurface<'h> {
     /// which output a given surface belongs on), not a defect.
     pub fn output_id(&self) -> Option<OutputId> {
         // SAFETY: the handle's lifetime guarantees the layer surface is
-        // live; `output` is read and null-checked before use, and when
-        // non-null this crate's own `on_new_output` guarantees its addon set
-        // is initialised.
+        // live; `output` is read and null-checked before use, so a null
+        // `output` returns `None` without any dereference. A *non-null*
+        // `output` is guaranteed to name a live output: the only writer is
+        // `Runtime::set_layer_surface_output`, and `Runtime::forget_output`
+        // nulls this field on every output destroy before wlroots frees the
+        // output (it is the single choke point on the destroy path — see its
+        // own doc), so a stale pointer to a freed output is never left here to
+        // dereference. When non-null this crate's own `on_new_output`
+        // guarantees the named output's addon set is initialised.
         unsafe {
             let output = (*self.raw.as_ptr()).output;
             if output.is_null() {

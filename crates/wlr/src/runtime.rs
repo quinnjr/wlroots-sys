@@ -221,24 +221,54 @@ pub(crate) struct RuntimeInner {
     /// the obligation this exists to catch a violation of: every clone of
     /// this handle must not outlive the `Display` it was initialised
     /// against, since wlroots frees the output layout (and the scene-output
-    /// layout attached to it) when that display dies, and `init_output`/
-    /// `commit_output`/every rect-and-buffer mutator dereferences a pointer
-    /// that shares the layout's lifetime.
+    /// layout attached to it) when that display dies, and the graphics
+    /// mutators dereference a pointer that shares the layout's lifetime.
     ///
-    /// Read, not just written: [`Runtime::add_rect`],
-    /// [`Runtime::add_rect_in_band`] and [`Runtime::commit_output`] each
-    /// `debug_assert_eq!` this against
-    /// [`crate::dispatch::current_display`] — the `wl_display`
-    /// [`Backend::run_all`](crate::Backend::run_all) is *currently* driving
-    /// on this thread, pinned for the call's duration by
-    /// [`crate::dispatch::DisplayPinGuard`]. A mismatch means this
-    /// `Runtime` clone is being driven by a `run_all` call for a *different*
-    /// `Display` than the one it was initialised against — exactly the
-    /// misuse this field exists to catch. `debug_assert_eq!` rather than a
-    /// real check: this is a bug detector for a mistake nothing here can
-    /// recover from cleanly (the layout may already be freed), not a
-    /// recoverable error a release build should pay to guard — see each
-    /// assert site's own comment.
+    /// Read, not just written, at four sites — deliberately not *every*
+    /// graphics mutator:
+    ///
+    /// - [`Backend::run_all`](crate::Backend::run_all), at entry, compares
+    ///   this against the `Display` it is about to drive (its authoritative
+    ///   argument, so the comparison is direct, not via
+    ///   [`current_display`](crate::dispatch::current_display)). This is the
+    ///   listener-linking choke point: a `run_all` for the wrong `Display`
+    ///   would link the cached shell/decoration/layer-shell listeners into a
+    ///   freed display's `wl_list`s.
+    /// - [`Runtime::add_rect`], [`Runtime::add_rect_in_band`] and
+    ///   [`Runtime::commit_output`] each `debug_assert_eq!` this against
+    ///   [`current_display`](crate::dispatch::current_display) — the
+    ///   `wl_display` [`Backend::run_all`](crate::Backend::run_all) is
+    ///   *currently* driving on this thread, pinned for the call's duration
+    ///   by [`crate::dispatch::DisplayPinGuard`]. A `0` there means "no live
+    ///   `run_all` to compare against", and is skipped rather than treated as
+    ///   agreement.
+    ///
+    /// A mismatch at any of them means this `Runtime` clone is being driven by
+    /// a `run_all` call for a *different* `Display` than the one it was
+    /// initialised against — exactly the misuse this field exists to catch.
+    /// These four are the choke points where such a reuse first becomes
+    /// observable: `run_all` is where the freed-display listeners would be
+    /// linked, and `add_rect`/`add_rect_in_band`/`commit_output` are the
+    /// per-run graphics calls a scene is first established through. Every
+    /// other graphics mutator (`init_output`, the `add_*_in_toplevel`
+    /// helpers, the `set_rect_*`/`set_buffer_*` setters) runs only *after*
+    /// one of these has already fired for the same run, so it would catch the
+    /// identical mismatch a beat later and no earlier — the check is not
+    /// duplicated onto them to avoid that redundancy, not because they are
+    /// exempt from the invariant.
+    ///
+    /// `debug_assert_eq!` rather than a real check: this is a bug detector for
+    /// a mistake nothing here can recover from cleanly (the layout may already
+    /// be freed), not a recoverable error a release build should pay to guard
+    /// — see each assert site's own comment. Because it fires from inside
+    /// handler callbacks, which this crate reaches across `extern "C"` frames,
+    /// a tripped assertion unwinds into a C frame and so (Rust 1.81+) is
+    /// turned into a process **abort**, not a catchable unwind — it terminates
+    /// the compositor rather than propagating. One accepted blind spot: the
+    /// comparison is of `wl_display` addresses as `usize`, so a `Display`
+    /// freed and a new one allocated at the very same address would compare
+    /// equal and pass falsely (ABA) — tolerable for a debug-only detector that
+    /// makes no safety guarantee a release build relies on.
     pub(crate) pinned_display: std::cell::Cell<usize>,
 }
 
@@ -883,7 +913,7 @@ impl Runtime {
         // already driving this thread — unusual (init_graphics is normally
         // called before the first run) but not impossible if a consumer
         // calls it from inside a handler — it must be driving the same
-        // `display` this call was just given: `init_graphics` is hands the
+        // `display` this call was just given: `init_graphics` is handed the
         // authoritative `Display` directly, so this is the one call site
         // that can compare against genuinely live ground truth rather than
         // a value another call recorded earlier.
@@ -1733,9 +1763,23 @@ impl Runtime {
     /// Build one `Runtime` per `Display`, and (because the graphics and
     /// backend state hanging off a `Runtime` is process-global in wlroots)
     /// one `Display` per process. This cannot be enforced by signature
-    /// without a breaking change, so 0.20.x states it rather than checks
-    /// it; a `debug_assert` pinning the originating `Display` is planned
-    /// for the next publish.
+    /// without a breaking change, so 0.20.x states it rather than checks it.
+    /// A debug-only detector does back the invariant, though it cannot make
+    /// the type system carry it:
+    /// [`init_graphics`](Runtime::init_graphics) records (pins) the `Display`
+    /// it is given, and both [`Backend::run_all`](crate::Backend::run_all) —
+    /// at entry, before it links the listeners this paragraph warns about —
+    /// and the graphics mutators [`add_rect`](Runtime::add_rect),
+    /// [`add_rect_in_band`](Runtime::add_rect_in_band) and
+    /// [`commit_output`](Runtime::commit_output) `debug_assert` that the
+    /// `Display` currently in play matches the pinned one. Reusing a
+    /// `Runtime` against a replacement `Display` therefore trips a debug
+    /// assertion at the next `run_all` or graphics call rather than silently
+    /// linking into freed `wl_list`s. Its limits: it is compiled out of
+    /// release builds, and it is a bug detector, not a recovery mechanism —
+    /// see `RuntimeInner::pinned_display`'s own (crate-internal) doc for
+    /// exactly which sites are covered and why per-setter duplication past
+    /// those choke points would be redundant.
     ///
     /// # Errors
     ///
@@ -2002,8 +2046,47 @@ impl Runtime {
     /// Remove `id` from the output table. Called from `on_output_destroy`
     /// before the output is freed, mirroring
     /// [`forget_toplevel`](Runtime::forget_toplevel).
+    ///
+    /// Also nulls this output's raw pointer out of any layer surface still
+    /// holding it. [`set_layer_surface_output`](Runtime::set_layer_surface_output)
+    /// plants the `*mut wlr_output` directly in the role object's `output`
+    /// field, and wlroots never clears it when the output dies; without this
+    /// purge, [`LayerSurface::output_id`](crate::LayerSurface::output_id)
+    /// would dereference a freed output after a hotplug removal (it reads
+    /// `(*output).addons`). This is the single choke point on the destroy
+    /// path — `on_output_destroy` always runs it, and nothing else calls
+    /// `forget_output` — so nulling here covers every layer surface that
+    /// could name the dying output. Sway and the tinywl derivatives null
+    /// `layer_surface->output` on output destroy for the identical reason.
     pub(crate) fn forget_output(&self, id: OutputId) {
-        self.inner.outputs.borrow_mut().remove(&id);
+        // Take the pointer out of the table by the same `remove` that forgets
+        // the id, so the comparison below uses the exact `*mut wlr_output`
+        // identity `set_layer_surface_output` planted (both come from this
+        // `outputs` table). `remove` returns the entry, so no second lookup.
+        let dying = self.inner.outputs.borrow_mut().remove(&id);
+        if let Some(dying) = dying {
+            let dying = dying.as_ptr();
+            // Distinct `RefCell` from `outputs` (whose borrow above has already
+            // been released by the time this borrow is taken), so no borrow
+            // conflict. `values()` reads each entry's `raw` without mutating
+            // the table.
+            for entry in self.inner.layer_surfaces.borrow().values() {
+                let ls = entry.raw.as_ptr();
+                // SAFETY: a present `layer_surfaces` entry names a live layer
+                // surface — its destroy callback removes the entry before
+                // wlroots frees it, the same invariant
+                // `set_layer_surface_output` relies on — so `ls` is a valid,
+                // dereferenceable `*mut wlr_layer_surface_v1` for this call.
+                // `output` is a plain `*mut wlr_output` field; writing null to
+                // it is a raw-field assignment, not a call into wlroots, so
+                // there is no reentrancy hazard.
+                unsafe {
+                    if (*ls).output == dying {
+                        (*ls).output = std::ptr::null_mut();
+                    }
+                }
+            }
+        }
     }
 
     /// This id's recorded raw output, with the borrow released before
@@ -4143,5 +4226,97 @@ mod tests {
 
         assert_eq!(rt.set_layer_surface_output(id, output_id), Some(()));
         assert_eq!(layer_surface.output, output_raw.as_ptr());
+    }
+
+    /// M1 regression: `forget_output` — the single choke point
+    /// `on_output_destroy` runs before wlroots frees an output — must null
+    /// this output's raw pointer out of every layer surface still holding
+    /// it, or [`LayerSurface::output_id`](crate::LayerSurface::output_id)
+    /// would later dereference the freed output (it reads
+    /// `(*output).addons`). A layer surface assigned to a *different* output
+    /// must be left untouched.
+    #[test]
+    fn forget_output_nulls_the_planted_pointer_only_in_matching_layer_surfaces() {
+        use std::alloc::{Layout, alloc_zeroed};
+
+        let rt = headless_runtime();
+
+        // Two heap-allocated, zeroed `wlr_output`s at distinct addresses
+        // stand in for two live outputs. `forget_output` never dereferences
+        // an output pointer — it only compares its identity and writes null —
+        // so a zeroed region never read beyond that comparison is enough.
+        // `alloc_zeroed` (touched only through a raw pointer, never
+        // *materialised* as a `wlr_output` value) rather than
+        // `mem::zeroed()`, for the reason `record_toplevel_with_surface`
+        // documents: `wlr_output` embeds function pointers that must be
+        // non-null, so producing one by value is UB even if it is never read.
+        // `NonNull::dangling()` cannot serve either: it is alignment-derived
+        // and so identical for both, which would defeat the "different output
+        // left untouched" half. Deliberately leaked — a scratch fixture this
+        // crate never tears down.
+        //
+        // SAFETY: the layout is non-zero-sized, so `alloc_zeroed` returns
+        // either null (checked) or a suitably aligned zeroed allocation; the
+        // bytes are only ever read as an opaque pointer identity, never as a
+        // `wlr_output`.
+        let out_a = {
+            let p = unsafe { alloc_zeroed(Layout::new::<sys::wlr_output>()) }
+                .cast::<sys::wlr_output>();
+            NonNull::new(p).expect("allocation failed")
+        };
+        let out_b = {
+            let p = unsafe { alloc_zeroed(Layout::new::<sys::wlr_output>()) }
+                .cast::<sys::wlr_output>();
+            NonNull::new(p).expect("allocation failed")
+        };
+        let id_a = OutputId(next_id());
+        let id_b = OutputId(next_id());
+        rt.record_output(id_a, out_a);
+        rt.record_output(id_b, out_b);
+
+        // Two zeroed layer surfaces whose only ever-touched field is
+        // `output` — as the assign-the-raw-field test above.
+        // SAFETY: as that test.
+        let mut ls_on_a: sys::wlr_layer_surface_v1 = unsafe { std::mem::zeroed() };
+        let mut ls_on_b: sys::wlr_layer_surface_v1 = unsafe { std::mem::zeroed() };
+        let ls_a = LayerSurfaceId(next_id());
+        let ls_b = LayerSurfaceId(next_id());
+        rt.record_layer_surface(
+            ls_a,
+            NonNull::from(&mut ls_on_a),
+            NonNull::<sys::wlr_scene_tree>::dangling(),
+            Layer::Background,
+        );
+        rt.record_layer_surface(
+            ls_b,
+            NonNull::from(&mut ls_on_b),
+            NonNull::<sys::wlr_scene_tree>::dangling(),
+            Layer::Top,
+        );
+
+        // Plant each output's pointer through the real assignment path, so
+        // the identity `forget_output` compares against is exactly the one
+        // production code stores.
+        assert_eq!(rt.set_layer_surface_output(ls_a, id_a), Some(()));
+        assert_eq!(rt.set_layer_surface_output(ls_b, id_b), Some(()));
+        assert_eq!(ls_on_a.output, out_a.as_ptr());
+        assert_eq!(ls_on_b.output, out_b.as_ptr());
+
+        // Destroy output A. Its pointer must be nulled out of the surface
+        // that named it; the surface on B must be left alone.
+        rt.forget_output(id_a);
+        assert!(
+            ls_on_a.output.is_null(),
+            "the dying output's pointer must be nulled out of its layer surface"
+        );
+        assert_eq!(
+            ls_on_b.output,
+            out_b.as_ptr(),
+            "a layer surface assigned to a different output must be untouched"
+        );
+
+        // And the id itself is gone — set_layer_surface_output can no longer
+        // resolve it, confirming the same call also forgot the output.
+        assert_eq!(rt.set_layer_surface_output(ls_a, id_a), None);
     }
 }
