@@ -3079,6 +3079,13 @@ unsafe extern "C" fn on_new_virtual_keyboard<S: Handlers>(
         let device = &raw mut (*vk).keyboard.base;
         let runtime = (*session).runtime;
 
+        // Single-seat assumption: the injected keyboard is attached to this
+        // runtime's only seat, not to `(*vk).seat` (the seat the client named
+        // in `create_virtual_keyboard`). Sound because this crate creates
+        // exactly one seat, so the two are necessarily the same. A future
+        // multi-seat crate must compare `(*vk).seat` against the target seat
+        // here instead of attaching unconditionally.
+
         let alive = Rc::new(Cell::new(true));
         let destroy = Registration::link_bare(
             &raw mut (*device).events.destroy,
