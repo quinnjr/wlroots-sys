@@ -71,6 +71,30 @@ guarantee that nothing observable moved.
 
 No further compatibility exception is sanctioned in the `0.20` line.
 
+## 0.20.13
+
+A latent use-after-free closed and the debug-only `Display` pin widened;
+no API change, semver-compatible within `0.20`.
+
+- **Fix (memory safety):** `set_layer_surface_output` (`0.20.12`) plants a
+  raw `wlr_output*` into the layer surface's role object. Nothing nulled it
+  when that output was destroyed, so `LayerSurface::output_id` could read
+  freed memory after an output hotplug removal. `forget_output` — the single
+  destroy path, always run from the output `destroy` listener — now nulls the
+  planted pointer in every tracked layer surface that referenced the dying
+  output; `output_id`'s existing null guard then returns `None`. Reachable
+  only by assigning an output, destroying it, then calling `output_id`, but a
+  genuine dangling deref where it did occur.
+- The debug-only `Display`-pin detector (`0.20.12`) now also fires at
+  `Backend::run_all` entry — the listener-linking path `Runtime`'s "Lifetime
+  obligation" doc names as an unrecoverable use-after-free, which the initial
+  `add_rect`/`add_rect_in_band`/`commit_output` sites did not cover. Still
+  compiled out under `--release`; no release behavior change.
+- Doc corrections: `create_xdg_shell` and `RuntimeInner::pinned_display` now
+  describe the shipped detector accurately (its four covered sites, that a
+  trip inside a handler aborts rather than unwinds, and the freed-then-
+  reallocated-`Display` address-ABA blind spot). No behavioral change.
+
 ## 0.20.12
 
 Scene-band placement and output assignment for layer surfaces; the two gaps
