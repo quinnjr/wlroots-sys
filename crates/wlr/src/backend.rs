@@ -1255,6 +1255,33 @@ impl<'d> Backend<'d> {
             });
         }
 
+        if let Some(seat) = runtime.seat_ptr() {
+            // SAFETY: `create_seat` returned a non-null `wlr_seat` owned by the
+            // display, which this call requires to outlive it, exactly as for
+            // the xdg shell above — so a null liveness flag is correct (the
+            // seat's owner, the display, cannot predecease this call). These
+            // are the `request_set_selection` / `request_set_primary_selection`
+            // signals a focused client raises to own the clipboard / primary
+            // selection; each handler is paired with `on_request_set_*` at the
+            // same `S`, as above.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*seat.as_ptr()).events.request_set_selection,
+                    on_request_set_selection::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*seat.as_ptr()).events.request_set_primary_selection,
+                    on_request_set_primary_selection::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
         Ok(regs)
     }
 }
@@ -1844,6 +1871,49 @@ unsafe extern "C" fn on_output_destroy<S: OutputHandler>(
 
 /// A client created a toplevel. Give it an id and a scene tree before anyone
 /// is told about it.
+/// Honors a client's request to own the clipboard selection. wlroots emits
+/// this only with a valid client grant serial, so accepting it as delivered
+/// (calling `wlr_seat_set_selection` with the event's own source and serial)
+/// is the standard, correct compositor behavior — the same thing tinywl and
+/// sway do. A request the client is not entitled to make never reaches here.
+unsafe extern "C" fn on_request_set_selection<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_seat.events.request_set_selection`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_seat_request_set_selection_event`; its
+    // `source`/`serial` are copied straight back into `wlr_seat_set_selection`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_seat_request_set_selection_event>();
+        if let Some(seat) = (*session).runtime.seat_ptr() {
+            sys::wlr_seat_set_selection(seat.as_ptr(), (*event).source, (*event).serial);
+        }
+    }
+}
+
+/// Honors a client's request to own the primary (middle-click) selection.
+/// Same reasoning as [`on_request_set_selection`].
+unsafe extern "C" fn on_request_set_primary_selection<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_request_set_selection`, but the signal is
+    // `wlr_seat.events.request_set_primary_selection` carrying a live
+    // `*mut wlr_seat_request_set_primary_selection_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_seat_request_set_primary_selection_event>();
+        if let Some(seat) = (*session).runtime.seat_ptr() {
+            sys::wlr_seat_set_primary_selection(seat.as_ptr(), (*event).source, (*event).serial);
+        }
+    }
+}
+
 unsafe extern "C" fn on_new_toplevel<S: Handlers>(
     l: *mut sys::wl_listener,
     data: *mut std::ffi::c_void,

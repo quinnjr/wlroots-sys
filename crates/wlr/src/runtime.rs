@@ -121,6 +121,19 @@ pub(crate) struct RuntimeInner {
     /// call would advertise a second `zxdg_decoration_manager_v1` global.
     pub(crate) xdg_decoration_manager: RefCell<Option<NonNull<sys::wlr_xdg_decoration_manager_v1>>>,
 
+    /// The primary-selection (`zwp_primary_selection_device_manager_v1`)
+    /// manager, once created — middle-click paste. `Option` for the same
+    /// reason `xdg_decoration_manager` is: a consumer that never calls
+    /// [`Runtime::create_primary_selection_manager`] never advertises the
+    /// global, and a second call would advertise a second one.
+    pub(crate) primary_selection_manager:
+        RefCell<Option<NonNull<sys::wlr_primary_selection_v1_device_manager>>>,
+
+    /// The data-control (`zwlr_data_control_manager_v1`) manager, once
+    /// created — lets a clipboard manager observe and set the selection.
+    /// `Option`, same rationale as the other manager globals.
+    pub(crate) data_control_manager: RefCell<Option<NonNull<sys::wlr_data_control_manager_v1>>>,
+
     /// Every live toplevel: the role object, its scene tree, and the surface
     /// its id addon lives on.
     pub(crate) toplevels: RefCell<HashMap<ToplevelId, ToplevelEntry>>,
@@ -550,6 +563,8 @@ impl Runtime {
                 pending_close: RefCell::new(Vec::new()),
                 xdg_shell: RefCell::new(None),
                 xdg_decoration_manager: RefCell::new(None),
+                primary_selection_manager: RefCell::new(None),
+                data_control_manager: RefCell::new(None),
                 toplevels: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
                 layer_shell: RefCell::new(None),
@@ -1856,6 +1871,43 @@ impl Runtime {
         &self,
     ) -> Option<NonNull<sys::wlr_xdg_decoration_manager_v1>> {
         *self.inner.xdg_decoration_manager.borrow()
+    }
+
+    /// Advertise `zwp_primary_selection_device_manager_v1` (middle-click
+    /// paste). The seat's `request_set_primary_selection` event is wired to
+    /// honor it in `backend.rs`'s per-run registration. Errors if called
+    /// twice — a second call would advertise a second global.
+    pub fn create_primary_selection_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.primary_selection_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_primary_selection_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is
+        // owned by the display and destroyed with it, so this crate never
+        // frees it.
+        let raw = unsafe { sys::wlr_primary_selection_v1_device_manager_create(display.as_ptr()) };
+        let raw = NonNull::new(raw)
+            .ok_or(Error::Create("wlr_primary_selection_v1_device_manager_create"))?;
+        *self.inner.primary_selection_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// Advertise `zwlr_data_control_manager_v1` so a clipboard manager can
+    /// observe and set the selection. wlroots wires it to the seat's
+    /// selection automatically; no per-run listener of ours is required.
+    /// Errors if called twice.
+    pub fn create_data_control_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.data_control_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_data_control_manager called twice",
+            ));
+        }
+        // SAFETY: as above — display-owned, never freed by this crate.
+        let raw = unsafe { sys::wlr_data_control_manager_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_data_control_manager_v1_create"))?;
+        *self.inner.data_control_manager.borrow_mut() = Some(raw);
+        Ok(())
     }
 
     /// The scene's root tree, for the callbacks in `backend.rs` that insert a
