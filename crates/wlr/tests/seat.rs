@@ -114,6 +114,22 @@ fn creating_the_data_control_manager_twice_is_refused() {
 }
 
 #[test]
+fn creating_the_virtual_keyboard_manager_twice_is_refused() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime
+        .create_virtual_keyboard_manager(&display)
+        .expect("first");
+    assert!(
+        matches!(
+            runtime.create_virtual_keyboard_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second virtual-keyboard global would make the compositor advertise two"
+    );
+}
+
+#[test]
 fn focus_and_hit_test_report_a_miss_rather_than_dereferencing() {
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");

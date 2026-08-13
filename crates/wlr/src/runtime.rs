@@ -134,6 +134,13 @@ pub(crate) struct RuntimeInner {
     /// `Option`, same rationale as the other manager globals.
     pub(crate) data_control_manager: RefCell<Option<NonNull<sys::wlr_data_control_manager_v1>>>,
 
+    /// The virtual-keyboard (`zwp_virtual_keyboard_manager_v1`) manager, once
+    /// created — lets a client inject a keyboard, e.g. an on-screen keyboard,
+    /// remote-input bridge, or a test harness that needs a real input serial.
+    /// `Option`, same rationale as the other manager globals.
+    pub(crate) virtual_keyboard_manager:
+        RefCell<Option<NonNull<sys::wlr_virtual_keyboard_manager_v1>>>,
+
     /// Every live toplevel: the role object, its scene tree, and the surface
     /// its id addon lives on.
     pub(crate) toplevels: RefCell<HashMap<ToplevelId, ToplevelEntry>>,
@@ -565,6 +572,7 @@ impl Runtime {
                 xdg_decoration_manager: RefCell::new(None),
                 primary_selection_manager: RefCell::new(None),
                 data_control_manager: RefCell::new(None),
+                virtual_keyboard_manager: RefCell::new(None),
                 toplevels: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
                 layer_shell: RefCell::new(None),
@@ -1908,6 +1916,33 @@ impl Runtime {
         let raw = NonNull::new(raw).ok_or(Error::Create("wlr_data_control_manager_v1_create"))?;
         *self.inner.data_control_manager.borrow_mut() = Some(raw);
         Ok(())
+    }
+
+    /// Advertise `zwp_virtual_keyboard_manager_v1` so a client can inject a
+    /// keyboard input device. The manager's `new_virtual_keyboard` event is
+    /// wired in `backend.rs`'s per-run registration to attach the injected
+    /// keyboard to the seat (so the seat gains keyboard capability and its
+    /// key/enter events mint serials, exactly as a physical keyboard would).
+    /// Errors if called twice.
+    pub fn create_virtual_keyboard_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.virtual_keyboard_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_virtual_keyboard_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_virtual_keyboard_manager_v1_create(display.as_ptr()) };
+        let raw =
+            NonNull::new(raw).ok_or(Error::Create("wlr_virtual_keyboard_manager_v1_create"))?;
+        *self.inner.virtual_keyboard_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    pub(crate) fn virtual_keyboard_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_virtual_keyboard_manager_v1>> {
+        *self.inner.virtual_keyboard_manager.borrow()
     }
 
     /// The scene's root tree, for the callbacks in `backend.rs` that insert a
