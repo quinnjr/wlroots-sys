@@ -71,6 +71,22 @@ guarantee that nothing observable moved.
 
 No further compatibility exception is sanctioned in the `0.20` line.
 
+## 0.20.14
+
+Selection stack: clipboard + primary-selection + data-control globals.
+
+- `Runtime::create_primary_selection_manager` and
+  `Runtime::create_data_control_manager` — the
+  `zwp_primary_selection_device_manager_v1` and `zwlr_data_control_manager_v1`
+  globals. `wl_data_device_manager` was already created in `init_graphics`.
+- The seat's `request_set_selection` / `request_set_primary_selection` events
+  are now wired to `wlr_seat_set_selection` / `wlr_seat_set_primary_selection`
+  (previously dropped), so a keyboard-focused client can own the clipboard and
+  the primary selection. Accepted as wlroots delivers them (a valid client
+  grant serial), the standard tinywl/sway behavior. data-control is auto-wired
+  to the seat's selection by wlroots; no listener of ours is required.
+- Additive; no existing item changed.
+
 ## 0.20.13
 
 A latent use-after-free closed and the debug-only `Display` pin widened;
