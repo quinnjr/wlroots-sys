@@ -71,6 +71,43 @@ guarantee that nothing observable moved.
 
 No further compatibility exception is sanctioned in the `0.20` line.
 
+## 0.20.15
+
+Virtual keyboard input, and a latent input-device use-after-free closed.
+
+- `Runtime::create_virtual_keyboard_manager` — the
+  `zwp_virtual_keyboard_manager_v1` global. Its `new_virtual_keyboard` event is
+  wired to attach the injected keyboard to the seat exactly as a physical one
+  from the backend would be, so the seat gains keyboard capability and its
+  enter/key events mint input serials. This is what lets on-screen keyboards,
+  remote-input bridges, and (notably) a headless test harness drive
+  serial-gated requests such as `wl_data_device.set_selection`.
+- **Fix (soundness):** `InputDevice`'s `alive` backstop flag (an
+  `Rc<Cell<bool>>` that each device `Registration` reads from its own `Drop`)
+  was declared before those registrations, so field-drop order freed the cell
+  first and the reads were a use-after-free. Harmless by luck on a hot-unplug
+  (the freed read happened to be `true`, so the unlink still ran), but a bulk
+  drop of the input table at shutdown with a device still attached could read
+  `false`, skip the unlink, and trip wlroots' `wlr_input_device_finish`
+  list-empty assert — aborting the process. `alive` now drops last.
+- Additive within `0.20`; no existing item changed.
+
+## 0.20.14
+
+Selection stack: clipboard + primary-selection + data-control globals.
+
+- `Runtime::create_primary_selection_manager` and
+  `Runtime::create_data_control_manager` — the
+  `zwp_primary_selection_device_manager_v1` and `zwlr_data_control_manager_v1`
+  globals. `wl_data_device_manager` was already created in `init_graphics`.
+- The seat's `request_set_selection` / `request_set_primary_selection` events
+  are now wired to `wlr_seat_set_selection` / `wlr_seat_set_primary_selection`
+  (previously dropped), so a keyboard-focused client can own the clipboard and
+  the primary selection. Accepted as wlroots delivers them (a valid client
+  grant serial), the standard tinywl/sway behavior. data-control is auto-wired
+  to the seat's selection by wlroots; no listener of ours is required.
+- Additive; no existing item changed.
+
 ## 0.20.13
 
 A latent use-after-free closed and the debug-only `Display` pin widened;

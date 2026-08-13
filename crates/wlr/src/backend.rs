@@ -1255,6 +1255,47 @@ impl<'d> Backend<'d> {
             });
         }
 
+        if let Some(seat) = runtime.seat_ptr() {
+            // SAFETY: `create_seat` returned a non-null `wlr_seat` owned by the
+            // display, which this call requires to outlive it, exactly as for
+            // the xdg shell above — so a null liveness flag is correct (the
+            // seat's owner, the display, cannot predecease this call). These
+            // are the `request_set_selection` / `request_set_primary_selection`
+            // signals a focused client raises to own the clipboard / primary
+            // selection; each handler is paired with `on_request_set_*` at the
+            // same `S`, as above.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*seat.as_ptr()).events.request_set_selection,
+                    on_request_set_selection::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*seat.as_ptr()).events.request_set_primary_selection,
+                    on_request_set_primary_selection::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
+        if let Some(manager) = runtime.virtual_keyboard_manager_ptr() {
+            // SAFETY: `create_virtual_keyboard_manager` returned a non-null
+            // manager owned by the display, which this call requires to outlive
+            // it, exactly as for the xdg shell above — null liveness is correct.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.new_virtual_keyboard,
+                    on_new_virtual_keyboard::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
         Ok(regs)
     }
 }
@@ -1844,6 +1885,49 @@ unsafe extern "C" fn on_output_destroy<S: OutputHandler>(
 
 /// A client created a toplevel. Give it an id and a scene tree before anyone
 /// is told about it.
+/// Honors a client's request to own the clipboard selection. wlroots emits
+/// this only with a valid client grant serial, so accepting it as delivered
+/// (calling `wlr_seat_set_selection` with the event's own source and serial)
+/// is the standard, correct compositor behavior — the same thing tinywl and
+/// sway do. A request the client is not entitled to make never reaches here.
+unsafe extern "C" fn on_request_set_selection<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_seat.events.request_set_selection`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_seat_request_set_selection_event`; its
+    // `source`/`serial` are copied straight back into `wlr_seat_set_selection`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_seat_request_set_selection_event>();
+        if let Some(seat) = (*session).runtime.seat_ptr() {
+            sys::wlr_seat_set_selection(seat.as_ptr(), (*event).source, (*event).serial);
+        }
+    }
+}
+
+/// Honors a client's request to own the primary (middle-click) selection.
+/// Same reasoning as [`on_request_set_selection`].
+unsafe extern "C" fn on_request_set_primary_selection<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_request_set_selection`, but the signal is
+    // `wlr_seat.events.request_set_primary_selection` carrying a live
+    // `*mut wlr_seat_request_set_primary_selection_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_seat_request_set_primary_selection_event>();
+        if let Some(seat) = (*session).runtime.seat_ptr() {
+            sys::wlr_seat_set_primary_selection(seat.as_ptr(), (*event).source, (*event).serial);
+        }
+    }
+}
+
 unsafe extern "C" fn on_new_toplevel<S: Handlers>(
     l: *mut sys::wl_listener,
     data: *mut std::ffi::c_void,
@@ -2868,15 +2952,6 @@ unsafe extern "C" fn on_toplevel_request_resize<S: Handlers>(
 /// have already freed by then. It is not, and cannot be, a substitute for
 /// the synchronous removal above.
 struct InputDevice {
-    /// See this struct's own doc for why this is a backstop, not the
-    /// primary mechanism.
-    ///
-    /// `Rc`, not `Box`, for the same reason [`Backend::alive`] is: the flag's
-    /// address must survive this struct moving — `Session::inputs` is a
-    /// `HashMap`, which reallocates — because every other field's
-    /// `Registration` holds a raw pointer into it.
-    #[allow(dead_code)]
-    alive: Rc<Cell<bool>>,
     /// This device's keyboard identity, if it is one — recorded so
     /// `on_input_destroy` can call [`Runtime::forget_keyboard`] and keep
     /// [`Runtime::has_keyboard`] truthful once this device is gone.
@@ -2890,6 +2965,25 @@ struct InputDevice {
     /// above is still linked, so this entry is still found and removed on
     /// destroy even for an ignored device type).
     _listeners: Vec<Registration>,
+    /// See this struct's own doc for why this is a backstop, not the
+    /// primary mechanism.
+    ///
+    /// `Rc`, not `Box`, for the same reason [`Backend::alive`] is: the flag's
+    /// address must survive this struct moving — `Session::inputs` is a
+    /// `HashMap`, which reallocates — because every other field's
+    /// `Registration` holds a raw pointer into it.
+    ///
+    /// **Declared last so it drops last.** `_destroy` and `_listeners` consult
+    /// this flag from their own `Registration::drop`; were `alive` to drop
+    /// first (freeing the `Cell` it owns), those reads would be a
+    /// use-after-free. Field drop runs in declaration order, so keeping this
+    /// after every `Registration` that points at it is what makes a bulk drop
+    /// of `Session::inputs` (a run ending with a device still attached — e.g.
+    /// a keyboard live at shutdown, or an injected virtual keyboard) unlink
+    /// cleanly instead of skipping the unlink against a freed flag and
+    /// tripping wlroots' `wlr_input_device_finish` list-empty assert.
+    #[allow(dead_code)]
+    alive: Rc<Cell<bool>>,
 }
 
 /// Recompute and push the seat's capabilities from what `runtime` currently
@@ -2957,6 +3051,89 @@ unsafe fn keysym_for_keycode(kb: *mut sys::wlr_keyboard, keycode: u32) -> u32 {
         // one `xkb_keysym_t`, per its own contract; reading the first
         // element is always in bounds.
         *syms
+    }
+}
+
+/// A client created a virtual keyboard. Attach its embedded `wlr_keyboard` to
+/// the seat exactly as a physical keyboard from the backend would be, so the
+/// seat gains keyboard capability and its enter/key events mint input serials
+/// (which `wl_data_device.set_selection` and other serial-gated requests
+/// require). Teardown reuses [`on_input_destroy`], keyed by the keyboard's base
+/// input device, when the client destroys the virtual keyboard.
+unsafe extern "C" fn on_new_virtual_keyboard<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked into
+    // `wlr_virtual_keyboard_manager_v1.events.new_virtual_keyboard`, whose data
+    // is a live `wlr_virtual_keyboard_v1`. Its embedded `keyboard` and that
+    // keyboard's `base` input device are live and fully initialised when
+    // wlroots announces it; the base's `events.destroy` fires when the client
+    // destroys the virtual keyboard, handled by `on_input_destroy` under the
+    // same `device as usize` key inserted here.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let vk = data.cast::<sys::wlr_virtual_keyboard_v1>();
+        let kb = &raw mut (*vk).keyboard;
+        let device = &raw mut (*vk).keyboard.base;
+        let runtime = (*session).runtime;
+
+        // Single-seat assumption: the injected keyboard is attached to this
+        // runtime's only seat, not to `(*vk).seat` (the seat the client named
+        // in `create_virtual_keyboard`). Sound because this crate creates
+        // exactly one seat, so the two are necessarily the same. A future
+        // multi-seat crate must compare `(*vk).seat` against the target seat
+        // here instead of attaching unconditionally.
+
+        let alive = Rc::new(Cell::new(true));
+        let destroy = Registration::link_bare(
+            &raw mut (*device).events.destroy,
+            on_input_destroy::<S>,
+            (*bound).session,
+            &raw const *alive,
+        );
+
+        // No keymap set here: the virtual-keyboard protocol delivers the
+        // client's own keymap to `kb`. Serial minting (enter/key) does not
+        // depend on a keymap.
+        sys::wlr_keyboard_set_repeat_info(kb, 25, 600);
+        if let Some(seat) = runtime.seat_ptr() {
+            sys::wlr_seat_set_keyboard(seat.as_ptr(), kb);
+        }
+        let kb_nn = NonNull::new_unchecked(kb);
+        runtime.record_keyboard(kb_nn);
+
+        let listeners = vec![
+            Registration::link_bare(
+                &raw mut (*kb).events.key,
+                on_key::<S>,
+                (*bound).session,
+                &raw const *alive,
+            ),
+            Registration::link_bare(
+                &raw mut (*kb).events.modifiers,
+                on_modifiers::<S>,
+                (*bound).session,
+                &raw const *alive,
+            ),
+        ];
+
+        // Keyed by the base input-device pointer, exactly as `on_new_input`
+        // keys a physical keyboard, so `on_input_destroy` recovers this entry
+        // from the `events.destroy` data with no side channel.
+        (*session).inputs.borrow_mut().insert(
+            device as usize,
+            InputDevice {
+                alive,
+                keyboard: Some(kb_nn),
+                pointer: None,
+                _destroy: destroy,
+                _listeners: listeners,
+            },
+        );
+
+        update_seat_capabilities(runtime);
     }
 }
 
