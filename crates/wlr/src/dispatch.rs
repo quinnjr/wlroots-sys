@@ -159,6 +159,60 @@ pub(crate) fn in_handler() -> bool {
     IN_HANDLER.get()
 }
 
+thread_local! {
+    /// The `wl_display` pointer (as `usize`) [`crate::Backend::run_all`] is
+    /// currently driving, or `0` when no `run_all` call is on this thread's
+    /// stack.
+    ///
+    /// Set for the duration of `run_all` only — [`crate::Backend::run`]
+    /// (the `OutputHandler`-only entry point) has no `Display` to record,
+    /// so it leaves this at whatever an outer `run_all` left it at (`0` if
+    /// none). This is what lets [`crate::Runtime`]'s graphics-touching
+    /// entry points assert they are being driven by the same `Display`
+    /// [`crate::Runtime::init_graphics`] was pinned to: read this once,
+    /// compare against the pinned value, and only assert when this reads
+    /// nonzero — a `0` means "no live `run_all` to compare against", not
+    /// "the display matches", so it is skipped rather than treated as
+    /// agreement.
+    static CURRENT_DISPLAY: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The display [`CURRENT_DISPLAY`] currently names, or `None` if no
+/// `run_all` call is on this thread's stack right now.
+pub(crate) fn current_display() -> Option<usize> {
+    let raw = CURRENT_DISPLAY.get();
+    if raw == 0 { None } else { Some(raw) }
+}
+
+/// Records `display` in [`CURRENT_DISPLAY`] for the life of the guard,
+/// restoring whatever was there before on drop — the same "restore, don't
+/// clear" shape [`HandlerGuard`] uses, and for the same reason: a nested
+/// `run_all` (there is no such call today, but this costs nothing to keep
+/// correct) must not let an inner call's drop erase an outer call's still-
+/// live pin.
+pub(crate) struct DisplayPinGuard {
+    previous: usize,
+}
+
+impl DisplayPinGuard {
+    /// `display` is `None` for [`crate::Backend::run`], which has no
+    /// `Display` to pin — the guard still restores whatever was already
+    /// recorded on drop, it just does not overwrite it with anything new.
+    pub(crate) fn enter(display: Option<usize>) -> Self {
+        let previous = CURRENT_DISPLAY.get();
+        if let Some(display) = display {
+            CURRENT_DISPLAY.set(display);
+        }
+        DisplayPinGuard { previous }
+    }
+}
+
+impl Drop for DisplayPinGuard {
+    fn drop(&mut self) {
+        CURRENT_DISPLAY.set(self.previous);
+    }
+}
+
 /// Marks a handler as running, on both the per-dispatcher and the thread-wide
 /// flag, and clears both on every exit path.
 ///

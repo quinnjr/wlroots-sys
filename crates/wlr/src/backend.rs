@@ -34,7 +34,7 @@ use std::os::fd::AsRawFd;
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use crate::dispatch::{Dispatcher, Event};
+use crate::dispatch::{Dispatcher, DisplayPinGuard, Event};
 use crate::id::{SourceId, attach_id, find_id};
 use crate::layer::Layer;
 use crate::seat::{KeyEvent, Modifiers};
@@ -875,6 +875,33 @@ impl<'d> Backend<'d> {
             return Err(Error::Mismatch("Backend::run_all"));
         }
 
+        // Debug-only Display-identity bug detector, covering the listener-
+        // linking hazard `Runtime::create_xdg_shell`'s own doc names: this
+        // call is about to have `run_inner` link `runtime`'s cached xdg-shell/
+        // decoration/layer-shell listeners into `display`'s `wl_list`s, and if
+        // `runtime` was pinned (by `init_graphics`) to a *different* `Display`,
+        // those lists belong to a freed display — a use-after-free with no
+        // recovery path. `display` is the authoritative ground truth here (as
+        // it is in `init_graphics`), so this compares against it directly
+        // rather than against `dispatch::current_display()`, which is not yet
+        // set to this call's display at run_all entry. Skipped when
+        // `pinned_display` is `0` — `init_graphics` has not run yet (a
+        // compositor is free to defer it into a `NewOutput` handler), so there
+        // is nothing recorded to compare against — the same "0 means no ground
+        // truth, skip rather than treat as agreement" rule the mutator sites
+        // apply to `current_display()`. `debug_assert_eq!` rather than a real
+        // check, for the reason `RuntimeInner::pinned_display`'s own doc gives.
+        let pinned = runtime.inner.pinned_display.get();
+        if pinned != 0 {
+            debug_assert_eq!(
+                pinned,
+                display.as_ptr() as usize,
+                "Backend::run_all is driving a Runtime pinned (by init_graphics) \
+                 to a different Display — its cached shell/decoration/layer-shell \
+                 listeners would be linked into a freed display's wl_lists"
+            );
+        }
+
         self.run_inner::<S>(
             Some(display),
             state,
@@ -908,6 +935,14 @@ impl<'d> Backend<'d> {
     ) -> Result<()> {
         alive_or_err(&self.alive)?;
         let _reentry = ReentryGuard::acquire()?;
+
+        // Pins `Runtime`'s Display-identity assert (see `Runtime`'s own doc
+        // on the pin) to `display`'s pointer for the life of this call —
+        // `None` for `run` (`display` is `None` there; see `DisplayPinGuard`'s
+        // own doc). Declared before `session` so it outlives every handler
+        // call this function makes, which is the whole window the assert
+        // needs covered.
+        let _display_pin = DisplayPinGuard::enter(display.map(|d| d.as_ptr() as usize));
 
         // `state` is consumed into a raw pointer here and never touched as a
         // reference again for the rest of this function, so no `&mut S` is live

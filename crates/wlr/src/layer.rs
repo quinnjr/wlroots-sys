@@ -185,9 +185,7 @@ impl LayerSurfaceId {
 /// that. A `raise_layer_surface` would only ever have something to do
 /// *within* a band (ordering two `Top` surfaces relative to each other),
 /// which this crate does not need for its current consumer and does not
-/// expose — the same "not this crate's job yet" reasoning
-/// [`crate::LayerSurface::output_id`]'s own doc gives for
-/// `set_layer_surface_output`.
+/// expose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Layer {
     /// Below everything, typically a wallpaper.
@@ -339,23 +337,29 @@ impl<'h> LayerSurface<'h> {
     /// `on_new_output`) but is not treated as a panic-worthy invariant
     /// violation in a method with no way to report one.
     ///
-    /// **Gap, deferred rather than fixed:** wlr-layer-shell's own doc names
-    /// the compositor's responsibility plainly — "it is your responsibility
-    /// to assign an output before returning" — but this crate exposes no
-    /// `set_layer_surface_output`, so a consumer that receives `None` here
-    /// has no way through this crate to discharge that responsibility. This
-    /// is safe for this crate's own manual-positioning model specifically
-    /// because nothing in this crate ever dereferences `(*ls).output`
-    /// itself — `output_id` only reads and null-checks it — so a layer
-    /// surface left without one simply reports `None` forever rather than
-    /// crashing anything. `set_layer_surface_output` remains a real gap in
-    /// the frozen surface, additive and left for a future release, not a
-    /// defect being silently frozen away.
+    /// wlr-layer-shell's own doc names the compositor's responsibility
+    /// plainly — "it is your responsibility to assign an output before
+    /// returning" — and [`crate::Runtime::set_layer_surface_output`]
+    /// (0.20.12) is how a consumer discharges it: call it from
+    /// [`crate::ToplevelHandler::new_layer_surface`] whenever this method
+    /// reports `None` for a surface that just arrived. Nothing in this
+    /// crate dereferences `(*ls).output` itself before that — `output_id`
+    /// only reads and null-checks it — so a layer surface a consumer
+    /// leaves without one simply reports `None` forever rather than
+    /// crashing anything; assigning one is a real compositor responsibility
+    /// this crate cannot discharge on a consumer's behalf (it does not know
+    /// which output a given surface belongs on), not a defect.
     pub fn output_id(&self) -> Option<OutputId> {
         // SAFETY: the handle's lifetime guarantees the layer surface is
-        // live; `output` is read and null-checked before use, and when
-        // non-null this crate's own `on_new_output` guarantees its addon set
-        // is initialised.
+        // live; `output` is read and null-checked before use, so a null
+        // `output` returns `None` without any dereference. A *non-null*
+        // `output` is guaranteed to name a live output: the only writer is
+        // `Runtime::set_layer_surface_output`, and `Runtime::forget_output`
+        // nulls this field on every output destroy before wlroots frees the
+        // output (it is the single choke point on the destroy path — see its
+        // own doc), so a stale pointer to a freed output is never left here to
+        // dereference. When non-null this crate's own `on_new_output`
+        // guarantees the named output's addon set is initialised.
         unsafe {
             let output = (*self.raw.as_ptr()).output;
             if output.is_null() {

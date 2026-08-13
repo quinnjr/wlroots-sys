@@ -53,6 +53,70 @@ fn layer_mutators_on_dead_ids_are_none() {
 }
 
 #[test]
+fn add_rect_in_band_on_a_fresh_runtime_without_graphics_errors() {
+    headless_env();
+    let runtime = wlr::Runtime::new().expect("runtime");
+    // Mirrors add_rect's contract: no graphics yet -> Err, not panic.
+    assert!(
+        runtime
+            .add_rect_in_band(wlr::Band::Overlay, 8, 8, [0.0, 0.0, 0.0, 1.0])
+            .is_err()
+    );
+}
+
+/// `OutputId` has no public dangling constructor (unlike `LayerSurfaceId`
+/// and `ToplevelId`; see those types' own `dangling_for_test`), so a live
+/// one is captured from a short `run_all`, the same way
+/// `output_layout.rs`'s stale-id test does. What is under test here is the
+/// *layer-surface* id miss specifically: `set_layer_surface_output`
+/// resolves the layer id first (see that method's own doc), so a dead
+/// layer id paired with a perfectly live, real output must still be
+/// `None` — output resolution is never reached at all.
+#[test]
+fn set_layer_surface_output_on_dead_ids_is_none() {
+    headless_env();
+    struct App {
+        output: Option<wlr::OutputId>,
+        runtime: wlr::Runtime,
+        turns: u32,
+    }
+    impl wlr::OutputHandler for App {
+        fn new_output(&mut self, output: &wlr::Output<'_>) {
+            let _ = output.enable_with_preferred_mode();
+            let _ = self.runtime.init_output(output);
+            self.output = Some(output.id());
+        }
+    }
+    impl wlr::ToplevelHandler for App {}
+    impl wlr::SeatHandler for App {}
+    impl wlr::FdHandler for App {}
+    impl wlr::LoopHandler for App {
+        fn should_stop(&mut self) -> bool {
+            self.turns += 1;
+            self.turns > 8 || self.output.is_some()
+        }
+    }
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    let mut app = App {
+        output: None,
+        runtime: runtime.clone(),
+        turns: 0,
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, wlr::Until::Turns(16))
+        .expect("run");
+    let output = app
+        .output
+        .expect("a headless output must have been announced");
+
+    let dead_layer = wlr::LayerSurfaceId::dangling_for_test();
+    assert_eq!(runtime.set_layer_surface_output(dead_layer, output), None);
+}
+
+#[test]
 fn the_layer_methods_are_additive() {
     struct Old;
     impl wlr::OutputHandler for Old {}

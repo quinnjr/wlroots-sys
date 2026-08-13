@@ -35,6 +35,13 @@ struct App {
     /// gets only an id, not a handle, so this is what lets it decide whether
     /// to focus.
     wants_keyboard: HashMap<wlr::LayerSurfaceId, bool>,
+    /// The first output this compositor ever saw, if any — where a layer
+    /// surface that arrives with no output of its own (see
+    /// `new_layer_surface` below) gets assigned. A compositor tracking more
+    /// than one output would pick more deliberately (the one under the
+    /// cursor, say); this example only ever has one in practice, so "the
+    /// first" is a fine stand-in.
+    first_output: Option<wlr::OutputId>,
 }
 
 impl wlr::SeatHandler for App {}
@@ -53,6 +60,9 @@ impl wlr::OutputHandler for App {
         }
         if self.runtime.init_output(output).is_ok() {
             self.output_box = self.runtime.output_layout_box(output.id());
+        }
+        if self.first_output.is_none() {
+            self.first_output = Some(output.id());
         }
     }
 
@@ -94,6 +104,17 @@ impl wlr::ToplevelHandler for App {
         // is where this crate's own record of it gets populated instead.
         self.sizes.insert(id, (width, height));
         self.runtime.configure_layer_surface(id, width, height);
+
+        // A client is free to leave `output` unset in `get_layer_surface`
+        // ("the output may be NULL. In this case, it is your responsibility
+        // to assign an output before returning" — wlr-layer-shell's own
+        // doc for `new_surface`, quoted in `set_layer_surface_output`'s own
+        // doc). This is the one place in this example that discharges it.
+        if surface.output_id().is_none()
+            && let Some(output) = self.first_output
+        {
+            self.runtime.set_layer_surface_output(id, output);
+        }
     }
 
     fn layer_surface_commit(&mut self, surface: &wlr::LayerSurface<'_>) {
@@ -167,6 +188,17 @@ fn main() -> wlr::Result<()> {
     let bg = runtime.add_rect(4096, 4096, [0.08, 0.09, 0.12, 1.0])?;
     runtime.lower_rect_to_bottom(bg);
 
+    // A thin drag-indicator rect, standing in for what a real compositor
+    // would show while the pointer drags a window across an edge.
+    // `Band::Overlay` rather than `add_rect` deliberately: unlike a root
+    // rect (see `Runtime::add_rect`'s own doc on the tradeoff), this stacks
+    // *with* the overlay band instead of sitting permanently above
+    // everything — the same band an on-screen keyboard or a lock screen
+    // would occupy, and exactly where a transient drag hint belongs.
+    let drag_indicator =
+        runtime.add_rect_in_band(wlr::Band::Overlay, 4, 64, [1.0, 1.0, 1.0, 0.6])?;
+    runtime.set_rect_position(drag_indicator, 0, 0);
+
     let socket = display.add_socket_auto()?;
     println!("listening on {socket}");
 
@@ -175,6 +207,7 @@ fn main() -> wlr::Result<()> {
         output_box: None,
         sizes: HashMap::new(),
         wants_keyboard: HashMap::new(),
+        first_output: None,
     };
     backend.run_all(&display, &mut app, &runtime, wlr::Until::Stop)?;
     Ok(())
