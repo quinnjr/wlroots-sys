@@ -3373,12 +3373,31 @@ impl Runtime {
         let Some(seat) = self.seat_ptr() else {
             return;
         };
-        let Some((_surface, sx, sy)) = self.leaf_surface_at(x, y) else {
+        let Some((surface, sx, sy)) = self.leaf_surface_at(x, y) else {
             return;
         };
-        // SAFETY: `seat` is this runtime's own live seat; `sx`/`sy` are
-        // read by value and not retained.
-        unsafe { sys::wlr_seat_touch_notify_motion(seat.as_ptr(), time_msec, id, sx, sy) };
+        // SAFETY: `seat` is this runtime's own live seat; `surface` was
+        // just resolved from a hit test against this runtime's own live
+        // scene and is therefore live too; `sx`/`sy` are read by value and
+        // not retained.
+        //
+        // `wlr_seat_touch_point_focus` first: unlike a pointer, a touch
+        // point's `focus_surface` is not recomputed on every motion --
+        // `wlr_seat_touch_notify_motion` alone keeps delivering to whatever
+        // surface last held focus (the down surface, absent a call here),
+        // which is fine for plain touch input but wrong for a drag, where
+        // the destination surface under the point changes as it moves.
+        // Calling this every motion (not only when the surface changes) is
+        // deliberate and cheap -- wlroots' own touch_point_focus is a no-op
+        // when `surface` already matches the point's current focus, so this
+        // just keeps `focus_surface`/`sx`/`sy` in sync with the hit test
+        // unconditionally rather than this crate tracking "did it change"
+        // itself and risking drift from wlroots' own idea of the same
+        // question.
+        unsafe {
+            sys::wlr_seat_touch_point_focus(seat.as_ptr(), surface, time_msec, id, sx, sy);
+            sys::wlr_seat_touch_notify_motion(seat.as_ptr(), time_msec, id, sx, sy);
+        }
     }
 
     /// Test-only: synthesize a touch-up for the touch point `id`, ending a
