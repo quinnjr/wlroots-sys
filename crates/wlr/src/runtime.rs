@@ -3357,7 +3357,11 @@ impl Runtime {
     /// [`inject_touch_down`](Runtime::inject_touch_down). Re-resolves the
     /// surface-local coordinates at the new position via
     /// [`leaf_surface_at`](Runtime::leaf_surface_at) and forwards to
-    /// `wlr_seat_touch_notify_motion`.
+    /// `wlr_seat_touch_notify_motion`. It also calls
+    /// `wlr_seat_touch_point_focus` first, so the touch point's focus
+    /// surface tracks whatever is under it as it moves — required for a
+    /// drag, whose destination surface differs from the touch-down one
+    /// (see the SAFETY note for detail).
     ///
     /// `wlr_seat_touch_notify_motion` takes no surface parameter — it
     /// addresses the touch point `id` already registered by the matching

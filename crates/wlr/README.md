@@ -71,6 +71,29 @@ guarantee that nothing observable moved.
 
 No further compatibility exception is sanctioned in the `0.20` line.
 
+## 0.20.17
+
+Completes headless touch drag-and-drop — the touch-side counterpart to what
+`0.20.16` shipped for the pointer. Both additions are test-only
+(`#[doc(hidden)]`, no production caller); default behavior is unchanged.
+
+- `Runtime::enable_test_touch` — makes the seat advertise
+  `WL_SEAT_CAPABILITY_TOUCH` so a headless client can bind `wl_touch`. The
+  crate wires no physical touch device (`on_new_input` has no touch arm), so
+  a seat driven only by injection never advertised touch, and wlroots refuses
+  to create a touch point for a client that holds no `wl_touch` — no injected
+  touch drag could start. The capability is folded into the seat's normal
+  capability recompute behind a per-`Runtime` flag, so it survives later
+  pointer/keyboard hot-plug. Off by default: with `enable_test_touch`
+  uncalled, advertised capabilities are byte-identical to `0.20.16`.
+- **`inject_touch_motion` now updates touch-point focus.** It calls
+  `wlr_seat_touch_point_focus` before `wlr_seat_touch_notify_motion` so the
+  touch point's focus surface follows the point as it moves. A touch point's
+  focus (unlike a pointer's) is not recomputed per motion, so without this a
+  drag kept delivering to the touch-down surface and the destination never
+  received `wl_data_device.enter`.
+- Additive within `0.20`; no existing item changed.
+
 ## 0.20.16
 
 Drag-and-drop, and the virtual pointer + touch injection that let a headless
