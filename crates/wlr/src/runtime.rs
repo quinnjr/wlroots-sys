@@ -3318,6 +3318,73 @@ impl Runtime {
         }
     }
 
+    /// Test-only: synthesize a touch-down at `(x, y)` so a headless test can
+    /// drive a touch drag. Resolves the struck surface and its local
+    /// coordinates via [`leaf_surface_at`](Runtime::leaf_surface_at) — the
+    /// same hit test pointer forwarding uses — and forwards to
+    /// `wlr_seat_touch_notify_down`, which defers to any active touch grab.
+    /// Returns the down serial (a valid touch grab serial) on success,
+    /// `None` when there is no seat or nothing under `(x, y)`.
+    ///
+    /// No production caller — there is no virtual-touch Wayland protocol,
+    /// so this exists solely for a headless harness to synthesize touch
+    /// input in tests.
+    #[doc(hidden)]
+    pub fn inject_touch_down(&self, x: f64, y: f64, id: i32, time_msec: u32) -> Option<u32> {
+        let seat = self.seat_ptr()?;
+        let (surface, sx, sy) = self.leaf_surface_at(x, y)?;
+        // SAFETY: `seat` is this runtime's own live seat (from
+        // `seat_ptr`); `surface` was just resolved from a hit test against
+        // this runtime's own live scene and is therefore live too.
+        // wlroots reads `sx`/`sy` by value and does not retain them.
+        Some(unsafe { sys::wlr_seat_touch_notify_down(seat.as_ptr(), surface, time_msec, id, sx, sy) })
+    }
+
+    /// Test-only: synthesize a touch-motion to `(x, y)` for the touch point
+    /// `id`, continuing a drag started with
+    /// [`inject_touch_down`](Runtime::inject_touch_down). Re-resolves the
+    /// surface-local coordinates at the new position via
+    /// [`leaf_surface_at`](Runtime::leaf_surface_at) and forwards to
+    /// `wlr_seat_touch_notify_motion`.
+    ///
+    /// `wlr_seat_touch_notify_motion` takes no surface parameter — it
+    /// addresses the touch point `id` already registered by the matching
+    /// `notify_down` and delivers to whichever client owns it. When `(x,
+    /// y)` has moved off every surface, there is nothing to resolve
+    /// coordinates against, so this is a deliberate no-op rather than
+    /// notifying with stale or zeroed coordinates: a drag that exits scene
+    /// bounds simply stops updating position until it re-enters one.
+    ///
+    /// No production caller — see [`inject_touch_down`](Runtime::inject_touch_down).
+    #[doc(hidden)]
+    pub fn inject_touch_motion(&self, x: f64, y: f64, id: i32, time_msec: u32) {
+        let Some(seat) = self.seat_ptr() else {
+            return;
+        };
+        let Some((_surface, sx, sy)) = self.leaf_surface_at(x, y) else {
+            return;
+        };
+        // SAFETY: `seat` is this runtime's own live seat; `sx`/`sy` are
+        // read by value and not retained.
+        unsafe { sys::wlr_seat_touch_notify_motion(seat.as_ptr(), time_msec, id, sx, sy) };
+    }
+
+    /// Test-only: synthesize a touch-up for the touch point `id`, ending a
+    /// drag started with [`inject_touch_down`](Runtime::inject_touch_down).
+    /// Forwards to `wlr_seat_touch_notify_up`, which defers to any active
+    /// touch grab and removes the touch point. A no-op when there is no
+    /// seat.
+    ///
+    /// No production caller — see [`inject_touch_down`](Runtime::inject_touch_down).
+    #[doc(hidden)]
+    pub fn inject_touch_up(&self, id: i32, time_msec: u32) {
+        let Some(seat) = self.seat_ptr() else {
+            return;
+        };
+        // SAFETY: `seat` is this runtime's own live seat.
+        unsafe { sys::wlr_seat_touch_notify_up(seat.as_ptr(), time_msec, id) };
+    }
+
     /// Where the cursor is, in scene coordinates. `(0.0, 0.0)` with no seat.
     pub fn pointer_position(&self) -> (f64, f64) {
         let cursor = *self.inner.cursor.borrow();
