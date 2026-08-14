@@ -39,7 +39,7 @@ use crate::id::{SourceId, attach_id, find_id};
 use crate::layer::Layer;
 use crate::seat::{KeyEvent, Modifiers};
 use crate::{
-    Display, Error, EventLoop, Handlers, LayerSurface, LayerSurfaceId, LoopHandler, Output,
+    Band, Display, Error, EventLoop, Handlers, LayerSurface, LayerSurfaceId, LoopHandler, Output,
     OutputHandler, OutputId, Result, Runtime, Toplevel, ToplevelId, sys,
 };
 
@@ -1280,6 +1280,27 @@ impl<'d> Backend<'d> {
                     std::ptr::null(),
                 )
             });
+            // `request_start_drag`/`start_drag`: a client asking to start a
+            // drag-and-drop operation, and wlroots confirming one actually
+            // started. Same liveness reasoning as the selection signals just
+            // above — the seat is display-owned, so a null liveness flag is
+            // correct.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*seat.as_ptr()).events.request_start_drag,
+                    on_request_start_drag::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*seat.as_ptr()).events.start_drag,
+                    on_start_drag::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
         }
 
         if let Some(manager) = runtime.virtual_keyboard_manager_ptr() {
@@ -1939,6 +1960,87 @@ unsafe extern "C" fn on_request_set_primary_selection<S: Handlers>(
         if let Some(seat) = (*session).runtime.seat_ptr() {
             sys::wlr_seat_set_primary_selection(seat.as_ptr(), (*event).source, (*event).serial);
         }
+    }
+}
+
+/// Honors a client's request to start a drag-and-drop operation. wlroots
+/// hands this listener a `wlr_drag` already built (by
+/// `wlr_data_device_manager`/`wlr_primary_selection`) but not yet armed; the
+/// grab only takes effect — and the seat only enters its drag state machine —
+/// once one of `wlr_seat_start_pointer_drag`/`wlr_seat_start_touch_drag` is
+/// called below. Validating the serial first is the security gate: a serial
+/// that does not match a live pointer or touch grab on `event.origin` means
+/// the client is not entitled to start this drag (it is stale, forged, or
+/// belongs to a different surface), so neither branch fires and the drag
+/// never starts. A later negative test pins this — do not weaken it.
+unsafe extern "C" fn on_request_start_drag<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_seat.events.request_start_drag`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_seat_request_start_drag_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_seat_request_start_drag_event>();
+        let Some(seat) = (*session).runtime.seat_ptr() else {
+            return;
+        };
+        let seat = seat.as_ptr();
+        // Pointer drag if the serial is a valid pointer grant.
+        if sys::wlr_seat_validate_pointer_grab_serial(seat, (*event).origin, (*event).serial) {
+            sys::wlr_seat_start_pointer_drag(seat, (*event).drag, (*event).serial);
+            return;
+        }
+        // Otherwise try touch.
+        let mut point: *mut sys::wlr_touch_point = std::ptr::null_mut();
+        if sys::wlr_seat_validate_touch_grab_serial(
+            seat,
+            (*event).origin,
+            (*event).serial,
+            &raw mut point,
+        ) {
+            sys::wlr_seat_start_touch_drag(seat, (*event).drag, (*event).serial, point);
+        }
+        // Neither grab validated: the serial is invalid, so the drag never
+        // starts. This is not an error — wlroots expects compositors to
+        // silently ignore an unentitled request.
+    }
+}
+
+/// A drag started (via [`on_request_start_drag`] above, once wlroots' own
+/// validation and `wlr_seat_start_*_drag` armed it). Parents the drag's icon
+/// — if it has one; not every drag carries a visible icon — into the overlay
+/// scene band so it renders above every toplevel and layer surface for the
+/// duration of the drag.
+///
+/// Open question, left for Task 7's harness test to resolve empirically:
+/// whether the scene node `wlr_scene_drag_icon_create` returns self-tracks
+/// the pointer/touch position (as `wlr_scene_drag_icon` in upstream wlroots
+/// appears to, via its own motion listeners), or this compositor must
+/// reposition it on pointer/touch motion itself. If the latter, that is a
+/// follow-up task, not a defect in this wiring.
+unsafe extern "C" fn on_start_drag<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_seat.events.start_drag`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_drag`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let drag = data.cast::<sys::wlr_drag>();
+        if (*drag).icon.is_null() {
+            return;
+        }
+        let Some(overlay) = (*session).runtime.band_ptr(Band::Overlay) else {
+            return;
+        };
+        let _tree = sys::wlr_scene_drag_icon_create(overlay.as_ptr(), (*drag).icon);
     }
 }
 
