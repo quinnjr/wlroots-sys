@@ -1296,6 +1296,20 @@ impl<'d> Backend<'d> {
             });
         }
 
+        if let Some(manager) = runtime.virtual_pointer_manager_ptr() {
+            // SAFETY: `create_virtual_pointer_manager` returned a non-null
+            // manager owned by the display, which this call requires to outlive
+            // it, exactly as for the xdg shell above — null liveness is correct.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.new_virtual_pointer,
+                    on_new_virtual_pointer::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
         Ok(regs)
     }
 }
@@ -3130,6 +3144,92 @@ unsafe extern "C" fn on_new_virtual_keyboard<S: Handlers>(
                 pointer: None,
                 _destroy: destroy,
                 _listeners: listeners,
+            },
+        );
+
+        update_seat_capabilities(runtime);
+    }
+}
+
+/// A client created a virtual pointer. Attach its embedded `wlr_pointer` to
+/// the cursor exactly as a physical pointer from the backend would be, so the
+/// seat gains pointer capability and its motion/button events mint input
+/// serials. Teardown reuses [`on_input_destroy`], keyed by the pointer's base
+/// input device, when the client destroys the virtual pointer.
+unsafe extern "C" fn on_new_virtual_pointer<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked into
+    // `wlr_virtual_pointer_manager_v1.events.new_virtual_pointer`, whose data
+    // is a live `wlr_virtual_pointer_v1_new_pointer_event`. Its `new_pointer`
+    // is a live `wlr_virtual_pointer_v1`; that pointer's embedded `pointer`
+    // and that pointer's `base` input device are live and fully initialised
+    // when wlroots announces it; the base's `events.destroy` fires when the
+    // client destroys the virtual pointer, handled by `on_input_destroy`
+    // under the same `device as usize` key inserted here.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_virtual_pointer_v1_new_pointer_event>();
+        let vp = (*event).new_pointer;
+        let pointer = &raw mut (*vp).pointer;
+        let device = &raw mut (*vp).pointer.base;
+        let runtime = (*session).runtime;
+
+        // Single-seat assumption: the injected pointer is attached to this
+        // runtime's only cursor, not routed by `(*event).suggested_seat` (the
+        // seat the client suggested). Sound because this crate creates
+        // exactly one seat, so the two are necessarily the same. A future
+        // multi-seat crate must compare `(*event).suggested_seat` against the
+        // target seat here instead of attaching unconditionally.
+
+        let alive = Rc::new(Cell::new(true));
+        let destroy = Registration::link_bare(
+            &raw mut (*device).events.destroy,
+            on_input_destroy::<S>,
+            (*bound).session,
+            &raw const *alive,
+        );
+
+        if let Some(cursor) = runtime.cursor_ptr() {
+            sys::wlr_cursor_attach_input_device(cursor.as_ptr(), device);
+        }
+        let p_nn = NonNull::new_unchecked(pointer);
+        runtime.record_pointer(p_nn);
+
+        let listeners = vec![
+            Registration::link_bare(
+                &raw mut (*pointer).events.motion,
+                on_pointer_motion::<S>,
+                (*bound).session,
+                &raw const *alive,
+            ),
+            Registration::link_bare(
+                &raw mut (*pointer).events.motion_absolute,
+                on_pointer_motion_absolute::<S>,
+                (*bound).session,
+                &raw const *alive,
+            ),
+            Registration::link_bare(
+                &raw mut (*pointer).events.button,
+                on_pointer_button::<S>,
+                (*bound).session,
+                &raw const *alive,
+            ),
+        ];
+
+        // Keyed by the base input-device pointer, exactly as `on_new_input`
+        // keys a physical pointer, so `on_input_destroy` recovers this entry
+        // from the `events.destroy` data with no side channel.
+        (*session).inputs.borrow_mut().insert(
+            device as usize,
+            InputDevice {
+                keyboard: None,
+                pointer: Some(p_nn),
+                _destroy: destroy,
+                _listeners: listeners,
+                alive,
             },
         );
 
