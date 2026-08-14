@@ -52,6 +52,11 @@ use crate::{
 /// below rather than trusted from this comment alone.
 const WL_SEAT_CAPABILITY_POINTER: u32 = 1;
 const WL_SEAT_CAPABILITY_KEYBOARD: u32 = 2;
+/// `touch = 4` — see this constant group's own doc above. There is no
+/// physical-touch-device wiring in this crate (`on_new_input` has no
+/// `WLR_INPUT_DEVICE_TOUCH` arm), so this bit is only ever set through
+/// [`Runtime::enable_test_touch`], not by any real device arriving.
+const WL_SEAT_CAPABILITY_TOUCH: u32 = 4;
 
 /// A wlroots backend.
 ///
@@ -3110,7 +3115,13 @@ struct InputDevice {
 /// way in.
 ///
 /// A no-op with no seat.
-fn update_seat_capabilities(runtime: &Runtime) {
+///
+/// `pub(crate)`, not private: [`Runtime::enable_test_touch`] (`runtime.rs`)
+/// also needs to trigger this recompute, from outside this module, the
+/// instant the test-touch flag is set — see that method's own doc for why a
+/// deferred recompute (waiting for the next device add/remove) is not good
+/// enough.
+pub(crate) fn update_seat_capabilities(runtime: &Runtime) {
     let Some(seat) = runtime.seat_ptr() else {
         return;
     };
@@ -3120,6 +3131,9 @@ fn update_seat_capabilities(runtime: &Runtime) {
     }
     if runtime.has_keyboard() {
         caps |= WL_SEAT_CAPABILITY_KEYBOARD;
+    }
+    if runtime.test_touch_enabled() {
+        caps |= WL_SEAT_CAPABILITY_TOUCH;
     }
     // SAFETY: the seat is this runtime's own (created by `create_seat`) and
     // live for as long as this runtime can be used.
@@ -4477,6 +4491,42 @@ mod tests {
     fn capability_bits_match_the_wayland_protocol() {
         assert_eq!(WL_SEAT_CAPABILITY_POINTER, 1);
         assert_eq!(WL_SEAT_CAPABILITY_KEYBOARD, 2);
+        assert_eq!(WL_SEAT_CAPABILITY_TOUCH, 4);
+    }
+
+    /// [`Runtime::enable_test_touch`] must make a seat that already exists
+    /// start advertising the touch capability immediately, not only on the
+    /// next unrelated device add/remove — this is what
+    /// `crates/wlr/tests/seat.rs` cannot observe itself, since `wlr_seat` and
+    /// its `capabilities` field are not part of this crate's public surface.
+    /// Reads `wlr_seat.capabilities` directly, the same field
+    /// `wlr_seat_set_capabilities` writes, so this exercises exactly what
+    /// `update_seat_capabilities` does rather than this crate's own
+    /// bookkeeping of it.
+    #[test]
+    fn enable_test_touch_sets_the_capability_bit_immediately() {
+        let display = crate::Display::new().expect("display");
+        let runtime = crate::Runtime::new().expect("runtime");
+        runtime.create_seat(&display, "seat0").expect("seat");
+
+        let seat = runtime.seat_ptr().expect("seat was just created");
+        // SAFETY: `seat` is this runtime's own live seat, just created above.
+        assert_eq!(
+            unsafe { (*seat.as_ptr()).capabilities } & WL_SEAT_CAPABILITY_TOUCH,
+            0,
+            "a fresh seat with no devices and no enable_test_touch call must \
+             not advertise touch"
+        );
+
+        runtime.enable_test_touch();
+
+        // SAFETY: same seat, still live.
+        assert_eq!(
+            unsafe { (*seat.as_ptr()).capabilities } & WL_SEAT_CAPABILITY_TOUCH,
+            WL_SEAT_CAPABILITY_TOUCH,
+            "enable_test_touch must set the touch bit without waiting for a \
+             device add/remove to trigger the next recompute"
+        );
     }
 
     /// Reproduces, at the smallest possible scale and with no `Session`,

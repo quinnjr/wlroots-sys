@@ -229,6 +229,17 @@ pub(crate) struct RuntimeInner {
     /// pruning as `keyboards`, for [`Runtime::has_pointer`].
     pub(crate) pointers: RefCell<Vec<NonNull<sys::wlr_pointer>>>,
 
+    /// Test-only: whether [`Runtime::enable_test_touch`] has been called.
+    /// There is no touch input device and never will be one recorded here —
+    /// unlike `keyboards`/`pointers`, this is not counting anything real, it
+    /// is a standing request that `backend.rs`'s `update_seat_capabilities`
+    /// OR the touch bit into every capability recompute it does from now on,
+    /// so the bit survives a keyboard or pointer later being hot-plugged or
+    /// unplugged instead of being clobbered by the next recompute. Default
+    /// `false`, so a consumer that never calls `enable_test_touch` gets
+    /// byte-identical capability behaviour to a build without this field.
+    pub(crate) test_touch_enabled: std::cell::Cell<bool>,
+
     /// Every output this run has announced, so a by-id mutator
     /// ([`Runtime::output_layout_box`], [`Runtime::set_output_position`])
     /// can resolve an [`OutputId`] back to the `*mut wlr_output` it names.
@@ -592,6 +603,7 @@ impl Runtime {
                 cursor_image_loaded: std::cell::Cell::new(false),
                 keyboards: RefCell::new(Vec::new()),
                 pointers: RefCell::new(Vec::new()),
+                test_touch_enabled: std::cell::Cell::new(false),
                 outputs: RefCell::new(HashMap::new()),
                 pinned_display: std::cell::Cell::new(0),
             }),
@@ -3476,6 +3488,43 @@ impl Runtime {
     /// clients it had one.
     pub(crate) fn has_pointer(&self) -> bool {
         !self.inner.pointers.borrow().is_empty()
+    }
+
+    /// Whether [`enable_test_touch`](Runtime::enable_test_touch) has been
+    /// called. Read by `backend.rs`'s `update_seat_capabilities` on every
+    /// recompute, exactly as `has_keyboard`/`has_pointer` are.
+    pub(crate) fn test_touch_enabled(&self) -> bool {
+        self.inner.test_touch_enabled.get()
+    }
+
+    /// Test-only: make the seat advertise `WL_SEAT_CAPABILITY_TOUCH` so
+    /// headless clients can bind `wl_touch` and injected touch points
+    /// ([`inject_touch_down`](Runtime::inject_touch_down) and friends) are
+    /// accepted. There is no touch input device; this exists purely so
+    /// `inject_touch_*` work in a test harness. No production caller.
+    ///
+    /// wlroots' own `wlr_seat_touch.c` (`touch_point_create`) refuses to
+    /// create a touch point unless the target surface's client already
+    /// holds a `wl_touch` resource, and a client can only obtain one via
+    /// `wl_seat.get_touch`, which wlroots gates server-side on the seat
+    /// having advertised the touch capability. Nothing in this crate ever
+    /// sets that bit otherwise — `on_new_input` has no
+    /// `WLR_INPUT_DEVICE_TOUCH` arm, since there is no virtual-touch
+    /// Wayland protocol to receive one from — so without this method a
+    /// headless seat driven only by `inject_touch_*` can never produce a
+    /// touch point at all.
+    ///
+    /// Sets the flag `update_seat_capabilities` now reads on every future
+    /// recompute (see [`RuntimeInner::test_touch_enabled`]'s own doc for why
+    /// that matters — a one-shot capability set here would be clobbered by
+    /// the very next keyboard or pointer hot-plug), then immediately
+    /// triggers a recompute itself, so a seat that already exists starts
+    /// advertising touch right away rather than waiting for some unrelated
+    /// device event to happen to fire one.
+    #[doc(hidden)]
+    pub fn enable_test_touch(&self) {
+        self.inner.test_touch_enabled.set(true);
+        crate::backend::update_seat_capabilities(self);
     }
 }
 
