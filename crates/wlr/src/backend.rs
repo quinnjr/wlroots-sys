@@ -2041,11 +2041,22 @@ unsafe extern "C" fn on_request_start_drag<S: Handlers>(
 /// [`RuntimeInner::drag_icon_tree`] so [`Runtime::drag_icon_position`] can
 /// observe it.
 ///
-/// Resolved empirically (Task 7's harness test): the scene node
+/// An earlier revision of this doc claimed the scene node
 /// `wlr_scene_drag_icon_create` returns self-tracks the pointer/touch
-/// position, via `wlr_scene_drag_icon`'s own motion listeners in upstream
-/// wlroots — so this compositor registers no motion listener of its own for
-/// it, and never needs to.
+/// position via its own motion listeners. That was wrong — verified against
+/// wlroots 0.20.2's own C source, `wlr_scene_drag_icon`'s only reposition
+/// listener fires on the icon surface's own buffer-commit deltas, never on
+/// cursor motion, so left alone the icon renders once at `(0, 0)` and never
+/// moves. This crate repositions the node itself instead: `on_pointer_motion`,
+/// `on_pointer_motion_absolute` (below), and
+/// [`Runtime::inject_touch_motion`] each call
+/// [`Runtime::reposition_drag_icon`] with their own freshly-updated cursor or
+/// touch-point layout position, on every motion, for as long as
+/// `drag_icon_tree` holds a tree — matching tinywl's own
+/// `wlr_scene_node_set_position(&drag_icon->node, cursor->x, cursor->y)`. The
+/// icon's own hotspot offset is still applied separately, by wlroots'
+/// internal `surface_tree` commit handler on the node this tree parents;
+/// this crate only ever positions the outer tree.
 ///
 /// Also links a destroy listener on the drag *icon's* own `events.destroy`
 /// (not the drag's — see below), keyed in `Session::drags` by the icon
@@ -3789,6 +3800,15 @@ unsafe extern "C" fn on_pointer_motion<S: Handlers>(
         runtime.ensure_cursor_image();
 
         let (x, y) = ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y);
+
+        // `wlr_scene_drag_icon` does not self-track the cursor (see
+        // `Runtime::drag_icon_position`'s doc for the full story) — this is
+        // the fix, called with the cursor's own freshly-updated layout
+        // position. `.round()`, not truncation: a truncated `x as i32` on a
+        // sub-pixel cursor position left the icon a pixel short of the
+        // cursor in the downstream prototype that found this bug.
+        runtime.reposition_drag_icon(x.round() as i32, y.round() as i32);
+
         let deliver = (*session).deliver;
         (*session).dispatcher.emit(
             &*session,
@@ -3828,6 +3848,11 @@ unsafe extern "C" fn on_pointer_motion_absolute<S: Handlers>(
         runtime.ensure_cursor_image();
 
         let (x, y) = ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y);
+
+        // See `on_pointer_motion`'s identical call for why this is here and
+        // why `.round()`.
+        runtime.reposition_drag_icon(x.round() as i32, y.round() as i32);
+
         let deliver = (*session).deliver;
         (*session).dispatcher.emit(
             &*session,

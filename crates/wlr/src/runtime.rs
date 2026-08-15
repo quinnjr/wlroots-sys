@@ -260,11 +260,17 @@ pub(crate) struct RuntimeInner {
     /// active drag carries no icon (`on_start_drag` returns early on a null
     /// icon without ever populating this).
     ///
-    /// Upstream `wlr_scene_drag_icon` self-tracks the pointer/touch position
-    /// through its own motion listeners, so nothing in this crate ever
-    /// writes to the tree's position — this cell exists purely so
-    /// [`Runtime::drag_icon_position`] can read it back for observability
-    /// (chiefly tests asserting the icon renders and follows the input).
+    /// Contrary to what an earlier revision of this doc claimed, upstream
+    /// `wlr_scene_drag_icon` does **not** self-track the pointer/touch
+    /// position — its only reposition listener fires on the icon surface's
+    /// own buffer-commit deltas, never on cursor motion (verified against
+    /// wlroots 0.20.2's own C source). So this crate's own motion handlers
+    /// write to the tree's position on every motion — see
+    /// [`Runtime::reposition_drag_icon`] and its callers — and this cell is
+    /// what makes that possible: it exists both so those handlers have
+    /// something to reposition and so [`Runtime::drag_icon_position`] can
+    /// read the result back for observability (chiefly tests asserting the
+    /// icon renders and follows the input).
     ///
     /// Cleared back to `None` by the per-drag-icon destroy listener
     /// `on_start_drag` registers on `(*(*drag).icon).events.destroy` — see
@@ -3288,11 +3294,23 @@ impl Runtime {
     /// tracks the input; the position is the scene node's layout coordinates
     /// (`wlr_scene_node_coords`).
     ///
-    /// wlroots' own `wlr_scene_drag_icon` repositions the node itself on
-    /// every pointer/touch motion — this crate registers no motion listener
-    /// of its own for it — so a `Some` returned here always reflects the
-    /// icon's live position, not a stale snapshot from when the drag
-    /// started.
+    /// Contrary to what an earlier revision of this doc claimed,
+    /// `wlr_scene_drag_icon` does **not** self-track the pointer/touch
+    /// position — verified against wlroots 0.20.2's own C source, its only
+    /// reposition listener fires on the icon surface's own buffer-commit
+    /// deltas, never on cursor motion. Left alone, the icon renders once at
+    /// `(0, 0)` and never moves. So this crate repositions the node itself,
+    /// on every pointer/touch motion, for as long as a drag icon is active —
+    /// see `backend.rs`'s `on_pointer_motion`, `on_pointer_motion_absolute`,
+    /// and [`inject_touch_motion`](Runtime::inject_touch_motion), all three
+    /// of which call `reposition_drag_icon` (crate-internal)
+    /// with the cursor's/touch point's own layout coordinates after updating
+    /// them. A `Some` returned here always reflects that live position, not
+    /// a stale snapshot from when the drag started. The icon's own hotspot
+    /// offset is applied separately, by wlroots' internal `surface_tree`
+    /// commit handler on the node this tree parents — this crate positions
+    /// the *outer* tree at the raw cursor, matching tinywl's own
+    /// `wlr_scene_node_set_position(&drag_icon->node, cursor->x, cursor->y)`.
     pub fn drag_icon_position(&self) -> Option<(i32, i32)> {
         let tree = (*self.inner.drag_icon_tree.borrow())?;
         let mut lx = 0;
@@ -3300,13 +3318,46 @@ impl Runtime {
         // SAFETY: a `Some` stored here is always a live `wlr_scene_tree` —
         // `backend.rs`'s `on_start_drag` populates this cell with the tree
         // `wlr_scene_drag_icon_create` just returned, and the destroy
-        // listener it registers on the same drag's `events.destroy` clears
-        // the cell back to `None` before wlroots frees the tree. Reads only
+        // listener it registers on the icon's `events.destroy` clears the
+        // cell back to `None` before wlroots frees the tree. Reads only
         // ever happen on the thread driving this runtime's event loop, the
         // same thread every listener above runs on, so there is no window in
         // which this could observe a tree mid-teardown.
         let found = unsafe { sys::wlr_scene_node_coords(&raw mut (*tree.as_ptr()).node, &raw mut lx, &raw mut ly) };
         found.then_some((lx, ly))
+    }
+
+    /// Move the drag-icon scene node to `(x, y)` — layout coordinates, the
+    /// same space [`drag_icon_position`](Runtime::drag_icon_position) reads
+    /// back — if a drag icon is currently active. A no-op with no active
+    /// drag icon.
+    ///
+    /// Called from `backend.rs`'s `on_pointer_motion`/
+    /// `on_pointer_motion_absolute` and from
+    /// [`inject_touch_motion`](Runtime::inject_touch_motion), each time
+    /// *after* they have already updated the cursor's/touch point's own
+    /// position for the motion, with that same freshly-updated position —
+    /// this is the fix for `wlr_scene_drag_icon` not self-tracking input;
+    /// see [`drag_icon_position`](Runtime::drag_icon_position)'s own doc for
+    /// the full story. `pub(crate)`, not part of this crate's public
+    /// surface: a consumer never calls this directly, it is wired into the
+    /// crate's own motion handlers.
+    pub(crate) fn reposition_drag_icon(&self, x: i32, y: i32) {
+        // The `NonNull` is copied out and the borrow dropped *before* the
+        // FFI call, rather than held across it: `wlr_scene_node_set_position`
+        // does not re-enter this crate today, but nothing about this method
+        // depends on that staying true, and every other call site in this
+        // crate that touches a `RefCell`-guarded pointer across an FFI call
+        // follows the same "copy out, then call" discipline to avoid a
+        // future re-entrant borrow panicking.
+        let Some(tree) = *self.inner.drag_icon_tree.borrow() else {
+            return;
+        };
+        // SAFETY: `tree` is a live `wlr_scene_tree` for the same reason
+        // `drag_icon_position`'s SAFETY comment gives — a `Some` here is
+        // always live, guaranteed by the destroy listener `on_start_drag`
+        // registers on the icon's own `events.destroy`.
+        unsafe { sys::wlr_scene_node_set_position(&raw mut (*tree.as_ptr()).node, x, y) };
     }
 
     /// The actual surface under `(x, y)`, and the position within *that*
@@ -3453,6 +3504,16 @@ impl Runtime {
             sys::wlr_seat_touch_point_focus(seat.as_ptr(), surface, time_msec, id, sx, sy);
             sys::wlr_seat_touch_notify_motion(seat.as_ptr(), time_msec, id, sx, sy);
         }
+
+        // `(x, y)` are already layout coordinates — this method's own doc
+        // says so — so no conversion is needed before handing them to
+        // `reposition_drag_icon`, unlike the pointer motion handlers, which
+        // read layout coordinates back out of `wlr_cursor` first. `.round()`,
+        // not truncation: matches the pointer handlers, and for the same
+        // reason — truncating toward zero on an f64 that lands just under a
+        // whole pixel leaves the icon a pixel short of where the point
+        // actually is.
+        self.reposition_drag_icon(x.round() as i32, y.round() as i32);
     }
 
     /// Test-only: synthesize a touch-up for the touch point `id`, ending a
@@ -4642,6 +4703,48 @@ mod tests {
     #[test]
     fn drag_icon_position_is_none_with_no_active_drag() {
         let rt = headless_runtime();
+        assert_eq!(rt.drag_icon_position(), None);
+    }
+
+    /// The fix this whole chain of doc corrections exists to justify:
+    /// `reposition_drag_icon` actually moves the node, and
+    /// `drag_icon_position` reads the move back. Does not need a real drag —
+    /// `reposition_drag_icon` only ever touches whatever tree
+    /// `drag_icon_tree` names, so a real scene tree planted directly (the
+    /// same "stands in for the tree a callback would have handed a
+    /// production code path" trick
+    /// `reparent_layer_surface_if_changed_moves_the_tree_only_when_the_layer_changed`
+    /// uses) is enough to exercise it without a client or a running seat.
+    #[test]
+    fn reposition_drag_icon_moves_the_tree_and_drag_icon_position_reads_it_back() {
+        let rt = headless_runtime();
+
+        // Stands in for the tree `on_start_drag` would have stored, parented
+        // under the same Overlay band that function uses.
+        // SAFETY: `overlay` is a live tree owned by `rt`'s own scene.
+        let overlay = rt.band_ptr(Band::Overlay).expect("overlay band");
+        let tree = NonNull::new(unsafe { sys::wlr_scene_tree_create(overlay.as_ptr()) }).unwrap();
+        *rt.inner.drag_icon_tree.borrow_mut() = Some(tree);
+
+        assert_eq!(rt.drag_icon_position(), Some((0, 0)));
+
+        rt.reposition_drag_icon(42, 17);
+        assert_eq!(rt.drag_icon_position(), Some((42, 17)));
+
+        // A second move overwrites rather than accumulates — layout
+        // coordinates, not a delta.
+        rt.reposition_drag_icon(3, 900);
+        assert_eq!(rt.drag_icon_position(), Some((3, 900)));
+    }
+
+    /// With no active drag icon, `reposition_drag_icon` is a documented
+    /// no-op — this is what makes it safe for `on_pointer_motion` and
+    /// `inject_touch_motion` to call unconditionally on every motion, active
+    /// drag or not, rather than checking first.
+    #[test]
+    fn reposition_drag_icon_is_a_no_op_with_no_active_drag() {
+        let rt = headless_runtime();
+        rt.reposition_drag_icon(5, 5);
         assert_eq!(rt.drag_icon_position(), None);
     }
 }
