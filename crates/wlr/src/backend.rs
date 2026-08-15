@@ -468,13 +468,19 @@ struct Session<'r, S> {
     /// `wlr_input_device_finish` hands that callback.
     inputs: RefCell<HashMap<usize, InputDevice>>,
 
-    /// This run's destroy listener on every drag currently in progress with
-    /// a visible icon, keyed by the drag's own `*mut wlr_drag` address (as
+    /// This run's destroy listener on every drag icon currently visible,
+    /// keyed by the drag icon's own `*mut wlr_drag_icon` address (as
     /// `usize`) — mirrors `inputs`' keying discipline exactly, and for the
     /// same reason: `on_start_drag`'s destroy listener must find and remove
-    /// one specific drag's entry synchronously, the moment that drag ends,
-    /// so it can clear [`RuntimeInner::drag_icon_tree`] before wlroots frees
-    /// the scene tree stored there. A drag with no icon never gets an entry
+    /// one specific icon's entry synchronously, the moment that icon is
+    /// destroyed, so it can clear [`RuntimeInner::drag_icon_tree`] before
+    /// wlroots frees the scene tree stored there. Keyed by the *icon*, not
+    /// the drag: wlroots frees the tree from two independent paths — the
+    /// drag ending normally, and a client destroying the drag-icon surface
+    /// mid-drag while the drag itself survives — and `(*icon).events.destroy`
+    /// is the one signal both paths fire, always in the same synchronous
+    /// emission that frees the tree; `(*drag).events.destroy` does not fire
+    /// on the second path at all. A drag with no icon never gets an entry
     /// here — `on_start_drag` returns before linking anything when
     /// `(*drag).icon` is null.
     drags: RefCell<HashMap<usize, Registration>>,
@@ -2041,15 +2047,24 @@ unsafe extern "C" fn on_request_start_drag<S: Handlers>(
 /// wlroots — so this compositor registers no motion listener of its own for
 /// it, and never needs to.
 ///
-/// Also links a destroy listener on the drag's own `events.destroy`, keyed
-/// in `Session::drags` by the drag pointer — mirrors `on_new_input`'s
-/// `InputDevice::_destroy` pattern (same keying discipline: the pointer
-/// handed to the destroy signal is exactly the key this inserts under), used
-/// here instead of `Registration::link_toplevel`'s id-carrying variants
-/// because a drag has no [`ToplevelId`]/[`OutputId`]/[`LayerSurfaceId`] to
-/// carry. That listener — not this function — is what clears
-/// `drag_icon_tree` back to `None`; see [`on_drag_destroy`]'s own doc for why
-/// that must happen before wlroots frees the tree.
+/// Also links a destroy listener on the drag *icon's* own `events.destroy`
+/// (not the drag's — see below), keyed in `Session::drags` by the icon
+/// pointer — mirrors `on_new_input`'s `InputDevice::_destroy` pattern (same
+/// keying discipline: the pointer handed to the destroy signal is exactly
+/// the key this inserts under), used here instead of
+/// `Registration::link_toplevel`'s id-carrying variants because a drag icon
+/// has no [`ToplevelId`]/[`OutputId`]/[`LayerSurfaceId`] to carry. That
+/// listener — not this function — is what clears `drag_icon_tree` back to
+/// `None`; see [`on_drag_destroy`]'s own doc for why that must happen before
+/// wlroots frees the tree, and for why the icon's destroy (not the drag's)
+/// is the correct lifetime boundary to watch: wlroots frees the scene tree
+/// on two independent paths — the drag ending normally, and a client
+/// destroying the drag-icon surface mid-drag while the drag itself survives
+/// with `drag->icon` nulled out — and only `(*icon).events.destroy` fires on
+/// both, always in the same synchronous emission that frees the tree.
+/// `(*drag).events.destroy` does not fire on the second path at all, which
+/// would leave `drag_icon_tree` holding a dangling pointer if that were the
+/// signal watched here.
 unsafe extern "C" fn on_start_drag<S: Handlers>(
     l: *mut sys::wl_listener,
     data: *mut std::ffi::c_void,
@@ -2075,12 +2090,17 @@ unsafe extern "C" fn on_start_drag<S: Handlers>(
         };
         *runtime.inner.drag_icon_tree.borrow_mut() = Some(tree);
 
-        // No `alive` backstop: as for the decoration listeners this mirrors,
-        // this drag cannot be freed by anything other than the destroy this
-        // very listener watches, so there is no "owner died first" case to
-        // guard against.
+        // Linked on the icon's own `events.destroy`, not the drag's — see
+        // this function's own doc for why that is the signal that fires on
+        // both teardown paths. No `alive` backstop: as for the decoration
+        // listeners this mirrors, the icon cannot be freed by anything other
+        // than the destroy this very listener watches, so there is no
+        // "owner died first" case to guard against. `(*drag).icon` is
+        // non-null here — checked above — so dereferencing it to reach its
+        // `events` is sound.
+        let icon = (*drag).icon;
         let destroy = Registration::link_bare(
-            &raw mut (*drag).events.destroy,
+            &raw mut (*icon).events.destroy,
             on_drag_destroy::<S>,
             (*bound).session,
             std::ptr::null(),
@@ -2088,19 +2108,20 @@ unsafe extern "C" fn on_start_drag<S: Handlers>(
         (*session)
             .drags
             .borrow_mut()
-            .insert(drag as usize, destroy);
+            .insert(icon as usize, destroy);
     }
 }
 
-/// The drag is about to be freed. Clear [`RuntimeInner::drag_icon_tree`]
+/// The drag icon is about to be freed. Clear [`RuntimeInner::drag_icon_tree`]
 /// *now*, whatever the handler does — the tree `on_start_drag` stored there
-/// is a child of the drag icon wlroots is about to destroy alongside the
-/// drag itself (`seat_handle_drag_destroy` in `wlr_seat.c` calls
-/// `wlr_drag_icon_destroy`, which frees the scene tree), so a read through
-/// [`Runtime::drag_icon_position`] after this point without this clear would
-/// dereference freed memory.
+/// is a child of this very icon, and wlroots' `drag_icon_destroy` (called
+/// either from `seat_handle_drag_destroy` when the drag ends normally, or
+/// independently when a client destroys the drag-icon surface mid-drag)
+/// frees the scene tree as part of the same teardown that emits this signal,
+/// so a read through [`Runtime::drag_icon_position`] after this point without
+/// this clear would dereference freed memory.
 ///
-/// Also removes this drag's entry from `Session::drags`, which unlinks this
+/// Also removes this icon's entry from `Session::drags`, which unlinks this
 /// very listener — sound for the same reason `on_input_destroy` and
 /// `on_toplevel_decoration_destroy` unlinking themselves is:
 /// `wl_signal_emit_mutable` has already advanced its cursor past the firing
@@ -2109,12 +2130,14 @@ unsafe extern "C" fn on_drag_destroy<S: Handlers>(
     l: *mut sys::wl_listener,
     data: *mut std::ffi::c_void,
 ) {
-    // SAFETY: linked by `on_start_drag` into this drag's own `events.destroy`;
-    // the drag is still live memory for the duration of this emission. `data`
-    // is the same `*mut wlr_drag` `on_start_drag` linked against — wlroots'
-    // `seat_handle_drag_destroy` emits with the drag itself as the signal
-    // data — so, cast to `usize`, it recovers the exact key that call
-    // inserted this entry under.
+    // SAFETY: linked by `on_start_drag` into this drag icon's own
+    // `events.destroy`; the icon is still live memory for the duration of
+    // this emission. `data` is the same `*mut wlr_drag_icon` `on_start_drag`
+    // linked against — wlroots' `drag_icon_destroy` emits `events.destroy`
+    // with the icon itself as the signal data, on both the normal-drag-end
+    // path and the icon-surface-destroyed-mid-drag path — so, cast to
+    // `usize`, it recovers the exact key that call inserted this entry
+    // under regardless of which path fired.
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();

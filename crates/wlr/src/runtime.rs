@@ -254,9 +254,6 @@ pub(crate) struct RuntimeInner {
     /// resolving to a pointer wlroots may have already reused or freed.
     pub(crate) outputs: RefCell<HashMap<OutputId, NonNull<sys::wlr_output>>>,
 
-    /// The `wl_display` [`Runtime::init_graphics`] was given, as a `usize`
-    /// — `0` before `init_graphics` has run. See `Runtime`'s own doc for
-    /// the obligation this exists to catch a violation of: every clone of
     /// The drag icon's scene tree, while a drag with a visible icon is in
     /// progress — the tree `wlr_scene_drag_icon_create` returns from
     /// `backend.rs`'s `on_start_drag`. `None` when no drag is active, or the
@@ -269,14 +266,15 @@ pub(crate) struct RuntimeInner {
     /// [`Runtime::drag_icon_position`] can read it back for observability
     /// (chiefly tests asserting the icon renders and follows the input).
     ///
-    /// Cleared back to `None` by the per-drag destroy listener `on_start_drag`
-    /// registers on `(*drag).events.destroy` — see that function's own doc.
-    /// That listener is the only thing standing between this cell and a
-    /// dangling pointer: the scene tree is owned by wlroots and freed when
-    /// the drag ends, so a stale `Some` here past that point would be a
-    /// use-after-free waiting to happen on the next read. See
-    /// [`Runtime::drag_icon_position`]'s SAFETY comment for the full
-    /// argument.
+    /// Cleared back to `None` by the per-drag-icon destroy listener
+    /// `on_start_drag` registers on `(*(*drag).icon).events.destroy` — see
+    /// that function's own doc for why the *icon's* destroy, not the drag's,
+    /// is the listener that has to run here. That listener is the only thing
+    /// standing between this cell and a dangling pointer: the scene tree is
+    /// owned by wlroots and freed when the icon is destroyed, so a stale
+    /// `Some` here past that point would be a use-after-free waiting to
+    /// happen on the next read. See [`Runtime::drag_icon_position`]'s SAFETY
+    /// comment for the full argument.
     pub(crate) drag_icon_tree: RefCell<Option<NonNull<sys::wlr_scene_tree>>>,
 
     /// The `wl_display` [`Runtime::init_graphics`] was given, as a `usize`
