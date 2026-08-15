@@ -257,6 +257,31 @@ pub(crate) struct RuntimeInner {
     /// The `wl_display` [`Runtime::init_graphics`] was given, as a `usize`
     /// — `0` before `init_graphics` has run. See `Runtime`'s own doc for
     /// the obligation this exists to catch a violation of: every clone of
+    /// The drag icon's scene tree, while a drag with a visible icon is in
+    /// progress — the tree `wlr_scene_drag_icon_create` returns from
+    /// `backend.rs`'s `on_start_drag`. `None` when no drag is active, or the
+    /// active drag carries no icon (`on_start_drag` returns early on a null
+    /// icon without ever populating this).
+    ///
+    /// Upstream `wlr_scene_drag_icon` self-tracks the pointer/touch position
+    /// through its own motion listeners, so nothing in this crate ever
+    /// writes to the tree's position — this cell exists purely so
+    /// [`Runtime::drag_icon_position`] can read it back for observability
+    /// (chiefly tests asserting the icon renders and follows the input).
+    ///
+    /// Cleared back to `None` by the per-drag destroy listener `on_start_drag`
+    /// registers on `(*drag).events.destroy` — see that function's own doc.
+    /// That listener is the only thing standing between this cell and a
+    /// dangling pointer: the scene tree is owned by wlroots and freed when
+    /// the drag ends, so a stale `Some` here past that point would be a
+    /// use-after-free waiting to happen on the next read. See
+    /// [`Runtime::drag_icon_position`]'s SAFETY comment for the full
+    /// argument.
+    pub(crate) drag_icon_tree: RefCell<Option<NonNull<sys::wlr_scene_tree>>>,
+
+    /// The `wl_display` [`Runtime::init_graphics`] was given, as a `usize`
+    /// — `0` before `init_graphics` has run. See `Runtime`'s own doc for
+    /// the obligation this exists to catch a violation of: every clone of
     /// this handle must not outlive the `Display` it was initialised
     /// against, since wlroots frees the output layout (and the scene-output
     /// layout attached to it) when that display dies, and the graphics
@@ -605,6 +630,7 @@ impl Runtime {
                 pointers: RefCell::new(Vec::new()),
                 test_touch_enabled: std::cell::Cell::new(false),
                 outputs: RefCell::new(HashMap::new()),
+                drag_icon_tree: RefCell::new(None),
                 pinned_display: std::cell::Cell::new(0),
             }),
         })
@@ -3258,6 +3284,33 @@ impl Runtime {
         None
     }
 
+    /// The drag icon's current layout position, if a drag with a visible icon
+    /// is in progress. `None` when no drag is active, or the active drag
+    /// carries no icon. Intended for tests asserting the icon renders and
+    /// tracks the input; the position is the scene node's layout coordinates
+    /// (`wlr_scene_node_coords`).
+    ///
+    /// wlroots' own `wlr_scene_drag_icon` repositions the node itself on
+    /// every pointer/touch motion — this crate registers no motion listener
+    /// of its own for it — so a `Some` returned here always reflects the
+    /// icon's live position, not a stale snapshot from when the drag
+    /// started.
+    pub fn drag_icon_position(&self) -> Option<(i32, i32)> {
+        let tree = (*self.inner.drag_icon_tree.borrow())?;
+        let mut lx = 0;
+        let mut ly = 0;
+        // SAFETY: a `Some` stored here is always a live `wlr_scene_tree` —
+        // `backend.rs`'s `on_start_drag` populates this cell with the tree
+        // `wlr_scene_drag_icon_create` just returned, and the destroy
+        // listener it registers on the same drag's `events.destroy` clears
+        // the cell back to `None` before wlroots frees the tree. Reads only
+        // ever happen on the thread driving this runtime's event loop, the
+        // same thread every listener above runs on, so there is no window in
+        // which this could observe a tree mid-teardown.
+        let found = unsafe { sys::wlr_scene_node_coords(&raw mut (*tree.as_ptr()).node, &raw mut lx, &raw mut ly) };
+        found.then_some((lx, ly))
+    }
+
     /// The actual surface under `(x, y)`, and the position within *that*
     /// surface — as opposed to [`toplevel_at`](Runtime::toplevel_at), which
     /// answers "which window, and where in that window". A hit on a popup
@@ -4579,5 +4632,18 @@ mod tests {
         // And the id itself is gone — set_layer_surface_output can no longer
         // resolve it, confirming the same call also forgot the output.
         assert_eq!(rt.set_layer_surface_output(ls_a, id_a), None);
+    }
+
+    /// No drag has ever started, so `drag_icon_tree` is still the `None`
+    /// [`Runtime::new`] initialised it to — this is as much of
+    /// [`Runtime::drag_icon_position`] as a unit test can exercise cheaply.
+    /// Driving a real drag end-to-end (a visible icon rendered as a scene
+    /// node, then following injected pointer motion) needs a client and a
+    /// running seat, which is exactly what the downstream icedtea-wm harness
+    /// render/follow test — not this crate's unit tests — covers.
+    #[test]
+    fn drag_icon_position_is_none_with_no_active_drag() {
+        let rt = headless_runtime();
+        assert_eq!(rt.drag_icon_position(), None);
     }
 }

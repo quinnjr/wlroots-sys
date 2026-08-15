@@ -468,6 +468,17 @@ struct Session<'r, S> {
     /// `wlr_input_device_finish` hands that callback.
     inputs: RefCell<HashMap<usize, InputDevice>>,
 
+    /// This run's destroy listener on every drag currently in progress with
+    /// a visible icon, keyed by the drag's own `*mut wlr_drag` address (as
+    /// `usize`) — mirrors `inputs`' keying discipline exactly, and for the
+    /// same reason: `on_start_drag`'s destroy listener must find and remove
+    /// one specific drag's entry synchronously, the moment that drag ends,
+    /// so it can clear [`RuntimeInner::drag_icon_tree`] before wlroots frees
+    /// the scene tree stored there. A drag with no icon never gets an entry
+    /// here — `on_start_drag` returns before linking anything when
+    /// `(*drag).icon` is null.
+    drags: RefCell<HashMap<usize, Registration>>,
+
     /// Whether the most recently delivered [`Event::Key`] was consumed by the
     /// handler. `on_key` cannot get a return value back through
     /// `Dispatcher::emit` directly — an `extern "C"` callback has no way to
@@ -959,6 +970,7 @@ impl<'d> Backend<'d> {
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
+            drags: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime,
             deliver: hooks.deliver,
@@ -2019,14 +2031,25 @@ unsafe extern "C" fn on_request_start_drag<S: Handlers>(
 /// validation and `wlr_seat_start_*_drag` armed it). Parents the drag's icon
 /// — if it has one; not every drag carries a visible icon — into the overlay
 /// scene band so it renders above every toplevel and layer surface for the
-/// duration of the drag.
+/// duration of the drag, and records the tree in
+/// [`RuntimeInner::drag_icon_tree`] so [`Runtime::drag_icon_position`] can
+/// observe it.
 ///
-/// Open question, left for Task 7's harness test to resolve empirically:
-/// whether the scene node `wlr_scene_drag_icon_create` returns self-tracks
-/// the pointer/touch position (as `wlr_scene_drag_icon` in upstream wlroots
-/// appears to, via its own motion listeners), or this compositor must
-/// reposition it on pointer/touch motion itself. If the latter, that is a
-/// follow-up task, not a defect in this wiring.
+/// Resolved empirically (Task 7's harness test): the scene node
+/// `wlr_scene_drag_icon_create` returns self-tracks the pointer/touch
+/// position, via `wlr_scene_drag_icon`'s own motion listeners in upstream
+/// wlroots — so this compositor registers no motion listener of its own for
+/// it, and never needs to.
+///
+/// Also links a destroy listener on the drag's own `events.destroy`, keyed
+/// in `Session::drags` by the drag pointer — mirrors `on_new_input`'s
+/// `InputDevice::_destroy` pattern (same keying discipline: the pointer
+/// handed to the destroy signal is exactly the key this inserts under), used
+/// here instead of `Registration::link_toplevel`'s id-carrying variants
+/// because a drag has no [`ToplevelId`]/[`OutputId`]/[`LayerSurfaceId`] to
+/// carry. That listener — not this function — is what clears
+/// `drag_icon_tree` back to `None`; see [`on_drag_destroy`]'s own doc for why
+/// that must happen before wlroots frees the tree.
 unsafe extern "C" fn on_start_drag<S: Handlers>(
     l: *mut sys::wl_listener,
     data: *mut std::ffi::c_void,
@@ -2038,14 +2061,68 @@ unsafe extern "C" fn on_start_drag<S: Handlers>(
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
         let drag = data.cast::<sys::wlr_drag>();
         if (*drag).icon.is_null() {
             return;
         }
-        let Some(overlay) = (*session).runtime.band_ptr(Band::Overlay) else {
+        let Some(overlay) = runtime.band_ptr(Band::Overlay) else {
             return;
         };
-        let _tree = sys::wlr_scene_drag_icon_create(overlay.as_ptr(), (*drag).icon);
+        let tree = sys::wlr_scene_drag_icon_create(overlay.as_ptr(), (*drag).icon);
+        let Some(tree) = NonNull::new(tree) else {
+            return;
+        };
+        *runtime.inner.drag_icon_tree.borrow_mut() = Some(tree);
+
+        // No `alive` backstop: as for the decoration listeners this mirrors,
+        // this drag cannot be freed by anything other than the destroy this
+        // very listener watches, so there is no "owner died first" case to
+        // guard against.
+        let destroy = Registration::link_bare(
+            &raw mut (*drag).events.destroy,
+            on_drag_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        (*session)
+            .drags
+            .borrow_mut()
+            .insert(drag as usize, destroy);
+    }
+}
+
+/// The drag is about to be freed. Clear [`RuntimeInner::drag_icon_tree`]
+/// *now*, whatever the handler does — the tree `on_start_drag` stored there
+/// is a child of the drag icon wlroots is about to destroy alongside the
+/// drag itself (`seat_handle_drag_destroy` in `wlr_seat.c` calls
+/// `wlr_drag_icon_destroy`, which frees the scene tree), so a read through
+/// [`Runtime::drag_icon_position`] after this point without this clear would
+/// dereference freed memory.
+///
+/// Also removes this drag's entry from `Session::drags`, which unlinks this
+/// very listener — sound for the same reason `on_input_destroy` and
+/// `on_toplevel_decoration_destroy` unlinking themselves is:
+/// `wl_signal_emit_mutable` has already advanced its cursor past the firing
+/// listener before this callback runs.
+unsafe extern "C" fn on_drag_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_start_drag` into this drag's own `events.destroy`;
+    // the drag is still live memory for the duration of this emission. `data`
+    // is the same `*mut wlr_drag` `on_start_drag` linked against — wlroots'
+    // `seat_handle_drag_destroy` emits with the drag itself as the signal
+    // data — so, cast to `usize`, it recovers the exact key that call
+    // inserted this entry under.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        runtime.inner.drag_icon_tree.borrow_mut().take();
+        let key = data as usize;
+        let removed = (*session).drags.borrow_mut().remove(&key);
+        drop(removed);
     }
 }
 
@@ -4288,6 +4365,7 @@ mod tests {
                 decorations: RefCell::new(HashMap::new()),
                 layers: RefCell::new(HashMap::new()),
                 inputs: RefCell::new(HashMap::new()),
+                drags: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
                 runtime: &runtime,
                 deliver: deliver::<Recorder>,
@@ -4459,6 +4537,7 @@ mod tests {
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
+            drags: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime: &runtime,
             deliver: deliver::<Recorder>,
