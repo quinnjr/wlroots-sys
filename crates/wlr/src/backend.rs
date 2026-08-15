@@ -39,7 +39,7 @@ use crate::id::{SourceId, attach_id, find_id};
 use crate::layer::Layer;
 use crate::seat::{KeyEvent, Modifiers};
 use crate::{
-    Display, Error, EventLoop, Handlers, LayerSurface, LayerSurfaceId, LoopHandler, Output,
+    Band, Display, Error, EventLoop, Handlers, LayerSurface, LayerSurfaceId, LoopHandler, Output,
     OutputHandler, OutputId, Result, Runtime, Toplevel, ToplevelId, sys,
 };
 
@@ -52,6 +52,11 @@ use crate::{
 /// below rather than trusted from this comment alone.
 const WL_SEAT_CAPABILITY_POINTER: u32 = 1;
 const WL_SEAT_CAPABILITY_KEYBOARD: u32 = 2;
+/// `touch = 4` — see this constant group's own doc above. There is no
+/// physical-touch-device wiring in this crate (`on_new_input` has no
+/// `WLR_INPUT_DEVICE_TOUCH` arm), so this bit is only ever set through
+/// [`Runtime::enable_test_touch`], not by any real device arriving.
+const WL_SEAT_CAPABILITY_TOUCH: u32 = 4;
 
 /// A wlroots backend.
 ///
@@ -1280,6 +1285,27 @@ impl<'d> Backend<'d> {
                     std::ptr::null(),
                 )
             });
+            // `request_start_drag`/`start_drag`: a client asking to start a
+            // drag-and-drop operation, and wlroots confirming one actually
+            // started. Same liveness reasoning as the selection signals just
+            // above — the seat is display-owned, so a null liveness flag is
+            // correct.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*seat.as_ptr()).events.request_start_drag,
+                    on_request_start_drag::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*seat.as_ptr()).events.start_drag,
+                    on_start_drag::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
         }
 
         if let Some(manager) = runtime.virtual_keyboard_manager_ptr() {
@@ -1290,6 +1316,20 @@ impl<'d> Backend<'d> {
                 Registration::link_bare(
                     &raw mut (*manager.as_ptr()).events.new_virtual_keyboard,
                     on_new_virtual_keyboard::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
+        if let Some(manager) = runtime.virtual_pointer_manager_ptr() {
+            // SAFETY: `create_virtual_pointer_manager` returned a non-null
+            // manager owned by the display, which this call requires to outlive
+            // it, exactly as for the xdg shell above — null liveness is correct.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.new_virtual_pointer,
+                    on_new_virtual_pointer::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     std::ptr::null(),
                 )
@@ -1925,6 +1965,87 @@ unsafe extern "C" fn on_request_set_primary_selection<S: Handlers>(
         if let Some(seat) = (*session).runtime.seat_ptr() {
             sys::wlr_seat_set_primary_selection(seat.as_ptr(), (*event).source, (*event).serial);
         }
+    }
+}
+
+/// Honors a client's request to start a drag-and-drop operation. wlroots
+/// hands this listener a `wlr_drag` already built (by
+/// `wlr_data_device_manager`/`wlr_primary_selection`) but not yet armed; the
+/// grab only takes effect — and the seat only enters its drag state machine —
+/// once one of `wlr_seat_start_pointer_drag`/`wlr_seat_start_touch_drag` is
+/// called below. Validating the serial first is the security gate: a serial
+/// that does not match a live pointer or touch grab on `event.origin` means
+/// the client is not entitled to start this drag (it is stale, forged, or
+/// belongs to a different surface), so neither branch fires and the drag
+/// never starts. A later negative test pins this — do not weaken it.
+unsafe extern "C" fn on_request_start_drag<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_seat.events.request_start_drag`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_seat_request_start_drag_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_seat_request_start_drag_event>();
+        let Some(seat) = (*session).runtime.seat_ptr() else {
+            return;
+        };
+        let seat = seat.as_ptr();
+        // Pointer drag if the serial is a valid pointer grant.
+        if sys::wlr_seat_validate_pointer_grab_serial(seat, (*event).origin, (*event).serial) {
+            sys::wlr_seat_start_pointer_drag(seat, (*event).drag, (*event).serial);
+            return;
+        }
+        // Otherwise try touch.
+        let mut point: *mut sys::wlr_touch_point = std::ptr::null_mut();
+        if sys::wlr_seat_validate_touch_grab_serial(
+            seat,
+            (*event).origin,
+            (*event).serial,
+            &raw mut point,
+        ) {
+            sys::wlr_seat_start_touch_drag(seat, (*event).drag, (*event).serial, point);
+        }
+        // Neither grab validated: the serial is invalid, so the drag never
+        // starts. This is not an error — wlroots expects compositors to
+        // silently ignore an unentitled request.
+    }
+}
+
+/// A drag started (via [`on_request_start_drag`] above, once wlroots' own
+/// validation and `wlr_seat_start_*_drag` armed it). Parents the drag's icon
+/// — if it has one; not every drag carries a visible icon — into the overlay
+/// scene band so it renders above every toplevel and layer surface for the
+/// duration of the drag.
+///
+/// Open question, left for Task 7's harness test to resolve empirically:
+/// whether the scene node `wlr_scene_drag_icon_create` returns self-tracks
+/// the pointer/touch position (as `wlr_scene_drag_icon` in upstream wlroots
+/// appears to, via its own motion listeners), or this compositor must
+/// reposition it on pointer/touch motion itself. If the latter, that is a
+/// follow-up task, not a defect in this wiring.
+unsafe extern "C" fn on_start_drag<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_seat.events.start_drag`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_drag`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let drag = data.cast::<sys::wlr_drag>();
+        if (*drag).icon.is_null() {
+            return;
+        }
+        let Some(overlay) = (*session).runtime.band_ptr(Band::Overlay) else {
+            return;
+        };
+        let _tree = sys::wlr_scene_drag_icon_create(overlay.as_ptr(), (*drag).icon);
     }
 }
 
@@ -2994,7 +3115,13 @@ struct InputDevice {
 /// way in.
 ///
 /// A no-op with no seat.
-fn update_seat_capabilities(runtime: &Runtime) {
+///
+/// `pub(crate)`, not private: [`Runtime::enable_test_touch`] (`runtime.rs`)
+/// also needs to trigger this recompute, from outside this module, the
+/// instant the test-touch flag is set — see that method's own doc for why a
+/// deferred recompute (waiting for the next device add/remove) is not good
+/// enough.
+pub(crate) fn update_seat_capabilities(runtime: &Runtime) {
     let Some(seat) = runtime.seat_ptr() else {
         return;
     };
@@ -3004,6 +3131,9 @@ fn update_seat_capabilities(runtime: &Runtime) {
     }
     if runtime.has_keyboard() {
         caps |= WL_SEAT_CAPABILITY_KEYBOARD;
+    }
+    if runtime.test_touch_enabled() {
+        caps |= WL_SEAT_CAPABILITY_TOUCH;
     }
     // SAFETY: the seat is this runtime's own (created by `create_seat`) and
     // live for as long as this runtime can be used.
@@ -3130,6 +3260,92 @@ unsafe extern "C" fn on_new_virtual_keyboard<S: Handlers>(
                 pointer: None,
                 _destroy: destroy,
                 _listeners: listeners,
+            },
+        );
+
+        update_seat_capabilities(runtime);
+    }
+}
+
+/// A client created a virtual pointer. Attach its embedded `wlr_pointer` to
+/// the cursor exactly as a physical pointer from the backend would be, so the
+/// seat gains pointer capability and its motion/button events mint input
+/// serials. Teardown reuses [`on_input_destroy`], keyed by the pointer's base
+/// input device, when the client destroys the virtual pointer.
+unsafe extern "C" fn on_new_virtual_pointer<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked into
+    // `wlr_virtual_pointer_manager_v1.events.new_virtual_pointer`, whose data
+    // is a live `wlr_virtual_pointer_v1_new_pointer_event`. Its `new_pointer`
+    // is a live `wlr_virtual_pointer_v1`; that pointer's embedded `pointer`
+    // and that pointer's `base` input device are live and fully initialised
+    // when wlroots announces it; the base's `events.destroy` fires when the
+    // client destroys the virtual pointer, handled by `on_input_destroy`
+    // under the same `device as usize` key inserted here.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_virtual_pointer_v1_new_pointer_event>();
+        let vp = (*event).new_pointer;
+        let pointer = &raw mut (*vp).pointer;
+        let device = &raw mut (*vp).pointer.base;
+        let runtime = (*session).runtime;
+
+        // Single-seat assumption: the injected pointer is attached to this
+        // runtime's only cursor, not routed by `(*event).suggested_seat` (the
+        // seat the client suggested). Sound because this crate creates
+        // exactly one seat, so the two are necessarily the same. A future
+        // multi-seat crate must compare `(*event).suggested_seat` against the
+        // target seat here instead of attaching unconditionally.
+
+        let alive = Rc::new(Cell::new(true));
+        let destroy = Registration::link_bare(
+            &raw mut (*device).events.destroy,
+            on_input_destroy::<S>,
+            (*bound).session,
+            &raw const *alive,
+        );
+
+        if let Some(cursor) = runtime.cursor_ptr() {
+            sys::wlr_cursor_attach_input_device(cursor.as_ptr(), device);
+        }
+        let p_nn = NonNull::new_unchecked(pointer);
+        runtime.record_pointer(p_nn);
+
+        let listeners = vec![
+            Registration::link_bare(
+                &raw mut (*pointer).events.motion,
+                on_pointer_motion::<S>,
+                (*bound).session,
+                &raw const *alive,
+            ),
+            Registration::link_bare(
+                &raw mut (*pointer).events.motion_absolute,
+                on_pointer_motion_absolute::<S>,
+                (*bound).session,
+                &raw const *alive,
+            ),
+            Registration::link_bare(
+                &raw mut (*pointer).events.button,
+                on_pointer_button::<S>,
+                (*bound).session,
+                &raw const *alive,
+            ),
+        ];
+
+        // Keyed by the base input-device pointer, exactly as `on_new_input`
+        // keys a physical pointer, so `on_input_destroy` recovers this entry
+        // from the `events.destroy` data with no side channel.
+        (*session).inputs.borrow_mut().insert(
+            device as usize,
+            InputDevice {
+                keyboard: None,
+                pointer: Some(p_nn),
+                _destroy: destroy,
+                _listeners: listeners,
+                alive,
             },
         );
 
@@ -4275,6 +4491,42 @@ mod tests {
     fn capability_bits_match_the_wayland_protocol() {
         assert_eq!(WL_SEAT_CAPABILITY_POINTER, 1);
         assert_eq!(WL_SEAT_CAPABILITY_KEYBOARD, 2);
+        assert_eq!(WL_SEAT_CAPABILITY_TOUCH, 4);
+    }
+
+    /// [`Runtime::enable_test_touch`] must make a seat that already exists
+    /// start advertising the touch capability immediately, not only on the
+    /// next unrelated device add/remove — this is what
+    /// `crates/wlr/tests/seat.rs` cannot observe itself, since `wlr_seat` and
+    /// its `capabilities` field are not part of this crate's public surface.
+    /// Reads `wlr_seat.capabilities` directly, the same field
+    /// `wlr_seat_set_capabilities` writes, so this exercises exactly what
+    /// `update_seat_capabilities` does rather than this crate's own
+    /// bookkeeping of it.
+    #[test]
+    fn enable_test_touch_sets_the_capability_bit_immediately() {
+        let display = crate::Display::new().expect("display");
+        let runtime = crate::Runtime::new().expect("runtime");
+        runtime.create_seat(&display, "seat0").expect("seat");
+
+        let seat = runtime.seat_ptr().expect("seat was just created");
+        // SAFETY: `seat` is this runtime's own live seat, just created above.
+        assert_eq!(
+            unsafe { (*seat.as_ptr()).capabilities } & WL_SEAT_CAPABILITY_TOUCH,
+            0,
+            "a fresh seat with no devices and no enable_test_touch call must \
+             not advertise touch"
+        );
+
+        runtime.enable_test_touch();
+
+        // SAFETY: same seat, still live.
+        assert_eq!(
+            unsafe { (*seat.as_ptr()).capabilities } & WL_SEAT_CAPABILITY_TOUCH,
+            WL_SEAT_CAPABILITY_TOUCH,
+            "enable_test_touch must set the touch bit without waiting for a \
+             device add/remove to trigger the next recompute"
+        );
     }
 
     /// Reproduces, at the smallest possible scale and with no `Session`,

@@ -71,6 +71,55 @@ guarantee that nothing observable moved.
 
 No further compatibility exception is sanctioned in the `0.20` line.
 
+## 0.20.17
+
+Completes headless touch drag-and-drop — the touch-side counterpart to what
+`0.20.16` shipped for the pointer. Both additions are test-only
+(`#[doc(hidden)]`, no production caller); default behavior is unchanged.
+
+- `Runtime::enable_test_touch` — makes the seat advertise
+  `WL_SEAT_CAPABILITY_TOUCH` so a headless client can bind `wl_touch`. The
+  crate wires no physical touch device (`on_new_input` has no touch arm), so
+  a seat driven only by injection never advertised touch, and wlroots refuses
+  to create a touch point for a client that holds no `wl_touch` — no injected
+  touch drag could start. The capability is folded into the seat's normal
+  capability recompute behind a per-`Runtime` flag, so it survives later
+  pointer/keyboard hot-plug. Off by default: with `enable_test_touch`
+  uncalled, advertised capabilities are byte-identical to `0.20.16`.
+- **`inject_touch_motion` now updates touch-point focus.** It calls
+  `wlr_seat_touch_point_focus` before `wlr_seat_touch_notify_motion` so the
+  touch point's focus surface follows the point as it moves. A touch point's
+  focus (unlike a pointer's) is not recomputed per motion, so without this a
+  drag kept delivering to the touch-down surface and the destination never
+  received `wl_data_device.enter`.
+- Additive within `0.20`; no existing item changed.
+
+## 0.20.16
+
+Drag-and-drop, and the virtual pointer + touch injection that let a headless
+test drive one.
+
+- `Runtime::create_virtual_pointer_manager` — the
+  `zwp_virtual_pointer_manager_v1` global. Its `new_virtual_pointer` event is
+  wired to attach the injected pointer to the seat and cursor exactly as a
+  physical one from the backend would be (record it, update capabilities,
+  register the motion/button listeners), reusing the input-destroy teardown.
+  The pointer analogue of `0.20.15`'s virtual keyboard: it mints the pointer
+  button serial a serial-gated `wl_data_device.start_drag` needs.
+- **Drag-and-drop wiring.** The seat's `request_start_drag` is now honored:
+  the grab serial is validated (`wlr_seat_validate_pointer_grab_serial`, then
+  touch) and, on success, the matching `wlr_seat_start_pointer_drag` /
+  `wlr_seat_start_touch_drag` begins the drag wlroots then drives end to end
+  (offer → enter → motion → drop, and the source→destination transfer). An
+  unvalidated serial starts no drag. On `start_drag`, a drag icon is rendered
+  as a `wlr_scene_drag_icon` node parented in the overlay band so it draws
+  above every window.
+- `Runtime::inject_touch_down`/`_motion`/`_up` — **test-only** (`#[doc(hidden)]`,
+  no production caller): synthesize a touch point through
+  `wlr_seat_touch_notify_*` so a headless test can drive a touch drag, since
+  touch has no virtual-input protocol of its own.
+- Additive within `0.20`; no existing item changed.
+
 ## 0.20.15
 
 Virtual keyboard input, and a latent input-device use-after-free closed.

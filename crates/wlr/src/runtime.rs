@@ -141,6 +141,13 @@ pub(crate) struct RuntimeInner {
     pub(crate) virtual_keyboard_manager:
         RefCell<Option<NonNull<sys::wlr_virtual_keyboard_manager_v1>>>,
 
+    /// The virtual-pointer (`zwlr_virtual_pointer_manager_v1`) manager, once
+    /// created — lets a client inject a pointer, e.g. a remote-input bridge
+    /// or a test harness that needs a real input serial. `Option`, same
+    /// rationale as the other manager globals.
+    pub(crate) virtual_pointer_manager:
+        RefCell<Option<NonNull<sys::wlr_virtual_pointer_manager_v1>>>,
+
     /// Every live toplevel: the role object, its scene tree, and the surface
     /// its id addon lives on.
     pub(crate) toplevels: RefCell<HashMap<ToplevelId, ToplevelEntry>>,
@@ -221,6 +228,17 @@ pub(crate) struct RuntimeInner {
     /// Every live pointer the backend has announced. Same shape and same
     /// pruning as `keyboards`, for [`Runtime::has_pointer`].
     pub(crate) pointers: RefCell<Vec<NonNull<sys::wlr_pointer>>>,
+
+    /// Test-only: whether [`Runtime::enable_test_touch`] has been called.
+    /// There is no touch input device and never will be one recorded here —
+    /// unlike `keyboards`/`pointers`, this is not counting anything real, it
+    /// is a standing request that `backend.rs`'s `update_seat_capabilities`
+    /// OR the touch bit into every capability recompute it does from now on,
+    /// so the bit survives a keyboard or pointer later being hot-plugged or
+    /// unplugged instead of being clobbered by the next recompute. Default
+    /// `false`, so a consumer that never calls `enable_test_touch` gets
+    /// byte-identical capability behaviour to a build without this field.
+    pub(crate) test_touch_enabled: std::cell::Cell<bool>,
 
     /// Every output this run has announced, so a by-id mutator
     /// ([`Runtime::output_layout_box`], [`Runtime::set_output_position`])
@@ -573,6 +591,7 @@ impl Runtime {
                 primary_selection_manager: RefCell::new(None),
                 data_control_manager: RefCell::new(None),
                 virtual_keyboard_manager: RefCell::new(None),
+                virtual_pointer_manager: RefCell::new(None),
                 toplevels: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
                 layer_shell: RefCell::new(None),
@@ -584,6 +603,7 @@ impl Runtime {
                 cursor_image_loaded: std::cell::Cell::new(false),
                 keyboards: RefCell::new(Vec::new()),
                 pointers: RefCell::new(Vec::new()),
+                test_touch_enabled: std::cell::Cell::new(false),
                 outputs: RefCell::new(HashMap::new()),
                 pinned_display: std::cell::Cell::new(0),
             }),
@@ -1945,6 +1965,33 @@ impl Runtime {
         *self.inner.virtual_keyboard_manager.borrow()
     }
 
+    /// Advertise `zwlr_virtual_pointer_manager_v1` so a client can inject a
+    /// pointer input device. The manager's `new_virtual_pointer` event is
+    /// wired in `backend.rs`'s per-run registration to attach the injected
+    /// pointer to the seat (so the seat gains pointer capability and its
+    /// motion/button events mint serials, exactly as a physical pointer
+    /// would). Errors if called twice.
+    pub fn create_virtual_pointer_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.virtual_pointer_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_virtual_pointer_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_virtual_pointer_manager_v1_create(display.as_ptr()) };
+        let raw =
+            NonNull::new(raw).ok_or(Error::Create("wlr_virtual_pointer_manager_v1_create"))?;
+        *self.inner.virtual_pointer_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    pub(crate) fn virtual_pointer_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_virtual_pointer_manager_v1>> {
+        *self.inner.virtual_pointer_manager.borrow()
+    }
+
     /// The scene's root tree, for the callbacks in `backend.rs` that insert a
     /// toplevel into it.
     ///
@@ -3283,6 +3330,96 @@ impl Runtime {
         }
     }
 
+    /// Test-only: synthesize a touch-down at `(x, y)` so a headless test can
+    /// drive a touch drag. Resolves the struck surface and its local
+    /// coordinates via [`leaf_surface_at`](Runtime::leaf_surface_at) — the
+    /// same hit test pointer forwarding uses — and forwards to
+    /// `wlr_seat_touch_notify_down`, which defers to any active touch grab.
+    /// Returns the down serial (a valid touch grab serial) on success,
+    /// `None` when there is no seat or nothing under `(x, y)`.
+    ///
+    /// No production caller — there is no virtual-touch Wayland protocol,
+    /// so this exists solely for a headless harness to synthesize touch
+    /// input in tests.
+    #[doc(hidden)]
+    pub fn inject_touch_down(&self, x: f64, y: f64, id: i32, time_msec: u32) -> Option<u32> {
+        let seat = self.seat_ptr()?;
+        let (surface, sx, sy) = self.leaf_surface_at(x, y)?;
+        // SAFETY: `seat` is this runtime's own live seat (from
+        // `seat_ptr`); `surface` was just resolved from a hit test against
+        // this runtime's own live scene and is therefore live too.
+        // wlroots reads `sx`/`sy` by value and does not retain them.
+        Some(unsafe { sys::wlr_seat_touch_notify_down(seat.as_ptr(), surface, time_msec, id, sx, sy) })
+    }
+
+    /// Test-only: synthesize a touch-motion to `(x, y)` for the touch point
+    /// `id`, continuing a drag started with
+    /// [`inject_touch_down`](Runtime::inject_touch_down). Re-resolves the
+    /// surface-local coordinates at the new position via
+    /// [`leaf_surface_at`](Runtime::leaf_surface_at) and forwards to
+    /// `wlr_seat_touch_notify_motion`. It also calls
+    /// `wlr_seat_touch_point_focus` first, so the touch point's focus
+    /// surface tracks whatever is under it as it moves — required for a
+    /// drag, whose destination surface differs from the touch-down one
+    /// (see the SAFETY note for detail).
+    ///
+    /// `wlr_seat_touch_notify_motion` takes no surface parameter — it
+    /// addresses the touch point `id` already registered by the matching
+    /// `notify_down` and delivers to whichever client owns it. When `(x,
+    /// y)` has moved off every surface, there is nothing to resolve
+    /// coordinates against, so this is a deliberate no-op rather than
+    /// notifying with stale or zeroed coordinates: a drag that exits scene
+    /// bounds simply stops updating position until it re-enters one.
+    ///
+    /// No production caller — see [`inject_touch_down`](Runtime::inject_touch_down).
+    #[doc(hidden)]
+    pub fn inject_touch_motion(&self, x: f64, y: f64, id: i32, time_msec: u32) {
+        let Some(seat) = self.seat_ptr() else {
+            return;
+        };
+        let Some((surface, sx, sy)) = self.leaf_surface_at(x, y) else {
+            return;
+        };
+        // SAFETY: `seat` is this runtime's own live seat; `surface` was
+        // just resolved from a hit test against this runtime's own live
+        // scene and is therefore live too; `sx`/`sy` are read by value and
+        // not retained.
+        //
+        // `wlr_seat_touch_point_focus` first: unlike a pointer, a touch
+        // point's `focus_surface` is not recomputed on every motion --
+        // `wlr_seat_touch_notify_motion` alone keeps delivering to whatever
+        // surface last held focus (the down surface, absent a call here),
+        // which is fine for plain touch input but wrong for a drag, where
+        // the destination surface under the point changes as it moves.
+        // Calling this every motion (not only when the surface changes) is
+        // deliberate and cheap -- wlroots' own touch_point_focus is a no-op
+        // when `surface` already matches the point's current focus, so this
+        // just keeps `focus_surface`/`sx`/`sy` in sync with the hit test
+        // unconditionally rather than this crate tracking "did it change"
+        // itself and risking drift from wlroots' own idea of the same
+        // question.
+        unsafe {
+            sys::wlr_seat_touch_point_focus(seat.as_ptr(), surface, time_msec, id, sx, sy);
+            sys::wlr_seat_touch_notify_motion(seat.as_ptr(), time_msec, id, sx, sy);
+        }
+    }
+
+    /// Test-only: synthesize a touch-up for the touch point `id`, ending a
+    /// drag started with [`inject_touch_down`](Runtime::inject_touch_down).
+    /// Forwards to `wlr_seat_touch_notify_up`, which defers to any active
+    /// touch grab and removes the touch point. A no-op when there is no
+    /// seat.
+    ///
+    /// No production caller — see [`inject_touch_down`](Runtime::inject_touch_down).
+    #[doc(hidden)]
+    pub fn inject_touch_up(&self, id: i32, time_msec: u32) {
+        let Some(seat) = self.seat_ptr() else {
+            return;
+        };
+        // SAFETY: `seat` is this runtime's own live seat.
+        unsafe { sys::wlr_seat_touch_notify_up(seat.as_ptr(), time_msec, id) };
+    }
+
     /// Where the cursor is, in scene coordinates. `(0.0, 0.0)` with no seat.
     pub fn pointer_position(&self) -> (f64, f64) {
         let cursor = *self.inner.cursor.borrow();
@@ -3374,6 +3511,43 @@ impl Runtime {
     /// clients it had one.
     pub(crate) fn has_pointer(&self) -> bool {
         !self.inner.pointers.borrow().is_empty()
+    }
+
+    /// Whether [`enable_test_touch`](Runtime::enable_test_touch) has been
+    /// called. Read by `backend.rs`'s `update_seat_capabilities` on every
+    /// recompute, exactly as `has_keyboard`/`has_pointer` are.
+    pub(crate) fn test_touch_enabled(&self) -> bool {
+        self.inner.test_touch_enabled.get()
+    }
+
+    /// Test-only: make the seat advertise `WL_SEAT_CAPABILITY_TOUCH` so
+    /// headless clients can bind `wl_touch` and injected touch points
+    /// ([`inject_touch_down`](Runtime::inject_touch_down) and friends) are
+    /// accepted. There is no touch input device; this exists purely so
+    /// `inject_touch_*` work in a test harness. No production caller.
+    ///
+    /// wlroots' own `wlr_seat_touch.c` (`touch_point_create`) refuses to
+    /// create a touch point unless the target surface's client already
+    /// holds a `wl_touch` resource, and a client can only obtain one via
+    /// `wl_seat.get_touch`, which wlroots gates server-side on the seat
+    /// having advertised the touch capability. Nothing in this crate ever
+    /// sets that bit otherwise — `on_new_input` has no
+    /// `WLR_INPUT_DEVICE_TOUCH` arm, since there is no virtual-touch
+    /// Wayland protocol to receive one from — so without this method a
+    /// headless seat driven only by `inject_touch_*` can never produce a
+    /// touch point at all.
+    ///
+    /// Sets the flag `update_seat_capabilities` now reads on every future
+    /// recompute (see [`RuntimeInner::test_touch_enabled`]'s own doc for why
+    /// that matters — a one-shot capability set here would be clobbered by
+    /// the very next keyboard or pointer hot-plug), then immediately
+    /// triggers a recompute itself, so a seat that already exists starts
+    /// advertising touch right away rather than waiting for some unrelated
+    /// device event to happen to fire one.
+    #[doc(hidden)]
+    pub fn enable_test_touch(&self) {
+        self.inner.test_touch_enabled.set(true);
+        crate::backend::update_seat_capabilities(self);
     }
 }
 
