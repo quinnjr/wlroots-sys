@@ -81,6 +81,7 @@ mod allocator;
 mod dmabuf;
 mod format;
 mod pass;
+mod pixel_format;
 mod swapchain;
 mod texture;
 
@@ -433,10 +434,11 @@ impl Renderer {
     ///
     /// # Errors
     ///
-    /// [`Error::Operation`] if `data` is shorter than `stride * height`, or if
-    /// any of `stride`, `width`, `height` is zero — wlroots asserts all four
-    /// rather than checking them. [`Error::Create`] if the renderer refused the
-    /// format.
+    /// [`Error::Operation`] if `data` is shorter than `stride * height`, if
+    /// `stride` is shorter than one row of `width` pixels in `format`, or if
+    /// any of `stride`, `width`, `height` is zero — wlroots asserts the zeroes
+    /// and checks neither of the other two. [`Error::Create`] if the renderer
+    /// refused the format.
     pub fn texture_from_pixels(
         &self,
         format: FourCc,
@@ -446,6 +448,15 @@ impl Renderer {
         data: &[u8],
     ) -> Result<Texture<'_>> {
         if stride == 0 || width == 0 || height == 0 {
+            return Err(Error::Operation("Renderer::texture_from_pixels"));
+        }
+        // A stride shorter than one row is the check that is easy to miss and
+        // impossible to notice: the renderer lays an image `width` pixels wide
+        // over this pointer and reads a full row from every one of `height`
+        // stride-spaced offsets, so `stride * height` is a sufficient bound
+        // only once the stride is itself a row's worth of bytes. wlroots checks
+        // neither. See `pixel_format.rs`.
+        if u64::from(stride) < pixel_format::min_stride_bound(format, u64::from(width)) {
             return Err(Error::Operation("Renderer::texture_from_pixels"));
         }
         // In `u64` throughout so a 32-bit `usize` cannot overflow before the
@@ -543,9 +554,14 @@ impl Renderer {
 
     /// Begin a pass drawing into `buffer`.
     ///
-    /// The returned pass borrows both this renderer and the buffer, which is
-    /// what keeps the destination locked for the pass's whole life. Dropping
-    /// the pass submits it; see [`RenderPass`].
+    /// The returned pass borrows this renderer, the buffer, and whatever
+    /// `options` names — a [`RenderTimer`] most of all, which the pass keeps a
+    /// pointer to and writes through when it is submitted (`render/gles2/
+    /// pass.c` reads `pass->timer` from inside `submit`). Sharing `'b` between
+    /// the buffer and the options is what makes a timer dropped before the
+    /// pass a compile error rather than a use-after-free.
+    ///
+    /// Dropping the pass submits it; see [`RenderPass`].
     ///
     /// # Errors
     ///
@@ -556,7 +572,7 @@ impl Renderer {
     pub fn begin_buffer_pass<'r, 'b>(
         &'r self,
         buffer: &'b Buffer<'b>,
-        options: &BufferPassOptions<'_>,
+        options: &BufferPassOptions<'b>,
     ) -> Result<RenderPass<'r, 'b>> {
         if self.pass_live.get() {
             return Err(Error::Reentrant("Renderer::begin_buffer_pass"));

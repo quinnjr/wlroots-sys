@@ -36,6 +36,7 @@ use crate::region::Region;
 use crate::sys;
 
 use super::format::FourCc;
+use super::pixel_format::min_stride_bound;
 
 /// A renderer's texture. Dropping it calls `wlr_texture_destroy`.
 ///
@@ -151,9 +152,9 @@ impl<'r> Texture<'r> {
     /// # Errors
     ///
     /// [`Error::Operation`] if the renderer has no read-back path or refused
-    /// the requested format, and if the requested source box falls outside the
-    /// texture — wlroots does not check that one and would write past the end
-    /// of the destination.
+    /// the requested format, and if the destination cannot hold what the read
+    /// would write — wlroots checks neither the destination's length nor the
+    /// stride against the width, and gets both wrong by writing past the end.
     pub fn read_pixels(&self, options: &mut ReadPixels<'_>) -> Result<()> {
         let src = options.effective_src_box(self.width(), self.height());
         if !options.fits(&src) {
@@ -218,13 +219,6 @@ impl Drop for Texture<'_> {
     }
 }
 
-/// An upper bound on the bytes one pixel occupies in any DRM format wlroots
-/// knows, used to charge a destination x-offset conservatively in
-/// [`ReadPixels::fits`]. wlroots' own `render/pixel_format.c` table tops out at
-/// 8 bytes per pixel; this doubles that so a format added in a patch release
-/// cannot quietly invalidate the bound.
-const MAX_BYTES_PER_PIXEL: u64 = 16;
-
 /// Where and how [`Texture::read_pixels`] writes the pixels it reads.
 ///
 /// Mirrors `wlr_texture_read_pixels_options`, with the destination as a
@@ -284,16 +278,18 @@ impl<'a> ReadPixels<'a> {
     /// wlroots computes the first byte it writes as
     /// `data + min_stride(format, dst_x) + dst_y * stride`
     /// (`wlr_texture_read_pixel_options_get_data`) and then writes `src.height`
-    /// rows `stride` bytes apart through a pixman image built over that pointer.
-    /// It never learns how long the destination is, which is what this has to
-    /// make up for.
+    /// rows `stride` bytes apart, **each `min_stride(format, src.width)` bytes
+    /// long**, through a pixman image (or a `glReadPixels` row walk) built over
+    /// that pointer. It never learns how long the destination is, which is what
+    /// this has to make up for.
     ///
-    /// The pixel size is the awkward part: this crate does not decode DRM
-    /// formats, so the horizontal offset is charged at
-    /// [`MAX_BYTES_PER_PIXEL`], an upper bound over every entry in wlroots'
-    /// own `pixel_format.c` table (the widest is 8 bytes, for the 16-bit-float
-    /// formats). Over-charging can only reject a read that would have fitted;
-    /// under-charging would let one write past the end of a slice.
+    /// Charging the last row its full width is the part that is easy to get
+    /// wrong and impossible to notice: `rows * stride` alone is a correct bound
+    /// only while `stride` is at least a row's worth of bytes, and wlroots
+    /// never checks that it is. A `stride` of 4 with an 8-pixel-wide
+    /// `ARGB8888` read writes 28 bytes past a slice that `rows * stride` says
+    /// is exactly big enough. So the row length is counted from the format
+    /// rather than from the stride — see `pixel_format.rs`.
     ///
     /// Every step is in `u64` so a 32-bit `usize` cannot overflow before the
     /// comparison.
@@ -302,10 +298,12 @@ impl<'a> ReadPixels<'a> {
             return false;
         }
         let stride = u64::from(self.stride);
-        let rows = u64::from(self.dst_y) + src.height as u64;
-        let needed = rows
-            .saturating_mul(stride)
-            .saturating_add(u64::from(self.dst_x).saturating_mul(MAX_BYTES_PER_PIXEL));
+        // `src.height - 1` rows are skipped over; the last one is charged its
+        // real length below rather than a stride.
+        let skipped = (src.height as u64 - 1).saturating_add(u64::from(self.dst_y));
+        let needed = min_stride_bound(self.format, u64::from(self.dst_x))
+            .saturating_add(skipped.saturating_mul(stride))
+            .saturating_add(min_stride_bound(self.format, src.width as u64));
         needed <= self.data.len() as u64
     }
 }
@@ -362,6 +360,38 @@ mod tests {
         let opts = ReadPixels::new(&mut data, FourCc::ARGB8888, 16).dst(0, 1);
         assert!(!opts.fits(&Box2D::new(0, 0, 4, 4)));
         assert!(opts.fits(&Box2D::new(0, 0, 4, 3)));
+    }
+
+    /// The stride is not a bound on the row length — wlroots writes
+    /// `min_stride(format, width)` bytes into every row whatever the stride
+    /// says, so a stride shorter than a row must be refused rather than
+    /// multiplied out. Measured against the real thing before it was: a
+    /// `read_pixels` of an 8×8 `ARGB8888` texture at `stride = 4` into the
+    /// 32-byte slice `rows * stride` called sufficient wrote 28 bytes past its
+    /// end.
+    #[test]
+    fn a_stride_shorter_than_one_row_is_rejected() {
+        let mut data = vec![0u8; 8 * 4];
+        let opts = ReadPixels::new(&mut data, FourCc::ARGB8888, 4);
+        assert!(!opts.fits(&Box2D::new(0, 0, 8, 8)));
+
+        // The same read at an honest stride, in a slice sized for it.
+        let mut data = vec![0u8; 8 * 8 * 4];
+        let opts = ReadPixels::new(&mut data, FourCc::ARGB8888, 8 * 4);
+        assert!(opts.fits(&Box2D::new(0, 0, 8, 8)));
+    }
+
+    /// The destination x-offset is charged in the destination's own format, not
+    /// at a flat rate, so an offset that fits is not refused.
+    #[test]
+    fn a_destination_x_offset_is_charged_in_the_destination_format() {
+        let mut data = vec![0u8; 4 * 4 * 4 + 4];
+        let opts = ReadPixels::new(&mut data, FourCc::ARGB8888, 4 * 4).dst(1, 0);
+        assert!(opts.fits(&Box2D::new(0, 0, 4, 4)));
+
+        let mut data = vec![0u8; 4 * 4 * 4 + 3];
+        let opts = ReadPixels::new(&mut data, FourCc::ARGB8888, 4 * 4).dst(1, 0);
+        assert!(!opts.fits(&Box2D::new(0, 0, 4, 4)));
     }
 
     #[test]

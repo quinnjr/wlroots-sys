@@ -1,0 +1,24 @@
+error: lifetime may not live long enough
+  --> tests/ui/timer_outlives_pass.rs:13:5
+   |
+10 |   fn timed<'r, 'b>(renderer: &'r Renderer, buffer: &'b Buffer<'b>) -> RenderPass<'r, 'b> {
+   |            --  -- lifetime `'b` defined here
+   |            |
+   |            lifetime `'r` defined here
+...
+13 | /     renderer
+14 | |         .begin_buffer_pass(buffer, &options)
+15 | |         .expect("render pass")
+   | |______________________________^ function was supposed to return data with lifetime `'b` but it is returning data with lifetime `'r`
+   |
+   = help: consider adding the following bound: `'r: 'b`
+
+error[E0515]: cannot return value referencing local variable `timer`
+  --> tests/ui/timer_outlives_pass.rs:13:5
+   |
+12 |       let options = BufferPassOptions::new().timer(&timer);
+   |                                                    ------ `timer` is borrowed here
+13 | /     renderer
+14 | |         .begin_buffer_pass(buffer, &options)
+15 | |         .expect("render pass")
+   | |______________________________^ returns a value referencing data owned by the current function

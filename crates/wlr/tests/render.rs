@@ -155,6 +155,41 @@ fn read_pixels_refuses_a_destination_that_is_too_small() {
     );
 }
 
+/// A stride shorter than one row of pixels is the case `rows * stride` gets
+/// wrong: wlroots lays an image `width` pixels wide over the destination and
+/// writes a full row from every stride-spaced offset, so the last row runs off
+/// the end of a slice that looked big enough. Measured before it was fixed —
+/// this exact call wrote 28 bytes past `too_narrow`.
+#[test]
+fn read_pixels_refuses_a_stride_shorter_than_one_row() {
+    let renderer = Renderer::pixman().expect("pixman renderer");
+    let pixels = vec![0xffu8; 8 * 8 * 4];
+    let texture = renderer
+        .texture_from_pixels(FourCc::ARGB8888, 8 * 4, 8, 8, &pixels)
+        .expect("texture from pixels");
+
+    let mut too_narrow = vec![0u8; 8 * 4];
+    let mut options = ReadPixels::new(&mut too_narrow, FourCc::ARGB8888, 4);
+    assert_eq!(
+        texture.read_pixels(&mut options),
+        Err(Error::Operation("wlr_texture_read_pixels"))
+    );
+}
+
+/// The same hazard on the way in: a short stride makes the renderer read a full
+/// row past the end of the pixels this crate copied for it.
+#[test]
+fn texture_from_pixels_refuses_a_stride_shorter_than_one_row() {
+    let renderer = Renderer::pixman().expect("pixman renderer");
+    let pixels = vec![0u8; 8 * 8 * 4];
+    assert_eq!(
+        renderer
+            .texture_from_pixels(FourCc::ARGB8888, 8 * 2, 8, 8, &pixels)
+            .err(),
+        Some(Error::Operation("Renderer::texture_from_pixels"))
+    );
+}
+
 #[test]
 fn texture_from_pixels_refuses_a_short_slice_and_a_zero_dimension() {
     let renderer = Renderer::pixman().expect("pixman renderer");

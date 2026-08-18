@@ -137,8 +137,13 @@ impl<'a> BufferPassOptions<'a> {
 
     /// Time this pass with `timer`.
     ///
-    /// The borrow is what makes the timer provably outlive the pass, which
-    /// wlroots requires and does not check.
+    /// The pass keeps the pointer and writes through it when it is submitted
+    /// (`render/gles2/pass.c` reads `pass->timer` from inside `submit`), so the
+    /// timer has to outlive the pass and wlroots does not check that it does.
+    /// [`Renderer::begin_buffer_pass`](crate::Renderer::begin_buffer_pass)
+    /// takes these options at the *pass's* lifetime rather than the call's,
+    /// which is what turns "has to outlive" into a compile error —
+    /// `tests/ui/timer_outlives_pass.rs` pins it.
     #[must_use]
     pub fn timer(mut self, timer: &'a RenderTimer<'a>) -> Self {
         self.timer = Some(timer);

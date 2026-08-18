@@ -117,3 +117,14 @@ fn a_render_pass_cannot_escape_the_scope_that_began_it() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/pass_escapes_renderer.rs");
 }
+
+/// A `RenderTimer` a pass names has to outlive the pass — wlroots keeps the
+/// pointer and writes through it from inside `submit`, so destroying the timer
+/// first is a use-after-free on any renderer that implements timers.
+/// `begin_buffer_pass` takes its options at the pass's own lifetime, which is
+/// what makes that a compile error rather than a rule.
+#[test]
+fn a_render_timer_cannot_die_before_the_pass_that_names_it() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/timer_outlives_pass.rs");
+}
