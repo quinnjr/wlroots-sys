@@ -405,8 +405,12 @@ pub enum Band {
     Toplevel,
     /// Above every toplevel, beneath `Overlay` — `Graphics::top_band`.
     Top,
-    /// Above everything — `Graphics::overlay_band`.
+    /// Above everything except `Lock` — `Graphics::overlay_band`.
     Overlay,
+    /// Above `Overlay` — the session-lock band. Only used while the session is
+    /// locked; lock surfaces render here, covering all normal content and
+    /// layer-shell. `Graphics::lock_band`.
+    Lock,
 }
 
 /// Which scene tree a [`RectEntry`] is parented into, and so how (or
@@ -504,10 +508,10 @@ pub(crate) struct Graphics {
     pub(crate) renderer: NonNull<sys::wlr_renderer>,
     pub(crate) allocator: NonNull<sys::wlr_allocator>,
 
-    /// The five stacking bands, direct children of `scene.tree` (the scene
+    /// The six stacking bands, direct children of `scene.tree` (the scene
     /// root) in exactly this order — bottom to top:
     /// `background_band`, `bottom_band`, `toplevel_band`, `top_band`,
-    /// `overlay_band`. Created once, together, right after `scene` itself
+    /// `overlay_band`, `lock_band`. Created once, together, right after `scene` itself
     /// (see [`Runtime::init_graphics`]), and never reordered or reparented
     /// afterward.
     ///
@@ -521,7 +525,7 @@ pub(crate) struct Graphics {
     /// by `on_layer_surface_commit` if the client changes layers later).
     /// Because `wlr_scene_tree_create`'s own `scene_node_init` appends each
     /// new sibling at the *end* of its parent's children list
-    /// (`wl_list_insert(parent->children.prev, ...)`), creating these five
+    /// (`wl_list_insert(parent->children.prev, ...)`), creating these six
     /// in this order at start-of-day is what fixes their relative stacking
     /// order permanently: nothing a consumer or a client does afterward can
     /// move `toplevel_band` above `top_band`/`overlay_band`, or below
@@ -548,11 +552,12 @@ pub(crate) struct Graphics {
     pub(crate) toplevel_band: NonNull<sys::wlr_scene_tree>,
     pub(crate) top_band: NonNull<sys::wlr_scene_tree>,
     pub(crate) overlay_band: NonNull<sys::wlr_scene_tree>,
+    pub(crate) lock_band: NonNull<sys::wlr_scene_tree>,
 }
 
 impl Graphics {
     /// The scene tree `band` names. Total — every [`Band`] variant maps to
-    /// exactly one of the five fields above.
+    /// exactly one of the six fields above.
     pub(crate) fn band_tree(&self, band: Band) -> NonNull<sys::wlr_scene_tree> {
         match band {
             Band::Background => self.background_band,
@@ -560,6 +565,7 @@ impl Graphics {
             Band::Toplevel => self.toplevel_band,
             Band::Top => self.top_band,
             Band::Overlay => self.overlay_band,
+            Band::Lock => self.lock_band,
         }
     }
 }
@@ -931,6 +937,9 @@ impl Runtime {
             let overlay_band = sys::wlr_scene_tree_create(&raw mut (*scene.as_ptr()).tree);
             let overlay_band = NonNull::new(overlay_band)
                 .ok_or(Error::Create("wlr_scene_tree_create (overlay band)"))?;
+            let lock_band = sys::wlr_scene_tree_create(&raw mut (*scene.as_ptr()).tree);
+            let lock_band = NonNull::new(lock_band)
+                .ok_or(Error::Create("wlr_scene_tree_create (lock band)"))?;
 
             // A live display, not null: this wlroots build has
             // `wlr_output_layout_create` register a destroy listener on the
@@ -985,6 +994,7 @@ impl Runtime {
                 toplevel_band,
                 top_band,
                 overlay_band,
+                lock_band,
             }
         };
         // Records the Display this handle is now pinned to (see
@@ -4330,7 +4340,7 @@ mod tests {
         }
     }
 
-    /// The frozen fix for M-2: the five bands exist, are direct children of
+    /// The frozen fix for M-2: the six bands exist, are direct children of
     /// the scene root, and are created in exactly this bottom-to-top order,
     /// which is what makes every later toplevel/layer-surface placement
     /// stack correctly with no further bookkeeping — see
@@ -4357,12 +4367,28 @@ mod tests {
             band_link(g.toplevel_band),
             band_link(g.top_band),
             band_link(g.overlay_band),
+            band_link(g.lock_band),
         ];
 
         assert_eq!(
             actual, expected,
-            "the five bands must be the scene root's first five children, \
-             in Background < Bottom < toplevels < Top < Overlay order"
+            "the six bands must be the scene root's first six children, \
+             in Background < Bottom < toplevels < Top < Overlay < Lock order"
+        );
+
+        let overlay_pos = actual
+            .iter()
+            .position(|&p| p == band_link(g.overlay_band))
+            .expect("overlay band is a root child");
+        let lock_pos = actual
+            .iter()
+            .position(|&p| p == band_link(g.lock_band))
+            .expect("lock band is a root child");
+        assert!(
+            overlay_pos < lock_pos,
+            "the lock band must sit above the overlay band: session-lock \
+             surfaces must cover even Overlay layer-shell content while the \
+             session is locked"
         );
     }
 
