@@ -173,54 +173,6 @@ note      = "Backend-specific construction and the interfaces milestone."
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_box"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_box_closest_point"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_box_contains_box"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_box_contains_point"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_box_empty"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_box_equal"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_box_intersection"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_box_transform"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_buffer"
 reason    = "not-yet"
 note      = "Buffer type the render pipeline hands around."
@@ -1313,12 +1265,6 @@ note      = "Render pipeline core."
 milestone = "M5"
 
 [[waived]]
-symbol    = "wlr_edges"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_egl"
 reason    = "not-yet"
 note      = "Render pipeline core."
@@ -1692,30 +1638,6 @@ symbol    = "wlr_ext_workspace_v1_request_type"
 reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
 milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_fbox"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_fbox_empty"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_fbox_equal"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_fbox_transform"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
 
 [[waived]]
 symbol    = "wlr_fixes"
@@ -2540,30 +2462,6 @@ note      = "Buffer-sharing, screen capture and DRM lease protocols."
 milestone = "M10"
 
 [[waived]]
-symbol    = "wlr_log_func_t"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_log_get_verbosity"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_log_importance"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_log_init"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_multi_backend_add"
 reason    = "not-yet"
 note      = "Backend-specific construction and the interfaces milestone."
@@ -3224,24 +3122,6 @@ note      = "Output stack completion."
 milestone = "M6"
 
 [[waived]]
-symbol    = "wlr_output_transform_compose"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_output_transform_coords"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_output_transform_invert"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_output_transformed_resolution"
 reason    = "not-yet"
 note      = "util/: geometry, region, transform, logging, addon substrate."
@@ -3596,46 +3476,10 @@ note      = "Buffer type the render pipeline hands around."
 milestone = "M5"
 
 [[waived]]
-symbol    = "wlr_region_confine"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_region_expand"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_region_from_resource"
 reason    = "not-yet"
 note      = "Takes a wl_resource; belongs with compositor/surface depth, not util."
 milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_region_rotated_bounds"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_region_scale"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_region_scale_xy"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_region_transform"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
 
 [[waived]]
 symbol    = "wlr_relative_pointer_manager_v1"

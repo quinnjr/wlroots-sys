@@ -69,3 +69,21 @@ fn toplevel_from_raw_with_id_is_not_reachable_outside_the_crate() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/toplevel_from_raw_is_private.rs");
 }
+
+/// `RegionRef` is a handle by the same argument as `Output` and `Toplevel`: it
+/// borrows a `pixman_region32` a wlroots object owns, and outliving that object
+/// is a use-after-free. The weaker, regression-only half of the pair.
+#[test]
+fn region_ref_lifetime_parameter_and_calling_convention_are_pinned() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/region_ref_escapes_borrow.rs");
+}
+
+/// The load-bearing half: it would start compiling the moment
+/// `RegionRef::from_raw` were widened to `pub`, which is what would let a
+/// consumer mint a view with a lifetime of their own choosing.
+#[test]
+fn region_ref_from_raw_is_not_reachable_outside_the_crate() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/region_ref_from_raw_is_private.rs");
+}

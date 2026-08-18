@@ -49,6 +49,46 @@ module = "backend"
 item   = "Backend::run_all"
 
 [[wrapped]]
+symbol = "wlr_box"
+module = "geom"
+item   = "Box2D"
+
+[[wrapped]]
+symbol = "wlr_box_closest_point"
+module = "geom"
+item   = "Box2D::closest_point"
+
+[[wrapped]]
+symbol = "wlr_box_contains_box"
+module = "geom"
+item   = "Box2D::contains_box"
+
+[[wrapped]]
+symbol = "wlr_box_contains_point"
+module = "geom"
+item   = "Box2D::contains_point"
+
+[[wrapped]]
+symbol = "wlr_box_empty"
+module = "geom"
+item   = "Box2D::empty"
+
+[[wrapped]]
+symbol = "wlr_box_equal"
+module = "geom"
+item   = "Box2D::equals"
+
+[[wrapped]]
+symbol = "wlr_box_intersection"
+module = "geom"
+item   = "Box2D::intersection"
+
+[[wrapped]]
+symbol = "wlr_box_transform"
+module = "geom"
+item   = "Box2D::transformed"
+
+[[wrapped]]
 symbol = "wlr_compositor_create"
 module = "runtime"
 item   = "Runtime::init_graphics"
@@ -62,6 +102,31 @@ item   = "Runtime::create_data_control_manager"
 symbol = "wlr_data_device_manager_create"
 module = "runtime"
 item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_edges"
+module = "toplevel"
+item   = "Edges"
+
+[[wrapped]]
+symbol = "wlr_fbox"
+module = "geom"
+item   = "FBox"
+
+[[wrapped]]
+symbol = "wlr_fbox_empty"
+module = "geom"
+item   = "FBox::empty"
+
+[[wrapped]]
+symbol = "wlr_fbox_equal"
+module = "geom"
+item   = "FBox::equals"
+
+[[wrapped]]
+symbol = "wlr_fbox_transform"
+module = "geom"
+item   = "FBox::transformed"
 
 [[wrapped]]
 symbol = "wlr_keyboard_get_modifiers"
@@ -92,6 +157,26 @@ item   = "LayerSurface"
 symbol = "wlr_layer_surface_v1_configure"
 module = "runtime"
 item   = "Runtime::configure_layer_surface"
+
+[[wrapped]]
+symbol = "wlr_log_func_t"
+module = "log"
+item   = "init_logging"
+
+[[wrapped]]
+symbol = "wlr_log_get_verbosity"
+module = "log"
+item   = "log_verbosity"
+
+[[wrapped]]
+symbol = "wlr_log_importance"
+module = "log"
+item   = "LogLevel"
+
+[[wrapped]]
+symbol = "wlr_log_init"
+module = "log"
+item   = "init_logging"
 
 [[wrapped]]
 symbol = "wlr_output"
@@ -149,6 +234,21 @@ module = "output"
 item   = "Output::enable_with_preferred_mode"
 
 [[wrapped]]
+symbol = "wlr_output_transform_compose"
+module = "geom"
+item   = "Transform::compose"
+
+[[wrapped]]
+symbol = "wlr_output_transform_coords"
+module = "geom"
+item   = "Transform::apply_coords"
+
+[[wrapped]]
+symbol = "wlr_output_transform_invert"
+module = "geom"
+item   = "Transform::invert"
+
+[[wrapped]]
 symbol = "wlr_pointer_button_event"
 module = "backend"
 item   = "SeatHandler::pointer_button"
@@ -167,6 +267,36 @@ item   = "SeatHandler::pointer_motion"
 symbol = "wlr_primary_selection_v1_device_manager_create"
 module = "runtime"
 item   = "Runtime::create_primary_selection_manager"
+
+[[wrapped]]
+symbol = "wlr_region_confine"
+module = "region"
+item   = "Region::confine"
+
+[[wrapped]]
+symbol = "wlr_region_expand"
+module = "region"
+item   = "Region::expanded"
+
+[[wrapped]]
+symbol = "wlr_region_rotated_bounds"
+module = "region"
+item   = "Region::rotated_bounds"
+
+[[wrapped]]
+symbol = "wlr_region_scale"
+module = "region"
+item   = "Region::scaled"
+
+[[wrapped]]
+symbol = "wlr_region_scale_xy"
+module = "region"
+item   = "Region::scaled_xy"
+
+[[wrapped]]
+symbol = "wlr_region_transform"
+module = "region"
+item   = "Region::transformed"
 
 [[wrapped]]
 symbol = "wlr_scene_attach_output_layout"

@@ -71,6 +71,61 @@ guarantee that nothing observable moved.
 
 No further compatibility exception is sanctioned in the `0.20` line.
 
+## Unreleased — M5, render & scene foundations
+
+Work in progress. This section collects everything M5 adds and is renamed to a
+version at release; nothing here has shipped. Purely additive so far.
+
+### Geometry, transforms and regions
+
+- `Box2D` and `FBox` — `wlr_box` and `wlr_fbox`, with the layout pinned to
+  wlroots' at compile time so passing one across is a pointer cast. Predicates
+  (`empty`, `contains_point`, `contains_box`, `closest_point`, `intersection`,
+  `transformed`, `equals`) are FFI calls rather than reimplementations, so the
+  edge cases cannot drift: containment is half-open, `contains_box` is false
+  when *either* box is empty, and `closest_point` reports `None` where wlroots
+  writes NaN. `From`/`Into` for `(x, y, width, height)` tuples, which is what
+  the older signatures such as `Runtime::output_layout_box` use.
+- `Transform` — the eight `wl_output_transform` values, with `invert`,
+  `compose` (documented as non-commutative once a flip is involved),
+  `apply_coords`, and lossless conversion to and from
+  `wlr_sys`'s `wl_output_transform`, so a `wayland-server` consumer is never
+  forced to launder a transform through this crate's type.
+  **`apply_coords` is not a point transform** despite its C name: it swaps the
+  axes for the four transforms that turn them and does nothing otherwise. Its
+  doc says so; `Box2D::transformed` is the real one.
+- `Region` and `RegionRef<'_>` — owned and borrowed pixel regions, covering
+  both pixman's set operations (`union`, `intersect`, `subtract`, `translated`,
+  `rectangles`, `extents`, `contains_point`) and wlroots' own helpers
+  (`scaled`, `scaled_xy`, `transformed`, `expanded`, `rotated_bounds`,
+  `confine`). No public API takes or returns a raw `pixman_region32`.
+  `expanded` takes a `u32`, making wlroots' non-negativity precondition
+  unrepresentable; `rotated_bounds` takes **radians**, which the headers do not
+  say and which `tests/region.rs` pins.
+
+### Logging
+
+- `LogLevel`, `init_logging` and `log_verbosity`. `init_logging` installs a
+  process-global sink (wlroots' callback has no user-data pointer, so there can
+  only be one) and sets the verbosity.
+- Two things worth knowing before you install one. **wlroots does not apply the
+  verbosity filter to a custom callback** — that test lives inside its own
+  stderr logger — so this crate applies it in the trampoline, and `level` means
+  the same thing either way. And a **panic escaping the sink is caught and
+  discarded**: a logger that aborts the process is worse than one that loses a
+  line. Everywhere else in this crate a panic aborts, deliberately; this is the
+  one exception.
+- Lines longer than 4 KiB are truncated. Rust cannot read a `va_list`, so the
+  formatting goes back through C's `vsnprintf` into a fixed buffer, and
+  two-pass sizing would need `va_copy`, which stable Rust also lacks.
+
+### Internal
+
+- The `wlr_addon` code that backs `OutputId`/`ToplevelId`/`LayerSurfaceId` is
+  now a reusable substrate rather than one hand-rolled copy in `id.rs`. No
+  public API change; the existing suite passing unchanged is the acceptance
+  criterion.
+
 ## 0.20.21
 
 Pointer constraints and relative pointer motion. All additive.

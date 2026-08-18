@@ -1,0 +1,10 @@
+error[E0621]: explicit lifetime required in the type of `region`
+ --> tests/ui/region_ref_escapes_borrow.rs:8:5
+  |
+8 |     sink.push(region);
+  |     ^^^^^^^^^^^^^^^^^ lifetime `'h` required
+  |
+help: add explicit lifetime `'h` to the type of `region`
+  |
+5 | fn handler<'h>(region: &'h RegionRef<'h>, sink: &mut Vec<&'h RegionRef<'h>>) {
+  |                         ++

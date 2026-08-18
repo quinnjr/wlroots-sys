@@ -375,6 +375,24 @@ mod tests {
         assert_not_impl_any!(crate::EventLoop<'static>: Send, Sync);
         assert_not_impl_any!(crate::Backend<'static>: Send, Sync);
         assert_not_impl_any!(crate::Output<'static>: Send, Sync);
+        // `Region` owns a C allocation and `RegionRef` borrows one, so neither
+        // may cross a thread; the raw pointer inside each is what makes that
+        // true today, and this is what keeps it true if the representation
+        // changes.
+        assert_not_impl_any!(crate::Region: Send, Sync);
+        assert_not_impl_any!(crate::RegionRef<'static>: Send, Sync);
+    }
+
+    /// The other half of the same argument: the plain value types carry no
+    /// wlroots ownership at all, so refusing to let them cross a thread would
+    /// be a cost with no safety behind it.
+    mod thread_free {
+        use static_assertions::assert_impl_all;
+
+        assert_impl_all!(crate::Box2D: Send, Sync);
+        assert_impl_all!(crate::FBox: Send, Sync);
+        assert_impl_all!(crate::Transform: Send, Sync);
+        assert_impl_all!(crate::LogLevel: Send, Sync);
     }
 
     /// Records delivery order, and re-enters the dispatcher from inside a
