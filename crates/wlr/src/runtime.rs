@@ -225,6 +225,20 @@ pub(crate) struct RuntimeInner {
     /// removes it regardless.
     pub(crate) lock_surface_trees: RefCell<HashMap<usize, LockSurfaceRender>>,
 
+    /// The opaque black fill covering every output while the session is
+    /// locked, parented into [`Band::Lock`] **beneath** every lock surface
+    /// (created before any surface arrives, so it stays at the bottom of the
+    /// band). This is what makes the spec's "blank Lock band covering every
+    /// output" actually opaque: a live locker's surface renders over it, but
+    /// any gap — a dead locker's freed surface, an uncovered or hotplugged
+    /// output — shows solid black rather than the normal toplevels beneath.
+    /// Created by [`Runtime::install_lock_fill`] when the session locks,
+    /// removed by [`Runtime::remove_lock_fill`] on a genuine unlock. `None`
+    /// when unlocked. Reused (repositioned) rather than duplicated across a
+    /// crashed-locker takeover, which calls `begin_session_lock` a second
+    /// time while this fill is still live.
+    pub(crate) session_lock_fill: std::cell::Cell<Option<RectId>>,
+
     /// Every live toplevel: the role object, its scene tree, and the surface
     /// its id addon lives on.
     pub(crate) toplevels: RefCell<HashMap<ToplevelId, ToplevelEntry>>,
@@ -734,6 +748,7 @@ impl Runtime {
                 session_unlock_requested: std::cell::Cell::new(false),
                 session_locked_sent: std::cell::Cell::new(false),
                 lock_surface_trees: RefCell::new(HashMap::new()),
+                session_lock_fill: std::cell::Cell::new(None),
                 toplevels: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
                 layer_shell: RefCell::new(None),
@@ -2298,6 +2313,75 @@ impl Runtime {
         *self.inner.session_lock.borrow_mut() = Some(lock);
         // No normal client keeps keyboard focus across a lock.
         self.clear_keyboard_focus();
+        // Cover every output with an opaque black fill beneath the lock
+        // surfaces, so any uncovered region shows black, never normal content.
+        self.install_lock_fill();
+    }
+
+    /// The extent of the whole output layout, `(x, y, width, height)`, or
+    /// `None` when the layout is empty (no output placed) or graphics is not
+    /// yet initialised. Unlike [`output_layout_box`](Runtime::output_layout_box),
+    /// this passes a null reference output, which `wlr_output_layout_get_box`
+    /// documents as returning the extents of the entire layout.
+    fn output_layout_extent(&self) -> Option<(i32, i32, i32, i32)> {
+        let layout = self.inner.graphics.borrow().as_ref().map(|g| g.layout)?;
+        // SAFETY: `layout` is this runtime's own, created by `init_graphics`
+        // and never freed by this crate (see [`Graphics`]'s own doc). A null
+        // reference asks for the whole-layout extents;
+        // `wlr_output_layout_get_box` fully initialises `dest_box` in every
+        // case, so reading it back is sound.
+        let wbox = unsafe {
+            let mut wbox = std::mem::MaybeUninit::<sys::wlr_box>::uninit();
+            sys::wlr_output_layout_get_box(
+                layout.as_ptr(),
+                std::ptr::null_mut(),
+                wbox.as_mut_ptr(),
+            );
+            wbox.assume_init()
+        };
+        if wbox.width == 0 && wbox.height == 0 {
+            None
+        } else {
+            Some((wbox.x, wbox.y, wbox.width, wbox.height))
+        }
+    }
+
+    /// Create (or, on a crashed-locker takeover, reposition) the opaque black
+    /// [`session_lock_fill`](RuntimeInner::session_lock_fill) so it covers the
+    /// full current output-layout extent. Parented into [`Band::Lock`] before
+    /// any lock surface arrives, so it sits at the bottom of the band and a
+    /// live locker's surface still renders over it. A no-op if graphics is not
+    /// initialised or the layout is empty (no output to cover yet) — the
+    /// crate rates a hotplug-during-lock resize LOW, so the fill covers the
+    /// outputs present at lock time and is not re-sized on later hotplug.
+    fn install_lock_fill(&self) {
+        let Some((x, y, w, h)) = self.output_layout_extent() else {
+            return;
+        };
+        // A takeover after a locker crash calls `begin_session_lock` again
+        // while the previous fill is still live: reposition it rather than
+        // leaking a second rect over the first.
+        if let Some(existing) = self.inner.session_lock_fill.get() {
+            self.set_rect_size(existing, w, h);
+            self.set_rect_position(existing, x, y);
+            return;
+        }
+        // Opaque black, premultiplied. `add_rect_in_band` appends at the end
+        // of the lock band's children (topmost within the band); because no
+        // lock surface has been added yet, later surfaces append above it.
+        if let Ok(id) = self.add_rect_in_band(Band::Lock, w, h, [0.0, 0.0, 0.0, 1.0]) {
+            self.set_rect_position(id, x, y);
+            self.inner.session_lock_fill.set(Some(id));
+        }
+    }
+
+    /// Destroy the opaque black lock fill, if present. Called only on a
+    /// genuine unlock — a locker dying keeps the session locked, so its fill
+    /// must remain to cover the now-uncovered outputs.
+    fn remove_lock_fill(&self) {
+        if let Some(id) = self.inner.session_lock_fill.take() {
+            self.remove_rect(id);
+        }
     }
 
     /// Record a lock surface's scene tree, keyed by the output it covers, so
@@ -2393,6 +2477,11 @@ impl Runtime {
         self.inner.lock_surface_trees.borrow_mut().clear();
         self.inner.session_locked.set(false);
         self.inner.session_locked_sent.set(false);
+        // Genuine unlock: the outputs are about to show normal content again,
+        // so the opaque cover must go. A locker *dying* never reaches here
+        // (`take_lock_destroy_was_unlocked` keeps the session locked), so the
+        // fill correctly survives a crash.
+        self.remove_lock_fill();
     }
 
     /// Common cleanup when the active `wlr_session_lock_v1` is destroyed: clear

@@ -2352,6 +2352,23 @@ unsafe extern "C" fn on_new_session_lock<S: Handlers>(
             return;
         };
 
+        // Reject a second, concurrent lock. wlroots fires `new_lock` for EVERY
+        // lock request; refusing one while another is still live is the
+        // compositor's job. If we accepted it, a malicious client could take a
+        // second lock over the already-locked session, cover the outputs to
+        // drive `locked`, then `unlock_and_destroy` to unlock the session with
+        // no user authentication — a full lock-screen bypass. Per
+        // ext-session-lock, reject by destroying the new lock (this sends
+        // `finished` to that client) and leave the existing lock untouched.
+        // `session_lock_ptr()` is `None` both when never locked and when a
+        // previous locker DIED (its destroy cleared it), so the legitimate
+        // takeover-after-crash path is preserved; only a second lock over a
+        // still-live one is refused.
+        if runtime.session_lock_ptr().is_some() {
+            sys::wlr_session_lock_v1_destroy(lock.as_ptr());
+            return;
+        }
+
         // Enter the locked state synchronously — the security bit is set here,
         // before anything else runs.
         runtime.begin_session_lock(lock);
