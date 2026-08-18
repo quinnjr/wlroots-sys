@@ -468,6 +468,23 @@ struct Session<'r, S> {
     /// `wlr_input_device_finish` hands that callback.
     inputs: RefCell<HashMap<usize, InputDevice>>,
 
+    /// This run's destroy listener on every drag icon currently visible,
+    /// keyed by the drag icon's own `*mut wlr_drag_icon` address (as
+    /// `usize`) — mirrors `inputs`' keying discipline exactly, and for the
+    /// same reason: `on_start_drag`'s destroy listener must find and remove
+    /// one specific icon's entry synchronously, the moment that icon is
+    /// destroyed, so it can clear [`RuntimeInner::drag_icon_tree`] before
+    /// wlroots frees the scene tree stored there. Keyed by the *icon*, not
+    /// the drag: wlroots frees the tree from two independent paths — the
+    /// drag ending normally, and a client destroying the drag-icon surface
+    /// mid-drag while the drag itself survives — and `(*icon).events.destroy`
+    /// is the one signal both paths fire, always in the same synchronous
+    /// emission that frees the tree; `(*drag).events.destroy` does not fire
+    /// on the second path at all. A drag with no icon never gets an entry
+    /// here — `on_start_drag` returns before linking anything when
+    /// `(*drag).icon` is null.
+    drags: RefCell<HashMap<usize, Registration>>,
+
     /// Whether the most recently delivered [`Event::Key`] was consumed by the
     /// handler. `on_key` cannot get a return value back through
     /// `Dispatcher::emit` directly — an `extern "C"` callback has no way to
@@ -959,6 +976,7 @@ impl<'d> Backend<'d> {
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
+            drags: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime,
             deliver: hooks.deliver,
@@ -2019,14 +2037,45 @@ unsafe extern "C" fn on_request_start_drag<S: Handlers>(
 /// validation and `wlr_seat_start_*_drag` armed it). Parents the drag's icon
 /// — if it has one; not every drag carries a visible icon — into the overlay
 /// scene band so it renders above every toplevel and layer surface for the
-/// duration of the drag.
+/// duration of the drag, and records the tree in
+/// [`RuntimeInner::drag_icon_tree`] so [`Runtime::drag_icon_position`] can
+/// observe it.
 ///
-/// Open question, left for Task 7's harness test to resolve empirically:
-/// whether the scene node `wlr_scene_drag_icon_create` returns self-tracks
-/// the pointer/touch position (as `wlr_scene_drag_icon` in upstream wlroots
-/// appears to, via its own motion listeners), or this compositor must
-/// reposition it on pointer/touch motion itself. If the latter, that is a
-/// follow-up task, not a defect in this wiring.
+/// An earlier revision of this doc claimed the scene node
+/// `wlr_scene_drag_icon_create` returns self-tracks the pointer/touch
+/// position via its own motion listeners. That was wrong — verified against
+/// wlroots 0.20.2's own C source, `wlr_scene_drag_icon`'s only reposition
+/// listener fires on the icon surface's own buffer-commit deltas, never on
+/// cursor motion, so left alone the icon renders once at `(0, 0)` and never
+/// moves. This crate repositions the node itself instead: `on_pointer_motion`,
+/// `on_pointer_motion_absolute` (below), and
+/// [`Runtime::inject_touch_motion`] each call
+/// [`Runtime::reposition_drag_icon`] with their own freshly-updated cursor or
+/// touch-point layout position, on every motion, for as long as
+/// `drag_icon_tree` holds a tree — matching tinywl's own
+/// `wlr_scene_node_set_position(&drag_icon->node, cursor->x, cursor->y)`. The
+/// icon's own hotspot offset is still applied separately, by wlroots'
+/// internal `surface_tree` commit handler on the node this tree parents;
+/// this crate only ever positions the outer tree.
+///
+/// Also links a destroy listener on the drag *icon's* own `events.destroy`
+/// (not the drag's — see below), keyed in `Session::drags` by the icon
+/// pointer — mirrors `on_new_input`'s `InputDevice::_destroy` pattern (same
+/// keying discipline: the pointer handed to the destroy signal is exactly
+/// the key this inserts under), used here instead of
+/// `Registration::link_toplevel`'s id-carrying variants because a drag icon
+/// has no [`ToplevelId`]/[`OutputId`]/[`LayerSurfaceId`] to carry. That
+/// listener — not this function — is what clears `drag_icon_tree` back to
+/// `None`; see [`on_drag_destroy`]'s own doc for why that must happen before
+/// wlroots frees the tree, and for why the icon's destroy (not the drag's)
+/// is the correct lifetime boundary to watch: wlroots frees the scene tree
+/// on two independent paths — the drag ending normally, and a client
+/// destroying the drag-icon surface mid-drag while the drag itself survives
+/// with `drag->icon` nulled out — and only `(*icon).events.destroy` fires on
+/// both, always in the same synchronous emission that frees the tree.
+/// `(*drag).events.destroy` does not fire on the second path at all, which
+/// would leave `drag_icon_tree` holding a dangling pointer if that were the
+/// signal watched here.
 unsafe extern "C" fn on_start_drag<S: Handlers>(
     l: *mut sys::wl_listener,
     data: *mut std::ffi::c_void,
@@ -2038,14 +2087,73 @@ unsafe extern "C" fn on_start_drag<S: Handlers>(
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
         let drag = data.cast::<sys::wlr_drag>();
         if (*drag).icon.is_null() {
             return;
         }
-        let Some(overlay) = (*session).runtime.band_ptr(Band::Overlay) else {
+        let Some(overlay) = runtime.band_ptr(Band::Overlay) else {
             return;
         };
-        let _tree = sys::wlr_scene_drag_icon_create(overlay.as_ptr(), (*drag).icon);
+        let tree = sys::wlr_scene_drag_icon_create(overlay.as_ptr(), (*drag).icon);
+        let Some(tree) = NonNull::new(tree) else {
+            return;
+        };
+        *runtime.inner.drag_icon_tree.borrow_mut() = Some(tree);
+
+        // Linked on the icon's own `events.destroy`, not the drag's — see
+        // this function's own doc for why that is the signal that fires on
+        // both teardown paths. No `alive` backstop: as for the decoration
+        // listeners this mirrors, the icon cannot be freed by anything other
+        // than the destroy this very listener watches, so there is no
+        // "owner died first" case to guard against. `(*drag).icon` is
+        // non-null here — checked above — so dereferencing it to reach its
+        // `events` is sound.
+        let icon = (*drag).icon;
+        let destroy = Registration::link_bare(
+            &raw mut (*icon).events.destroy,
+            on_drag_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        (*session).drags.borrow_mut().insert(icon as usize, destroy);
+    }
+}
+
+/// The drag icon is about to be freed. Clear [`RuntimeInner::drag_icon_tree`]
+/// *now*, whatever the handler does — the tree `on_start_drag` stored there
+/// is a child of this very icon, and wlroots' `drag_icon_destroy` (called
+/// either from `seat_handle_drag_destroy` when the drag ends normally, or
+/// independently when a client destroys the drag-icon surface mid-drag)
+/// frees the scene tree as part of the same teardown that emits this signal,
+/// so a read through [`Runtime::drag_icon_position`] after this point without
+/// this clear would dereference freed memory.
+///
+/// Also removes this icon's entry from `Session::drags`, which unlinks this
+/// very listener — sound for the same reason `on_input_destroy` and
+/// `on_toplevel_decoration_destroy` unlinking themselves is:
+/// `wl_signal_emit_mutable` has already advanced its cursor past the firing
+/// listener before this callback runs.
+unsafe extern "C" fn on_drag_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_start_drag` into this drag icon's own
+    // `events.destroy`; the icon is still live memory for the duration of
+    // this emission. `data` is the same `*mut wlr_drag_icon` `on_start_drag`
+    // linked against — wlroots' `drag_icon_destroy` emits `events.destroy`
+    // with the icon itself as the signal data, on both the normal-drag-end
+    // path and the icon-surface-destroyed-mid-drag path — so, cast to
+    // `usize`, it recovers the exact key that call inserted this entry
+    // under regardless of which path fired.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        runtime.inner.drag_icon_tree.borrow_mut().take();
+        let key = data as usize;
+        let removed = (*session).drags.borrow_mut().remove(&key);
+        drop(removed);
     }
 }
 
@@ -3689,6 +3797,15 @@ unsafe extern "C" fn on_pointer_motion<S: Handlers>(
         runtime.ensure_cursor_image();
 
         let (x, y) = ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y);
+
+        // `wlr_scene_drag_icon` does not self-track the cursor (see
+        // `Runtime::drag_icon_position`'s doc for the full story) — this is
+        // the fix, called with the cursor's own freshly-updated layout
+        // position. `.round()`, not truncation: a truncated `x as i32` on a
+        // sub-pixel cursor position left the icon a pixel short of the
+        // cursor in the downstream prototype that found this bug.
+        runtime.reposition_drag_icon(x.round() as i32, y.round() as i32);
+
         let deliver = (*session).deliver;
         (*session).dispatcher.emit(
             &*session,
@@ -3728,6 +3845,11 @@ unsafe extern "C" fn on_pointer_motion_absolute<S: Handlers>(
         runtime.ensure_cursor_image();
 
         let (x, y) = ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y);
+
+        // See `on_pointer_motion`'s identical call for why this is here and
+        // why `.round()`.
+        runtime.reposition_drag_icon(x.round() as i32, y.round() as i32);
+
         let deliver = (*session).deliver;
         (*session).dispatcher.emit(
             &*session,
@@ -4288,6 +4410,7 @@ mod tests {
                 decorations: RefCell::new(HashMap::new()),
                 layers: RefCell::new(HashMap::new()),
                 inputs: RefCell::new(HashMap::new()),
+                drags: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
                 runtime: &runtime,
                 deliver: deliver::<Recorder>,
@@ -4459,6 +4582,7 @@ mod tests {
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
+            drags: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime: &runtime,
             deliver: deliver::<Recorder>,

@@ -71,6 +71,32 @@ guarantee that nothing observable moved.
 
 No further compatibility exception is sanctioned in the `0.20` line.
 
+## 0.20.18
+
+Drag icons now follow the cursor — a behavior fix — plus an accessor to
+observe the drag-icon scene node.
+
+- **Fix (behavior):** a visible drag icon now tracks the pointer/touch as it
+  moves. `wlr_scene_drag_icon_create` (contrary to a note this crate carried)
+  does **not** self-track the cursor — verified against wlroots 0.20.2's own
+  `types/scene/drag_icon.c`, its only reposition listener fires on the icon
+  surface's buffer-commit deltas, never on motion. So a drag icon was created
+  once at `(0, 0)` and never moved, for **every** consumer, not just in tests.
+  `on_pointer_motion`/`on_pointer_motion_absolute` and `inject_touch_motion`
+  now reposition the icon's scene node to the cursor's layout position on each
+  motion (as tinywl and cage do). This is a knowing observable-behavior change
+  within `0.20.x` — the second such exception on record (see the compatibility
+  note above and `0.20.11`) — because the prior behavior was simply broken.
+  A consumer with no drag in progress is unaffected.
+- `Runtime::drag_icon_position() -> Option<(i32, i32)>` — the drag icon's
+  current layout position while a drag with a visible icon is active, else
+  `None`. Public observability (e.g. for tests asserting the icon renders and
+  follows). Backed by a stored scene-tree handle that a destroy listener on the
+  drag icon's own `events.destroy` clears, so the read can never touch freed
+  memory on either drag-teardown path.
+- Additive API surface (the new accessor); the repositioning is the behavior
+  fix noted above. No existing item's name or signature changed.
+
 ## 0.20.17
 
 Completes headless touch drag-and-drop — the touch-side counterpart to what
