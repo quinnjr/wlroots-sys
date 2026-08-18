@@ -5,36 +5,6 @@
 # needs no milestone. See README.md in this directory before editing.
 
 [[waived]]
-symbol    = "wlr_addon"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_addon_find"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_addon_finish"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_addon_init"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_addon_interface"
-reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_addon_set"
 reason    = "interface-impl-only"
 note      = "Only an object that owns its own addon set calls these; nothing in wlr does."
@@ -3640,8 +3610,8 @@ milestone = "M5"
 [[waived]]
 symbol    = "wlr_region_from_resource"
 reason    = "not-yet"
-note      = "util/: geometry, region, transform, logging, addon substrate."
-milestone = "M5"
+note      = "Takes a wl_resource; belongs with compositor/surface depth, not util."
+milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_region_rotated_bounds"

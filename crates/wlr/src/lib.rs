@@ -75,6 +75,7 @@
 
 pub(crate) mod sys;
 
+mod addon;
 mod backend;
 mod buffer;
 mod decoration;

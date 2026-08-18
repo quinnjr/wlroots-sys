@@ -6,9 +6,9 @@
 //! mechanism for data whose lifetime is bound to an object. wlroots runs our
 //! destructor at exactly the right moment, so nothing has to be swept.
 
-use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::addon::{Addon, addon_kind};
 use crate::sys;
 
 /// Identifies an output for as long as the consumer chooses to remember it.
@@ -45,53 +45,31 @@ pub(crate) fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Our addon payload: a `wlr_addon` header followed by the id.
+addon_kind!(
+    /// The id payload's addon kind: a `u64` attached under the name wlroots
+    /// prints when it walks a set.
+    ///
+    /// The name is part of the on-object representation and must not change:
+    /// it is what distinguishes this crate's addons from another consumer's in
+    /// a debugger, and `backend.rs`'s `ensure_id_raw` relies on `find` matching
+    /// an addon attached by an earlier run of the same process.
+    ID_ADDON_IMPL: u64 = c"wlr-rs-object-id"
+);
+
+/// Serialises every test that attaches or destroys *any* addon this crate
+/// declares, not only an id one.
 ///
-/// `#[repr(C)]` with the addon first so `id_addon_from_raw` can recover the
-/// payload from the `*mut wlr_addon` wlroots hands to the destroy hook via a
-/// zero-offset cast. Enforced below by `const _`, since the cast itself
-/// cannot detect a future field reordering.
-#[repr(C)]
-struct IdAddon {
-    addon: sys::wlr_addon,
-    id: u64,
-}
-
-// `id_addon_from_raw`'s cast is sound only while `addon` is `IdAddon`'s first
-// field, at offset 0. This fails to compile if that ever stops being true.
-const _: () = assert!(std::mem::offset_of!(IdAddon, addon) == 0);
-
-/// `wlr_addon_interface` holds raw pointers, so it is not `Sync` by default.
-/// Wrapping it lets us hold one immutable instance for the process.
-struct AddonImpl(sys::wlr_addon_interface);
-
-// SAFETY: the contents are never mutated after initialisation, and the `name`
-// pointer targets a `'static` C string.
-unsafe impl Sync for AddonImpl {}
-
-static ID_ADDON_IMPL: AddonImpl = AddonImpl(sys::wlr_addon_interface {
-    name: c"wlr-rs-object-id".as_ptr(),
-    destroy: Some(id_addon_destroy),
-});
-
-/// Test-only witness that `id_addon_destroy` actually ran and freed its
-/// `Box`. Production builds have no way to observe that beyond "did not
-/// crash"; this gives the test something to assert on.
-#[cfg(test)]
-static DESTROY_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// Serialises every test that attaches or destroys an id addon.
+/// [`crate::addon::DESTROY_COUNT`] is process-wide and shared by every addon
+/// kind, and the tests below assert a *delta* across their own work, so a second
+/// test destroying an addon on another harness thread at the same moment would
+/// inflate that delta and fail it for the wrong reason. `backend.rs`'s delivery
+/// tests destroy id addons, so they take this lock too — the alternative is a
+/// suite that passes or fails by scheduling.
 ///
-/// [`DESTROY_COUNT`] is process-wide and the test below asserts a *delta* across
-/// its own work, so a second test destroying an id addon on another harness
-/// thread at the same moment would inflate that delta and fail it for the wrong
-/// reason. `backend.rs`'s delivery tests destroy id addons, so they take this
-/// lock too — the alternative is a suite that passes or fails by scheduling.
-///
-/// **If you write a test that finishes an addon set carrying an id addon —
-/// calling `wlr_addon_set_finish` directly, or through a fixture whose `Drop`
-/// does — take this lock for the whole test.** Finishing the set runs
-/// [`id_addon_destroy`], which bumps [`DESTROY_COUNT`]; a test that does so
+/// **If you write a test that finishes an addon set carrying one of this
+/// crate's addons — calling `wlr_addon_set_finish` directly, or through a
+/// fixture whose `Drop` does — take this lock for the whole test.** Finishing
+/// the set runs [`crate::addon::addon_destroy`], which bumps the counter; a test that does so
 /// without holding the lock will not fail itself, it will fail whichever test
 /// happens to be measuring the delta at that moment, intermittently and
 /// somewhere else.
@@ -103,31 +81,6 @@ pub(crate) fn id_test_lock() -> std::sync::MutexGuard<'static, ()> {
     // to run the remaining tests would turn one real failure into several
     // spurious ones.
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// Called by wlroots when the owning object is destroyed.
-unsafe extern "C" fn id_addon_destroy(addon: *mut sys::wlr_addon) {
-    // SAFETY: wlroots only invokes this for addons we registered, all of which
-    // are the `addon` field of a boxed `IdAddon`.
-    unsafe {
-        let payload: *mut IdAddon = id_addon_from_raw(addon);
-        sys::wlr_addon_finish(addon);
-        drop(Box::from_raw(payload));
-    }
-    #[cfg(test)]
-    DESTROY_COUNT.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Downcast `addon` to the `IdAddon` that embeds it.
-///
-/// A plain pointer cast, not offset arithmetic: valid only while `addon` is
-/// `IdAddon`'s first `#[repr(C)]` field (offset 0), which is checked at
-/// compile time by the `const _` assertion next to the struct definition.
-unsafe fn id_addon_from_raw(addon: *mut sys::wlr_addon) -> *mut IdAddon {
-    // SAFETY: `addon` points at the `addon` field of a live `IdAddon`, and
-    // that field is at offset 0 (enforced by the `const _` assertion above),
-    // so the cast recovers the enclosing `IdAddon` exactly.
-    addon.cast::<IdAddon>()
 }
 
 /// Attach a fresh id to `set` and return it.
@@ -149,17 +102,7 @@ pub(crate) unsafe fn attach_id(set: *mut sys::wlr_addon_set) -> u64 {
         );
 
         let id = next_id();
-        let payload = Box::into_raw(Box::new(IdAddon {
-            addon: std::mem::zeroed(),
-            id,
-        }));
-
-        sys::wlr_addon_init(
-            &raw mut (*payload).addon,
-            set,
-            (&raw const ID_ADDON_IMPL).cast::<c_void>(),
-            &raw const ID_ADDON_IMPL.0,
-        );
+        Addon::attach(set, ID_ADDON_IMPL.owner(), &ID_ADDON_IMPL, id);
         id
     }
 }
@@ -175,21 +118,18 @@ pub(crate) unsafe fn find_id(set: *const sys::wlr_addon_set) -> Option<u64> {
     // signature takes `*mut wlr_addon_set` even though it performs no mutation,
     // so the cast back to `*mut` here is not a soundness hazard.
     unsafe {
-        let addon = sys::wlr_addon_find(
-            set.cast_mut(),
-            (&raw const ID_ADDON_IMPL).cast::<c_void>(),
-            &raw const ID_ADDON_IMPL.0,
-        );
-        if addon.is_null() {
+        let payload = Addon::<u64>::find(set, ID_ADDON_IMPL.owner(), &ID_ADDON_IMPL);
+        if payload.is_null() {
             return None;
         }
-        Some((*id_addon_from_raw(addon)).id)
+        Some(*Addon::data(payload))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addon::DESTROY_COUNT;
 
     /// Exercises the id addon against a standalone `wlr_addon_set`. This needs
     /// no display, backend or output — `wlr_addon_set_init` works on any set.

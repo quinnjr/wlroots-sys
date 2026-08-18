@@ -39,10 +39,23 @@ by name so a second one cannot arrive unnoticed.
 ## When does a symbol count as wrapped?
 
 A row in `wrapped.toml` names the safe public item that gives a consumer that
-symbol's *effect*. Internal plumbing does not count: `wlr_addon_init` is called on
-every toplevel this crate tracks, but no consumer can attach an addon, so it is
-waived until M5 exposes one. Nor does raw-pointer reachability — `as_ptr()` is an
-interop tool, not coverage.
+symbol's *effect* — which is not the same as the item having the same shape as
+the C function. Raw-pointer reachability is not coverage either: `as_ptr()` is an
+interop tool.
+
+The `wlr_addon_*` rows are the case worth understanding, because they look like
+internal plumbing and are not. A consumer cannot attach an addon, and there is no
+plan for one to; what the addon mechanism buys them is `OutputId`, `ToplevelId`
+and `LayerSurfaceId` — identities minted when wlroots announces an object and
+released, by wlroots, at exactly the moment it dies. That guarantee is documented
+on those types, is reachable by every consumer, and nothing but `wlr_addon`
+provides it. So the rows point at the ids rather than at an addon API that will
+never exist. `wlr_addon_set_*` is genuinely different and stays waived: only code
+that *owns* a set calls those, which in this crate is nobody.
+
+Contrast `wlr_scene_surface_try_from_buffer`, called on every pointer motion so
+input reaches the right surface, but with no consumer-visible effect of its own —
+that stays waived until a milestone gives a consumer scene-node access.
 
 Every row is validated twice by the gate: the symbol must exist in `bindings.rs`,
 and it must still appear in a `sys::` use somewhere under `crates/wlr/src`. The

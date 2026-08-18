@@ -9,6 +9,31 @@
 # a `sys::` use somewhere under `crates/wlr/src`.
 
 [[wrapped]]
+symbol = "wlr_addon"
+module = "addon"
+item   = "OutputId"
+
+[[wrapped]]
+symbol = "wlr_addon_find"
+module = "addon"
+item   = "Output::id"
+
+[[wrapped]]
+symbol = "wlr_addon_finish"
+module = "addon"
+item   = "OutputHandler::destroyed"
+
+[[wrapped]]
+symbol = "wlr_addon_init"
+module = "addon"
+item   = "OutputId"
+
+[[wrapped]]
+symbol = "wlr_addon_interface"
+module = "addon"
+item   = "OutputId"
+
+[[wrapped]]
 symbol = "wlr_backend"
 module = "backend"
 item   = "Backend"
@@ -337,4 +362,3 @@ item   = "Runtime::set_toplevel_maximized"
 symbol = "wlr_xdg_toplevel_set_size"
 module = "runtime"
 item   = "Runtime::set_toplevel_size"
-
