@@ -91,14 +91,17 @@ pub(crate) struct RuntimeInner {
     /// id types predate the mechanism.
     pub(crate) nodes: RefCell<HashMap<NodeId, NodeEntry>>,
 
-    /// How many [`Runtime::with_node`] borrows are live on this thread.
+    /// How many [`Runtime::with_node`] borrows and [`Runtime::for_each_buffer`]
+    /// walks are live on this thread.
     ///
     /// A [`SceneNode`](crate::SceneNode) handle holds a raw pointer, so a
     /// destroy reached from inside the closure that was handed the handle
-    /// would leave it dangling for the rest of that call. Rather than
-    /// documenting the hazard away, every call that can free a node refuses
-    /// while this is non-zero. `Cell`, not `RefCell`: it is read from paths
-    /// that must not be able to fail.
+    /// would leave it dangling for the rest of that call; a destroy reached
+    /// from inside a `for_each_buffer` visitor is worse still, because wlroots
+    /// is mid-`wl_list_for_each` over the very list the node sits in. Rather
+    /// than documenting the hazard away, every call that can free or unlink a
+    /// node refuses while this is non-zero. `Cell`, not `RefCell`: it is read
+    /// from paths that must not be able to fail.
     pub(crate) node_borrows: std::cell::Cell<usize>,
 
     /// Every live RGBA pixel-buffer scene node. Same shape and same purge
@@ -752,7 +755,8 @@ impl Graphics {
     }
 }
 
-/// Raises `RuntimeInner::node_borrows` for the life of a scene-node borrow.
+/// Raises `RuntimeInner::node_borrows` for the life of a scene-node borrow or
+/// of a [`Runtime::for_each_buffer`] walk.
 ///
 /// A [`SceneNode`] handle is a raw pointer with a lifetime; the lifetime stops
 /// it escaping the closure, but nothing in the type system stops that closure
@@ -761,6 +765,13 @@ impl Graphics {
 /// refuses. `Drop` lowers the count on every path, including an unwind, so a
 /// panicking closure cannot leave a runtime permanently unable to destroy
 /// anything.
+///
+/// [`Runtime::for_each_buffer`] raises the same guard for a sharper reason than
+/// a dangling handle: wlroots walks each tree's child list with
+/// `wl_list_for_each`, not the `_safe` form, so it reads the current node's
+/// `link.next` *after* the visitor returns. Freeing or unlinking that node from
+/// inside the visitor is a use-after-free inside wlroots' own recursion, not
+/// merely a stale Rust handle.
 struct NodeBorrowGuard<'a> {
     inner: &'a RuntimeInner,
 }
@@ -1754,10 +1765,12 @@ impl Runtime {
     /// node.
     ///
     /// Also `None`, having removed nothing, while a
-    /// [`with_node`](Runtime::with_node) borrow is live — that borrow's handle
-    /// would otherwise dangle for the rest of the closure. Only code inside
-    /// such a closure can observe this, so it is additive to the published
-    /// 0.20.5 behaviour rather than a change to it.
+    /// [`with_node`](Runtime::with_node) borrow or a
+    /// [`for_each_buffer`](Runtime::for_each_buffer) walk is live — that
+    /// borrow's handle would otherwise dangle for the rest of the closure, and
+    /// that walk would read a freed `wl_list` link. Only code inside such a
+    /// closure can observe this, so it is additive to the published 0.20.5
+    /// behaviour rather than a change to it.
     pub fn remove_rect(&self, rect: RectId) -> Option<()> {
         if self.inner.node_borrows.get() != 0 {
             return None;
@@ -2106,7 +2119,8 @@ impl Runtime {
     /// node.
     ///
     /// Also `None`, having removed nothing, while a
-    /// [`with_node`](Runtime::with_node) borrow is live — see
+    /// [`with_node`](Runtime::with_node) borrow or a
+    /// [`for_each_buffer`](Runtime::for_each_buffer) walk is live — see
     /// [`remove_rect`](Runtime::remove_rect)'s own note.
     pub fn remove_buffer(&self, buffer: BufferId) -> Option<()> {
         if self.inner.node_borrows.get() != 0 {
@@ -2364,7 +2378,9 @@ impl Runtime {
     ///   tree, a drag icon) — tear those down through the object that owns
     ///   them;
     /// * a [`with_node`](Runtime::with_node) borrow is live, which would leave
-    ///   the handle that borrow produced dangling.
+    ///   the handle that borrow produced dangling;
+    /// * a [`for_each_buffer`](Runtime::for_each_buffer) walk is live, which
+    ///   would leave wlroots' own `wl_list_for_each` reading a freed link.
     pub fn destroy_node(&self, node: NodeId) -> Option<()> {
         if self.inner.node_borrows.get() != 0 {
             return None;
@@ -2483,10 +2499,12 @@ impl Runtime {
     ///
     /// `None` — with nothing moved — when either id is unknown or stale, when
     /// `new_parent` is not a tree, when `node` is not one this crate created
-    /// for the consumer, when a [`with_node`](Runtime::with_node) borrow is
-    /// live, or when the move would make a cycle (`new_parent` is `node`
-    /// itself or one of its descendants). wlroots asserts the cycle case, and
-    /// an assert here is a process abort.
+    /// for the consumer, when a [`with_node`](Runtime::with_node) borrow or a
+    /// [`for_each_buffer`](Runtime::for_each_buffer) walk is live, or when the
+    /// move would make a cycle (`new_parent` is `node` itself or one of its
+    /// descendants). wlroots asserts the cycle case, and an assert here is a
+    /// process abort; a reparent mid-walk would unlink the node out of the very
+    /// `wl_list` wlroots is iterating.
     ///
     /// Reparenting changes which destroy cascade owns the node, so the parent
     /// tracking the frozen [`RectId`]/[`BufferId`] tables still carry is
@@ -2781,6 +2799,21 @@ impl Runtime {
     ///
     /// `None` for an unknown or stale id.
     ///
+    /// While the walk is running nothing may free or move a node underneath it:
+    /// [`destroy_node`](Runtime::destroy_node),
+    /// [`reparent_node`](Runtime::reparent_node),
+    /// [`remove_rect`](Runtime::remove_rect) and
+    /// [`remove_buffer`](Runtime::remove_buffer) all return `None` without
+    /// acting when called from inside `f`, on this runtime or on any clone of
+    /// it — the same guard [`with_node`](Runtime::with_node) raises, and for a
+    /// sharper reason. wlroots walks each tree's child list with
+    /// `wl_list_for_each`, **not** the `_safe` form: it reads the current
+    /// node's `link.next` *after* `f` returns, so destroying the node `f` was
+    /// just handed (or any ancestor of it, which frees the list heads the walk
+    /// is standing in) is a use-after-free inside wlroots' own recursion. Note
+    /// this covers freeing and moving only — creating a node under a tree the
+    /// walk has not reached yet is legal, and the walk will visit it.
+    ///
     /// # Panics
     ///
     /// A panic escaping `f` is caught, the remaining nodes are skipped, and
@@ -2840,9 +2873,16 @@ impl Runtime {
         // `wlr_scene_node_for_each_buffer`'s parameter happens to be spelled
         // as today.
         let iterator: sys::wlr_scene_buffer_iterator_func_t = Some(visit);
+        // Raised for the whole walk, and lowered by `Drop` even if `f` panicked
+        // (the panic is caught above and resumed below, so the guard falls with
+        // this frame either way). wlroots iterates with `wl_list_for_each`, so
+        // a node freed or unlinked by `f` leaves the walk reading `link.next`
+        // out of reclaimed memory — see this method's own doc.
+        let _guard = NodeBorrowGuard::enter(&self.inner);
         // SAFETY: a resolvable id names a live node; `visit` has
         // `wlr_scene_buffer_iterator_func_t`'s signature, and `ctx` outlives
-        // the call it is handed to.
+        // the call it is handed to. The guard above is what keeps every node
+        // the walk touches alive and in place for its duration.
         unsafe {
             sys::wlr_scene_node_for_each_buffer(
                 raw.as_ptr(),
@@ -3029,13 +3069,22 @@ impl Runtime {
     /// the node. `options` carries the damage hint and the explicit-sync wait
     /// point.
     ///
-    /// `None` if the id is unknown, stale or not a buffer node.
+    /// `None` if the id is unknown, stale or not a buffer node, or if `buffer`
+    /// is `None` while `options` carries a damage region —
+    /// `wlr_scene_buffer_set_buffer_with_options` asserts
+    /// `buffer || !options->damage`, and an assert is a process abort. A damage
+    /// region is in buffer-local coordinates, so with no buffer there is
+    /// nothing to scale it by; clearing a node and damaging it are separate
+    /// requests.
     pub fn set_scene_buffer(
         &self,
         node: NodeId,
         buffer: Option<&Buffer<'_>>,
         options: &SceneBufferOptions<'_>,
     ) -> Option<()> {
+        if buffer.is_none() && options.has_damage() {
+            return None;
+        }
         let raw = self.movable_scene_buffer_ptr(node)?;
         let buf = buffer.map_or(std::ptr::null_mut(), |b| b.as_ptr());
         let opts = options.as_c();
@@ -3071,8 +3120,19 @@ impl Runtime {
     /// Crop a buffer node to `source`, in buffer-local coordinates. `None`
     /// samples the whole buffer, which is the default.
     ///
-    /// Returns `None` if the id is unknown, stale or not a buffer node.
+    /// Returns `None` if the id is unknown, stale or not a buffer node, or if
+    /// any of `source`'s four fields is negative or `NaN`.
+    /// `wlr_scene_buffer_set_source_box` asserts all four are `>= 0`, and the
+    /// comparison it compiles to (`comisd`/`jb`) fails on an unordered operand
+    /// too, so a `NaN` aborts exactly as `-1.0` does.
     pub fn set_scene_buffer_source_box(&self, node: NodeId, source: Option<FBox>) -> Option<()> {
+        if let Some(b) = source {
+            // `v >= 0.0` rather than `!(v < 0.0)`: `NaN` fails every comparison,
+            // so this refuses it, which is what the C does too.
+            if ![b.x, b.y, b.width, b.height].iter().all(|v| *v >= 0.0) {
+                return None;
+            }
+        }
         let raw = self.movable_scene_buffer_ptr(node)?;
         let ptr = source.as_ref().map_or(std::ptr::null(), FBox::as_c);
         // SAFETY: a resolvable id of the right tag names a live buffer node;

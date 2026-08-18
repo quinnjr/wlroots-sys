@@ -328,6 +328,51 @@ fn a_live_node_borrow_refuses_every_destroy() {
     assert_eq!(rt.remove_buffer(buffer), Some(()));
 }
 
+/// The same guard, for the walk rather than the handle — and here it is not a
+/// dangling Rust pointer it prevents but a use-after-free inside wlroots.
+/// `scene_node_for_each_scene_buffer` recurses with `wl_list_for_each`, *not*
+/// the `_safe` form, so it reads the visited node's `link.next` after the
+/// visitor returns. Freeing that node from inside the visitor segfaulted before
+/// this guard existed; the process surviving this test is the real assertion.
+#[test]
+fn a_live_buffer_walk_refuses_every_destroy() {
+    let rt = scene_runtime();
+    let tree = rt.create_tree_in_band(wlr::Band::Top).expect("tree");
+    let overlay = rt.band_node(wlr::Band::Overlay).expect("overlay");
+    let rect = rt.add_rect(4, 4, [0.0; 4]).expect("legacy rect");
+    let legacy = rt.add_buffer(1, 1, &[0, 0, 0, 255]).expect("legacy buffer");
+
+    let mut nodes = Vec::new();
+    for _ in 0..8 {
+        nodes.push(rt.create_scene_buffer(tree, None).expect("buffer node"));
+    }
+
+    let peer = rt.clone();
+    let mut visited = Vec::new();
+    let mut refusals = Vec::new();
+    rt.for_each_buffer(tree, |id, _, _| {
+        visited.push(id);
+        refusals.push((
+            peer.destroy_node(id),
+            peer.reparent_node(id, overlay),
+            peer.remove_rect(rect),
+            peer.remove_buffer(legacy),
+        ));
+    })
+    .expect("walkable");
+
+    assert_eq!(visited, nodes, "every buffer node was visited, in order");
+    assert!(
+        refusals.iter().all(|r| *r == (None, None, None, None)),
+        "no free or unlink may succeed mid-walk: {refusals:?}"
+    );
+
+    // And the graph is intact afterwards, which is what the refusals bought.
+    assert_eq!(rt.node_children(tree), Some(nodes));
+    assert_eq!(rt.remove_rect(rect), Some(()));
+    assert_eq!(rt.remove_buffer(legacy), Some(()));
+}
+
 /// Every wlroots `assert()` reachable from this API, refused. The process
 /// surviving this test *is* the assertion; the `assert_eq!`s only confirm the
 /// refusal was reported rather than silently swallowed.
@@ -362,6 +407,46 @@ fn calls_that_would_abort_wlroots_are_refused() {
     assert_eq!(rt.create_rect(a, -1, 4, [0.0; 4]), None);
     let buffer = rt.create_scene_buffer(a, None).expect("buffer node");
     assert_eq!(rt.set_scene_buffer_dest_size(buffer, -1, 1), None);
+
+    // `wlr_scene_buffer_set_source_box` asserts all four fields are >= 0, and
+    // the comparison it compiles to fails on an unordered operand too, so NaN
+    // aborts exactly as a negative does.
+    for bad in [
+        wlr::FBox::new(-1.0, 0.0, 1.0, 1.0),
+        wlr::FBox::new(0.0, -1.0, 1.0, 1.0),
+        wlr::FBox::new(0.0, 0.0, -1.0, 1.0),
+        wlr::FBox::new(0.0, 0.0, 1.0, -1.0),
+        wlr::FBox::new(f64::NAN, 0.0, 1.0, 1.0),
+        wlr::FBox::new(0.0, 0.0, f64::NAN, 1.0),
+    ] {
+        assert_eq!(
+            rt.set_scene_buffer_source_box(buffer, Some(bad)),
+            None,
+            "a source box with a negative or NaN field must be refused: {bad:?}"
+        );
+    }
+    assert_eq!(
+        rt.set_scene_buffer_source_box(buffer, Some(wlr::FBox::new(0.0, 0.0, 1.0, 1.0))),
+        Some(())
+    );
+
+    // `wlr_scene_buffer_set_buffer_with_options` asserts
+    // `buffer || !options->damage` — a damage region is in buffer-local
+    // coordinates, so it is meaningless with no buffer to scale it by.
+    let region = wlr::Region::new();
+    assert_eq!(
+        rt.set_scene_buffer(
+            buffer,
+            None,
+            &wlr::SceneBufferOptions::new().damage(&region)
+        ),
+        None
+    );
+    // ... and clearing the node without one is still fine.
+    assert_eq!(
+        rt.set_scene_buffer(buffer, None, &wlr::SceneBufferOptions::new()),
+        Some(())
+    );
 
     // Not a wlroots assert, but this crate's own: an out-of-range opacity is
     // a silently wrong image rather than an error, so it is refused.

@@ -46,6 +46,17 @@ impl<'a> SceneBufferOptions<'a> {
         self
     }
 
+    /// Whether a damage region has been declared.
+    ///
+    /// `wlr_scene_buffer_set_buffer_with_options` `assert()`s
+    /// `buffer || !options->damage` — a region names buffer-local coordinates,
+    /// which are meaningless with no buffer to scale them by — so
+    /// [`Runtime::set_scene_buffer`](crate::Runtime::set_scene_buffer) has to
+    /// ask before it calls.
+    pub(crate) fn has_damage(&self) -> bool {
+        self.damage.is_some()
+    }
+
     /// The C struct these options describe, borrowing `self` for the call.
     ///
     /// The pointers it holds — the region and the timeline — are borrowed from
