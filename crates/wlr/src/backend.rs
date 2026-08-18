@@ -1481,6 +1481,24 @@ impl<'d> Backend<'d> {
             });
         }
 
+        if let Some(renderer) = runtime.renderer_ptr() {
+            // SAFETY: `init_graphics` created this renderer with
+            // `wlr_renderer_autocreate` and nothing destroys it — `Graphics`
+            // has no `Drop`, and wlroots never destroys a renderer it did not
+            // create — so `events.lost` is an initialised signal on an object
+            // that outlives this registration, which is what a null liveness
+            // flag asserts. `session` is paired with `on_renderer_lost` at the
+            // same `S`, exactly as for the shells above.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*renderer.as_ptr()).events.lost,
+                    on_renderer_lost::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
         if runtime.seat_ptr().is_some() {
             // SAFETY: the backend is live (`run_inner` checked `alive_or_err`
             // on entry, before this hook runs), so `events.new_input` is an
@@ -1817,6 +1835,10 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         Event::NewOutput(id) => with_output(session, id, |output| state.new_output(output)),
         Event::OutputFrame(id) => with_output(session, id, |output| state.frame(output)),
         Event::OutputDestroyed(id) => state.destroyed(id),
+        // No id to resolve: the run has one renderer, and the handler is
+        // handed the runtime so it can tear the graphics stack down without
+        // having kept a clone of it.
+        Event::RendererLost => state.renderer_lost(session.runtime),
         Event::FdReady(id, mask) => {
             // Resolving through the runtime rather than carrying the fd in
             // the event is what makes deferral sound here too: a source the
@@ -2050,6 +2072,33 @@ unsafe fn ensure_id_raw(set: *mut sys::wlr_addon_set) -> u64 {
             Some(id) => id,
             None => attach_id(set),
         }
+    }
+}
+
+/// The GPU backing the runtime's renderer was lost.
+///
+/// Routed like any other event rather than acted on here: wlroots has no
+/// recovery call, so the only thing to do is tell the consumer, and telling
+/// them has to go through the dispatcher for the usual reason (a handler may
+/// already be on the stack).
+unsafe extern "C" fn on_renderer_lost<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener
+    // `register_toplevel_and_input` linked into the runtime renderer's
+    // `events.lost`, which is the `listener` field of a live `Bound` whose
+    // `session` was paired with this very instantiation — same `S` — and is
+    // valid for as long as that registration exists. `data` carries the
+    // renderer, and is deliberately not read: the event names no object, so
+    // there is nothing that could dangle by the time it is delivered.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::RendererLost, deliver);
     }
 }
 
@@ -5025,10 +5074,12 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         // produce one of these either. Dropped for the same reason as
         // `FdReady` above.
         //
-        // Same for every input event: `run` never registers a seat either
+        // Same for every input event, and for the renderer's `lost` signal:
+        // `run` never registers a seat or a renderer watch either
         // (`Backend::register_toplevel_and_input` is `run_all`'s hook; `run`
         // uses `no_extra`), so these cannot be produced on this path.
-        Event::NewToplevel(..)
+        Event::RendererLost
+        | Event::NewToplevel(..)
         | Event::ToplevelInitialCommit(..)
         | Event::ToplevelMapped(..)
         | Event::ToplevelUnmapped(..)
@@ -5847,5 +5898,87 @@ mod tests {
         assert!(regs.borrow().key.is_none());
         assert!(regs.borrow().modifiers.is_none());
         assert!(regs.borrow().destroy.is_none());
+    }
+
+    /// The `events.lost` plumbing, end to end: wlroots emits the signal, the
+    /// per-run listener turns it into an [`Event`], and `deliver_all` calls the
+    /// handler.
+    ///
+    /// The emission is this test's own, because a GPU reset cannot be provoked
+    /// on the headless backend (and the pixman renderer never emits `lost` at
+    /// all). What is being tested is everything *after* the signal fires, which
+    /// is the part this crate wrote — the signal itself is wlroots'.
+    #[test]
+    fn a_lost_renderer_reaches_the_output_handler() {
+        struct Recorder {
+            runtime: Runtime,
+            emitted: bool,
+            lost: u32,
+            turns: u32,
+        }
+
+        impl OutputHandler for Recorder {
+            fn new_output(&mut self, _output: &crate::Output<'_>) {
+                if self.emitted {
+                    return;
+                }
+                self.emitted = true;
+                let Some(renderer) = self.runtime.renderer_ptr() else {
+                    return;
+                };
+                // SAFETY: `init_graphics` created this renderer and nothing
+                // destroys it, so `events.lost` is an initialised signal on a
+                // live object. wlroots passes the renderer itself as the
+                // signal's data; `on_renderer_lost` deliberately does not read
+                // it, and no other listener is linked into this signal here.
+                // Emitting from inside a handler is the reentrant case on
+                // purpose: the event is queued and drained once this returns.
+                unsafe {
+                    sys::wl_signal_emit_mutable(
+                        &raw mut (*renderer.as_ptr()).events.lost,
+                        renderer.as_ptr().cast(),
+                    );
+                }
+            }
+
+            fn renderer_lost(&mut self, _rt: &Runtime) {
+                self.lost += 1;
+            }
+        }
+
+        impl crate::ToplevelHandler for Recorder {}
+        impl crate::SeatHandler for Recorder {}
+        impl crate::FdHandler for Recorder {}
+
+        impl crate::LoopHandler for Recorder {
+            fn should_stop(&mut self) -> bool {
+                self.turns += 1;
+                self.turns >= 4
+            }
+        }
+
+        crate::interest::tests::headless_env();
+        let display = Display::new().expect("display");
+        let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+        let runtime = Runtime::new().expect("runtime");
+        runtime
+            .init_graphics(&display, &backend)
+            .expect("init_graphics");
+
+        let mut app = Recorder {
+            runtime: runtime.clone(),
+            emitted: false,
+            lost: 0,
+            turns: 0,
+        };
+        backend
+            .run_all(&display, &mut app, &runtime, Until::Turns(4))
+            .expect("run_all");
+
+        assert!(app.emitted, "the headless backend announces an output");
+        assert_eq!(
+            app.lost, 1,
+            "the lost signal reached the handler exactly once"
+        );
     }
 }

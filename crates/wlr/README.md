@@ -117,7 +117,9 @@ failures.
   (software, no GPU, no backend needed). Reports `features()`, `buffer_caps()`,
   `texture_formats()` and a **borrowed** `drm_fd()`; registers the buffer
   factory globals with `init_wl_display`/`init_wl_shm`; makes textures, render
-  timers and render passes. `is_lost()` latches when the GPU is reset.
+  timers and render passes. `is_lost()` latches when the GPU is reset, and a
+  compositor driven by `Backend::run_all` hears about the runtime's own renderer
+  through the new `OutputHandler::renderer_lost` instead.
 - `RendererRef<'_>` and `AllocatorRef<'_>`, from `Runtime::renderer_ref()` and
   `Runtime::allocator_ref()` — **non-owning** views of the pair
   `Runtime::init_graphics` creates and deliberately never frees. They carry the

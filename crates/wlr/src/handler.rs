@@ -90,6 +90,26 @@ pub trait OutputHandler {
     fn destroyed(&mut self, id: OutputId) {
         let _ = id;
     }
+
+    /// The GPU was lost — reset, removed, or otherwise invalidated — and the
+    /// renderer [`Runtime::init_graphics`](crate::Runtime::init_graphics)
+    /// created can no longer be used.
+    ///
+    /// Every texture, swapchain and in-flight render pass derived from it is
+    /// invalid too. wlroots offers no recovery call: the only correct response
+    /// is to tear the graphics stack down and build a new one, which for this
+    /// crate today means ending the run and starting over. Ignoring it leaves a
+    /// compositor drawing into a renderer that will fail every call.
+    ///
+    /// `rt` is the runtime the run was given, so an implementor does not have
+    /// to have kept a clone of it to react. Added in 0.20.19.
+    ///
+    /// On a renderer a consumer created themselves
+    /// ([`Renderer::autocreate`](crate::Renderer::autocreate)) this is not
+    /// delivered — ask [`Renderer::is_lost`](crate::Renderer::is_lost) instead.
+    fn renderer_lost(&mut self, rt: &crate::Runtime) {
+        let _ = rt;
+    }
 }
 
 /// File-descriptor source readiness.

@@ -2888,6 +2888,14 @@ impl Runtime {
         Some(unsafe { AllocatorRef::from_raw(raw.as_ptr()) })
     }
 
+    /// The renderer's `events.lost` signal, for `backend.rs`'s per-run
+    /// listener. `None` before [`init_graphics`](Runtime::init_graphics) has
+    /// run — in which case there is no renderer to watch and no listener is
+    /// registered, exactly as for the optional globals.
+    pub(crate) fn renderer_ptr(&self) -> Option<NonNull<sys::wlr_renderer>> {
+        self.inner.graphics.borrow().as_ref().map(|g| g.renderer)
+    }
+
     /// The scene tree every toplevel's own tree is parented into — see
     /// `Graphics::background_band`'s own doc for the full argument.
     /// `None` before [`init_graphics`](Runtime::init_graphics) has run.

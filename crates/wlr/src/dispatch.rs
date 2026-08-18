@@ -56,6 +56,15 @@ pub(crate) enum Event {
     OutputFrame(OutputId),
     OutputDestroyed(OutputId),
 
+    /// The runtime's renderer emitted `events.lost`: the GPU was reset and
+    /// everything derived from that renderer is invalid.
+    ///
+    /// Carries nothing, because there is nothing to carry — the run has exactly
+    /// one renderer, and wlroots passes the renderer itself as the signal's
+    /// data, which this crate must not turn into a handle for the usual reason
+    /// (a deferred event may name a dead object).
+    RendererLost,
+
     /// An fd source is ready. Carries the readiness mask rather than a
     /// [`Readiness`](crate::Readiness) so the enum stays `Copy` and `Eq`
     /// without exporting a public type into a private one.
