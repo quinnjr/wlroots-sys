@@ -132,6 +132,8 @@ impl wlr::SeatHandler for App {
     }
 }
 
+impl wlr::SessionLockHandler for App {}
+
 fn main() -> wlr::Result<()> {
     let display = wlr::Display::new()?;
     let runtime = wlr::Runtime::new()?;

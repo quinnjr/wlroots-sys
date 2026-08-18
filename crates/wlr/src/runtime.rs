@@ -171,6 +171,60 @@ pub(crate) struct RuntimeInner {
     /// (saturating) decrementing respectively.
     pub(crate) idle_inhibitors: std::cell::Cell<usize>,
 
+    /// The `ext_session_lock_manager_v1` global, once created — lets a locker
+    /// (e.g. a lock screen) lock the session. `Option`, same rationale as the
+    /// other manager globals: a consumer that never calls
+    /// [`create_session_lock_manager`](Runtime::create_session_lock_manager)
+    /// never advertises the global, and a second call would advertise a
+    /// second one.
+    pub(crate) session_lock_manager: RefCell<Option<NonNull<sys::wlr_session_lock_manager_v1>>>,
+
+    /// Whether the session is currently locked. **The security bit.** Set true
+    /// the instant a locker takes a lock (`backend.rs`'s
+    /// `on_new_session_lock`) and cleared **only** on a genuine unlock
+    /// (`on_session_unlock`) — a locker that dies without unlocking leaves
+    /// this true (`on_session_lock_destroy`), which is exactly what keeps the
+    /// screen locked when the lock process crashes. Read by
+    /// [`Runtime::is_session_locked`] and by every focus/hit-test entry point
+    /// in this crate to refuse input to normal clients while locked. Init
+    /// `false`.
+    pub(crate) session_locked: std::cell::Cell<bool>,
+
+    /// The active `wlr_session_lock_v1`, while one is held. `None` before any
+    /// lock and between a lock dying and the next taking over — note
+    /// [`session_locked`](RuntimeInner::session_locked) can be `true` while
+    /// this is `None` (a locker died without unlocking; the session stays
+    /// locked until a new locker unlocks). Set by `on_new_session_lock`,
+    /// cleared by `on_session_lock_destroy`.
+    pub(crate) session_lock: RefCell<Option<NonNull<sys::wlr_session_lock_v1>>>,
+
+    /// Whether the active lock asked to unlock before it was destroyed. Set by
+    /// `on_session_unlock`, reset to `false` when a fresh lock is taken
+    /// (`on_new_session_lock`). This is the flag `on_session_lock_destroy`
+    /// reads to tell a genuine unlock (complete the teardown) from a locker
+    /// dying (**stay locked** — the security invariant). Init `false`.
+    pub(crate) session_unlock_requested: std::cell::Cell<bool>,
+
+    /// Whether `wlr_session_lock_v1_send_locked` has already been sent for the
+    /// active lock. The protocol's `locked` event is sent exactly once per
+    /// lock, only after every output is covered by a committed lock surface;
+    /// this guards that "once". Reset when a fresh lock is taken and when a
+    /// lock is destroyed. Init `false`.
+    pub(crate) session_locked_sent: std::cell::Cell<bool>,
+
+    /// Every current lock surface's scene tree, keyed by the `*mut wlr_output`
+    /// (as `usize`) it covers, alongside the underlying `wlr_surface` so the
+    /// "all outputs covered" check can read its `mapped` flag. Populated by
+    /// `on_session_lock_new_surface` (which creates the tree in
+    /// [`Band::Lock`]); an entry is removed by `on_session_lock_surface_destroy`
+    /// **before** wlroots frees the tree (the subsurface tree is destroyed
+    /// with its surface), and the whole map is cleared on unlock and on lock
+    /// destroy. The stored tree pointer is never dereferenced through this map
+    /// — only inserted and dropped — so an entry momentarily outliving its
+    /// tree could never be a use-after-free; the per-surface destroy listener
+    /// removes it regardless.
+    pub(crate) lock_surface_trees: RefCell<HashMap<usize, LockSurfaceRender>>,
+
     /// Every live toplevel: the role object, its scene tree, and the surface
     /// its id addon lives on.
     pub(crate) toplevels: RefCell<HashMap<ToplevelId, ToplevelEntry>>,
@@ -366,6 +420,26 @@ pub(crate) struct RuntimeInner {
 pub(crate) struct ToplevelEntry {
     pub(crate) raw: NonNull<sys::wlr_xdg_toplevel>,
     pub(crate) tree: NonNull<sys::wlr_scene_tree>,
+}
+
+/// One current lock surface as this crate tracks it: the scene tree it renders
+/// through (a child of [`Band::Lock`], created by
+/// `wlr_scene_subsurface_tree_create`) and the underlying `wlr_surface` whose
+/// `mapped` flag the "all outputs covered" check reads. See
+/// [`RuntimeInner::lock_surface_trees`] for the lifetime rules — the `tree`
+/// here is never dereferenced through the map, only stored and dropped.
+#[derive(Clone, Copy)]
+pub(crate) struct LockSurfaceRender {
+    /// The scene tree the lock surface renders through. Stored to name the
+    /// per-output lock-surface tree (the crate's model of what covers each
+    /// output) and to hold the handle for the surface's whole lifetime, but
+    /// **never dereferenced** and never destroyed by this crate: wlroots owns
+    /// the subsurface tree and frees it with the surface, so this crate only
+    /// ever inserts and drops the pointer. Hence `dead_code`-allowed — its
+    /// value is its presence in the map, not a read.
+    #[allow(dead_code)]
+    pub(crate) tree: NonNull<sys::wlr_scene_tree>,
+    pub(crate) surface: *mut sys::wlr_surface,
 }
 
 /// A live layer surface: the role object, the scene tree
@@ -654,6 +728,12 @@ impl Runtime {
                 idle_notifier: RefCell::new(None),
                 idle_inhibit_manager: RefCell::new(None),
                 idle_inhibitors: std::cell::Cell::new(0),
+                session_lock_manager: RefCell::new(None),
+                session_locked: std::cell::Cell::new(false),
+                session_lock: RefCell::new(None),
+                session_unlock_requested: std::cell::Cell::new(false),
+                session_locked_sent: std::cell::Cell::new(false),
+                lock_surface_trees: RefCell::new(HashMap::new()),
                 toplevels: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
                 layer_shell: RefCell::new(None),
@@ -2153,6 +2233,230 @@ impl Runtime {
         }
     }
 
+    /// Create the `ext_session_lock_manager_v1` global. A locker (a lock
+    /// screen) binds it to lock the session; wlroots then drives the
+    /// `ext-session-lock-v1` protocol and this crate's
+    /// `backend.rs` handlers (`on_new_session_lock` and friends) enforce the
+    /// state machine — the screen locks, input is refused to normal clients
+    /// while locked, and a locker that dies without unlocking leaves the
+    /// session locked. Errors if called twice.
+    ///
+    /// This only advertises the global. Whether it does anything depends on a
+    /// [`Backend::run_all`](crate::Backend::run_all) being driven for the same
+    /// `display`, which is what links the `new_lock` listener; a consumer that
+    /// creates the manager and never runs takes no locks, exactly as for the
+    /// other manager globals.
+    pub fn create_session_lock_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.session_lock_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_session_lock_manager called twice",
+            ));
+        }
+        // SAFETY: display live for the call; the manager is display-owned and
+        // freed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_session_lock_manager_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_session_lock_manager_v1_create"))?;
+        *self.inner.session_lock_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    pub(crate) fn session_lock_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_session_lock_manager_v1>> {
+        *self.inner.session_lock_manager.borrow()
+    }
+
+    /// Whether the session is currently locked.
+    ///
+    /// `true` from the instant a locker takes a lock until a **genuine**
+    /// unlock — a locker that crashes or is killed without unlocking leaves
+    /// this `true`, which is exactly what keeps the screen locked when the
+    /// lock process dies. While this is `true`, this crate refuses keyboard
+    /// and pointer focus to every normal toplevel and layer surface (see
+    /// [`focus_toplevel_keyboard`](Runtime::focus_toplevel_keyboard),
+    /// [`focus_layer_keyboard`](Runtime::focus_layer_keyboard) and
+    /// [`toplevel_at`](Runtime::toplevel_at), and the crate-internal pointer
+    /// hit test), so a consumer can observe the lock but never has to enforce
+    /// it. Tests read this to prove the state machine.
+    pub fn is_session_locked(&self) -> bool {
+        self.inner.session_locked.get()
+    }
+
+    pub(crate) fn session_lock_ptr(&self) -> Option<NonNull<sys::wlr_session_lock_v1>> {
+        *self.inner.session_lock.borrow()
+    }
+
+    /// Enter the locked state for a freshly-taken lock: mark the session
+    /// locked, reset the per-lock flags, record the lock, and take keyboard
+    /// focus away from whatever normal client had it. Called synchronously
+    /// from `backend.rs`'s `on_new_session_lock` — the state change is applied
+    /// here, immediately, not deferred behind the handler notification.
+    pub(crate) fn begin_session_lock(&self, lock: NonNull<sys::wlr_session_lock_v1>) {
+        self.inner.session_locked.set(true);
+        self.inner.session_unlock_requested.set(false);
+        self.inner.session_locked_sent.set(false);
+        *self.inner.session_lock.borrow_mut() = Some(lock);
+        // No normal client keeps keyboard focus across a lock.
+        self.clear_keyboard_focus();
+    }
+
+    /// Record a lock surface's scene tree, keyed by the output it covers, so
+    /// the coverage check can find it and the destroy path can drop it. Called
+    /// from `on_session_lock_new_surface` after the tree is created in
+    /// [`Band::Lock`].
+    pub(crate) fn record_lock_surface(
+        &self,
+        output: *mut sys::wlr_output,
+        tree: NonNull<sys::wlr_scene_tree>,
+        surface: *mut sys::wlr_surface,
+    ) {
+        self.inner
+            .lock_surface_trees
+            .borrow_mut()
+            .insert(output as usize, LockSurfaceRender { tree, surface });
+    }
+
+    /// Drop the lock surface covering `output` from the tree map. Called from
+    /// `on_session_lock_surface_destroy` before wlroots frees the tree. Only
+    /// removes this crate's reference — wlroots owns and frees the subsurface
+    /// tree itself when the surface dies, so this must never call
+    /// `wlr_scene_node_destroy` on it.
+    pub(crate) fn forget_lock_surface(&self, output: *mut sys::wlr_output) {
+        self.inner
+            .lock_surface_trees
+            .borrow_mut()
+            .remove(&(output as usize));
+    }
+
+    /// Whether every live output is covered by a lock surface whose underlying
+    /// `wlr_surface` is mapped (has committed a buffer). This is the
+    /// precondition for sending the protocol's `locked` event. `false` when
+    /// there are no live outputs — sending `locked` with nothing on screen
+    /// would be a security hole, so an empty output set never satisfies it.
+    pub(crate) fn all_outputs_lock_covered(&self) -> bool {
+        let outputs = self.inner.outputs.borrow();
+        if outputs.is_empty() {
+            return false;
+        }
+        let trees = self.inner.lock_surface_trees.borrow();
+        for out in outputs.values() {
+            match trees.get(&(out.as_ptr() as usize)) {
+                Some(entry) => {
+                    if entry.surface.is_null() {
+                        return false;
+                    }
+                    // SAFETY: the surface is live while its lock surface is —
+                    // the per-surface destroy listener removes this entry
+                    // before wlroots frees the surface — so reading `mapped`
+                    // is sound. `mapped` is wlroots' own flag, true once the
+                    // client has committed a buffer.
+                    if !unsafe { (*entry.surface).mapped } {
+                        return false;
+                    }
+                }
+                None => return false,
+            }
+        }
+        true
+    }
+
+    /// Send the protocol's `locked` event exactly once, if every output is now
+    /// covered and it has not already been sent. Called from
+    /// `on_session_lock_surface_commit` on every lock surface commit; the
+    /// `session_locked_sent` guard makes the repeated calls idempotent.
+    pub(crate) fn send_locked_if_covered(&self) {
+        if self.inner.session_locked_sent.get() {
+            return;
+        }
+        if !self.all_outputs_lock_covered() {
+            return;
+        }
+        let Some(lock) = self.session_lock_ptr() else {
+            return;
+        };
+        // SAFETY: `lock` is the active lock recorded by `begin_session_lock`
+        // and cleared by `on_session_lock_destroy` before wlroots frees it, so
+        // it is live here. `wlr_session_lock_v1_send_locked` is exactly the
+        // call the protocol requires once every output is covered.
+        unsafe { sys::wlr_session_lock_v1_send_locked(lock.as_ptr()) };
+        self.inner.session_locked_sent.set(true);
+    }
+
+    /// Handle a **genuine** unlock request from the active locker: record that
+    /// an unlock was asked for (so a following lock `destroy` completes the
+    /// teardown instead of staying locked), drop the lock surfaces, and leave
+    /// the session unlocked. Called synchronously from
+    /// `on_session_unlock`; the `session_lock_changed(false)` handler
+    /// notification is emitted separately by the caller.
+    pub(crate) fn unlock_session(&self) {
+        self.inner.session_unlock_requested.set(true);
+        self.inner.lock_surface_trees.borrow_mut().clear();
+        self.inner.session_locked.set(false);
+        self.inner.session_locked_sent.set(false);
+    }
+
+    /// Common cleanup when the active `wlr_session_lock_v1` is destroyed: clear
+    /// the lock pointer, drop any remaining surface trees, and reset the
+    /// send-once flag. Returns whether an unlock had been requested first —
+    /// `true` means a genuine unlock already ran and the caller completes the
+    /// teardown; `false` means the locker died without unlocking and the
+    /// caller must **keep the session locked** (the security invariant). This
+    /// method never touches [`session_locked`](RuntimeInner::session_locked),
+    /// so the stay-locked path is preserved by construction.
+    pub(crate) fn take_lock_destroy_was_unlocked(&self) -> bool {
+        *self.inner.session_lock.borrow_mut() = None;
+        self.inner.lock_surface_trees.borrow_mut().clear();
+        self.inner.session_locked_sent.set(false);
+        self.inner.session_unlock_requested.replace(false)
+    }
+
+    /// Give the keyboard focus to a lock surface's underlying `wlr_surface`.
+    ///
+    /// Unlike [`focus_toplevel_keyboard`](Runtime::focus_toplevel_keyboard)
+    /// and [`focus_layer_keyboard`](Runtime::focus_layer_keyboard), this is
+    /// **not** gated on the lock state — it is the one surface class allowed
+    /// focus while locked, and is called from `on_session_lock_new_surface`
+    /// for the first lock surface so the lock screen can receive keystrokes.
+    /// A no-op with no seat or a null surface.
+    ///
+    /// # Safety
+    ///
+    /// `surface` must be null or a live `wlr_surface`.
+    pub(crate) unsafe fn focus_lock_surface_keyboard(&self, surface: *mut sys::wlr_surface) {
+        let seat = *self.inner.seat.borrow();
+        let Some(seat) = seat else { return };
+        if surface.is_null() {
+            return;
+        }
+        // SAFETY: `surface` is live per this method's contract;
+        // `wlr_seat_get_keyboard` returns null when no keyboard is attached,
+        // which the enter call tolerates by taking no keycodes — the identical
+        // shape `focus_toplevel_keyboard` follows.
+        unsafe {
+            if (*seat.as_ptr()).keyboard_state.focused_surface == surface {
+                return;
+            }
+            let kb = sys::wlr_seat_get_keyboard(seat.as_ptr());
+            if kb.is_null() {
+                sys::wlr_seat_keyboard_notify_enter(
+                    seat.as_ptr(),
+                    surface,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                );
+            } else {
+                sys::wlr_seat_keyboard_notify_enter(
+                    seat.as_ptr(),
+                    surface,
+                    (*kb).keycodes.as_ptr(),
+                    (*kb).num_keycodes,
+                    &raw mut (*kb).modifiers,
+                );
+            }
+        }
+    }
+
     pub(crate) fn virtual_pointer_manager_ptr(
         &self,
     ) -> Option<NonNull<sys::wlr_virtual_pointer_manager_v1>> {
@@ -3105,6 +3409,12 @@ impl Runtime {
     /// doc gives for its toplevel counterpart, checked against
     /// `wlr_surface::mapped` here too rather than tracked separately.
     pub fn focus_layer_keyboard(&self, id: LayerSurfaceId) -> Option<()> {
+        // Input isolation: while the session is locked, no normal layer
+        // surface may take keyboard focus either — see
+        // [`focus_toplevel_keyboard`](Runtime::focus_toplevel_keyboard).
+        if self.is_session_locked() {
+            return None;
+        }
         let seat = *self.inner.seat.borrow();
         let seat = seat?;
         let raw = self.layer_surface_ptr(id)?;
@@ -3281,6 +3591,13 @@ impl Runtime {
     /// step with the map/unmap events
     /// [`ToplevelHandler`](crate::ToplevelHandler) delivers.
     pub fn focus_toplevel_keyboard(&self, id: ToplevelId) -> Option<()> {
+        // Input isolation: while the session is locked, no normal toplevel may
+        // take keyboard focus, whatever a consumer asks for. This is one of
+        // the two focus gates that make the lock safe — see
+        // [`is_session_locked`](Runtime::is_session_locked).
+        if self.is_session_locked() {
+            return None;
+        }
         let seat = *self.inner.seat.borrow();
         let seat = seat?;
         let entry = self.toplevel_entry(id)?;
@@ -3378,6 +3695,18 @@ impl Runtime {
     /// rect, and when [`init_graphics`](Runtime::init_graphics) has not run
     /// (there is no scene to test against).
     pub fn toplevel_at(&self, x: f64, y: f64) -> Option<(ToplevelId, f64, f64)> {
+        // Input isolation: while the session is locked, no normal toplevel is
+        // ever "under the pointer" as far as click-to-focus/raise/move is
+        // concerned — only lock surfaces exist to the pointer, and they carry
+        // no [`ToplevelId`]. Returning `None` unconditionally here keeps a
+        // consumer's own pointer routing from ever resolving a toplevel while
+        // locked, the pointer half of the same guarantee the keyboard gates
+        // give. Pointer *forwarding* to the lock surface itself still works —
+        // that goes through [`leaf_surface_at`](Runtime::leaf_surface_at),
+        // which is restricted to the lock band rather than disabled.
+        if self.is_session_locked() {
+            return None;
+        }
         let scene = self.scene_ptr()?;
         let mut nx = 0.0;
         let mut ny = 0.0;
@@ -3530,17 +3859,29 @@ impl Runtime {
         let scene = self.scene_ptr()?;
         let mut nx = 0.0;
         let mut ny = 0.0;
-        // SAFETY: the scene is this runtime's own and outlives the call; the
-        // two out-parameters are live stack locals.
-        let node = unsafe {
-            sys::wlr_scene_node_at(
-                &raw mut (*scene.as_ptr()).tree.node,
-                x,
-                y,
-                &raw mut nx,
-                &raw mut ny,
-            )
+        // Input isolation: while the session is locked, restrict the hit test
+        // to the lock band, so the only surfaces the pointer can ever resolve
+        // to are the locker's own — a normal toplevel or layer surface under
+        // the cursor is never returned, and so never receives pointer
+        // enter/motion (this method is the sole pointer-focus path, via
+        // `backend.rs`'s `enter_surface_under_cursor`). The lock band's own
+        // node is the hit-test root then; unlocked, it is the scene root as
+        // before. If there is no lock band (graphics never initialised) while
+        // somehow locked, nothing is hittable and the pointer resolves to
+        // nothing — fail closed.
+        let root = if self.is_session_locked() {
+            let lock_band = self.band_ptr(Band::Lock)?;
+            // SAFETY: `lock_band` is this runtime's own scene tree from
+            // `init_graphics`, live for the call.
+            unsafe { &raw mut (*lock_band.as_ptr()).node }
+        } else {
+            // SAFETY: the scene is this runtime's own and outlives the call.
+            unsafe { &raw mut (*scene.as_ptr()).tree.node }
         };
+        // SAFETY: `root` is a live scene node (either the scene root or the
+        // lock band, both this runtime's own); the two out-parameters are live
+        // stack locals.
+        let node = unsafe { sys::wlr_scene_node_at(root, x, y, &raw mut nx, &raw mut ny) };
         if node.is_null() {
             return None;
         }

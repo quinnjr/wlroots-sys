@@ -32,6 +32,8 @@ impl wlr::SeatHandler for App {
     }
 }
 
+impl wlr::SessionLockHandler for App {}
+
 #[test]
 fn a_seat_can_be_created_and_a_run_survives_it() {
     // SAFETY: the only test in this binary, so no other harness thread can
@@ -231,4 +233,45 @@ fn focus_without_a_seat_is_a_miss() {
         None
     );
     runtime.clear_keyboard_focus();
+}
+
+/// A second `ext_session_lock_manager_v1` global would make the compositor
+/// advertise two, so the crate refuses the double-create — mirroring every
+/// other manager global here.
+#[test]
+fn creating_the_session_lock_manager_twice_is_refused() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime
+        .create_session_lock_manager(&display)
+        .expect("first");
+    assert!(
+        matches!(
+            runtime.create_session_lock_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second session-lock global would make the compositor advertise two"
+    );
+}
+
+/// A fresh runtime is not locked, and creating the manager global alone does
+/// not lock it — a lock is only entered when a client actually takes one
+/// (proven end-to-end by the icedtea harness tests). This pins the initial
+/// state the input-isolation gates all key off of.
+#[test]
+fn a_fresh_runtime_is_not_session_locked() {
+    let runtime = wlr::Runtime::new().expect("runtime");
+    assert!(
+        !runtime.is_session_locked(),
+        "a runtime with no locker must not report itself locked"
+    );
+
+    let display = wlr::Display::new().expect("display");
+    runtime
+        .create_session_lock_manager(&display)
+        .expect("manager");
+    assert!(
+        !runtime.is_session_locked(),
+        "advertising the manager global must not lock the session by itself"
+    );
 }

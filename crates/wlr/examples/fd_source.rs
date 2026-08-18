@@ -19,6 +19,7 @@ struct App {
 impl wlr::OutputHandler for App {}
 impl wlr::ToplevelHandler for App {}
 impl wlr::SeatHandler for App {}
+impl wlr::SessionLockHandler for App {}
 
 impl wlr::FdHandler for App {
     fn fd_ready(&mut self, source: wlr::SourceId, fd: BorrowedFd<'_>, readiness: wlr::Readiness) {

@@ -127,6 +127,7 @@ fn the_new_handler_method_is_additive() {
     impl wlr::OutputHandler for Old {}
     impl wlr::ToplevelHandler for Old {}
     impl wlr::SeatHandler for Old {}
+    impl wlr::SessionLockHandler for Old {}
     impl wlr::FdHandler for Old {}
     impl wlr::LoopHandler for Old {}
     fn takes_handlers<S: wlr::Handlers>(_s: &S) {}
