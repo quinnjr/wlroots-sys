@@ -1945,8 +1945,9 @@ impl Runtime {
         // owned by the display and destroyed with it, so this crate never
         // frees it.
         let raw = unsafe { sys::wlr_primary_selection_v1_device_manager_create(display.as_ptr()) };
-        let raw = NonNull::new(raw)
-            .ok_or(Error::Create("wlr_primary_selection_v1_device_manager_create"))?;
+        let raw = NonNull::new(raw).ok_or(Error::Create(
+            "wlr_primary_selection_v1_device_manager_create",
+        ))?;
         *self.inner.primary_selection_manager.borrow_mut() = Some(raw);
         Ok(())
     }
@@ -3323,7 +3324,9 @@ impl Runtime {
         // ever happen on the thread driving this runtime's event loop, the
         // same thread every listener above runs on, so there is no window in
         // which this could observe a tree mid-teardown.
-        let found = unsafe { sys::wlr_scene_node_coords(&raw mut (*tree.as_ptr()).node, &raw mut lx, &raw mut ly) };
+        let found = unsafe {
+            sys::wlr_scene_node_coords(&raw mut (*tree.as_ptr()).node, &raw mut lx, &raw mut ly)
+        };
         found.then_some((lx, ly))
     }
 
@@ -3451,7 +3454,9 @@ impl Runtime {
         // `seat_ptr`); `surface` was just resolved from a hit test against
         // this runtime's own live scene and is therefore live too.
         // wlroots reads `sx`/`sy` by value and does not retain them.
-        Some(unsafe { sys::wlr_seat_touch_notify_down(seat.as_ptr(), surface, time_msec, id, sx, sy) })
+        Some(unsafe {
+            sys::wlr_seat_touch_notify_down(seat.as_ptr(), surface, time_msec, id, sx, sy)
+        })
     }
 
     /// Test-only: synthesize a touch-motion to `(x, y)` for the touch point
@@ -4633,13 +4638,13 @@ mod tests {
         // bytes are only ever read as an opaque pointer identity, never as a
         // `wlr_output`.
         let out_a = {
-            let p = unsafe { alloc_zeroed(Layout::new::<sys::wlr_output>()) }
-                .cast::<sys::wlr_output>();
+            let p =
+                unsafe { alloc_zeroed(Layout::new::<sys::wlr_output>()) }.cast::<sys::wlr_output>();
             NonNull::new(p).expect("allocation failed")
         };
         let out_b = {
-            let p = unsafe { alloc_zeroed(Layout::new::<sys::wlr_output>()) }
-                .cast::<sys::wlr_output>();
+            let p =
+                unsafe { alloc_zeroed(Layout::new::<sys::wlr_output>()) }.cast::<sys::wlr_output>();
             NonNull::new(p).expect("allocation failed")
         };
         let id_a = OutputId(next_id());

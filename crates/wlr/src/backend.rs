@@ -2116,10 +2116,7 @@ unsafe extern "C" fn on_start_drag<S: Handlers>(
             (*bound).session,
             std::ptr::null(),
         );
-        (*session)
-            .drags
-            .borrow_mut()
-            .insert(icon as usize, destroy);
+        (*session).drags.borrow_mut().insert(icon as usize, destroy);
     }
 }
 
