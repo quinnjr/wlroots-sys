@@ -234,7 +234,9 @@ fn named_srgb_primaries_are_the_h273_values() {
 #[test]
 fn converting_a_colour_volume_to_itself_is_the_identity_matrix() {
     let srgb = ColorPrimaries::named(NamedPrimaries::Srgb);
-    let m = srgb.transform_absolute_colorimetric(&srgb);
+    let m = srgb
+        .transform_absolute_colorimetric(&srgb)
+        .expect("sRGB is not degenerate");
     #[rustfmt::skip]
     let identity = [
         1.0f32, 0.0, 0.0,
@@ -252,7 +254,9 @@ fn converting_a_colour_volume_to_itself_is_the_identity_matrix() {
 fn converting_between_two_volumes_is_not_the_identity() {
     let srgb = ColorPrimaries::named(NamedPrimaries::Srgb);
     let bt2020 = ColorPrimaries::named(NamedPrimaries::Bt2020);
-    let m = srgb.transform_absolute_colorimetric(&bt2020);
+    let m = srgb
+        .transform_absolute_colorimetric(&bt2020)
+        .expect("neither volume is degenerate");
     assert!(
         !close(m[0], 1.0) || !close(m[1], 0.0),
         "sRGB and BT.2020 have different primaries: {m:?}"
@@ -265,13 +269,89 @@ fn converting_between_two_volumes_is_not_the_identity() {
     }
 }
 
+/// `ColorPrimaries` has public `f32` fields and a `Default`, so a degenerate
+/// colour volume is one struct literal away — and wlroots inverts it with
+/// `matrix_invert`, whose `assert(det != 0)` aborts the whole compositor in the
+/// distro build.
+///
+/// `ColorPrimaries::default()` **did** abort the test binary before the check
+/// existed; that is the case this test exists for. The rest are singular only
+/// up to rounding, so wlroots answers them with a matrix of unusable
+/// magnitudes rather than an abort — refused here for the same reason.
+#[test]
+fn a_degenerate_colour_volume_is_refused_instead_of_aborting() {
+    let srgb = ColorPrimaries::named(NamedPrimaries::Srgb);
+    let refused = Error::Operation("ColorPrimaries::transform_absolute_colorimetric");
+
+    // All zeroes: every chromaticity has `y == 0`, so wlroots' `xy_to_xyz`
+    // answers the zero vector and the matrix is entirely zero.
+    let zeroed = ColorPrimaries::default();
+    assert_eq!(
+        zeroed.transform_absolute_colorimetric(&zeroed).unwrap_err(),
+        refused
+    );
+    // Degenerate on either side alone, not just both.
+    assert_eq!(
+        srgb.transform_absolute_colorimetric(&zeroed).unwrap_err(),
+        refused
+    );
+    assert_eq!(
+        zeroed.transform_absolute_colorimetric(&srgb).unwrap_err(),
+        refused
+    );
+
+    // Two primaries at the same chromaticity: the RGB→XYZ matrix has two equal
+    // columns, so it is singular without any zero in it.
+    let collinear = ColorPrimaries {
+        red: Cie1931Xy { x: 0.64, y: 0.33 },
+        green: Cie1931Xy { x: 0.64, y: 0.33 },
+        blue: Cie1931Xy { x: 0.15, y: 0.06 },
+        white: Cie1931Xy {
+            x: 0.3127,
+            y: 0.3290,
+        },
+    };
+    assert_eq!(
+        collinear
+            .transform_absolute_colorimetric(&srgb)
+            .unwrap_err(),
+        refused
+    );
+
+    // A white point sitting exactly on the red primary: the RGB→XYZ matrix is
+    // fine, but the scaling vector has two zero components, which is the
+    // *second* inversion wlroots does and the one only the destination
+    // reaches.
+    let white_on_red = ColorPrimaries {
+        white: srgb.red,
+        ..srgb
+    };
+    assert_eq!(
+        srgb.transform_absolute_colorimetric(&white_on_red)
+            .unwrap_err(),
+        refused
+    );
+
+    // And the real volumes still work, so the check is not simply refusing
+    // everything.
+    assert!(srgb.transform_absolute_colorimetric(&srgb).is_ok());
+    assert!(
+        white_on_red
+            .transform_absolute_colorimetric(&srgb)
+            .is_ok_and(|m| m.iter().all(|v| v.is_finite())),
+        "a degenerate *source* only reaches the first inversion, which succeeds"
+    );
+}
+
 /// `transform_absolute_colorimetric` produces a matrix in exactly the order
 /// `ColorTransform::matrix` consumes — row-major — so the two compose. If they
 /// disagreed, a colour-managed compositor would transpose every conversion.
 #[test]
 fn the_primaries_matrix_feeds_straight_into_a_matrix_transform() {
     let srgb = ColorPrimaries::named(NamedPrimaries::Srgb);
-    let identity = srgb.transform_absolute_colorimetric(&srgb);
+    let identity = srgb
+        .transform_absolute_colorimetric(&srgb)
+        .expect("sRGB is not degenerate");
     let tr = ColorTransform::matrix(identity).expect("matrix transform");
     let out = tr.eval([0.1, 0.2, 0.3]);
     for (got, want) in out.iter().zip([0.1f32, 0.2, 0.3]) {

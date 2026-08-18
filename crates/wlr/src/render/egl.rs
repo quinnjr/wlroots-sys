@@ -12,9 +12,15 @@
 //! wlroots exposes exactly one way to release a `wlr_egl`: hand it to
 //! `wlr_gles2_renderer_create`, which takes ownership and destroys it with the
 //! renderer. So [`Egl`] has **no `Drop`** — there is nothing it could call —
-//! and an [`Egl`] that is never passed to
-//! [`Renderer::gles2_from_egl`](crate::Renderer::gles2_from_egl) leaks. That is
-//! wlroots' API, stated rather than papered over.
+//! and an [`Egl`] that is never passed to `Renderer::gles2_from_egl` leaks.
+//! That is wlroots' API, stated rather than papered over.
+//!
+//! `Renderer::gles2_from_egl` is named in code spans throughout this module
+//! rather than linked, for the reason `mod.rs` gives: it is gated on
+//! `wlr_has_gles2_renderer` while this module is not, so an intra-doc link to
+//! it is a hard error under `-D warnings` in any build without the
+//! `gles2-renderer` feature — which is exactly the configuration where an
+//! `Egl` has nowhere to go.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -24,8 +30,10 @@ use crate::sys;
 
 /// A `wlr_egl` built around a caller-supplied EGL display and context.
 ///
-/// Consumed by [`Renderer::gles2_from_egl`](crate::Renderer::gles2_from_egl),
-/// which is its only release path. Useless without the `gles2-renderer`
+/// Consumed by `Renderer::gles2_from_egl`, which is its only release path —
+/// named rather than linked because it is gated and this type is not, and a
+/// link to a gated item breaks the doc build of every smaller feature set (see
+/// this module's own doc). Useless without the `gles2-renderer`
 /// feature, and inert rather than an error there: the type still compiles,
 /// there is simply no renderer constructor to hand it to.
 pub struct Egl {
@@ -85,7 +93,7 @@ impl Egl {
     /// The raw `wlr_egl`, for interop with code that speaks `wlr-sys` directly.
     ///
     /// Borrowed — this value still holds it, and the only release path remains
-    /// [`Renderer::gles2_from_egl`](crate::Renderer::gles2_from_egl).
+    /// `Renderer::gles2_from_egl`.
     pub fn as_ptr(&self) -> *mut sys::wlr_egl {
         self.raw.as_ptr()
     }

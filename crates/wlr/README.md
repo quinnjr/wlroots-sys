@@ -192,7 +192,8 @@ without it.
 - `Cie1931Xy`, `ColorPrimaries` and `ColorLuminances` — `#[repr(C)]` twins with
   their layouts pinned to wlroots'. `ColorPrimaries::named` fills one from a
   well-known volume; `transform_absolute_colorimetric` computes the 3×3
-  conversion between two.
+  conversion between two, and refuses a degenerate one rather than letting
+  wlroots invert a singular matrix.
 - `ColorTransform` — immutable and reference-counted, so `Clone` is a genuine
   second reference and one may outlive every renderer that ever applied it.
   Built from an ICC profile (where wlroots was compiled with lcms2), an inverse
@@ -201,10 +202,13 @@ without it.
   wlroots' `render/color.c` rather than guessed from a header that says only
   "a 3×3 matrix" — and it is the same order `transform_absolute_colorimetric`
   produces, so the two compose.
-- Two more wlroots assertions are checked in Rust: an empty transform pipeline
-  (`init_pipeline` asserts a non-zero length) and mismatched or empty lookup
+- Three more wlroots assertions are checked in Rust: an empty transform pipeline
+  (`init_pipeline` asserts a non-zero length), mismatched or empty lookup
   tables (`init_lut_3x1d` reads `dim` entries from all three pointers whatever
-  their real lengths, and a `dim` of 0 makes the evaluator index at `SIZE_MAX`).
+  their real lengths, and a `dim` of 0 makes the evaluator index at `SIZE_MAX`),
+  and a degenerate colour volume (`matrix_invert` asserts `det != 0`, and
+  `ColorPrimaries::default()` is all zeroes — that one aborted the test binary
+  before the check existed).
 - The colour setters on `TextureOptions` and `BufferPassOptions` **fail** rather
   than being ignored when the renderer cannot honour them. wlroots' own answer
   is to draw anyway, untagged, which turns a colour-managed compositor into a

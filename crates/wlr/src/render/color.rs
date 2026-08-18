@@ -400,12 +400,38 @@ impl ColorPrimaries {
     /// (`multiply_matrix_vector` in `render/color.c`), so elements 0..3 are the
     /// first row. Feeding a column-major matrix through
     /// [`ColorTransform::matrix`] transposes the transform silently.
-    pub fn transform_absolute_colorimetric(&self, dst: &ColorPrimaries) -> [f32; 9] {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] — without calling wlroots — when either volume is
+    /// degenerate. The fields of this type are public `f32`s, so a caller can
+    /// build a colour volume whose primaries are collinear, whose white point
+    /// lies on one of them, or that is simply
+    /// [`Default::default`] (all zeroes). Every one of those makes wlroots
+    /// invert a singular matrix, and `matrix_invert` (`util/matrix.c`) is
+    /// `assert(det != 0)` — which the distro build of wlroots turns into an
+    /// `abort()` of the whole compositor. Checked here instead.
+    pub fn transform_absolute_colorimetric(&self, dst: &ColorPrimaries) -> Result<[f32; 9]> {
+        // wlroots inverts three matrices on this path: the RGB→XYZ matrix of
+        // each volume, and the scaled destination matrix. Reaching the third
+        // requires the first two, so they are checked in that order.
+        let refuse = Error::Operation("ColorPrimaries::transform_absolute_colorimetric");
+        if rgb_to_xyz(self).is_none() {
+            return Err(refuse);
+        }
+        let Some(dst_to_xyz) = rgb_to_xyz(dst) else {
+            return Err(refuse);
+        };
+        if is_singular(&dst_to_xyz) {
+            return Err(refuse);
+        }
+
         let mut matrix = [0.0f32; 9];
         // SAFETY: both operands are live for the call and pinned to
         // `wlr_color_primaries`' layout; `matrix` is a live local of exactly
-        // the nine floats wlroots writes. The function is pure — it retains
-        // nothing.
+        // the nine floats wlroots writes. The three checks above are the three
+        // assertions the call would otherwise abort on. The function is pure —
+        // it retains nothing.
         unsafe {
             sys::wlr_color_primaries_transform_absolute_colorimetric(
                 self.as_c(),
@@ -413,8 +439,103 @@ impl ColorPrimaries {
                 matrix.as_mut_ptr(),
             );
         }
-        matrix
+        Ok(matrix)
     }
+}
+
+/// `xy_to_xyz` from `render/color.c`, verbatim — including that a zero `y`
+/// yields the zero vector rather than a division by zero, which is what makes
+/// a defaulted [`ColorPrimaries`] singular rather than infinite.
+fn xy_to_xyz(src: Cie1931Xy) -> [f32; 3] {
+    if src.y == 0.0 {
+        return [0.0, 0.0, 0.0];
+    }
+    [src.x / src.y, 1.0, (1.0 - src.x - src.y) / src.y]
+}
+
+/// The determinant `matrix_invert` computes, in wlroots' own term order.
+fn det3(m: &[f32; 9]) -> f32 {
+    let (a, b, c) = (m[0], m[1], m[2]);
+    let (d, e, f) = (m[3], m[4], m[5]);
+    let (g, h, i) = (m[6], m[7], m[8]);
+    a * e * i + b * f * g + c * d * h - c * e * g - b * d * i - a * f * h
+}
+
+/// Whether `matrix_invert` would refuse this matrix.
+///
+/// wlroots' test is `det != 0` exactly. This one has a relative margin on
+/// purpose, and in both directions it matters:
+///
+/// * Reproducing a float expression bit-for-bit across two compilers is not
+///   something to stake an `abort()` on, so a determinant wlroots might round
+///   to exactly zero must be refused here even if this arithmetic did not.
+/// * A volume that is singular *up to rounding* — two primaries at the same
+///   chromaticity, a white point on top of a primary — leaves wlroots a
+///   determinant of a few ULPs rather than zero. It does not abort on those,
+///   it returns a matrix of astronomically large garbage. Refusing is the
+///   better answer and costs nothing real.
+///
+/// The margin is nowhere near any actual set of primaries: sRGB's determinant
+/// here is ~19 against a threshold of ~4e-3, a factor of 4000.
+fn is_singular(m: &[f32; 9]) -> bool {
+    let det = det3(m);
+    if !det.is_finite() {
+        return true;
+    }
+    let scale = m.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+    det.abs() <= 16.0 * f32::EPSILON * scale * scale * scale
+}
+
+/// `wlr_color_primaries_to_xyz` from `render/color.c`, replicated far enough to
+/// answer "would this abort?".
+///
+/// `None` where wlroots' first `matrix_invert` would assert; otherwise the
+/// matrix its *second* one is handed, so the caller can test that too.
+fn rgb_to_xyz(p: &ColorPrimaries) -> Option<[f32; 9]> {
+    let r = xy_to_xyz(p.red);
+    let g = xy_to_xyz(p.green);
+    let b = xy_to_xyz(p.blue);
+    let w = xy_to_xyz(p.white);
+
+    let xyz = [r[0], g[0], b[0], r[1], g[1], b[1], r[2], g[2], b[2]];
+    if is_singular(&xyz) {
+        return None;
+    }
+
+    // The inverse, then `S = xyz⁻¹ · w`, then the columns scaled by it.
+    let det = det3(&xyz);
+    let inv_det = 1.0 / det;
+    let (a, b_, c) = (xyz[0], xyz[1], xyz[2]);
+    let (d, e, f) = (xyz[3], xyz[4], xyz[5]);
+    let (g_, h, i) = (xyz[6], xyz[7], xyz[8]);
+    let inv = [
+        inv_det * (e * i - f * h),
+        inv_det * -(b_ * i - c * h),
+        inv_det * (b_ * f - c * e),
+        inv_det * -(d * i - f * g_),
+        inv_det * (a * i - c * g_),
+        inv_det * -(a * f - c * d),
+        inv_det * (d * h - e * g_),
+        inv_det * -(a * h - b_ * g_),
+        inv_det * (a * e - b_ * d),
+    ];
+    let s = [
+        inv[0] * w[0] + inv[1] * w[1] + inv[2] * w[2],
+        inv[3] * w[0] + inv[4] * w[1] + inv[5] * w[2],
+        inv[6] * w[0] + inv[7] * w[1] + inv[8] * w[2],
+    ];
+
+    Some([
+        s[0] * r[0],
+        s[1] * g[0],
+        s[2] * b[0],
+        s[0] * r[1],
+        s[1] * g[1],
+        s[2] * b[1],
+        s[0] * r[2],
+        s[1] * g[2],
+        s[2] * b[2],
+    ])
 }
 
 /// A luminance range and reference white level, in cd/m²:
