@@ -5203,7 +5203,7 @@ milestone = "M9"
 [[waived]]
 symbol    = "wlr_surface_reject_pending"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+note      = "Shell completion. The one bound C variadic: Rust cannot forward into a va_list, so the wrapper must format first and pass a lone %s."
 milestone = "M9"
 
 [[waived]]

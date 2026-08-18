@@ -135,14 +135,22 @@ fn every_not_yet_entry_names_a_milestone() {
     );
 }
 
-/// bindgen skips C variadics silently, so one that *is* bound would mean the
-/// generated file changed shape under us.
+/// The variadics are pinned by name rather than merely counted.
+///
+/// `pub fn f(a: T, ...)` is legal Rust in an `extern "C"` block, so a C variadic
+/// does reach `bindings.rs` — and wlroots 0.20 has exactly one. It cannot be
+/// wrapped like its neighbours: Rust cannot forward arguments into a `va_list`,
+/// so covering it means a hand-written call site that formats the message first
+/// and passes a lone `%s`. A second one appearing inside a milestone that
+/// budgeted for none is the failure this pins down.
 #[test]
-fn no_bound_symbol_is_variadic() {
+fn the_bound_variadics_are_the_known_ones() {
     let variadic = coverage::variadic_fns(&bindings_source());
-    assert!(
-        variadic.is_empty(),
-        "bindgen bound a variadic wlr_* function, which it cannot call: {variadic:?}"
+    assert_eq!(
+        variadic,
+        vec!["wlr_surface_reject_pending".to_owned()],
+        "the set of bound variadic wlr_* functions changed; a new one needs a \
+         formatting call site, not an ordinary wrapper — see coverage/README.md"
     );
 }
 

@@ -25,6 +25,17 @@ A handful of names denote both a type and a function (`wlr_xdg_toplevel_configur
 is both a struct and a function in C, which is legal there). The ledgers are keyed
 by name, so one row covers both.
 
+`WLR_*`-prefixed constants (`WLR_DMABUF_MAX_PLANES`, the `WLR_HAS_*` capability
+defines, the `*_CAP` limits) are out of scope too: they are compile-time values
+`wlr-sys` already re-exports verbatim, not behaviour a safe API can add anything
+to. The audit's pattern is the lowercase `wlr_` prefix, which excludes them.
+
+One symbol is a C variadic — `wlr_surface_reject_pending`. bindgen does bind
+variadics (`pub fn f(a: T, ...)` is legal in an `extern "C"` block), but Rust
+cannot forward arguments into a `va_list`, so wrapping it means a call site that
+formats the message first and passes a lone `%s`. The gate pins the variadic set
+by name so a second one cannot arrive unnoticed.
+
 ## When does a symbol count as wrapped?
 
 A row in `wrapped.toml` names the safe public item that gives a consumer that

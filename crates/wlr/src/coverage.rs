@@ -29,10 +29,11 @@
 //! # What this cannot prove
 //!
 //! `bindings.rs` shows only what bindgen *chose* to bind. A symbol that exists
-//! in a wlroots header but that bindgen silently skipped (a variadic function,
-//! for instance) is invisible here. That risk belongs to `wlr-sys`'
-//! `tests/interop.rs`, not to this audit; [`variadic_fns`] exists so the one
-//! detectable case is at least reported rather than assumed away.
+//! in a wlroots header but that bindgen silently skipped is invisible here.
+//! That risk belongs to `wlr-sys`' `tests/interop.rs`, not to this audit.
+//! [`variadic_fns`] covers the neighbouring case — a symbol bindgen *did* bind
+//! but which no ordinary wrapper can call the same way — because a ledger row
+//! saying "wrapped" means something different for those.
 
 #![allow(dead_code)]
 
@@ -154,21 +155,48 @@ pub fn extract(bindings_src: &str) -> Vec<Symbol> {
     out
 }
 
-/// Names of `wlr_*` functions whose signature line carries a `...`.
+/// Names of `wlr_*` functions bindgen bound as C variadics.
 ///
-/// bindgen cannot bind a C variadic, so today this is empty and the count is
-/// expected to stay that way. If wlroots ever adds one it will appear in the
-/// headers and *not* in the symbol list, i.e. it would go missing silently; a
-/// bound-but-variadic line is the only variant of that failure this file can
-/// see, so it is reported rather than ignored.
+/// `pub fn f(a: T, ...)` is legal Rust in an `extern "C"` block, so bindgen does
+/// emit these — wlroots 0.20 has one, `wlr_surface_reject_pending`. They matter
+/// to the ledger because a safe wrapper cannot forward Rust arguments into a
+/// `va_list`: covering one means a hand-written call site that formats first and
+/// passes a single `%s`, which is a different piece of work from the 837 other
+/// functions. Reporting the set is what keeps a second one from arriving inside
+/// a milestone that budgeted for none.
+///
+/// The whole parameter list is walked, not just the declaration's first line:
+/// rustfmt wraps a long signature and puts the `...` on a line of its own, which
+/// is exactly the shape `wlr_surface_reject_pending` has.
 pub fn variadic_fns(bindings_src: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for line in bindings_src.lines() {
-        if let Some(rest) = line.trim_start().strip_prefix("pub fn ")
-            && let Some((name, after)) = leading_ident(rest)
-            && name.starts_with("wlr_")
-            && after.contains("...")
-        {
+    let mut lines = bindings_src.lines();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.trim_start().strip_prefix("pub fn ") else {
+            continue;
+        };
+        let Some((name, mut tail)) = leading_ident(rest) else {
+            continue;
+        };
+        if !name.starts_with("wlr_") || !tail.starts_with('(') {
+            continue;
+        }
+
+        let mut depth = 0i32;
+        let mut variadic = false;
+        loop {
+            variadic |= tail.contains("...");
+            depth += tail.chars().filter(|c| *c == '(').count() as i32;
+            depth -= tail.chars().filter(|c| *c == ')').count() as i32;
+            // Stop at the paren that closes the parameter list; a return type
+            // may carry parens of its own and says nothing about arity.
+            if depth <= 0 {
+                break;
+            }
+            let Some(next) = lines.next() else { break };
+            tail = next;
+        }
+        if variadic {
             out.push(name.to_owned());
         }
     }
@@ -384,6 +412,15 @@ pub fn parse_waived(src: &str) -> Result<Vec<WaivedEntry>, String> {
     Ok(out)
 }
 
+/// This file's own basename.
+///
+/// It lives under `crates/wlr/src/` but is not a module of the library, and its
+/// test fixtures below contain literal `sys::wlr_*` strings. Letting the scan
+/// read it would mean the audit could satisfy its own staleness check from its
+/// own source — `wlr_scene_create` and `wlr_box` are in those fixtures today —
+/// which is precisely the silent drift the check exists to catch.
+const AUDIT_FILE: &str = "coverage.rs";
+
 /// Every `sys::wlr_*` identifier mentioned anywhere under `src_dir`.
 ///
 /// `crates/wlr/src/sys.rs` is a single `pub(crate) use wlr_sys::*;`, so every
@@ -400,7 +437,9 @@ pub fn scan_sys_uses(src_dir: &Path) -> std::io::Result<BTreeSet<String>> {
             let path = entry.path();
             if entry.file_type()?.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "rs") {
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && path.file_name().is_none_or(|name| name != AUDIT_FILE)
+            {
                 let text = fs::read_to_string(&path)?;
                 collect_sys_uses(&text, &mut found);
             }
@@ -612,8 +651,9 @@ fn percent(part: usize, whole: usize) -> f64 {
 /// Longest-prefix map from symbol name to a burn-down area.
 ///
 /// Purely cosmetic — it shapes the report, never the gate — so an unmatched
-/// symbol lands in `other` rather than failing anything. Order matters: the
-/// first match wins, so the more specific prefix must come first.
+/// symbol lands in `other` rather than failing anything. The longest matching
+/// prefix wins, so rows may be added in any order and `wlr_output_transform_*`
+/// still reaches `util` past the shorter `wlr_output` row.
 const GROUPS: &[(&str, &str)] = &[
     ("wlr_scene", "scene"),
     ("wlr_damage_ring", "scene"),
@@ -868,6 +908,15 @@ unsafe extern "C" {
     pub fn wlr_log_vararg(fmt: *const ::std::os::raw::c_char, ...);
 }
 unsafe extern "C" {
+    pub fn wlr_surface_reject_pending(
+        surface: *mut wlr_surface,
+        resource: *mut wl_resource,
+        code: u32,
+        msg: *const ::std::os::raw::c_char,
+        ...
+    );
+}
+unsafe extern "C" {
     pub fn pixman_region32_init(region: *mut pixman_region32);
 }
 "#;
@@ -887,6 +936,7 @@ unsafe extern "C" {
                 ("wlr_log_vararg", Kind::Fn),
                 ("wlr_real_union", Kind::Union),
                 ("wlr_scene_payload", Kind::Union),
+                ("wlr_surface_reject_pending", Kind::Fn),
             ]
         );
     }
@@ -911,9 +961,26 @@ unsafe extern "C" {
         );
     }
 
+    /// Both spellings must be caught. `wlr_surface_reject_pending` is the real
+    /// one wlroots 0.20 ships, and rustfmt wraps its signature so the `...` is
+    /// on a line by itself — a first-line-only scan reports zero variadics on a
+    /// tree that has one, which is a false green in the gate that reads this.
     #[test]
-    fn variadic_functions_are_flagged() {
-        assert_eq!(variadic_fns(FIXTURE), vec!["wlr_log_vararg".to_owned()]);
+    fn variadic_functions_are_flagged_on_one_line_and_across_many() {
+        assert_eq!(
+            variadic_fns(FIXTURE),
+            vec![
+                "wlr_log_vararg".to_owned(),
+                "wlr_surface_reject_pending".to_owned()
+            ]
+        );
+    }
+
+    /// A non-variadic wrapped signature must not be swept in by the walk, and
+    /// the walk must stop at the parameter list rather than running to EOF.
+    #[test]
+    fn a_wrapped_non_variadic_signature_is_not_flagged() {
+        assert!(!variadic_fns(FIXTURE).contains(&"wlr_box_intersection".to_owned()));
     }
 
     #[test]
@@ -1015,6 +1082,32 @@ milestone = \"M5\"
         assert!(found.contains("wlr_scene_create"));
         assert!(found.contains("wlr_box"));
         assert!(!found.contains("wl_listener"));
+    }
+
+    /// The staleness check is only worth anything if the audit cannot answer it
+    /// out of its own source. `coverage.rs` carries `sys::wlr_*` strings in the
+    /// fixtures above, so it is skipped.
+    #[test]
+    fn the_scan_skips_the_audit_file_itself() {
+        let dir = std::env::temp_dir().join(format!(
+            "wlr-coverage-scan-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let nested = dir.join("render");
+        fs::create_dir_all(&nested).expect("temp dir");
+        fs::write(dir.join("runtime.rs"), "sys::wlr_from_a_real_module()").expect("write");
+        fs::write(nested.join("pass.rs"), "sys::wlr_from_a_nested_module()").expect("write");
+        fs::write(dir.join(AUDIT_FILE), "sys::wlr_from_the_audit_fixture()").expect("write");
+        fs::write(dir.join("notes.txt"), "sys::wlr_from_a_non_rust_file()").expect("write");
+
+        let found = scan_sys_uses(&dir).expect("scan");
+        fs::remove_dir_all(&dir).expect("cleanup");
+
+        assert!(found.contains("wlr_from_a_real_module"));
+        assert!(found.contains("wlr_from_a_nested_module"));
+        assert!(!found.contains("wlr_from_the_audit_fixture"));
+        assert!(!found.contains("wlr_from_a_non_rust_file"));
     }
 
     fn sym(name: &str, kind: Kind) -> Symbol {
