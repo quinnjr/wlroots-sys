@@ -259,6 +259,62 @@ precondition is unrepresentable rather than documented.
   dependency and no normalisation. This crate wraps wlroots' *use* of those
   libraries; re-typing a handle would put two definitions of it in one process.
 
+### The scene graph
+
+Before M5 the only thing a consumer could put in the scene was a rect or a
+pixel buffer, at the root, in a band, or in a toplevel. Now the graph itself is
+addressable: trees, nesting, restacking, reparenting and hit testing, all by id.
+
+- `NodeId` — the storable identity of a scene node, and the first id in this
+  crate that is **addon-backed for its whole family**. `wlr_scene_node_destroy`
+  frees the node *and every descendant* with no announcement; a payload on each
+  node's own `wlr_addon_set` is what tells this crate, because wlroots runs an
+  addon's destructor for every node it frees, cascade included. So a `NodeId`
+  goes stale at exactly the right instant and every call on it misses cleanly
+  from then on — see `tests/scene_destroy.rs`, which asserts that for a
+  three-deep tree through every entry point.
+- `NodeKind` and the borrow-scoped handles `SceneNode<'_>`, `SceneTree<'_>`,
+  `SceneRect<'_>`, `SceneBuffer<'_>`, reached through `Runtime::with_node`,
+  `with_tree`, `with_rect` and `with_scene_buffer`. Handles are read-only
+  observation surfaces; every mutation is a by-id call on `Runtime`. The
+  downcasts (`try_as_tree`/`try_as_rect`/`try_as_buffer`) check wlroots' type
+  tag first — the C helpers are bare pointer casts and undefined behaviour on a
+  mismatch.
+- While a handle borrow is live, `destroy_node`, `reparent_node`, `remove_rect`
+  and `remove_buffer` all return `None` without acting. A closure that freed
+  the node it was just handed would be left holding a dangling handle, and a
+  documented rule is weaker than a check.
+- Structure: `create_tree_in_band`, `create_tree_under`, `create_rect`,
+  `create_scene_buffer`, `destroy_node`, `reparent_node`, `set_node_enabled`,
+  `set_node_position`, `place_node_above`, `place_node_below`,
+  `raise_node_to_top`, `lower_node_to_bottom`.
+- Queries: `node_kind`, `node_position`, `node_coords`, `node_enabled`,
+  `node_parent`, `node_children`, `node_at`, `for_each_buffer`,
+  `scene_root_node`, `band_node`, `rect_node`, `buffer_node`.
+- Buffer nodes: `set_scene_buffer` (with `SceneBufferOptions` carrying a damage
+  region and an explicit-sync wait point), plus `set_scene_buffer_dest_size`,
+  `_source_box`, `_opaque_region`, `_transform`, `_opacity`, `_filter`,
+  `_transfer_function`, `_primaries`, `_color_encoding` and `_color_range`.
+- **Every wlroots `assert()` reachable from here is a `None` instead.** Arch
+  ships wlroots with assertions enabled, so an unchecked call would abort the
+  process rather than fail: `place_node_above`/`_below` refuse a node placed
+  against itself and a pair with different parents, `reparent_node` refuses a
+  cycle, the size setters refuse a negative dimension. `tests/scene_tree.rs`
+  exercises each one, and the process surviving that test *is* the assertion.
+- Three origins, because not every node in the scene is the consumer's to
+  restructure. Nodes this crate created for them are fully mutable; the scene
+  root and the five bands are readable and enable-able but never destroyed,
+  restacked or reparented; and a node wlroots owns — a toplevel's tree, a layer
+  surface's tree, a client's surface node — gets an id when `node_at` or
+  `node_children` reaches it, but only reads and property changes. Restack
+  those through `raise_toplevel` and its siblings, which keep this crate's own
+  placement bookkeeping straight.
+- `RectId` and `BufferId` are unchanged and still work exactly as before, but
+  the nodes under them now carry the same payload: `rect_node`/`buffer_node`
+  bridge to the node API, a cascade that frees such a node drops its row (so
+  `remove_rect` afterwards misses instead of double-destroying), and
+  `reparent_node` recomputes the parent tracking those two tables still use.
+
 ### Cargo features
 
 `wlr` now re-exports `wlr-sys`' feature names one for one — `drm-backend`,

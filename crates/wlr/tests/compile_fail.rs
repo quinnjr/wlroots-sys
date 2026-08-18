@@ -156,3 +156,32 @@ fn a_timeline_waiter_cannot_outlive_the_display_whose_loop_it_is_on() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/sync_waiter_outlives_display.rs");
 }
+
+/// The case that actually proves a consumer cannot mint a `SceneNode`. A node
+/// is freed by a destroy cascade nobody announces, so a handle minted with a
+/// lifetime of the consumer's own choosing is the sharpest use-after-free this
+/// crate has available. It would start compiling — and so fail as a test — the
+/// moment `SceneNode::from_raw_with_id` were widened to `pub`.
+#[test]
+fn scene_node_from_raw_with_id_is_not_reachable_outside_the_crate() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/scene_node_from_raw_is_private.rs");
+}
+
+/// The `SceneTree` half of the pair above: the tree handle has its own private
+/// constructor, and the argument applies to it verbatim.
+#[test]
+fn scene_tree_from_raw_with_id_is_not_reachable_outside_the_crate() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/scene_tree_from_raw_is_private.rs");
+}
+
+/// The weaker, regression-only half for `SceneNode`: it pins the intended
+/// calling convention — `Runtime::with_node` hands the handle out for the
+/// duration of one closure and no longer — and that `SceneNode` carries
+/// exactly one lifetime parameter.
+#[test]
+fn scene_node_lifetime_parameter_and_calling_convention_are_pinned() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/scene_node_escapes_borrow.rs");
+}

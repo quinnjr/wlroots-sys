@@ -3139,24 +3139,6 @@ note      = "Deep wlr_scene / damage_ring surface."
 milestone = "M5"
 
 [[waived]]
-symbol    = "wlr_scene_buffer"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_buffer_from_node"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_buffer_iterator_func_t"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_scene_buffer_point_accepts_input_func_t"
 reason    = "not-yet"
 note      = "Deep wlr_scene / damage_ring surface."
@@ -3169,73 +3151,7 @@ note      = "Deep wlr_scene / damage_ring surface."
 milestone = "M5"
 
 [[waived]]
-symbol    = "wlr_scene_buffer_set_buffer_options"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_scene_buffer_set_buffer_with_damage"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_buffer_set_buffer_with_options"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_buffer_set_color_encoding"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_buffer_set_color_range"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_buffer_set_filter_mode"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_buffer_set_opacity"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_buffer_set_opaque_region"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_buffer_set_primaries"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_buffer_set_source_box"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_buffer_set_transfer_function"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_buffer_set_transform"
 reason    = "not-yet"
 note      = "Deep wlr_scene / damage_ring surface."
 milestone = "M5"
@@ -3271,42 +3187,6 @@ milestone = "M5"
 
 [[waived]]
 symbol    = "wlr_scene_layer_surface_v1_create"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_node"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_node_for_each_buffer"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_node_place_above"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_node_place_below"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_node_reparent"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_node_type"
 reason    = "not-yet"
 note      = "Deep wlr_scene / damage_ring surface."
 milestone = "M5"
@@ -3367,12 +3247,6 @@ milestone = "M5"
 
 [[waived]]
 symbol    = "wlr_scene_outputs_update_event"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_rect_from_node"
 reason    = "not-yet"
 note      = "Deep wlr_scene / damage_ring surface."
 milestone = "M5"
@@ -3445,24 +3319,6 @@ milestone = "M5"
 
 [[waived]]
 symbol    = "wlr_scene_timer_get_duration_ns"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_tree"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_tree_create"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scene_tree_from_node"
 reason    = "not-yet"
 note      = "Deep wlr_scene / damage_ring surface."
 milestone = "M5"

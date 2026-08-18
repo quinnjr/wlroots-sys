@@ -789,9 +789,24 @@ module = "runtime"
 item   = "Runtime::init_graphics"
 
 [[wrapped]]
+symbol = "wlr_scene_buffer"
+module = "scene::buffer"
+item   = "SceneBuffer"
+
+[[wrapped]]
 symbol = "wlr_scene_buffer_create"
 module = "runtime"
 item   = "Runtime::add_buffer"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_from_node"
+module = "scene"
+item   = "SceneNode::try_as_buffer"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_iterator_func_t"
+module = "runtime"
+item   = "Runtime::for_each_buffer"
 
 [[wrapped]]
 symbol = "wlr_scene_buffer_set_buffer"
@@ -799,9 +814,64 @@ module = "runtime"
 item   = "Runtime::update_buffer"
 
 [[wrapped]]
+symbol = "wlr_scene_buffer_set_buffer_options"
+module = "scene::buffer"
+item   = "SceneBufferOptions"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_buffer_with_options"
+module = "runtime"
+item   = "Runtime::set_scene_buffer"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_color_encoding"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_color_encoding"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_color_range"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_color_range"
+
+[[wrapped]]
 symbol = "wlr_scene_buffer_set_dest_size"
 module = "runtime"
 item   = "Runtime::set_buffer_dest_size"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_filter_mode"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_filter"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_opacity"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_opacity"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_opaque_region"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_opaque_region"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_primaries"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_primaries"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_source_box"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_source_box"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_transfer_function"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_transfer_function"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_transform"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_transform"
 
 [[wrapped]]
 symbol = "wlr_scene_create"
@@ -812,6 +882,11 @@ item   = "Runtime::init_graphics"
 symbol = "wlr_scene_get_scene_output"
 module = "runtime"
 item   = "Runtime::commit_output"
+
+[[wrapped]]
+symbol = "wlr_scene_node"
+module = "scene"
+item   = "SceneNode"
 
 [[wrapped]]
 symbol = "wlr_scene_node_at"
@@ -829,14 +904,34 @@ module = "runtime"
 item   = "Runtime::remove_rect"
 
 [[wrapped]]
+symbol = "wlr_scene_node_for_each_buffer"
+module = "runtime"
+item   = "Runtime::for_each_buffer"
+
+[[wrapped]]
 symbol = "wlr_scene_node_lower_to_bottom"
 module = "runtime"
 item   = "Runtime::lower_rect_to_bottom"
 
 [[wrapped]]
+symbol = "wlr_scene_node_place_above"
+module = "runtime"
+item   = "Runtime::place_node_above"
+
+[[wrapped]]
+symbol = "wlr_scene_node_place_below"
+module = "runtime"
+item   = "Runtime::place_node_below"
+
+[[wrapped]]
 symbol = "wlr_scene_node_raise_to_top"
 module = "runtime"
 item   = "Runtime::raise_toplevel"
+
+[[wrapped]]
+symbol = "wlr_scene_node_reparent"
+module = "runtime"
+item   = "Runtime::reparent_node"
 
 [[wrapped]]
 symbol = "wlr_scene_node_set_enabled"
@@ -847,6 +942,11 @@ item   = "Runtime::set_toplevel_visible"
 symbol = "wlr_scene_node_set_position"
 module = "runtime"
 item   = "Runtime::set_rect_position"
+
+[[wrapped]]
+symbol = "wlr_scene_node_type"
+module = "scene"
+item   = "NodeKind"
 
 [[wrapped]]
 symbol = "wlr_scene_output_commit"
@@ -870,13 +970,18 @@ item   = "Runtime::commit_output"
 
 [[wrapped]]
 symbol = "wlr_scene_rect"
-module = "scene"
-item   = "RectId"
+module = "scene::rect"
+item   = "SceneRect"
 
 [[wrapped]]
 symbol = "wlr_scene_rect_create"
 module = "runtime"
 item   = "Runtime::add_rect"
+
+[[wrapped]]
+symbol = "wlr_scene_rect_from_node"
+module = "scene"
+item   = "SceneNode::try_as_rect"
 
 [[wrapped]]
 symbol = "wlr_scene_rect_set_color"
@@ -887,6 +992,21 @@ item   = "Runtime::set_rect_color"
 symbol = "wlr_scene_rect_set_size"
 module = "runtime"
 item   = "Runtime::set_rect_size"
+
+[[wrapped]]
+symbol = "wlr_scene_tree"
+module = "scene"
+item   = "SceneTree"
+
+[[wrapped]]
+symbol = "wlr_scene_tree_create"
+module = "runtime"
+item   = "Runtime::create_tree_in_band"
+
+[[wrapped]]
+symbol = "wlr_scene_tree_from_node"
+module = "scene"
+item   = "SceneNode::try_as_tree"
 
 [[wrapped]]
 symbol = "wlr_seat_create"

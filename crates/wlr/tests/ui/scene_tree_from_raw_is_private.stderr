@@ -1,0 +1,13 @@
+error[E0624]: associated function `from_raw_with_id` is private
+ --> tests/ui/scene_tree_from_raw_is_private.rs:7:35
+  |
+7 |       let _ = SceneTree::<'static>::from_raw_with_id;
+  |                                     ^^^^^^^^^^^^^^^^ private associated function
+  |
+ ::: src/scene/mod.rs
+  |
+  | /     pub(crate) unsafe fn from_raw_with_id(
+  | |         raw: *mut sys::wlr_scene_tree,
+  | |         id: NodeId,
+  | |     ) -> SceneTree<'h> {
+  | |______________________- private associated function defined here

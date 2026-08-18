@@ -124,7 +124,9 @@ pub use render::{Gles2, Gles2TextureAttribs};
 #[cfg(wlr_has_vulkan_renderer)]
 pub use render::{Vk, VkImageAttribs};
 pub use runtime::{Band, Runtime};
-pub use scene::RectId;
+pub use scene::{
+    NodeId, NodeKind, RectId, SceneBuffer, SceneBufferOptions, SceneNode, SceneRect, SceneTree,
+};
 pub use seat::{KeyEvent, Modifiers};
 pub use toplevel::{Edges, Toplevel, ToplevelId};
 

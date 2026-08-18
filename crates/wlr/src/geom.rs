@@ -221,7 +221,12 @@ impl FBox {
     }
 
     /// This box as the C type, for the duration of the borrow.
-    fn as_c(&self) -> *const sys::wlr_fbox {
+    ///
+    /// `pub(crate)` because the scene's source-box setter hands one straight
+    /// to wlroots — the cast is sound only because of the layout assertions
+    /// above, so it stays in this module's gift rather than becoming a public
+    /// escape hatch.
+    pub(crate) fn as_c(&self) -> *const sys::wlr_fbox {
         (&raw const *self).cast::<sys::wlr_fbox>()
     }
 
