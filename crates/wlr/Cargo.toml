@@ -27,6 +27,12 @@ wlr-sys = { version = "0.20", path = "../wlr-sys" }
 # produce look-alike types (see wlr-sys's own tests/interop.rs).
 xkbcommon-sys = "1.4"
 
+[build-dependencies]
+# build.rs re-emits wlr-sys's subsystem cfgs (they do not cross the package
+# boundary) and probes pixman-1, which wlroots keeps in Requires.private and so
+# never puts on our link line.
+pkg-config = "0.3"
+
 [dev-dependencies]
 trybuild = "1.0"
 # Asserts the `!Send`/`!Sync` premise the thread-local dispatch guard rests on.
