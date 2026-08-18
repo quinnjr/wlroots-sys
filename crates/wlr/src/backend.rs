@@ -499,11 +499,14 @@ struct Session<'r, S> {
     drags: RefCell<HashMap<usize, Registration>>,
 
     /// This run's destroy listener on every idle inhibitor currently live,
-    /// keyed by the inhibitor's own `*mut wlr_idle_inhibitor_v1` address (as
-    /// `usize`) — mirrors `drags`' keying discipline exactly, and for the
-    /// same reason: `on_idle_inhibitor_destroy` must find and remove one
-    /// specific inhibitor's entry synchronously, the moment that inhibitor is
-    /// destroyed, without touching any other live inhibitor's listener.
+    /// keyed by the `destroy` listener's own address (as `usize`) — NOT the
+    /// inhibitor object's, because wlroots emits the inhibitor's `destroy`
+    /// signal with its **surface** as `data` (not the inhibitor), so the
+    /// handler recovers its key from the firing `wl_listener` `l` instead. The
+    /// map still serves `drags`' role: `on_idle_inhibitor_destroy` must find
+    /// and remove one specific inhibitor's entry synchronously, the moment that
+    /// inhibitor is destroyed, without touching any other live inhibitor's
+    /// listener.
     idle_inhibitors: RefCell<HashMap<usize, Registration>>,
 
     /// This run's `new_surface`/`unlock`/`destroy` listeners on every live
@@ -2273,10 +2276,11 @@ unsafe extern "C" fn on_drag_destroy<S: Handlers>(
 /// re-gates the idle notifier via
 /// [`Runtime::refresh_idle_inhibited`](crate::Runtime::refresh_idle_inhibited),
 /// then links a destroy listener on the inhibitor's own `events.destroy`,
-/// keyed in `Session::idle_inhibitors` by the inhibitor pointer — mirrors
-/// `on_start_drag`'s `Session::drags` pattern exactly (same keying
-/// discipline: the pointer handed to the destroy signal is exactly the key
-/// this inserts under).
+/// keyed in `Session::idle_inhibitors` by that destroy listener's own address
+/// — NOT the inhibitor pointer, because wlroots emits the inhibitor's
+/// `destroy` signal with its **surface** as the signal `data`, not the
+/// inhibitor. Mirrors the session-lock keying discipline: the destroy handler
+/// recovers the same key from the `wl_listener` `l` it is handed.
 unsafe extern "C" fn on_new_idle_inhibitor<S: Handlers>(
     l: *mut sys::wl_listener,
     data: *mut std::ffi::c_void,
@@ -2307,10 +2311,12 @@ unsafe extern "C" fn on_new_idle_inhibitor<S: Handlers>(
             (*bound).session,
             std::ptr::null(),
         );
-        (*session)
-            .idle_inhibitors
-            .borrow_mut()
-            .insert(inhibitor as usize, destroy);
+        // Key by the destroy listener's own address, not the inhibitor
+        // pointer: wlroots emits the inhibitor's `destroy` with its surface as
+        // `data`, so the destroy handler recovers the key from the `l` it is
+        // handed (equal to this address), never from the signal `data`.
+        let key = destroy.listener_addr();
+        (*session).idle_inhibitors.borrow_mut().insert(key, destroy);
     }
 }
 
@@ -2325,13 +2331,14 @@ unsafe extern "C" fn on_new_idle_inhibitor<S: Handlers>(
 /// listener before this callback runs.
 unsafe extern "C" fn on_idle_inhibitor_destroy<S: Handlers>(
     l: *mut sys::wl_listener,
-    data: *mut std::ffi::c_void,
+    _data: *mut std::ffi::c_void,
 ) {
     // SAFETY: linked by `on_new_idle_inhibitor` into this inhibitor's own
-    // `events.destroy`; the inhibitor is still live memory for the duration
-    // of this emission. `data` is the same `*mut wlr_idle_inhibitor_v1`
-    // `on_new_idle_inhibitor` linked against, so cast to `usize` it recovers
-    // the exact key that call inserted this entry under.
+    // `events.destroy`; the inhibitor is still live memory for this emission.
+    // wlroots emits this signal with the inhibitor's **surface** as `data`
+    // (NOT the inhibitor), so identity comes from `l` — the address of this
+    // handler's own listener, under which `on_new_idle_inhibitor` keyed the
+    // `idle_inhibitors` entry — never from the signal `data`.
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
@@ -2341,7 +2348,7 @@ unsafe extern "C" fn on_idle_inhibitor_destroy<S: Handlers>(
             .idle_inhibitors
             .set(runtime.inner.idle_inhibitors.get().saturating_sub(1));
         runtime.refresh_idle_inhibited();
-        let key = data as usize;
+        let key = l as usize;
         let removed = (*session).idle_inhibitors.borrow_mut().remove(&key);
         drop(removed);
     }
