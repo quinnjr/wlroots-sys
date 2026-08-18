@@ -485,6 +485,14 @@ struct Session<'r, S> {
     /// `(*drag).icon` is null.
     drags: RefCell<HashMap<usize, Registration>>,
 
+    /// This run's destroy listener on every idle inhibitor currently live,
+    /// keyed by the inhibitor's own `*mut wlr_idle_inhibitor_v1` address (as
+    /// `usize`) — mirrors `drags`' keying discipline exactly, and for the
+    /// same reason: `on_idle_inhibitor_destroy` must find and remove one
+    /// specific inhibitor's entry synchronously, the moment that inhibitor is
+    /// destroyed, without touching any other live inhibitor's listener.
+    idle_inhibitors: RefCell<HashMap<usize, Registration>>,
+
     /// Whether the most recently delivered [`Event::Key`] was consumed by the
     /// handler. `on_key` cannot get a return value back through
     /// `Dispatcher::emit` directly — an `extern "C"` callback has no way to
@@ -977,6 +985,7 @@ impl<'d> Backend<'d> {
             layers: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
+            idle_inhibitors: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime,
             deliver: hooks.deliver,
@@ -1348,6 +1357,20 @@ impl<'d> Backend<'d> {
                 Registration::link_bare(
                     &raw mut (*manager.as_ptr()).events.new_virtual_pointer,
                     on_new_virtual_pointer::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
+        if let Some(manager) = runtime.idle_inhibit_manager_ptr() {
+            // SAFETY: `create_idle_inhibit_manager` returned a non-null
+            // manager owned by the display, which this call requires to outlive
+            // it, exactly as for the xdg shell above — null liveness is correct.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.new_inhibitor,
+                    on_new_idle_inhibitor::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     std::ptr::null(),
                 )
@@ -2153,6 +2176,85 @@ unsafe extern "C" fn on_drag_destroy<S: Handlers>(
         runtime.inner.drag_icon_tree.borrow_mut().take();
         let key = data as usize;
         let removed = (*session).drags.borrow_mut().remove(&key);
+        drop(removed);
+    }
+}
+
+/// A client bound `zwp_idle_inhibit_manager_v1` and requested an inhibitor on
+/// one of its surfaces. Counts it in [`RuntimeInner::idle_inhibitors`] and
+/// re-gates the idle notifier via
+/// [`Runtime::refresh_idle_inhibited`](crate::Runtime::refresh_idle_inhibited),
+/// then links a destroy listener on the inhibitor's own `events.destroy`,
+/// keyed in `Session::idle_inhibitors` by the inhibitor pointer — mirrors
+/// `on_start_drag`'s `Session::drags` pattern exactly (same keying
+/// discipline: the pointer handed to the destroy signal is exactly the key
+/// this inserts under).
+unsafe extern "C" fn on_new_idle_inhibitor<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_idle_inhibit_manager_v1.events.new_inhibitor`, whose `session` is
+    // the `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_idle_inhibitor_v1`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let inhibitor = data.cast::<sys::wlr_idle_inhibitor_v1>();
+
+        runtime
+            .inner
+            .idle_inhibitors
+            .set(runtime.inner.idle_inhibitors.get() + 1);
+        runtime.refresh_idle_inhibited();
+
+        // Linked on the inhibitor's own `events.destroy`. No `alive`
+        // backstop: as for the drag icon this mirrors, the inhibitor cannot
+        // be freed by anything other than the destroy this very listener
+        // watches, so there is no "owner died first" case to guard against.
+        let destroy = Registration::link_bare(
+            &raw mut (*inhibitor).events.destroy,
+            on_idle_inhibitor_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        (*session)
+            .idle_inhibitors
+            .borrow_mut()
+            .insert(inhibitor as usize, destroy);
+    }
+}
+
+/// The idle inhibitor is about to be freed. Decrements
+/// [`RuntimeInner::idle_inhibitors`] (saturating — this handler and
+/// `on_new_idle_inhibitor` are the only writers, so it never underflows in
+/// practice, but a stray double-fire must not panic) and re-gates the idle
+/// notifier, then removes this inhibitor's entry from
+/// `Session::idle_inhibitors`, which unlinks this very listener — sound for
+/// the same reason `on_drag_destroy` unlinking itself is:
+/// `wl_signal_emit_mutable` has already advanced its cursor past the firing
+/// listener before this callback runs.
+unsafe extern "C" fn on_idle_inhibitor_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_idle_inhibitor` into this inhibitor's own
+    // `events.destroy`; the inhibitor is still live memory for the duration
+    // of this emission. `data` is the same `*mut wlr_idle_inhibitor_v1`
+    // `on_new_idle_inhibitor` linked against, so cast to `usize` it recovers
+    // the exact key that call inserted this entry under.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        runtime
+            .inner
+            .idle_inhibitors
+            .set(runtime.inner.idle_inhibitors.get().saturating_sub(1));
+        runtime.refresh_idle_inhibited();
+        let key = data as usize;
+        let removed = (*session).idle_inhibitors.borrow_mut().remove(&key);
         drop(removed);
     }
 }
@@ -4415,6 +4517,7 @@ mod tests {
                 layers: RefCell::new(HashMap::new()),
                 inputs: RefCell::new(HashMap::new()),
                 drags: RefCell::new(HashMap::new()),
+                idle_inhibitors: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
                 runtime: &runtime,
                 deliver: deliver::<Recorder>,
@@ -4587,6 +4690,7 @@ mod tests {
             layers: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
+            idle_inhibitors: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime: &runtime,
             deliver: deliver::<Recorder>,

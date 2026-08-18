@@ -158,6 +158,19 @@ pub(crate) struct RuntimeInner {
     /// timeout. `Option`, same rationale as the other manager globals.
     pub(crate) idle_notifier: RefCell<Option<NonNull<sys::wlr_idle_notifier_v1>>>,
 
+    /// The idle-inhibit (`zwp_idle_inhibit_manager_v1`) manager, once
+    /// created — lets a client (e.g. a video player) inhibit idling while a
+    /// surface is visible. `Option`, same rationale as the other manager
+    /// globals.
+    pub(crate) idle_inhibit_manager: RefCell<Option<NonNull<sys::wlr_idle_inhibit_manager_v1>>>,
+
+    /// The number of currently live `wlr_idle_inhibitor_v1` objects, tracked
+    /// so [`Runtime::refresh_idle_inhibited`] knows whether to gate the idle
+    /// notifier. `backend.rs`'s `on_new_idle_inhibitor`/
+    /// `on_idle_inhibitor_destroy` are the only writers, incrementing and
+    /// (saturating) decrementing respectively.
+    pub(crate) idle_inhibitors: std::cell::Cell<usize>,
+
     /// Every live toplevel: the role object, its scene tree, and the surface
     /// its id addon lives on.
     pub(crate) toplevels: RefCell<HashMap<ToplevelId, ToplevelEntry>>,
@@ -639,6 +652,8 @@ impl Runtime {
                 virtual_pointer_manager: RefCell::new(None),
                 screencopy_manager: RefCell::new(None),
                 idle_notifier: RefCell::new(None),
+                idle_inhibit_manager: RefCell::new(None),
+                idle_inhibitors: std::cell::Cell::new(0),
                 toplevels: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
                 layer_shell: RefCell::new(None),
@@ -2095,6 +2110,47 @@ impl Runtime {
         // runtime; `seat` was created by `create_seat` and lives as long as
         // this runtime.
         unsafe { sys::wlr_idle_notifier_v1_notify_activity(notifier.as_ptr(), seat.as_ptr()) };
+    }
+
+    /// Create the `zwp_idle_inhibit_manager_v1` global. A client (e.g. a
+    /// video player) can bind it to inhibit idling for as long as one of its
+    /// surfaces is visible; `backend.rs`'s `on_new_idle_inhibitor`/
+    /// `on_idle_inhibitor_destroy` track how many inhibitors are currently
+    /// live and re-gate [`create_idle_notifier`](Runtime::create_idle_notifier)'s
+    /// notifier accordingly. Errors if called twice.
+    pub fn create_idle_inhibit_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.idle_inhibit_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_idle_inhibit_manager called twice",
+            ));
+        }
+        // SAFETY: display live for the call; the manager is display-owned and
+        // freed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_idle_inhibit_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_idle_inhibit_v1_create"))?;
+        *self.inner.idle_inhibit_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    pub(crate) fn idle_inhibit_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_idle_inhibit_manager_v1>> {
+        *self.inner.idle_inhibit_manager.borrow()
+    }
+
+    /// Gate the idle notifier on whether any idle inhibitor is currently
+    /// live. Called from `backend.rs` every time `idle_inhibitors` changes —
+    /// on a new inhibitor and on one being destroyed. A no-op with no idle
+    /// notifier (a consumer that never calls
+    /// [`create_idle_notifier`](Runtime::create_idle_notifier) pays nothing
+    /// for it), regardless of whether an idle-inhibit manager exists.
+    pub(crate) fn refresh_idle_inhibited(&self) {
+        if let Some(notifier) = self.idle_notifier() {
+            let inhibited = self.inner.idle_inhibitors.get() > 0;
+            // SAFETY: `notifier` is display-owned and lives as long as this
+            // runtime.
+            unsafe { sys::wlr_idle_notifier_v1_set_inhibited(notifier.as_ptr(), inhibited) };
+        }
     }
 
     pub(crate) fn virtual_pointer_manager_ptr(
