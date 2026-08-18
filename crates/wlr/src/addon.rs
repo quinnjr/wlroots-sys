@@ -198,6 +198,44 @@ pub(crate) static DESTROY_COUNT: std::sync::atomic::AtomicUsize =
 /// `T`'s `Drop` must not unwind: this runs in an `extern "C"` frame, where an
 /// unwind aborts the process rather than propagating.
 pub(crate) unsafe extern "C" fn addon_destroy<T>(raw: *mut sys::wlr_addon) {
+    // SAFETY: the caller guarantees `raw` is the header of a boxed `Addon<T>`
+    // still linked into a set, which is exactly `finish_and_free`'s own
+    // precondition.
+    unsafe { finish_and_free::<T>(raw) };
+    #[cfg(test)]
+    DESTROY_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// [`addon_destroy`] without the test-only [`DESTROY_COUNT`] bump.
+///
+/// [`DESTROY_COUNT`] is process-wide and several tests assert a *delta* across
+/// it while holding [`crate::id::id_test_lock`]. That only works while every
+/// addon this crate attaches is attached and destroyed by code that also takes
+/// the lock. Scene node ids ([`crate::scene`]) are not such a payload: one is
+/// attached to every scene node this crate creates *or merely observes*, and
+/// destroyed by ordinary scene work in tests written before that payload
+/// existed and which must keep passing unmodified —
+/// `clear_toplevels_does_not_purge_a_band_rect` destroys a rect without taking
+/// the lock, and would start inflating another test's delta the moment rects
+/// carried a counted addon. So that kind is deliberately invisible to this
+/// counter and brings its own
+/// ([`crate::scene::node_destroy_count`](crate::scene::node_destroy_count)).
+///
+/// # Safety
+///
+/// Identical to [`addon_destroy`]'s.
+pub(crate) unsafe extern "C" fn addon_destroy_untracked<T>(raw: *mut sys::wlr_addon) {
+    // SAFETY: as for `addon_destroy`.
+    unsafe { finish_and_free::<T>(raw) };
+}
+
+/// Unlink `raw` from its set (rule 3) and free the box it heads.
+///
+/// # Safety
+///
+/// `raw` must be the `raw` field of a live `Addon<T>` boxed by
+/// [`Addon::attach`] and still linked into a set.
+unsafe fn finish_and_free<T>(raw: *mut sys::wlr_addon) {
     // SAFETY: the caller (wlroots) passes an addon we registered, all of which
     // are the first field of a boxed `Addon<T>`; `wlr_addon_finish` unlinks it
     // from the set before the memory goes away.
@@ -206,8 +244,6 @@ pub(crate) unsafe extern "C" fn addon_destroy<T>(raw: *mut sys::wlr_addon) {
         sys::wlr_addon_finish(raw);
         drop(Box::from_raw(payload));
     }
-    #[cfg(test)]
-    DESTROY_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Declare an addon kind: one `static AddonImpl` naming its payload type.
@@ -219,6 +255,11 @@ pub(crate) unsafe extern "C" fn addon_destroy<T>(raw: *mut sys::wlr_addon) {
 ///
 /// `$name` is the sentinel too: pass `NAME.owner()` as `owner` at every call
 /// site (module docs, rule 2).
+///
+/// The `untracked` form is identical except that its destroy hook does not
+/// bump [`DESTROY_COUNT`] — see
+/// [`addon_destroy_untracked`](crate::addon::addon_destroy_untracked) for when
+/// that is the right choice and why it is not the default.
 macro_rules! addon_kind {
     ($(#[$meta:meta])* $vis:vis $name:ident: $payload:ty = $cname:literal) => {
         $(#[$meta])*
@@ -226,6 +267,14 @@ macro_rules! addon_kind {
             $crate::addon::AddonImpl($crate::sys::wlr_addon_interface {
                 name: $cname.as_ptr(),
                 destroy: Some($crate::addon::addon_destroy::<$payload>),
+            });
+    };
+    (untracked $(#[$meta:meta])* $vis:vis $name:ident: $payload:ty = $cname:literal) => {
+        $(#[$meta])*
+        $vis static $name: $crate::addon::AddonImpl =
+            $crate::addon::AddonImpl($crate::sys::wlr_addon_interface {
+                name: $cname.as_ptr(),
+                destroy: Some($crate::addon::addon_destroy_untracked::<$payload>),
             });
     };
 }
