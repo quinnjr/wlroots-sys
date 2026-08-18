@@ -89,7 +89,7 @@ version at release; nothing here has shipped. Purely additive so far.
 - `Transform` — the eight `wl_output_transform` values, with `invert`,
   `compose` (documented as non-commutative once a flip is involved),
   `apply_coords`, and lossless conversion to and from
-  `wlr_sys`'s `wl_output_transform`, so a `wayland-server` consumer is never
+  `wlr-sys`'s `wl_output_transform`, so a `wayland-server` consumer is never
   forced to launder a transform through this crate's type.
   **`apply_coords` is not a point transform** despite its C name: it swaps the
   axes for the four transforms that turn them and does nothing otherwise. Its

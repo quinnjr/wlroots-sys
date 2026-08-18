@@ -154,7 +154,9 @@ fn silent_filters_everything_and_the_verbosity_is_readable_back() {
     let lines = captured.lock().unwrap_or_else(|p| p.into_inner()).clone();
     assert!(
         lines.is_empty(),
-        "wlroots drops everything below the verbosity before the sink is called: {lines:?}"
+        "the crate's trampoline drops everything above the verbosity — wlroots \
+         hands a custom callback every line regardless, so nothing but this \
+         filter is between the sink and them: {lines:?}"
     );
 }
 

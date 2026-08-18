@@ -25,13 +25,21 @@
 //!    anything. wlroots documents this; skipping it leaves a freed addon linked
 //!    into the set, which the next walk dereferences.
 //!
-//! `(owner, impl)` must also be unique *within a set*: wlroots' `wlr_addon_init`
-//! does not check for a duplicate, so a second attach with the same pair leaves
-//! two entries and makes `wlr_addon_find` return whichever the list walk reaches
-//! first. Callers that cannot rule out a second attach must `find` first — see
-//! [`crate::id::attach_id`], which asserts, and `backend.rs`'s `ensure_id_raw`,
-//! which is idempotent instead because it runs inside a C callback where an
-//! assertion would abort.
+//! `(owner, impl)` must also be unique *within a set*, and getting that wrong is
+//! not a soft failure. `wlr_addon_init` walks the set and ends at
+//! `assert(0 && "Can't have two addons of the same type with the same owner")`
+//! — verified by disassembling the installed `libwlroots-0.20.so`, whose
+//! `wlr_addon_init` reaches `__assert_fail` on the duplicate path. So a second
+//! attach with the same pair **aborts the process** on an assertions-enabled
+//! build, which is what distributions ship; only under `NDEBUG` does it
+//! degrade to two entries and a `wlr_addon_find` that returns whichever the
+//! list walk reaches first.
+//!
+//! Callers that cannot rule out a second attach must therefore `find` first —
+//! see [`crate::id::attach_id`], whose own `assert!` fails with a message
+//! naming this crate before wlroots' fires, and `backend.rs`'s `ensure_id_raw`,
+//! which is idempotent instead because it runs inside a C callback where any
+//! abort is the whole compositor.
 
 use std::ffi::c_void;
 
@@ -93,9 +101,11 @@ impl<T: 'static> Addon<T> {
     ///
     /// `set` must point at an initialised `wlr_addon_set` belonging to a live
     /// object. `(owner, impl_)` must not already be present in `set` — wlroots
-    /// does not reject a duplicate, it merely makes lookup ambiguous — and
-    /// `impl_`'s `destroy` must be [`addon_destroy::<T>`](addon_destroy), which
-    /// is what [`addon_kind!`] guarantees.
+    /// `assert()`s against a duplicate and aborts the process, so this is a
+    /// precondition to check rather than a case to recover from; see the module
+    /// docs. `impl_`'s `destroy` must be
+    /// [`addon_destroy::<T>`](addon_destroy), which is what [`addon_kind!`]
+    /// guarantees.
     pub(crate) unsafe fn attach(
         set: *mut sys::wlr_addon_set,
         owner: *const (),
@@ -354,6 +364,31 @@ mod tests {
             1,
             "finishing the set afterwards did not free it a second time"
         );
+    }
+
+    /// The duplicate hazard from the module docs, from the only side a test can
+    /// observe it: a second attach under a pair already in the set reaches
+    /// `assert(0 && "Can't have two addons of the same type with the same
+    /// owner")` inside `wlr_addon_init`, which aborts the process — so nothing
+    /// in this crate may ever get that far. [`crate::id::attach_id`] checks
+    /// first, and this is what says the check is still there. Deleting it as
+    /// "obviously redundant" turns a panic with a message into an abort with
+    /// none.
+    #[test]
+    #[should_panic(expected = "an id addon is already attached")]
+    fn a_second_attach_of_one_kind_is_refused_before_wlroots_can_abort() {
+        let _serialised = crate::id::id_test_lock();
+
+        // Dropped during the unwind, before the lock guard, so the first addon
+        // is freed by its destroy hook rather than leaked into a dead set.
+        let set = ScratchSet::new();
+
+        // SAFETY: `set.0` is live and initialised. The second call is the one
+        // under test; it panics before reaching `wlr_addon_init`.
+        unsafe {
+            crate::id::attach_id(set.0);
+            crate::id::attach_id(set.0);
+        }
     }
 
     /// Two kinds attached to one set do not collide: the `(owner, impl)` key
