@@ -14,13 +14,48 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# Re-exported 1:1 from `wlr-sys`, name for name, and deliberately nothing more:
+# a consumer who turns a wlroots subsystem off there must be able to spell the
+# same thing here, and a name that meant something different in the two crates
+# would be worse than no name at all. `default` mirrors `wlr-sys`' own default
+# for the same reason.
+#
+# These decide which *headers* `wlr-sys` binds, which is what makes the
+# `wlr_has_*` cfgs in `build.rs` true or false. Turning `gles2-renderer` off
+# removes `Renderer::as_gles2` and friends, because the symbols behind them are
+# no longer bound.
+default = [
+    "drm-backend",
+    "x11-backend",
+    "libinput-backend",
+    "session",
+    "gles2-renderer",
+    "xwayland",
+]
+
+drm-backend = ["wlr-sys/drm-backend"]
+x11-backend = ["wlr-sys/x11-backend"]
+libinput-backend = ["wlr-sys/libinput-backend"]
+session = ["wlr-sys/session"]
+gles2-renderer = ["wlr-sys/gles2-renderer"]
+# Off by default, exactly as in `wlr-sys`: it needs `vulkan-headers` installed.
+vulkan-renderer = ["wlr-sys/vulkan-renderer"]
+xwayland = ["wlr-sys/xwayland"]
+
 [dependencies]
 # This branch binds wlroots 0.20, so it names the workspace member directly.
 # A `version` alone would resolve the published copy instead, putting two
 # packages with `links = "wlroots"` in the graph and breaking the whole
 # workspace. Older wlroots minors live on `support/*` branches, each with its
 # own `wlr` minor — cargo cannot resolve a manifest listing two of them.
-wlr-sys = { version = "0.20", path = "../wlr-sys" }
+#
+# `default-features = false` because the `[features]` table above forwards them
+# one for one. Without it `wlr --no-default-features` would still hand `wlr-sys`
+# its own defaults, and the re-export would be a lie: turning `gles2-renderer`
+# off here would leave the subsystem bound and the `wlr_has_*` cfg set. `wlr`'s
+# own `default` list is the same six names, so the default build is unchanged.
+wlr-sys = { version = "0.20", path = "../wlr-sys", default-features = false }
 # The same xkbcommon this branch's wlr-sys blocklists and re-imports, so the
 # `xkb_state`/`xkb_keymap` pointers on `wlr_keyboard` are the same nominal
 # types here as they are there. Naming a different version would silently
