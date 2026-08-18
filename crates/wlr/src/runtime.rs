@@ -148,6 +148,11 @@ pub(crate) struct RuntimeInner {
     pub(crate) virtual_pointer_manager:
         RefCell<Option<NonNull<sys::wlr_virtual_pointer_manager_v1>>>,
 
+    /// The screencopy (`zwlr_screencopy_manager_v1`) manager, once created —
+    /// lets a client capture an output's rendered contents (screenshots,
+    /// screen sharing). `Option`, same rationale as the other manager globals.
+    pub(crate) screencopy_manager: RefCell<Option<NonNull<sys::wlr_screencopy_manager_v1>>>,
+
     /// Every live toplevel: the role object, its scene tree, and the surface
     /// its id addon lives on.
     pub(crate) toplevels: RefCell<HashMap<ToplevelId, ToplevelEntry>>,
@@ -621,6 +626,7 @@ impl Runtime {
                 data_control_manager: RefCell::new(None),
                 virtual_keyboard_manager: RefCell::new(None),
                 virtual_pointer_manager: RefCell::new(None),
+                screencopy_manager: RefCell::new(None),
                 toplevels: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
                 layer_shell: RefCell::new(None),
@@ -2014,6 +2020,25 @@ impl Runtime {
         let raw =
             NonNull::new(raw).ok_or(Error::Create("wlr_virtual_pointer_manager_v1_create"))?;
         *self.inner.virtual_pointer_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// Create the `zwlr_screencopy_manager_v1` global, letting clients capture
+    /// an output's rendered contents (grim, wf-recorder, screen-sharing
+    /// portals). wlroots implements the whole capture flow — buffer
+    /// negotiation, the copy, damage, and the `ready`/`failed` result — so
+    /// there is nothing further to wire. Errors if called twice.
+    pub fn create_screencopy_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.screencopy_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_screencopy_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_screencopy_manager_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_screencopy_manager_v1_create"))?;
+        *self.inner.screencopy_manager.borrow_mut() = Some(raw);
         Ok(())
     }
 

@@ -71,6 +71,19 @@ guarantee that nothing observable moved.
 
 No further compatibility exception is sanctioned in the `0.20` line.
 
+## 0.20.19
+
+Output capture: the `zwlr_screencopy_manager_v1` global.
+
+- `Runtime::create_screencopy_manager(&Display) -> Result<()>` — creates the
+  `zwlr_screencopy_manager_v1` global, letting clients capture an output's
+  rendered contents (screenshot tools like grim and wf-recorder, and the
+  `xdg-desktop-portal-wlr` screen-share path). wlroots owns the whole capture
+  flow — buffer negotiation, the copy, damage, and the `ready`/`failed` result
+  — so there is nothing further to wire; this mirrors the other
+  `create_*_manager` helpers. Errors if called twice (a second global would be
+  advertised). Purely additive; no existing item changed.
+
 ## 0.20.18
 
 Drag icons now follow the cursor — a behavior fix — plus an accessor to
