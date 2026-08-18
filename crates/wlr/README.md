@@ -71,6 +71,36 @@ guarantee that nothing observable moved.
 
 No further compatibility exception is sanctioned in the `0.20` line.
 
+## 0.20.20
+
+Session locking (`ext-session-lock-v1`) and idle management
+(`ext-idle-notify-v1` + `zwp_idle_inhibit`). All additive.
+
+- `Band::Lock` — a new topmost scene band above `Overlay`, appended to the
+  `Band` enum. Session-lock surfaces render here so they cover all normal
+  content and layer-shell while the session is locked.
+- `Runtime::create_session_lock_manager(&Display) -> Result<()>` — the
+  `ext_session_lock_manager_v1` global, plus a crate-driven state machine that
+  enforces the lock's security in one place: while locked, keyboard and pointer
+  focus are refused to normal toplevels/layers and routed only to lock
+  surfaces; a second lock requested while one is already live is rejected
+  (`finished`); and a locker that *dies without unlocking* leaves the session
+  locked (an opaque black fill covers every output) rather than exposing the
+  desktop. `Runtime::is_session_locked(&self) -> bool` observes the state.
+- `SessionLockHandler::session_lock_changed(&mut self, locked: bool)` — a new
+  defaulted handler method (folded into the `Handlers` supertrait) telling the
+  compositor to suspend its own focus/layout work while locked. Existing
+  `Handlers` impls need an (empty) `impl SessionLockHandler` block.
+- `Runtime::create_idle_notifier(&Display) -> Result<()>` — the
+  `ext_idle_notifier_v1` global. The seat input path reports activity centrally,
+  so wlroots drives clients' idle timers with no per-event wiring.
+- `Runtime::create_idle_inhibit_manager(&Display) -> Result<()>` — the
+  `zwp_idle_inhibit_manager_v1` global; a live inhibitor sets the notifier
+  inhibited so idle pauses (e.g. while a video plays).
+
+Errors if any `create_*` is called twice. No existing item's name or signature
+changed.
+
 ## 0.20.19
 
 Output capture: the `zwlr_screencopy_manager_v1` global.
