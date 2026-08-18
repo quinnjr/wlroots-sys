@@ -178,17 +178,32 @@ pub(crate) struct NodePurge {
     legacy: Option<LegacyId>,
 }
 
-/// Test-only witness that node payloads are freed exactly once.
-///
-/// Deliberately *not* [`crate::addon::DESTROY_COUNT`] — see
-/// [`crate::addon::addon_destroy_untracked`] for why this kind needs its own.
 #[cfg(test)]
-static NODE_DESTROY_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    /// Test-only witness that node payloads are freed exactly once.
+    ///
+    /// Deliberately *not* [`crate::addon::DESTROY_COUNT`] — see
+    /// [`crate::addon::addon_destroy_untracked`] for why this kind needs its
+    /// own — and deliberately **per thread** rather than process-wide.
+    ///
+    /// A process-wide counter would have exactly the defect that motivated the
+    /// untracked kind in the first place: the test harness runs each test on
+    /// its own thread, several of this crate's tests destroy scene nodes, and a
+    /// test asserting a *delta* across a shared counter fails whenever another
+    /// one happens to destroy something between its two reads. That flaked
+    /// roughly one run in ten. Every node this crate tracks is created and
+    /// destroyed on one thread (the handles are `!Send`, and a cascade runs
+    /// synchronously inside the `wlr_scene_node_destroy` that started it), so
+    /// counting per thread measures exactly the cascade under test and nothing
+    /// else. With `--test-threads=1` the tests run sequentially on one thread,
+    /// where a delta across a single call is equally unpolluted.
+    static NODE_DESTROY_COUNT: Cell<usize> = const { Cell::new(0) };
+}
 
-/// How many node payloads this process has freed. Test-only.
+/// How many node payloads this thread has freed. Test-only.
 #[cfg(test)]
 pub(crate) fn node_destroy_count() -> usize {
-    NODE_DESTROY_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+    NODE_DESTROY_COUNT.with(Cell::get)
 }
 
 impl Drop for NodePurge {
@@ -225,8 +240,11 @@ impl Drop for NodePurge {
             }
         }
 
+        // `try_with`, not `with`: this frame is `extern "C"`, and `with` panics
+        // if the thread's TLS is already being destroyed. Nothing above may
+        // unwind, and neither may this.
         #[cfg(test)]
-        NODE_DESTROY_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = NODE_DESTROY_COUNT.try_with(|c| c.set(c.get() + 1));
     }
 }
 
@@ -373,7 +391,12 @@ impl<'h> SceneNode<'h> {
 
     /// The id of this node's parent tree.
     ///
-    /// `None` at the scene root, which has no parent.
+    /// `None` at the scene root, which has no parent — and also `None` for a
+    /// parent that carries no [`NodeId`] yet, since a bare handle has no
+    /// runtime to mint one through (the same limit
+    /// [`SceneTree::children`] documents). Use
+    /// [`Runtime::node_parent`](crate::Runtime::node_parent), which mints,
+    /// when the two cases must be told apart.
     pub fn parent(&self) -> Option<NodeId> {
         // SAFETY: the handle's lifetime guarantees the node is live, and every
         // `parent` in a scene is either a live tree or null at the root.

@@ -7005,6 +7005,10 @@ mod tests {
     ///
     /// If that were ever untrue, a descendant's row would survive its node and
     /// the next `set_node_position` on it would write through a freed pointer.
+    ///
+    /// The witness is per-thread (see `scene::NODE_DESTROY_COUNT`), so this
+    /// delta measures this cascade and not whatever another test running beside
+    /// it happened to destroy.
     #[test]
     fn destroying_a_tree_runs_every_descendants_addon_destructor() {
         let rt = headless_runtime();
