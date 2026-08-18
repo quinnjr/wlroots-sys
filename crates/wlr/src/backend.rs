@@ -195,6 +195,16 @@ struct Bound {
     /// apply to it.
     toplevel: Option<ToplevelId>,
 
+    /// A `Cell<bool>` the callback sets when the signal fires, or null.
+    ///
+    /// Separate from `alive`, which is read by [`Registration::drop`] and is
+    /// about the *signal owner*'s liveness. This one is written by
+    /// [`on_set_flag`] and is about the signal having fired at all — the shape
+    /// `render::Renderer` needs for `events.lost`, where the object stays
+    /// alive and only becomes unusable. Reusing `alive` for it would invert
+    /// the meaning `Registration::drop` reads out of that field.
+    flag: *const Cell<bool>,
+
     /// The layer surface this listener belongs to, for the four per-layer-
     /// surface listeners `on_new_layer_surface` links (commit/map/unmap on
     /// the base `wlr_surface`, destroy on the layer surface's own
@@ -223,7 +233,7 @@ const _: () = assert!(std::mem::offset_of!(Bound, listener) == 0);
 /// intrusive, so the signal stores a pointer *into* this allocation and moving
 /// the `Registration` (which moves only the `Box`, not its contents) must not
 /// disturb it.
-struct Registration {
+pub(crate) struct Registration {
     bound: Box<Bound>,
 }
 
@@ -242,11 +252,18 @@ impl Registration {
     ///   contract for every call `notify` makes through it.
     /// * `notify` must be prepared to recover a `Bound` from the listener it is
     ///   handed, which is what [`bound_of`] does.
+    // Eight parameters, and every one of them is a slot on `Bound` this
+    // constructor exists to fill. The five wrappers below are what call sites
+    // actually use; collapsing the slots into a struct would only move the
+    // same eight values one line up, and none of them has a meaningful
+    // default.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn link(
         signal: *mut sys::wl_signal,
         notify: sys::wl_notify_func_t,
         session: *const (),
         alive: *const Cell<bool>,
+        flag: *const Cell<bool>,
         id: Option<OutputId>,
         toplevel: Option<ToplevelId>,
         layer: Option<LayerSurfaceId>,
@@ -263,6 +280,7 @@ impl Registration {
             },
             session,
             alive,
+            flag,
             id,
             toplevel,
             layer,
@@ -307,7 +325,52 @@ impl Registration {
         alive: *const Cell<bool>,
     ) -> Self {
         // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
-        unsafe { Self::link(signal, notify, session, alive, None, None, None) }
+        unsafe {
+            Self::link(
+                signal,
+                notify,
+                session,
+                alive,
+                std::ptr::null(),
+                None,
+                None,
+                None,
+            )
+        }
+    }
+
+    /// Link a listener that does nothing but set `flag` when the signal fires.
+    ///
+    /// The shape [`crate::Renderer`] needs for `events.lost`: the renderer stays
+    /// alive after a GPU reset and only becomes unusable, so there is no
+    /// liveness flag to clear and no event to route — a consumer asks
+    /// [`Renderer::is_lost`](crate::Renderer::is_lost) afterwards.
+    ///
+    /// `alive` is left null, which is the *stronger* claim (see
+    /// [`Registration::drop`]): every caller of this must unlink the
+    /// registration while the signal's owner is still alive.
+    ///
+    /// # Safety
+    ///
+    /// * `signal` must point at an initialised `wl_signal` whose owner outlives
+    ///   the returned `Registration`.
+    /// * `flag` must outlive the returned `Registration`, and must be reachable
+    ///   only from the event loop's own thread.
+    pub(crate) unsafe fn link_flag(signal: *mut sys::wl_signal, flag: *const Cell<bool>) -> Self {
+        // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
+        // `on_set_flag` reads neither `session` nor any id slot.
+        unsafe {
+            Self::link(
+                signal,
+                on_set_flag,
+                std::ptr::null(),
+                std::ptr::null(),
+                flag,
+                None,
+                None,
+                None,
+            )
+        }
     }
 
     /// Link a per-output listener, carrying the [`OutputId`] its callback reads
@@ -325,7 +388,18 @@ impl Registration {
         id: OutputId,
     ) -> Self {
         // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
-        unsafe { Self::link(signal, notify, session, alive, Some(id), None, None) }
+        unsafe {
+            Self::link(
+                signal,
+                notify,
+                session,
+                alive,
+                std::ptr::null(),
+                Some(id),
+                None,
+                None,
+            )
+        }
     }
 
     /// Link a per-toplevel (or per-decoration) listener, carrying the
@@ -344,7 +418,18 @@ impl Registration {
         toplevel: ToplevelId,
     ) -> Self {
         // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
-        unsafe { Self::link(signal, notify, session, alive, None, Some(toplevel), None) }
+        unsafe {
+            Self::link(
+                signal,
+                notify,
+                session,
+                alive,
+                std::ptr::null(),
+                None,
+                Some(toplevel),
+                None,
+            )
+        }
     }
 
     /// Link a per-layer-surface listener, carrying the [`LayerSurfaceId`] its
@@ -363,7 +448,18 @@ impl Registration {
         layer: LayerSurfaceId,
     ) -> Self {
         // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
-        unsafe { Self::link(signal, notify, session, alive, None, None, Some(layer)) }
+        unsafe {
+            Self::link(
+                signal,
+                notify,
+                session,
+                alive,
+                std::ptr::null(),
+                None,
+                None,
+                Some(layer),
+            )
+        }
     }
 }
 
@@ -828,6 +924,15 @@ impl<'d> Backend<'d> {
     /// necessarily alive (nothing has had the chance to kill it yet).
     pub(crate) fn as_ptr(&self) -> *mut sys::wlr_backend {
         self.raw.as_ptr()
+    }
+
+    /// The liveness gate, for in-crate callers outside this module that take a
+    /// `&Backend` from a consumer at an arbitrary moment —
+    /// [`Renderer::autocreate`](crate::Renderer::autocreate) is one, and unlike
+    /// `init_graphics` it can be called after a DRM unplug has already killed
+    /// the backend.
+    pub(crate) fn alive_or_err(&self) -> Result<()> {
+        alive_or_err(&self.alive)
     }
 
     /// Start the backend, at most once.
@@ -1945,6 +2050,24 @@ unsafe fn ensure_id_raw(set: *mut sys::wlr_addon_set) -> u64 {
             Some(id) => id,
             None => attach_id(set),
         }
+    }
+}
+
+/// The signal this listener was linked into fired; record that and nothing else.
+///
+/// The counterpart to [`on_backend_destroy`] for signals that do not mean "the
+/// object is going away" — `wlr_renderer.events.lost` is the one this exists
+/// for. See [`Registration::link_flag`].
+unsafe extern "C" fn on_set_flag(l: *mut sys::wl_listener, _data: *mut std::ffi::c_void) {
+    // SAFETY: wlroots invokes this only for a listener `link_flag` created,
+    // which is the `listener` field of a live `Bound` whose `flag` the caller
+    // guaranteed outlives the registration.
+    //
+    // Nothing here can unwind: a `Cell<bool>` write has no failure mode and
+    // calls no user code, which matters because this is an `extern "C"` frame.
+    unsafe {
+        let bound = bound_of(l);
+        (*(*bound).flag).set(true);
     }
 }
 

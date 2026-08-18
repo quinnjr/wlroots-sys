@@ -1,0 +1,14 @@
+error[E0505]: cannot move out of `renderer` because it is borrowed
+  --> tests/ui/texture_outlives_renderer.rs:17:10
+   |
+11 |     let renderer = Renderer::pixman().expect("pixman renderer");
+   |         -------- binding `renderer` declared here
+12 |     let pixels = vec![0u8; 4 * 4 * 4];
+13 |     let texture = renderer
+   |                   -------- borrow of `renderer` occurs here
+...
+17 |     drop(renderer);
+   |          ^^^^^^^^ move out of `renderer` occurs here
+18 |
+19 |     let _ = texture.width();
+   |             ------- borrow later used here

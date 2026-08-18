@@ -90,13 +90,14 @@ mod layer;
 mod log;
 mod output;
 mod region;
+mod render;
 mod runtime;
 mod scene;
 mod seat;
 mod toplevel;
 
 pub use backend::{Backend, Until};
-pub use buffer::BufferId;
+pub use buffer::{Buffer, BufferId};
 pub use decoration::DecorationMode;
 pub use display::{Display, EventLoop};
 pub use error::{Error, Result};
@@ -108,6 +109,13 @@ pub use layer::{Anchor, Layer, LayerSurface, LayerSurfaceId};
 pub use log::{LogLevel, init_logging, log_verbosity};
 pub use output::Output;
 pub use region::{Region, RegionRef};
+pub use render::{
+    Allocator, AllocatorRef, BlendMode, BufferCaps, BufferPassOptions, DMABUF_MAX_PLANES,
+    DmabufAttributes, DmabufAttributesRef, DmabufPlane, DrmFormat, DrmFormatRef, DrmFormatSet,
+    DrmFormatSetRef, FilterMode, FourCc, LockedBuffer, Modifier, OwnedBuffer, ReadPixels,
+    RectOptions, RenderColor, RenderPass, RenderTimer, Renderer, RendererFeatures, RendererRef,
+    SWAPCHAIN_CAP, Swapchain, Texture, TextureOptions,
+};
 pub use runtime::{Band, Runtime};
 pub use scene::RectId;
 pub use seat::{KeyEvent, Modifiers};

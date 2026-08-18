@@ -87,3 +87,33 @@ fn region_ref_from_raw_is_not_reachable_outside_the_crate() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/region_ref_from_raw_is_private.rs");
 }
+
+/// A texture outliving its renderer is a double free — the pixman renderer
+/// destroys every texture it still knows about when it goes, and
+/// `wlr_texture_destroy` afterwards frees the same allocation again. This is
+/// the borrow that prevents it, and unlike the pairs above it is not merely a
+/// calling convention: the ordering it pins is a memory-safety requirement of
+/// wlroots' own API.
+#[test]
+fn a_texture_cannot_outlive_its_renderer() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/texture_outlives_renderer.rs");
+}
+
+/// The load-bearing half for textures: `Texture::from_raw` is `pub(crate)`, so
+/// a consumer cannot mint one with a lifetime that escapes the check above.
+#[test]
+fn texture_from_raw_is_not_reachable_outside_the_crate() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/texture_from_raw_is_private.rs");
+}
+
+/// Dropping a render pass submits it, so a pass that outlived its renderer
+/// would submit through freed memory. `RenderPass<'r, 'b>` borrows both the
+/// renderer and the destination buffer; this pins that it cannot be returned
+/// from the scope that made it.
+#[test]
+fn a_render_pass_cannot_escape_the_scope_that_began_it() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/pass_escapes_renderer.rs");
+}

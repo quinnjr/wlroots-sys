@@ -23,30 +23,6 @@ note      = "Only an object that owns its own addon set calls these; nothing in 
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_allocator"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_allocator_autocreate"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_allocator_create_buffer"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_allocator_destroy"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_allocator_init"
 reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
@@ -173,31 +149,13 @@ note      = "Backend-specific construction and the interfaces milestone."
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_buffer"
-reason    = "not-yet"
-note      = "Buffer type the render pipeline hands around."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_buffer_begin_data_ptr_access"
 reason    = "not-yet"
 note      = "Buffer type the render pipeline hands around."
 milestone = "M5"
 
 [[waived]]
-symbol    = "wlr_buffer_cap"
-reason    = "not-yet"
-note      = "Buffer type the render pipeline hands around."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_buffer_data_ptr_access_flag"
-reason    = "not-yet"
-note      = "Buffer type the render pipeline hands around."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_buffer_drop"
 reason    = "not-yet"
 note      = "Buffer type the render pipeline hands around."
 milestone = "M5"
@@ -213,12 +171,6 @@ symbol    = "wlr_buffer_finish"
 reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
 milestone = "M13"
-
-[[waived]]
-symbol    = "wlr_buffer_get_dmabuf"
-reason    = "not-yet"
-note      = "Buffer type the render pipeline hands around."
-milestone = "M5"
 
 [[waived]]
 symbol    = "wlr_buffer_get_shm"
@@ -239,19 +191,7 @@ note      = "Reachable only by implementing a wlroots vtable from Rust; see M13.
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_buffer_is_opaque"
-reason    = "not-yet"
-note      = "Buffer type the render pipeline hands around."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_buffer_lock"
-reason    = "not-yet"
-note      = "Buffer type the render pipeline hands around."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_buffer_pass_options"
 reason    = "not-yet"
 note      = "Buffer type the render pipeline hands around."
 milestone = "M5"
@@ -270,12 +210,6 @@ milestone = "M5"
 
 [[waived]]
 symbol    = "wlr_buffer_try_from_resource"
-reason    = "not-yet"
-note      = "Buffer type the render pipeline hands around."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_buffer_unlock"
 reason    = "not-yet"
 note      = "Buffer type the render pipeline hands around."
 milestone = "M5"
@@ -887,24 +821,6 @@ note      = "Output stack completion."
 milestone = "M6"
 
 [[waived]]
-symbol    = "wlr_dmabuf_attributes"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_dmabuf_attributes_copy"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_dmabuf_attributes_finish"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_dmabuf_v1_buffer"
 reason    = "not-yet"
 note      = "Buffer-sharing, screen capture and DRM lease protocols."
@@ -1025,64 +941,9 @@ note      = "Backend-specific construction and the interfaces milestone."
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_drm_format"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_drm_format_finish"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_format_set"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_format_set_add"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_format_set_finish"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_format_set_get"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_format_set_has"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_format_set_intersect"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_format_set_remove"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_format_set_union"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
+reason    = "superseded-by"
+note      = "DrmFormat owns its modifiers as a Vec, so this would free Rust's memory; a C-owned format belongs to a set or a swapchain, which frees it with wlr_drm_format_set_finish / wlr_swapchain_destroy."
 
 [[waived]]
 symbol    = "wlr_drm_lease"
@@ -3140,12 +3001,6 @@ note      = "Output stack completion."
 milestone = "M6"
 
 [[waived]]
-symbol    = "wlr_pixman_renderer_create"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_pixman_renderer_get_buffer_image"
 reason    = "not-yet"
 note      = "Render pipeline core."
@@ -3512,40 +3367,10 @@ note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
 
 [[waived]]
-symbol    = "wlr_render_blend_mode"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_render_color"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_render_pass"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_render_pass_add_rect"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_render_pass_add_texture"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_render_pass_impl"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_render_pass_init"
@@ -3554,28 +3379,10 @@ note      = "Reachable only by implementing a wlroots vtable from Rust; see M13.
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_render_pass_submit"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_render_rect_options"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_render_rect_options_get_box"
 reason    = "interface-impl-only"
 note      = "Accessor a renderer implementation calls on options wlroots hands it."
 milestone = "M13"
-
-[[waived]]
-symbol    = "wlr_render_texture_options"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
 
 [[waived]]
 symbol    = "wlr_render_texture_options_get_alpha"
@@ -3596,30 +3403,6 @@ note      = "Accessor a renderer implementation calls on options wlroots hands i
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_render_timer"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_render_timer_create"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_render_timer_destroy"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_render_timer_get_duration_ns"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_render_timer_impl"
 reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
@@ -3627,42 +3410,6 @@ milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_render_timer_is_gles2"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_renderer"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_renderer_autocreate"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_renderer_begin_buffer_pass"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_renderer_destroy"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_renderer_get_drm_fd"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_renderer_get_texture_formats"
 reason    = "not-yet"
 note      = "Render pipeline core."
 milestone = "M5"
@@ -3680,18 +3427,6 @@ note      = "Reachable only by implementing a wlroots vtable from Rust; see M13.
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_renderer_init_wl_display"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_renderer_init_wl_shm"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_renderer_is_gles2"
 reason    = "not-yet"
 note      = "Render pipeline core."
@@ -3705,12 +3440,6 @@ milestone = "M5"
 
 [[waived]]
 symbol    = "wlr_renderer_is_vk"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_scale_filter_mode"
 reason    = "not-yet"
 note      = "Render pipeline core."
 milestone = "M5"
@@ -5135,42 +4864,6 @@ note      = "Shell completion: xdg-shell remainder, foreign toplevels, composito
 milestone = "M9"
 
 [[waived]]
-symbol    = "wlr_swapchain"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_swapchain_acquire"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_swapchain_create"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_swapchain_destroy"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_swapchain_has_buffer"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_swapchain_slot"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_switch"
 reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
@@ -5705,36 +5398,6 @@ note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
 
 [[waived]]
-symbol    = "wlr_texture"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_texture_destroy"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_texture_from_buffer"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_texture_from_dmabuf"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_texture_from_pixels"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_texture_impl"
 reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
@@ -5765,40 +5428,16 @@ note      = "Render pipeline core."
 milestone = "M5"
 
 [[waived]]
-symbol    = "wlr_texture_preferred_read_format"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_texture_read_pixel_options_get_data"
 reason    = "interface-impl-only"
 note      = "Accessor a renderer implementation calls on options wlroots hands it."
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_texture_read_pixels"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_texture_read_pixels_options"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_texture_read_pixels_options_get_src_box"
 reason    = "interface-impl-only"
 note      = "Accessor a renderer implementation calls on options wlroots hands it."
 milestone = "M13"
-
-[[waived]]
-symbol    = "wlr_texture_update_from_buffer"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
 
 [[waived]]
 symbol    = "wlr_touch"

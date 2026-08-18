@@ -103,6 +103,72 @@ version at release; nothing here has shipped. Purely additive so far.
   unrepresentable; `rotated_bounds` takes **radians**, which the headers do not
   say and which `tests/region.rs` pins.
 
+### Rendering
+
+The one part of wlroots a compositor genuinely *owns*: a renderer, an
+allocator, a swapchain, a texture and a render pass are all created by the
+compositor and freed by the compositor. Verified rather than assumed — the only
+`wlr_renderer_destroy`/`wlr_allocator_destroy` calls inside wlroots 0.20.2 are
+for the DRM backend's own internal renderer — so these types have real `Drop`
+impls, and there is no "was it destroyed behind my back?" error among their
+failures.
+
+- `Renderer` — `autocreate` (whatever wlroots picks for a backend) or `pixman`
+  (software, no GPU, no backend needed). Reports `features()`, `buffer_caps()`,
+  `texture_formats()` and a **borrowed** `drm_fd()`; registers the buffer
+  factory globals with `init_wl_display`/`init_wl_shm`; makes textures, render
+  timers and render passes. `is_lost()` latches when the GPU is reset.
+- `RendererRef<'_>` and `AllocatorRef<'_>`, from `Runtime::renderer_ref()` and
+  `Runtime::allocator_ref()` — **non-owning** views of the pair
+  `Runtime::init_graphics` creates and deliberately never frees. They carry the
+  same queries with no `Drop` and no way to acquire one, because handing out an
+  owning type for those would put a double free one `drop` away.
+- `Texture<'r>` — borrows the renderer that made it, which is how wlroots'
+  "textures must be destroyed separately" stops being a rule to remember and
+  becomes a compile error (`tests/ui/texture_outlives_renderer.rs`).
+  `update_from_buffer` documents its own **routine** failure: the pixman
+  renderer implements no update path at all, and callers must be prepared to
+  rebuild the texture instead. `read_pixels` bounds-checks the destination
+  slice, which wlroots does not.
+- `RenderPass<'r, 'b>`, with `TextureOptions`/`RectOptions` builders,
+  `RenderColor`, `BlendMode` and `FilterMode`. **Dropping a pass submits it**:
+  `wlr_render_pass_submit` is the only thing that frees a pass, wlroots has no
+  cancel, and a forgotten pass leaks GPU memory. `submit()` is the same call
+  with the answer returned. One live pass per renderer; a second returns
+  `Error::Reentrant`.
+- `Allocator<'r>` and `Swapchain<'a>`, with `SWAPCHAIN_CAP`. A swapchain whose
+  allocator died reports `Error::Destroyed("wlr_allocator")` from `acquire`
+  rather than calling into it — wlroots nulls the field from its own listener,
+  so that is a fact rather than a cached guess.
+- **`OwnedBuffer` and `LockedBuffer` are not interchangeable.** An allocator
+  hands out the *producer* reference (released with `wlr_buffer_drop`); a
+  swapchain hands out the *consumer* reference (released with
+  `wlr_buffer_unlock`). Mixing them up is a leak in one direction and a
+  premature free in the other, and wlroots diagnoses neither — so they are
+  different types that both deref to the read-only `Buffer<'_>`.
+- `DrmFormat`, `DrmFormatSet` (+ the `Ref` views), `FourCc` and `Modifier`.
+  `DrmFormatSet::intersect` returns `Err` for an **empty** intersection as well
+  as for a failure, because `wlr_drm_format_set_intersect` reports both as
+  `false` and gives nothing to tell them apart; guessing would be wrong half the
+  time.
+- `DmabufAttributes` / `DmabufAttributesRef<'_>` — owned (closes its
+  descriptors) and borrowed (closes none, because `Buffer::dmabuf`'s descriptors
+  belong to the buffer). `try_clone` dups. `plane_fd` dups too, rather than
+  handing out a descriptor the attributes still own.
+
+Four wlroots assertions are reachable from an obvious safe call here, and every
+distro builds wlroots without `NDEBUG`, so tripping one **aborts the process**.
+They are checked in Rust instead: a renderer's own listeners are unlinked before
+it is destroyed, `texture_from_pixels` rejects a zero dimension or a short
+slice, `add_rect` rejects a negative extent, `add_texture` rejects a source box
+outside its texture (and a texture belonging to another renderer), and
+`Swapchain::create` rejects a non-positive size.
+
+One implementation note worth knowing: `texture_from_pixels` keeps its own copy
+of the pixels. wlroots wraps the caller's pointer in a buffer it immediately
+drops, and the pixman renderer goes on reading through that *original* pointer —
+so a `&[u8]` argument cannot promise what the texture needs.
+
 ### Logging
 
 - `LogLevel`, `init_logging` and `log_verbosity`. `init_logging` installs a

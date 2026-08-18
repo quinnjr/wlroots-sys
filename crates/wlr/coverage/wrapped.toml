@@ -34,6 +34,26 @@ module = "addon"
 item   = "OutputId"
 
 [[wrapped]]
+symbol = "wlr_allocator"
+module = "render::allocator"
+item   = "Allocator"
+
+[[wrapped]]
+symbol = "wlr_allocator_autocreate"
+module = "render::allocator"
+item   = "Allocator::autocreate"
+
+[[wrapped]]
+symbol = "wlr_allocator_create_buffer"
+module = "render::allocator"
+item   = "Allocator::create_buffer"
+
+[[wrapped]]
+symbol = "wlr_allocator_destroy"
+module = "render::allocator"
+item   = "Allocator (Drop)"
+
+[[wrapped]]
 symbol = "wlr_backend"
 module = "backend"
 item   = "Backend"
@@ -89,6 +109,41 @@ module = "geom"
 item   = "Box2D::transformed"
 
 [[wrapped]]
+symbol = "wlr_buffer"
+module = "buffer"
+item   = "Buffer"
+
+[[wrapped]]
+symbol = "wlr_buffer_cap"
+module = "render"
+item   = "BufferCaps"
+
+[[wrapped]]
+symbol = "wlr_buffer_drop"
+module = "render::allocator"
+item   = "OwnedBuffer (Drop)"
+
+[[wrapped]]
+symbol = "wlr_buffer_get_dmabuf"
+module = "buffer"
+item   = "Buffer::dmabuf"
+
+[[wrapped]]
+symbol = "wlr_buffer_is_opaque"
+module = "buffer"
+item   = "Buffer::is_opaque"
+
+[[wrapped]]
+symbol = "wlr_buffer_pass_options"
+module = "render::pass"
+item   = "BufferPassOptions"
+
+[[wrapped]]
+symbol = "wlr_buffer_unlock"
+module = "render::swapchain"
+item   = "LockedBuffer (Drop)"
+
+[[wrapped]]
 symbol = "wlr_compositor_create"
 module = "runtime"
 item   = "Runtime::init_graphics"
@@ -102,6 +157,66 @@ item   = "Runtime::create_data_control_manager"
 symbol = "wlr_data_device_manager_create"
 module = "runtime"
 item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_dmabuf_attributes"
+module = "render::dmabuf"
+item   = "DmabufAttributes"
+
+[[wrapped]]
+symbol = "wlr_dmabuf_attributes_copy"
+module = "render::dmabuf"
+item   = "DmabufAttributesRef::try_clone"
+
+[[wrapped]]
+symbol = "wlr_dmabuf_attributes_finish"
+module = "render::dmabuf"
+item   = "DmabufAttributes (Drop)"
+
+[[wrapped]]
+symbol = "wlr_drm_format"
+module = "render::format"
+item   = "DrmFormat"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set"
+module = "render::format"
+item   = "DrmFormatSet"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set_add"
+module = "render::format"
+item   = "DrmFormatSet::add"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set_finish"
+module = "render::format"
+item   = "DrmFormatSet (Drop)"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set_get"
+module = "render::format"
+item   = "DrmFormatSet::get"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set_has"
+module = "render::format"
+item   = "DrmFormatSet::has"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set_intersect"
+module = "render::format"
+item   = "DrmFormatSet::intersect"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set_remove"
+module = "render::format"
+item   = "DrmFormatSet::remove"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set_union"
+module = "render::format"
+item   = "DrmFormatSet::union"
 
 [[wrapped]]
 symbol = "wlr_edges"
@@ -249,6 +364,11 @@ module = "geom"
 item   = "Transform::invert"
 
 [[wrapped]]
+symbol = "wlr_pixman_renderer_create"
+module = "render"
+item   = "Renderer::pixman"
+
+[[wrapped]]
 symbol = "wlr_pointer_button_event"
 module = "backend"
 item   = "SeatHandler::pointer_button"
@@ -297,6 +417,111 @@ item   = "Region::scaled_xy"
 symbol = "wlr_region_transform"
 module = "region"
 item   = "Region::transformed"
+
+[[wrapped]]
+symbol = "wlr_render_blend_mode"
+module = "render::pass"
+item   = "BlendMode"
+
+[[wrapped]]
+symbol = "wlr_render_color"
+module = "render::pass"
+item   = "RenderColor"
+
+[[wrapped]]
+symbol = "wlr_render_pass"
+module = "render::pass"
+item   = "RenderPass"
+
+[[wrapped]]
+symbol = "wlr_render_pass_add_rect"
+module = "render::pass"
+item   = "RenderPass::add_rect"
+
+[[wrapped]]
+symbol = "wlr_render_pass_add_texture"
+module = "render::pass"
+item   = "RenderPass::add_texture"
+
+[[wrapped]]
+symbol = "wlr_render_pass_submit"
+module = "render::pass"
+item   = "RenderPass::submit"
+
+[[wrapped]]
+symbol = "wlr_render_rect_options"
+module = "render::pass"
+item   = "RectOptions"
+
+[[wrapped]]
+symbol = "wlr_render_texture_options"
+module = "render::pass"
+item   = "TextureOptions"
+
+[[wrapped]]
+symbol = "wlr_render_timer"
+module = "render::pass"
+item   = "RenderTimer"
+
+[[wrapped]]
+symbol = "wlr_render_timer_create"
+module = "render"
+item   = "Renderer::create_timer"
+
+[[wrapped]]
+symbol = "wlr_render_timer_destroy"
+module = "render::pass"
+item   = "RenderTimer (Drop)"
+
+[[wrapped]]
+symbol = "wlr_render_timer_get_duration_ns"
+module = "render::pass"
+item   = "RenderTimer::duration_ns"
+
+[[wrapped]]
+symbol = "wlr_renderer"
+module = "render"
+item   = "Renderer"
+
+[[wrapped]]
+symbol = "wlr_renderer_autocreate"
+module = "render"
+item   = "Renderer::autocreate"
+
+[[wrapped]]
+symbol = "wlr_renderer_begin_buffer_pass"
+module = "render"
+item   = "Renderer::begin_buffer_pass"
+
+[[wrapped]]
+symbol = "wlr_renderer_destroy"
+module = "render"
+item   = "Renderer (Drop)"
+
+[[wrapped]]
+symbol = "wlr_renderer_get_drm_fd"
+module = "render"
+item   = "Renderer::drm_fd"
+
+[[wrapped]]
+symbol = "wlr_renderer_get_texture_formats"
+module = "render"
+item   = "Renderer::texture_formats"
+
+[[wrapped]]
+symbol = "wlr_renderer_init_wl_display"
+module = "render"
+item   = "Renderer::init_wl_display"
+
+[[wrapped]]
+symbol = "wlr_renderer_init_wl_shm"
+module = "render"
+item   = "Renderer::init_wl_shm"
+
+[[wrapped]]
+symbol = "wlr_scale_filter_mode"
+module = "render::pass"
+item   = "FilterMode"
 
 [[wrapped]]
 symbol = "wlr_scene_attach_output_layout"
@@ -422,6 +647,81 @@ item   = "Runtime::focus_toplevel_keyboard"
 symbol = "wlr_subcompositor_create"
 module = "runtime"
 item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_swapchain"
+module = "render::swapchain"
+item   = "Swapchain"
+
+[[wrapped]]
+symbol = "wlr_swapchain_acquire"
+module = "render::swapchain"
+item   = "Swapchain::acquire"
+
+[[wrapped]]
+symbol = "wlr_swapchain_create"
+module = "render::swapchain"
+item   = "Swapchain::create"
+
+[[wrapped]]
+symbol = "wlr_swapchain_destroy"
+module = "render::swapchain"
+item   = "Swapchain (Drop)"
+
+[[wrapped]]
+symbol = "wlr_swapchain_has_buffer"
+module = "render::swapchain"
+item   = "Swapchain::has_buffer"
+
+[[wrapped]]
+symbol = "wlr_swapchain_slot"
+module = "render::swapchain"
+item   = "Swapchain::in_flight"
+
+[[wrapped]]
+symbol = "wlr_texture"
+module = "render::texture"
+item   = "Texture"
+
+[[wrapped]]
+symbol = "wlr_texture_destroy"
+module = "render::texture"
+item   = "Texture (Drop)"
+
+[[wrapped]]
+symbol = "wlr_texture_from_buffer"
+module = "render"
+item   = "Renderer::texture_from_buffer"
+
+[[wrapped]]
+symbol = "wlr_texture_from_dmabuf"
+module = "render"
+item   = "Renderer::texture_from_dmabuf"
+
+[[wrapped]]
+symbol = "wlr_texture_from_pixels"
+module = "render"
+item   = "Renderer::texture_from_pixels"
+
+[[wrapped]]
+symbol = "wlr_texture_preferred_read_format"
+module = "render::texture"
+item   = "Texture::preferred_read_format"
+
+[[wrapped]]
+symbol = "wlr_texture_read_pixels"
+module = "render::texture"
+item   = "Texture::read_pixels"
+
+[[wrapped]]
+symbol = "wlr_texture_read_pixels_options"
+module = "render::texture"
+item   = "ReadPixels"
+
+[[wrapped]]
+symbol = "wlr_texture_update_from_buffer"
+module = "render::texture"
+item   = "Texture::update_from_buffer"
 
 [[wrapped]]
 symbol = "wlr_virtual_keyboard_manager_v1_create"

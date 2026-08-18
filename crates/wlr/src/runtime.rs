@@ -39,8 +39,8 @@ use crate::id::{SourceId, next_id};
 use crate::layer::Layer;
 use crate::scene::RectId;
 use crate::{
-    Backend, BufferId, Display, Error, Interest, LayerSurfaceId, Output, OutputId, Result,
-    ToplevelId, sys,
+    AllocatorRef, Backend, BufferId, Display, Error, Interest, LayerSurfaceId, Output, OutputId,
+    RendererRef, Result, ToplevelId, sys,
 };
 
 /// A declared fd source: the descriptor, what it wants, and its id.
@@ -2850,6 +2850,42 @@ impl Runtime {
     /// caller drops the announcement instead of aborting the process for it.
     pub(crate) fn scene_ptr(&self) -> Option<NonNull<sys::wlr_scene>> {
         self.inner.graphics.borrow().as_ref().map(|g| g.scene)
+    }
+
+    /// The renderer [`init_graphics`](Runtime::init_graphics) created, as a
+    /// **non-owning** view.
+    ///
+    /// `None` before `init_graphics` has run.
+    ///
+    /// Borrowed rather than owned, and that is the whole point of the separate
+    /// type: this renderer is deliberately never destroyed (see `Graphics`' own
+    /// doc for why, and what a future `Drop` would have to do), so handing out
+    /// a [`Renderer`](crate::Renderer) — which destroys what it holds — would
+    /// make a double free one `drop` away. A renderer this crate's consumer
+    /// owns comes from [`Renderer::autocreate`](crate::Renderer::autocreate)
+    /// instead.
+    ///
+    /// The `&self` borrow is what bounds the view: it cannot outlive the
+    /// `Runtime` handle it was taken from, and every clone of that handle names
+    /// the same graphics.
+    pub fn renderer_ref(&self) -> Option<RendererRef<'_>> {
+        let raw = self.inner.graphics.borrow().as_ref().map(|g| g.renderer)?;
+        // SAFETY: `init_graphics` created this renderer and nothing destroys it
+        // — `Graphics` has no `Drop`, and wlroots never destroys a renderer it
+        // did not create — so it is live for the whole process, which outlives
+        // this borrow. The view cannot free it.
+        Some(unsafe { RendererRef::from_raw(raw.as_ptr()) })
+    }
+
+    /// The allocator [`init_graphics`](Runtime::init_graphics) created, as a
+    /// **non-owning** view. `None` before `init_graphics` has run.
+    ///
+    /// Borrowed for the same reason [`renderer_ref`](Runtime::renderer_ref) is.
+    pub fn allocator_ref(&self) -> Option<AllocatorRef<'_>> {
+        let raw = self.inner.graphics.borrow().as_ref().map(|g| g.allocator)?;
+        // SAFETY: as in `renderer_ref`; the allocator is created once by
+        // `init_graphics` and never destroyed.
+        Some(unsafe { AllocatorRef::from_raw(raw.as_ptr()) })
     }
 
     /// The scene tree every toplevel's own tree is parented into — see

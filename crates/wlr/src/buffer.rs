@@ -75,7 +75,98 @@
 //! and a render pass does not call back into handler code" — true of this
 //! crate today, and worth re-checking the day either stops being true.
 
+use std::marker::PhantomData;
+use std::ptr::NonNull;
+
+use crate::render::DmabufAttributesRef;
 use crate::sys;
+
+/// A `wlr_buffer` borrowed for the duration of a call.
+///
+/// Borrow-scoped like every other handle in this crate, and for the usual
+/// reason: a buffer is reference-counted by wlroots and freed the moment its
+/// last reference goes, which can be inside any wlroots call this crate makes.
+/// The two *owning* forms live in the render module and both deref to this one:
+/// [`OwnedBuffer`](crate::OwnedBuffer) (the producer reference an allocator
+/// hands out, released with `wlr_buffer_drop`) and
+/// [`LockedBuffer`](crate::LockedBuffer) (the consumer reference a swapchain
+/// hands out, released with `wlr_buffer_unlock`). This module's own "Refcount
+/// story" is what those two names mean; they are **not** interchangeable.
+pub struct Buffer<'a> {
+    raw: NonNull<sys::wlr_buffer>,
+    _scope: PhantomData<&'a ()>,
+}
+
+impl<'a> Buffer<'a> {
+    /// # Safety
+    ///
+    /// * `raw` must point at a live `wlr_buffer`.
+    /// * The returned handle must not outlive the reference that keeps that
+    ///   buffer alive — a lock, a producer reference, or the callback the
+    ///   buffer was handed to.
+    pub(crate) unsafe fn from_raw(raw: *mut sys::wlr_buffer) -> Buffer<'a> {
+        Buffer {
+            raw: NonNull::new(raw).expect("wlroots handed us a null wlr_buffer"),
+            _scope: PhantomData,
+        }
+    }
+
+    /// The raw buffer, for the in-crate callers that pass it back to wlroots.
+    pub(crate) fn as_ptr(&self) -> *mut sys::wlr_buffer {
+        self.raw.as_ptr()
+    }
+
+    /// Width in pixels.
+    pub fn width(&self) -> i32 {
+        // SAFETY: the handle's lifetime guarantees the buffer is live.
+        unsafe { (*self.raw.as_ptr()).width }
+    }
+
+    /// Height in pixels.
+    pub fn height(&self) -> i32 {
+        // SAFETY: the handle's lifetime guarantees the buffer is live.
+        unsafe { (*self.raw.as_ptr()).height }
+    }
+
+    /// Whether every pixel of this buffer is fully opaque, which lets a
+    /// compositor skip whatever is behind it.
+    pub fn is_opaque(&self) -> bool {
+        // SAFETY: as above; `wlr_buffer_is_opaque` only reads the buffer.
+        unsafe { sys::wlr_buffer_is_opaque(self.raw.as_ptr()) }
+    }
+
+    /// This buffer's DMA-BUF attributes, if it has any.
+    ///
+    /// The descriptors in the returned view belong to the buffer and are valid
+    /// for as long as it is — which is why this is a
+    /// [`DmabufAttributesRef`](crate::DmabufAttributesRef) and not the owned
+    /// form. Calling `wlr_dmabuf_attributes_finish` on these would close
+    /// descriptors the buffer still uses and then close them a second time when
+    /// the buffer dies.
+    pub fn dmabuf(&self) -> Option<DmabufAttributesRef<'_>> {
+        let mut attrs = std::mem::MaybeUninit::<sys::wlr_dmabuf_attributes>::zeroed();
+        // SAFETY: the handle's lifetime guarantees the buffer is live;
+        // `attrs` is a live local wlroots fills in completely when it returns
+        // true, and leaves alone otherwise (which is why the `false` arm
+        // returns before assuming anything about it).
+        let ok = unsafe { sys::wlr_buffer_get_dmabuf(self.raw.as_ptr(), attrs.as_mut_ptr()) };
+        if !ok {
+            return None;
+        }
+        // SAFETY: wlroots returned true, so every field is initialised. The
+        // descriptors it names are the buffer's own, borrowed for `'_`.
+        unsafe { DmabufAttributesRef::from_raw(attrs.assume_init()) }
+    }
+}
+
+impl std::fmt::Debug for Buffer<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Buffer")
+            .field("width", &self.width())
+            .field("height", &self.height())
+            .finish()
+    }
+}
 
 /// Identifies an RGBA pixel-buffer scene node.
 ///
