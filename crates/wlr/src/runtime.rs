@@ -153,6 +153,11 @@ pub(crate) struct RuntimeInner {
     /// screen sharing). `Option`, same rationale as the other manager globals.
     pub(crate) screencopy_manager: RefCell<Option<NonNull<sys::wlr_screencopy_manager_v1>>>,
 
+    /// The idle-notifier (`ext_idle_notifier_v1`) global, once created — lets
+    /// a client (e.g. swayidle) be told when the seat has been idle for a
+    /// timeout. `Option`, same rationale as the other manager globals.
+    pub(crate) idle_notifier: RefCell<Option<NonNull<sys::wlr_idle_notifier_v1>>>,
+
     /// Every live toplevel: the role object, its scene tree, and the surface
     /// its id addon lives on.
     pub(crate) toplevels: RefCell<HashMap<ToplevelId, ToplevelEntry>>,
@@ -633,6 +638,7 @@ impl Runtime {
                 virtual_keyboard_manager: RefCell::new(None),
                 virtual_pointer_manager: RefCell::new(None),
                 screencopy_manager: RefCell::new(None),
+                idle_notifier: RefCell::new(None),
                 toplevels: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
                 layer_shell: RefCell::new(None),
@@ -2050,6 +2056,45 @@ impl Runtime {
         let raw = NonNull::new(raw).ok_or(Error::Create("wlr_screencopy_manager_v1_create"))?;
         *self.inner.screencopy_manager.borrow_mut() = Some(raw);
         Ok(())
+    }
+
+    /// Create the `ext_idle_notifier_v1` global. Clients (e.g. swayidle) bind
+    /// `ext_idle_notification_v1` to be told when the seat has been idle for a
+    /// timeout; this crate feeds it input activity from the seat handlers, and
+    /// wlroots drives the client-facing timers. Errors if called twice.
+    pub fn create_idle_notifier(&self, display: &Display) -> Result<()> {
+        if self.inner.idle_notifier.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_idle_notifier called twice",
+            ));
+        }
+        // SAFETY: display live for the call; notifier is display-owned and freed
+        // with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_idle_notifier_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_idle_notifier_v1_create"))?;
+        *self.inner.idle_notifier.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    pub(crate) fn idle_notifier(&self) -> Option<NonNull<sys::wlr_idle_notifier_v1>> {
+        *self.inner.idle_notifier.borrow()
+    }
+
+    /// Feed the idle notifier a user-activity event on the current seat, if
+    /// both exist. Called from every seat-input dispatch in `backend.rs` (and
+    /// the touch injectors in `runtime.rs`/test harness) so wlroots' idle
+    /// timers reset on real activity. A no-op with no idle notifier or no
+    /// seat — a consumer that never calls
+    /// [`create_idle_notifier`](Runtime::create_idle_notifier) pays nothing
+    /// for it.
+    pub(crate) fn notify_seat_activity(&self) {
+        let (Some(notifier), Some(seat)) = (self.idle_notifier(), self.seat_ptr()) else {
+            return;
+        };
+        // SAFETY: `notifier` is display-owned and lives as long as this
+        // runtime; `seat` was created by `create_seat` and lives as long as
+        // this runtime.
+        unsafe { sys::wlr_idle_notifier_v1_notify_activity(notifier.as_ptr(), seat.as_ptr()) };
     }
 
     pub(crate) fn virtual_pointer_manager_ptr(
@@ -3483,6 +3528,7 @@ impl Runtime {
     /// input in tests.
     #[doc(hidden)]
     pub fn inject_touch_down(&self, x: f64, y: f64, id: i32, time_msec: u32) -> Option<u32> {
+        self.notify_seat_activity();
         let seat = self.seat_ptr()?;
         let (surface, sx, sy) = self.leaf_surface_at(x, y)?;
         // SAFETY: `seat` is this runtime's own live seat (from
@@ -3516,6 +3562,7 @@ impl Runtime {
     /// No production caller — see [`inject_touch_down`](Runtime::inject_touch_down).
     #[doc(hidden)]
     pub fn inject_touch_motion(&self, x: f64, y: f64, id: i32, time_msec: u32) {
+        self.notify_seat_activity();
         let Some(seat) = self.seat_ptr() else {
             return;
         };
@@ -3565,6 +3612,7 @@ impl Runtime {
     /// No production caller — see [`inject_touch_down`](Runtime::inject_touch_down).
     #[doc(hidden)]
     pub fn inject_touch_up(&self, id: i32, time_msec: u32) {
+        self.notify_seat_activity();
         let Some(seat) = self.seat_ptr() else {
             return;
         };

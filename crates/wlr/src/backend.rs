@@ -3653,6 +3653,7 @@ unsafe extern "C" fn on_key<S: Handlers>(l: *mut sys::wl_listener, data: *mut st
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_keyboard_key_event>();
+        (*session).runtime.notify_seat_activity();
         let Some(seat) = (*session).runtime.seat_ptr() else {
             return;
         };
@@ -3788,6 +3789,7 @@ unsafe extern "C" fn on_pointer_motion<S: Handlers>(
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_pointer_motion_event>();
         let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
         let Some(cursor) = runtime.cursor_ptr() else {
             return;
         };
@@ -3836,6 +3838,7 @@ unsafe extern "C" fn on_pointer_motion_absolute<S: Handlers>(
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_pointer_motion_absolute_event>();
         let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
         let Some(cursor) = runtime.cursor_ptr() else {
             return;
         };
@@ -3879,6 +3882,7 @@ unsafe extern "C" fn on_pointer_button<S: Handlers>(
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_pointer_button_event>();
         let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
         let Some(cursor) = runtime.cursor_ptr() else {
             return;
         };
