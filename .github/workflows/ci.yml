@@ -61,6 +61,33 @@ jobs:
       # cargo cannot resolve a manifest listing two `wlr-sys` versions.
       - run: cargo test --workspace
 
+      # 100% is defined in the all-features configuration, so the ledgers are
+      # reconciled against those bindings. WLR_COVERAGE_ALL_FEATURES is what
+      # turns "ledger names a symbol bindgen never emitted" into a hard failure;
+      # a smaller feature set binds a subset and would report every gated row.
+      # WLR_COVERAGE_BINDINGS is resolved here rather than left to the audit's
+      # own newest-mtime search: any later cargo invocation that builds wlr-sys
+      # in a different configuration writes a newer bindings.rs, and the audit
+      # would then silently reconcile against a subset.
+      - name: Coverage audit (all features)
+        run: |
+          cargo build -p wlr-sys --all-features
+          bindings=$(find target/debug/build -maxdepth 3 -name bindings.rs -path '*wlr-sys*' \
+            -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)
+          echo "ground truth: $bindings"
+          export WLR_COVERAGE_BINDINGS="$bindings"
+          cargo test -p wlr --all-features --test coverage_audit
+          # Informational: the burn-down table, so a milestone's progress is
+          # visible in the log without anyone running it locally.
+          cargo run -p xtask -- coverage
+        env:
+          WLR_COVERAGE_ALL_FEATURES: 1
+
+      # The same gate against whatever bindings the default build produced —
+      # a subset, so the other three checks must still hold.
+      - name: Coverage audit (no default features)
+        run: cargo test -p wlr --no-default-features --test coverage_audit
+
       # The README is the crate's rustdoc (`#![doc = include_str!(...)]`), so a
       # broken link or fence in it breaks documentation builds.
       - run: cargo doc -p wlr-sys --no-deps

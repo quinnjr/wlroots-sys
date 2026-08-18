@@ -1,0 +1,4 @@
+[alias]
+# `cargo xtask coverage` prints the safe crate's coverage burn-down; add
+# `--check` to make an inconsistent ledger a non-zero exit.
+xtask = "run -p xtask --"

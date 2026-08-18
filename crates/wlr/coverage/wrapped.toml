@@ -1,0 +1,340 @@
+# Symbols the safe `wlr` API covers.
+#
+# One `[[wrapped]]` block per `wlr_*` symbol, with the module that reaches it
+# and the safe public item a consumer calls to get its effect. See README.md in
+# this directory for the format, the rules, and how to edit this file.
+#
+# Every row is validated twice by `cargo test -p wlr --test coverage_audit`:
+# the symbol must exist in the generated bindings, and it must still appear in
+# a `sys::` use somewhere under `crates/wlr/src`.
+
+[[wrapped]]
+symbol = "wlr_backend"
+module = "backend"
+item   = "Backend"
+
+[[wrapped]]
+symbol = "wlr_backend_autocreate"
+module = "backend"
+item   = "Backend::autocreate"
+
+[[wrapped]]
+symbol = "wlr_backend_start"
+module = "backend"
+item   = "Backend::run_all"
+
+[[wrapped]]
+symbol = "wlr_compositor_create"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_data_control_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_data_control_manager"
+
+[[wrapped]]
+symbol = "wlr_data_device_manager_create"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_keyboard_get_modifiers"
+module = "seat"
+item   = "KeyEvent::modifiers"
+
+[[wrapped]]
+symbol = "wlr_keyboard_key_event"
+module = "seat"
+item   = "KeyEvent"
+
+[[wrapped]]
+symbol = "wlr_keyboard_modifier"
+module = "seat"
+item   = "Modifiers"
+
+[[wrapped]]
+symbol = "wlr_layer_shell_v1_create"
+module = "runtime"
+item   = "Runtime::create_layer_shell"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1"
+module = "layer"
+item   = "LayerSurface"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_configure"
+module = "runtime"
+item   = "Runtime::configure_layer_surface"
+
+[[wrapped]]
+symbol = "wlr_output"
+module = "output"
+item   = "Output"
+
+[[wrapped]]
+symbol = "wlr_output_commit_state"
+module = "output"
+item   = "Output::commit"
+
+[[wrapped]]
+symbol = "wlr_output_init_render"
+module = "runtime"
+item   = "Runtime::init_output"
+
+[[wrapped]]
+symbol = "wlr_output_layout_add"
+module = "runtime"
+item   = "Runtime::set_output_position"
+
+[[wrapped]]
+symbol = "wlr_output_layout_add_auto"
+module = "runtime"
+item   = "Runtime::init_output"
+
+[[wrapped]]
+symbol = "wlr_output_layout_create"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_output_layout_get_box"
+module = "runtime"
+item   = "Runtime::output_layout_box"
+
+[[wrapped]]
+symbol = "wlr_output_preferred_mode"
+module = "output"
+item   = "Output::enable_with_preferred_mode"
+
+[[wrapped]]
+symbol = "wlr_output_schedule_frame"
+module = "output"
+item   = "Output::schedule_frame"
+
+[[wrapped]]
+symbol = "wlr_output_state_set_enabled"
+module = "output"
+item   = "Output::enable_with_preferred_mode"
+
+[[wrapped]]
+symbol = "wlr_output_state_set_mode"
+module = "output"
+item   = "Output::enable_with_preferred_mode"
+
+[[wrapped]]
+symbol = "wlr_pointer_button_event"
+module = "backend"
+item   = "SeatHandler::pointer_button"
+
+[[wrapped]]
+symbol = "wlr_pointer_motion_absolute_event"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_pointer_motion_event"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_primary_selection_v1_device_manager_create"
+module = "runtime"
+item   = "Runtime::create_primary_selection_manager"
+
+[[wrapped]]
+symbol = "wlr_scene_attach_output_layout"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_create"
+module = "runtime"
+item   = "Runtime::add_buffer"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_buffer"
+module = "runtime"
+item   = "Runtime::update_buffer"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_dest_size"
+module = "runtime"
+item   = "Runtime::set_buffer_dest_size"
+
+[[wrapped]]
+symbol = "wlr_scene_create"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_scene_get_scene_output"
+module = "runtime"
+item   = "Runtime::commit_output"
+
+[[wrapped]]
+symbol = "wlr_scene_node_at"
+module = "runtime"
+item   = "Runtime::toplevel_at"
+
+[[wrapped]]
+symbol = "wlr_scene_node_coords"
+module = "runtime"
+item   = "Runtime::drag_icon_position"
+
+[[wrapped]]
+symbol = "wlr_scene_node_destroy"
+module = "runtime"
+item   = "Runtime::remove_rect"
+
+[[wrapped]]
+symbol = "wlr_scene_node_lower_to_bottom"
+module = "runtime"
+item   = "Runtime::lower_rect_to_bottom"
+
+[[wrapped]]
+symbol = "wlr_scene_node_raise_to_top"
+module = "runtime"
+item   = "Runtime::raise_toplevel"
+
+[[wrapped]]
+symbol = "wlr_scene_node_set_enabled"
+module = "runtime"
+item   = "Runtime::set_toplevel_visible"
+
+[[wrapped]]
+symbol = "wlr_scene_node_set_position"
+module = "runtime"
+item   = "Runtime::set_rect_position"
+
+[[wrapped]]
+symbol = "wlr_scene_output_commit"
+module = "runtime"
+item   = "Runtime::commit_output"
+
+[[wrapped]]
+symbol = "wlr_scene_output_create"
+module = "runtime"
+item   = "Runtime::init_output"
+
+[[wrapped]]
+symbol = "wlr_scene_output_layout_add_output"
+module = "runtime"
+item   = "Runtime::init_output"
+
+[[wrapped]]
+symbol = "wlr_scene_output_send_frame_done"
+module = "runtime"
+item   = "Runtime::commit_output"
+
+[[wrapped]]
+symbol = "wlr_scene_rect"
+module = "scene"
+item   = "RectId"
+
+[[wrapped]]
+symbol = "wlr_scene_rect_create"
+module = "runtime"
+item   = "Runtime::add_rect"
+
+[[wrapped]]
+symbol = "wlr_scene_rect_set_color"
+module = "runtime"
+item   = "Runtime::set_rect_color"
+
+[[wrapped]]
+symbol = "wlr_scene_rect_set_size"
+module = "runtime"
+item   = "Runtime::set_rect_size"
+
+[[wrapped]]
+symbol = "wlr_seat_create"
+module = "runtime"
+item   = "Runtime::create_seat"
+
+[[wrapped]]
+symbol = "wlr_seat_keyboard_notify_clear_focus"
+module = "runtime"
+item   = "Runtime::clear_keyboard_focus"
+
+[[wrapped]]
+symbol = "wlr_seat_keyboard_notify_enter"
+module = "runtime"
+item   = "Runtime::focus_toplevel_keyboard"
+
+[[wrapped]]
+symbol = "wlr_subcompositor_create"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_virtual_keyboard_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_virtual_keyboard_manager"
+
+[[wrapped]]
+symbol = "wlr_virtual_pointer_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_virtual_pointer_manager"
+
+[[wrapped]]
+symbol = "wlr_xdg_decoration_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_xdg_decoration_manager"
+
+[[wrapped]]
+symbol = "wlr_xdg_shell_create"
+module = "runtime"
+item   = "Runtime::create_xdg_shell"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_schedule_configure"
+module = "runtime"
+item   = "Runtime::configure_toplevel"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel"
+module = "toplevel"
+item   = "Toplevel"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_decoration_v1_mode"
+module = "decoration"
+item   = "DecorationMode"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_decoration_v1_set_mode"
+module = "runtime"
+item   = "Runtime::set_decoration_mode"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_resize_event"
+module = "backend"
+item   = "ToplevelHandler::request_resize"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_send_close"
+module = "runtime"
+item   = "Runtime::close_toplevel"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_activated"
+module = "runtime"
+item   = "Runtime::set_toplevel_activated"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_fullscreen"
+module = "runtime"
+item   = "Runtime::set_toplevel_fullscreen"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_maximized"
+module = "runtime"
+item   = "Runtime::set_toplevel_maximized"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_size"
+module = "runtime"
+item   = "Runtime::set_toplevel_size"
+
