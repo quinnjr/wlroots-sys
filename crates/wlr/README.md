@@ -171,6 +171,100 @@ of the pixels. wlroots wraps the caller's pointer in a buffer it immediately
 drops, and the pixman renderer goes on reading through that *original* pointer —
 so a `&[u8]` argument cannot promise what the texture needs.
 
+### Colour
+
+`wlr/render/color.h` in full: the vocabulary the render API speaks, and the
+transforms a colour-managed compositor applies. Wrapped here rather than with
+the colour-management protocols later, because a render pass cannot be described
+without it.
+
+- `NamedPrimaries`, `TransferFunction`, `ColorEncoding`, `ColorRange`,
+  `ChromaLocation` and `AlphaMode`, plus the set types `ColorEncodings` and
+  `TransferFunctions`. **Three of those C enums are bitmask-valued and three are
+  sequential**, and nothing in the Rust shows which — `ColorEncoding::Bt709` is
+  2 while `ColorRange::Limited` is 1. `tests/render_color.rs` pins every value
+  against wlroots' own constants. The same enum is a *set* on the renderer
+  (`Renderer::color_encodings`) and a *single value* on a texture, which is why
+  there are two types rather than one.
+  `TransferFunction` deliberately has no `Default`: its variants start at
+  `1 << 0`, so the "unset" wlroots reads out of a zeroed struct is not a member
+  of the enum, and this crate spells it `Option<TransferFunction>`.
+- `Cie1931Xy`, `ColorPrimaries` and `ColorLuminances` — `#[repr(C)]` twins with
+  their layouts pinned to wlroots'. `ColorPrimaries::named` fills one from a
+  well-known volume; `transform_absolute_colorimetric` computes the 3×3
+  conversion between two.
+- `ColorTransform` — immutable and reference-counted, so `Clone` is a genuine
+  second reference and one may outlive every renderer that ever applied it.
+  Built from an ICC profile (where wlroots was compiled with lcms2), an inverse
+  EOTF, three 1-D lookup tables, a matrix, or a pipeline of other transforms.
+  **The matrix is row-major**, verified against `multiply_matrix_vector` in
+  wlroots' `render/color.c` rather than guessed from a header that says only
+  "a 3×3 matrix" — and it is the same order `transform_absolute_colorimetric`
+  produces, so the two compose.
+- Two more wlroots assertions are checked in Rust: an empty transform pipeline
+  (`init_pipeline` asserts a non-zero length) and mismatched or empty lookup
+  tables (`init_lut_3x1d` reads `dim` entries from all three pointers whatever
+  their real lengths, and a `dim` of 0 makes the evaluator index at `SIZE_MAX`).
+- The colour setters on `TextureOptions` and `BufferPassOptions` **fail** rather
+  than being ignored when the renderer cannot honour them. wlroots' own answer
+  is to draw anyway, untagged, which turns a colour-managed compositor into a
+  quietly mis-rendering one.
+
+### Explicit synchronisation
+
+- `SyncTimeline` — a reference-counted DRM sync-object timeline, with
+  `create`/`import`, `signal`, `check`, `transfer`, `export`, and the sync-file
+  pair. `check` collapses wlroots' two-level answer the only way that keeps
+  both: `Err` is "the ioctl failed", `Ok(false)` is "not ready yet".
+- `SyncFlags::WAIT_FOR_SUBMIT` and `WAIT_AVAILABLE`. These are libdrm's
+  `DRM_SYNCOBJ_WAIT_FLAGS_*`, not wlroots symbols, so they are not in `wlr-sys`
+  and this crate writes them out — and they are **not** bits 0 and 1, because
+  `WAIT_ALL` holds bit 0. `tests/render_sync.rs` reads the installed `drm.h` and
+  compares.
+- `EventLoop::wait_for_timeline` returns a `SyncWaiter<'_>`: a one-shot wait
+  registered on the loop, cancelled by dropping it. `wlr_..._waiter_finish` is
+  legal *and required* after the callback has fired — the callback path releases
+  nothing — which was verified in wlroots' source rather than inferred from the
+  header's word "cancel", since the two readings differ by a leak in one
+  direction and a double free in the other. The waiter borrows the loop, so
+  outliving the display is a compile error.
+- The timeline's DRM descriptor must outlive the timeline: wlroots keeps it and
+  uses it to destroy the kernel object. That one is documented rather than
+  borrow-checked, on purpose — a lifetime there would make storing a timeline
+  beside the renderer it came from a self-referential struct, and wlroots'
+  whole reason for reference-counting timelines is that they are stored.
+
+### Backend-specific renderer surfaces
+
+Every `wlr_gles2_*`, `wlr_vk_*` and `wlr_pixman_*` accessor is undefined
+behaviour on an object of the wrong kind, and each ships a separate
+`wlr_*_is_*` test the caller is trusted to have run. Here the test produces a
+value instead: `Renderer::as_pixman`, `as_gles2` and `as_vulkan` answer `Some`
+only when it passed, and every backend-specific call hangs off the view. The
+precondition is unrepresentable rather than documented.
+
+- `Pixman<'_>`, `Gles2<'_>` and `Vk<'_>`, plus `Texture::pixman_image`,
+  `gles2_attribs`, `vulkan_attribs` and `vulkan_has_alpha`, and
+  `RenderTimer::is_gles2` (there is no `wlr_render_timer_is_vk` to mirror).
+- `Egl`, for a compositor that initialises EGL itself, with
+  `Renderer::gles2_from_egl` **consuming** it — that is wlroots' only release
+  path, since there is no `wlr_egl_destroy`, so an `Egl` that never reaches a
+  renderer leaks. Stated rather than papered over.
+- GL names, Vulkan handles, `EGLDisplay` and `pixman_image_t` cross as whatever
+  `wlr-sys` generated, from `unsafe` functions, with no `gl`/`ash`/`pixman`
+  dependency and no normalisation. This crate wraps wlroots' *use* of those
+  libraries; re-typing a handle would put two definitions of it in one process.
+
+### Cargo features
+
+`wlr` now re-exports `wlr-sys`' feature names one for one — `drm-backend`,
+`x11-backend`, `libinput-backend`, `session`, `gles2-renderer`,
+`vulkan-renderer`, `xwayland` — with the same default set, and forwards them
+rather than letting `wlr-sys` pick its own. They decide which wlroots headers
+are bound, and so which of the `wlr_has_*` cfgs are set: building without
+`gles2-renderer` removes `Renderer::as_gles2`, `Gles2` and
+`RenderTimer::is_gles2`, because the symbols behind them are no longer there.
+
 ### Logging
 
 - `LogLevel`, `init_logging` and `log_verbosity`. `init_logging` installs a

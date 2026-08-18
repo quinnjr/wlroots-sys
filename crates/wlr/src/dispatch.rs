@@ -273,6 +273,38 @@ impl Drop for HandlerGuard<'_> {
     }
 }
 
+/// Marks an `extern "C"` frame that runs consumer code but is not a
+/// [`Dispatcher`] delivery.
+///
+/// [`HandlerGuard`] needs a dispatcher to set its per-dispatcher flag, and some
+/// callbacks have none: `render::sync`'s timeline waiter is invoked by
+/// libwayland from inside `wl_event_loop_dispatch`, with a plain closure and no
+/// `&mut S` anywhere. Deferral is therefore not the question — there is no
+/// second `&mut S` to alias — but *refusal* still is, because the closure can
+/// hold a `&Display` and drive the loop from underneath the dispatch that is
+/// running it.
+///
+/// So this sets only [`IN_HANDLER`], and restores rather than clears it for the
+/// same reason `HandlerGuard` does: a frame nested inside a real handler
+/// delivery must not reopen the loop when it returns.
+pub(crate) struct ForeignFrame {
+    previous: bool,
+}
+
+impl ForeignFrame {
+    pub(crate) fn enter() -> ForeignFrame {
+        ForeignFrame {
+            previous: IN_HANDLER.replace(true),
+        }
+    }
+}
+
+impl Drop for ForeignFrame {
+    fn drop(&mut self) {
+        IN_HANDLER.set(self.previous);
+    }
+}
+
 /// Routes events to handler traits, one at a time.
 pub(crate) struct Dispatcher<S> {
     state: *mut S,

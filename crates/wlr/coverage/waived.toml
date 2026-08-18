@@ -35,12 +35,6 @@ note      = "Reachable only by implementing a wlroots vtable from Rust; see M13.
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_alpha_mode"
-reason    = "not-yet"
-note      = "Selection, drag-and-drop and the small standalone protocols."
-milestone = "M11"
-
-[[waived]]
 symbol    = "wlr_alpha_modifier_surface_v1_state"
 reason    = "not-yet"
 note      = "Selection, drag-and-drop and the small standalone protocols."
@@ -233,30 +227,6 @@ note      = "Buffer type the render pipeline hands around."
 milestone = "M5"
 
 [[waived]]
-symbol    = "wlr_color_chroma_location"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_cie1931_xy"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_encoding"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_luminances"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_color_manager_v1"
 reason    = "not-yet"
 note      = "Colour-management protocol; layered on M5's render/color.h types."
@@ -323,36 +293,6 @@ note      = "Colour-management protocol; layered on M5's render/color.h types."
 milestone = "M12"
 
 [[waived]]
-symbol    = "wlr_color_named_primaries"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_primaries"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_primaries_from_named"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_primaries_transform_absolute_colorimetric"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_range"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_color_representation_manager_v1"
 reason    = "not-yet"
 note      = "Colour-management protocol; layered on M5's render/color.h types."
@@ -417,66 +357,6 @@ symbol    = "wlr_color_representation_v1_surface_state"
 reason    = "not-yet"
 note      = "Colour-management protocol; layered on M5's render/color.h types."
 milestone = "M12"
-
-[[waived]]
-symbol    = "wlr_color_transfer_function"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_transform"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_transform_eval"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_transform_init_linear_to_icc"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_transform_init_linear_to_inverse_eotf"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_transform_init_lut_3x1d"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_transform_init_matrix"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_transform_init_pipeline"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_transform_ref"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_color_transform_unref"
-reason    = "not-yet"
-note      = "render/color.h; wrapped in M5, not M12 (see the M5 plan, D9)."
-milestone = "M5"
 
 [[waived]]
 symbol    = "wlr_compositor"
@@ -1032,122 +912,8 @@ milestone = "M13"
 [[waived]]
 symbol    = "wlr_drm_syncobj_merger"
 reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_syncobj_timeline"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_syncobj_timeline_check"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_syncobj_timeline_create"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_syncobj_timeline_export"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_syncobj_timeline_export_sync_file"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_syncobj_timeline_import"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_syncobj_timeline_import_sync_file"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_syncobj_timeline_ready_callback"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_syncobj_timeline_ref"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_syncobj_timeline_signal"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_syncobj_timeline_transfer"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_syncobj_timeline_unref"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_syncobj_timeline_waiter"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_syncobj_timeline_waiter_finish"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_drm_syncobj_timeline_waiter_init"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_egl"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_egl_create_with_context"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_egl_get_context"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_egl_get_display"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
+note      = "Opaque, and reachable only as a field of wlr_linux_drm_syncobj_v1_surface_state — no constructor, no functions. Belongs to that protocol, not to render/drm_syncobj.h."
+milestone = "M10"
 
 [[waived]]
 symbol    = "wlr_export_dmabuf_frame_v1"
@@ -1703,48 +1469,6 @@ symbol    = "wlr_gamma_control_v1_send_failed_and_destroy"
 reason    = "not-yet"
 note      = "Output stack completion."
 milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_gles2_renderer_check_ext"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_gles2_renderer_create"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_gles2_renderer_create_with_drm_fd"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_gles2_renderer_get_buffer_fbo"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_gles2_renderer_get_egl"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_gles2_texture_attribs"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_gles2_texture_get_attribs"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
 
 [[waived]]
 symbol    = "wlr_headless_add_output"
@@ -3001,18 +2725,6 @@ note      = "Output stack completion."
 milestone = "M6"
 
 [[waived]]
-symbol    = "wlr_pixman_renderer_get_buffer_image"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_pixman_texture_get_image"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_pointer"
 reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
@@ -3409,12 +3121,6 @@ note      = "Reachable only by implementing a wlroots vtable from Rust; see M13.
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_render_timer_is_gles2"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_renderer_impl"
 reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
@@ -3425,24 +3131,6 @@ symbol    = "wlr_renderer_init"
 reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
 milestone = "M13"
-
-[[waived]]
-symbol    = "wlr_renderer_is_gles2"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_renderer_is_pixman"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_renderer_is_vk"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
 
 [[waived]]
 symbol    = "wlr_scene"
@@ -5410,24 +5098,6 @@ note      = "Reachable only by implementing a wlroots vtable from Rust; see M13.
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_texture_is_gles2"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_texture_is_pixman"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_texture_is_vk"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
 symbol    = "wlr_texture_read_pixel_options_get_data"
 reason    = "interface-impl-only"
 note      = "Accessor a renderer implementation calls on options wlroots hands it."
@@ -5600,54 +5270,6 @@ symbol    = "wlr_virtual_pointer_v1_new_pointer_event"
 reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_vk_image_attribs"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_vk_renderer_create_with_drm_fd"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_vk_renderer_get_device"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_vk_renderer_get_instance"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_vk_renderer_get_physical_device"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_vk_renderer_get_queue_family"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_vk_texture_get_image_attribs"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
-
-[[waived]]
-symbol    = "wlr_vk_texture_has_alpha"
-reason    = "not-yet"
-note      = "Render pipeline core."
-milestone = "M5"
 
 [[waived]]
 symbol    = "wlr_wl_backend_create"

@@ -32,6 +32,8 @@ use crate::region::Region;
 use crate::sys;
 
 use super::Renderer;
+use super::color::{ColorEncoding, ColorPrimaries, ColorRange, ColorTransform, TransferFunction};
+use super::sync::SyncTimeline;
 use super::texture::Texture;
 
 /// A colour in a render pass, each channel in `0..=1`.
@@ -117,22 +119,23 @@ impl From<FilterMode> for sys::wlr_scale_filter_mode {
 /// What a pass is begun with.
 ///
 /// Every field is optional and the default is what wlroots reads out of a
-/// zeroed `wlr_buffer_pass_options`.
-///
-/// Two of wlroots' four fields have no setter yet: `color_transform` needs the
-/// colour wrappers and `signal_timeline` needs the DRM sync-object wrappers,
-/// both of which land with the rest of the render module. They are passed as
-/// null here, which is what wlroots documents as "no transform" and "no
-/// timeline".
+/// zeroed `wlr_buffer_pass_options`: no timer, no colour transform, no signal
+/// timeline.
 #[derive(Debug, Default)]
 pub struct BufferPassOptions<'a> {
     timer: Option<&'a RenderTimer<'a>>,
+    color_transform: Option<&'a ColorTransform>,
+    signal: Option<(&'a SyncTimeline, u64)>,
 }
 
 impl<'a> BufferPassOptions<'a> {
     /// The default options: no timer, no colour transform, no timeline.
     pub fn new() -> BufferPassOptions<'a> {
-        BufferPassOptions { timer: None }
+        BufferPassOptions {
+            timer: None,
+            color_transform: None,
+            signal: None,
+        }
     }
 
     /// Time this pass with `timer`.
@@ -150,14 +153,59 @@ impl<'a> BufferPassOptions<'a> {
         self
     }
 
+    /// Apply `transform` to everything this pass draws, on the way out.
+    ///
+    /// Requires a renderer whose
+    /// [`features().output_color_transform`](crate::RendererFeatures::output_color_transform)
+    /// is set; the pixman renderer's is not.
+    /// [`Renderer::begin_buffer_pass`](crate::Renderer::begin_buffer_pass)
+    /// refuses rather than letting wlroots ignore it silently.
+    ///
+    /// The transform is borrowed only for the pass — it is reference-counted
+    /// and independent of any renderer, so the same one may be reused across
+    /// passes and outlive them all.
+    #[must_use]
+    pub fn color_transform(mut self, transform: &'a ColorTransform) -> Self {
+        self.color_transform = Some(transform);
+        self
+    }
+
+    /// Signal `point` on `timeline` once the GPU has finished this pass.
+    ///
+    /// Requires a renderer whose
+    /// [`features().timeline`](crate::RendererFeatures::timeline) is set —
+    /// which `WLR_RENDER_NO_EXPLICIT_SYNC=1` in the environment turns off, and
+    /// the pixman renderer never has.
+    /// [`Renderer::begin_buffer_pass`](crate::Renderer::begin_buffer_pass)
+    /// refuses rather than dropping the request.
+    #[must_use]
+    pub fn signal(mut self, timeline: &'a SyncTimeline, point: u64) -> Self {
+        self.signal = Some((timeline, point));
+        self
+    }
+
+    /// Whether these options name anything the renderer has to support.
+    ///
+    /// wlroots ignores a colour transform or a signal timeline that its
+    /// renderer cannot honour, which turns a colour-managed or explicitly
+    /// synchronised compositor into a silently wrong one.
+    pub(crate) fn unsupported_by(&self, features: &super::RendererFeatures) -> bool {
+        (self.color_transform.is_some() && !features.output_color_transform)
+            || (self.signal.is_some() && !features.timeline)
+    }
+
     pub(crate) fn to_sys(&self) -> sys::wlr_buffer_pass_options {
         sys::wlr_buffer_pass_options {
             timer: self
                 .timer
                 .map_or(std::ptr::null_mut(), |timer| timer.as_ptr()),
-            color_transform: std::ptr::null_mut(),
-            signal_timeline: std::ptr::null_mut(),
-            signal_point: 0,
+            color_transform: self
+                .color_transform
+                .map_or(std::ptr::null_mut(), ColorTransform::as_ptr),
+            signal_timeline: self
+                .signal
+                .map_or(std::ptr::null_mut(), |(timeline, _)| timeline.as_ptr()),
+            signal_point: self.signal.map_or(0, |(_, point)| point),
         }
     }
 }
@@ -198,6 +246,17 @@ impl<'r> RenderTimer<'r> {
         let ns = unsafe { sys::wlr_render_timer_get_duration_ns(self.raw.as_ptr()) };
         if ns < 0 { None } else { Some(ns as u64) }
     }
+
+    /// Whether this timer belongs to the GLES2 renderer.
+    ///
+    /// There is no Vulkan counterpart. wlroots ships `wlr_render_timer_is_gles2`
+    /// and no `wlr_render_timer_is_vk`, so this is an asymmetry in the C API
+    /// rather than an omission here.
+    #[cfg(wlr_has_gles2_renderer)]
+    pub fn is_gles2(&self) -> bool {
+        // SAFETY: this value owns a live timer for as long as it exists.
+        unsafe { sys::wlr_render_timer_is_gles2(self.raw.as_ptr()) }
+    }
 }
 
 impl std::fmt::Debug for RenderTimer<'_> {
@@ -234,6 +293,17 @@ pub struct TextureOptions<'a> {
     transform: Transform,
     filter_mode: FilterMode,
     blend_mode: BlendMode,
+    /// `None` is wlroots' unset, which is the integer 0 — **not** a value of
+    /// `wlr_color_transfer_function`, whose variants all start at `1 << 0`.
+    transfer_function: Option<TransferFunction>,
+    /// Stored by value rather than borrowed, for the same reason as `alpha`:
+    /// wlroots takes a `const wlr_color_primaries *` and a pointer to a
+    /// temporary dangles by the time the call reads it.
+    primaries: Option<ColorPrimaries>,
+    color_encoding: ColorEncoding,
+    color_range: ColorRange,
+    luminance_multiplier: Option<f32>,
+    wait: Option<(&'a SyncTimeline, u64)>,
 }
 
 impl<'a> TextureOptions<'a> {
@@ -250,6 +320,12 @@ impl<'a> TextureOptions<'a> {
             transform: Transform::Normal,
             filter_mode: FilterMode::default(),
             blend_mode: BlendMode::default(),
+            transfer_function: None,
+            primaries: None,
+            color_encoding: ColorEncoding::None,
+            color_range: ColorRange::None,
+            luminance_multiplier: None,
+            wait: None,
         }
     }
 
@@ -301,6 +377,79 @@ impl<'a> TextureOptions<'a> {
     pub fn blend(mut self, blend: BlendMode) -> Self {
         self.blend_mode = blend;
         self
+    }
+
+    /// The transfer function the texture's pixels are encoded with.
+    ///
+    /// Unset by default, which wlroots reads as "assume the renderer's own".
+    /// Setting one requires a renderer whose
+    /// [`features().input_color_transform`](crate::RendererFeatures::input_color_transform)
+    /// is set — [`RenderPass::add_texture`] refuses otherwise rather than
+    /// letting wlroots ignore it.
+    #[must_use]
+    pub fn transfer_function(mut self, tf: TransferFunction) -> Self {
+        self.transfer_function = Some(tf);
+        self
+    }
+
+    /// The colour primaries the texture's pixels are in.
+    ///
+    /// Taken by value: wlroots reads this through a `const` pointer during the
+    /// draw, and this crate keeps the storage it points at inside these
+    /// options — the same arrangement `alpha` uses.
+    #[must_use]
+    pub fn primaries(mut self, primaries: ColorPrimaries) -> Self {
+        self.primaries = Some(primaries);
+        self
+    }
+
+    /// The YCbCr matrix coefficients to convert the texture with.
+    ///
+    /// [`ColorEncoding::None`] — the default — means the texture is already
+    /// RGB, or that the encoding is unknown. Must be one of the encodings
+    /// [`Renderer::color_encodings`](crate::Renderer::color_encodings) reports.
+    #[must_use]
+    pub fn color_encoding(mut self, encoding: ColorEncoding) -> Self {
+        self.color_encoding = encoding;
+        self
+    }
+
+    /// Whether the texture's values use the full or the limited range.
+    #[must_use]
+    pub fn color_range(mut self, range: ColorRange) -> Self {
+        self.color_range = range;
+        self
+    }
+
+    /// Scale the texture's luminance by this factor.
+    ///
+    /// Stored inline for the same reason as `alpha`.
+    #[must_use]
+    pub fn luminance_multiplier(mut self, multiplier: f32) -> Self {
+        self.luminance_multiplier = Some(multiplier);
+        self
+    }
+
+    /// Wait for `point` on `timeline` before sampling the texture.
+    ///
+    /// Requires a renderer whose
+    /// [`features().timeline`](crate::RendererFeatures::timeline) is set;
+    /// [`RenderPass::add_texture`] refuses otherwise, because wlroots would
+    /// simply not wait and the tearing that follows is intermittent.
+    #[must_use]
+    pub fn wait(mut self, timeline: &'a SyncTimeline, point: u64) -> Self {
+        self.wait = Some((timeline, point));
+        self
+    }
+
+    /// Whether these options name anything the renderer has to support.
+    fn unsupported_by(&self, features: &super::RendererFeatures) -> bool {
+        let colour = self.transfer_function.is_some()
+            || self.primaries.is_some()
+            || self.color_encoding != ColorEncoding::None
+            || self.color_range != ColorRange::None
+            || self.luminance_multiplier.is_some();
+        (colour && !features.input_color_transform) || (self.wait.is_some() && !features.timeline)
     }
 
     /// Whether the source box lies inside the texture.
@@ -400,7 +549,10 @@ impl<'r, 'b> RenderPass<'r, 'b> {
     ///   Every renderer's `add_texture` asserts on the texture's identity
     ///   before touching it, and the assertion aborts rather than returning.
     /// * [`Error::Operation`] if the source box falls outside the texture,
-    ///   which wlroots also asserts.
+    ///   which wlroots also asserts, or if the options name a colour tag or a
+    ///   wait timeline this renderer does not support. wlroots ignores both
+    ///   silently, which turns a colour-managed or explicitly synchronised
+    ///   compositor into a subtly wrong one rather than a failing one.
     pub fn add_texture(&mut self, options: &TextureOptions<'_>) -> Result<()> {
         if options.texture.renderer_ptr() != self.renderer.as_ptr() {
             return Err(Error::Mismatch("RenderPass::add_texture"));
@@ -408,10 +560,15 @@ impl<'r, 'b> RenderPass<'r, 'b> {
         if !options.src_box_in_bounds() {
             return Err(Error::Operation("wlr_render_pass_add_texture"));
         }
+        if options.unsupported_by(&self.renderer.features()) {
+            return Err(Error::Operation("wlr_render_pass_add_texture"));
+        }
 
-        // Held in a local for the duration of the call: wlroots reads through
-        // this pointer while `add_texture` runs and never retains it.
+        // Held in locals for the duration of the call: wlroots reads through
+        // these pointers while `add_texture` runs and never retains them.
         let alpha = options.alpha;
+        let luminance_multiplier = options.luminance_multiplier;
+        let primaries = options.primaries;
         let raw = sys::wlr_render_texture_options {
             texture: options.texture.as_ptr(),
             src_box: sys::wlr_fbox {
@@ -435,21 +592,32 @@ impl<'r, 'b> RenderPass<'r, 'b> {
             transform: options.transform.into(),
             filter_mode: options.filter_mode.into(),
             blend_mode: options.blend_mode.into(),
-            // Zero is "unset" for all four of these, not a named enum value —
-            // `wlr_color_transfer_function` has no zero variant at all. The
-            // colour setters arrive with the colour wrappers.
-            transfer_function: sys::wlr_color_transfer_function(0),
-            primaries: std::ptr::null(),
-            color_encoding: sys::wlr_color_encoding::WLR_COLOR_ENCODING_NONE,
-            color_range: sys::wlr_color_range::WLR_COLOR_RANGE_NONE,
-            luminance_multiplier: std::ptr::null(),
-            wait_timeline: std::ptr::null_mut(),
-            wait_point: 0,
+            // The literal integer 0 is "unset" here, and it is **not** a named
+            // variant: `wlr_color_transfer_function`'s values all start at
+            // `1 << 0`, so there is nothing in the enum to write instead. The
+            // other three do have a zero variant, and use it.
+            transfer_function: options
+                .transfer_function
+                .map_or(sys::wlr_color_transfer_function(0), Into::into),
+            primaries: primaries
+                .as_ref()
+                .map_or(std::ptr::null(), ColorPrimaries::as_c),
+            color_encoding: options.color_encoding.into(),
+            color_range: options.color_range.into(),
+            luminance_multiplier: luminance_multiplier
+                .as_ref()
+                .map_or(std::ptr::null(), |m| &raw const *m),
+            wait_timeline: options
+                .wait
+                .map_or(std::ptr::null_mut(), |(timeline, _)| timeline.as_ptr()),
+            wait_point: options.wait.map_or(0, |(_, point)| point),
         };
         // SAFETY: the pass is live (this value owns it until `submit`), the
         // texture is live and belongs to this renderer (checked above), the
-        // clip region and the alpha local outlive the call, and the source box
-        // satisfies wlroots' own assertion.
+        // clip region and the `alpha`, `luminance_multiplier` and `primaries`
+        // locals all outlive the call, the wait timeline is borrowed by the
+        // options for at least as long, and the source box satisfies wlroots'
+        // own assertion.
         unsafe { sys::wlr_render_pass_add_texture(self.raw.as_ptr(), &raw const raw) };
         Ok(())
     }

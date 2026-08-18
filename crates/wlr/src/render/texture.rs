@@ -198,6 +198,98 @@ impl<'r> Texture<'r> {
         // SAFETY: the handle's lifetime guarantees the texture is live.
         FourCc(unsafe { sys::wlr_texture_preferred_read_format(self.raw.as_ptr()) })
     }
+
+    /// How this texture is bound in GL, or `None` if it is not a GLES2
+    /// texture.
+    ///
+    /// `wlr_gles2_texture_get_attribs` has no type test of its own and is
+    /// undefined behaviour on a texture of another kind, so the test is done
+    /// here and reported as the `Option` — the same bargain the backend view
+    /// types make for renderers.
+    #[cfg(wlr_has_gles2_renderer)]
+    pub fn gles2_attribs(&self) -> Option<super::Gles2TextureAttribs> {
+        // SAFETY: the handle's lifetime guarantees the texture is live.
+        if !unsafe { sys::wlr_texture_is_gles2(self.raw.as_ptr()) } {
+            return None;
+        }
+        let mut attribs = sys::wlr_gles2_texture_attribs {
+            target: 0,
+            tex: 0,
+            has_alpha: false,
+        };
+        // SAFETY: live texture, proved GLES2 by the test above — which is the
+        // precondition — and `attribs` is a live local wlroots fills in.
+        unsafe { sys::wlr_gles2_texture_get_attribs(self.raw.as_ptr(), &raw mut attribs) };
+        Some(super::Gles2TextureAttribs {
+            target: attribs.target,
+            tex: attribs.tex,
+            has_alpha: attribs.has_alpha,
+        })
+    }
+
+    /// The `VkImage` backing this texture, or `None` if it is not a Vulkan
+    /// texture.
+    ///
+    /// As with the GLES2 accessor above, `wlr_vk_texture_get_image_attribs`
+    /// requires the type test the `Option` reports.
+    #[cfg(wlr_has_vulkan_renderer)]
+    pub fn vulkan_attribs(&self) -> Option<super::VkImageAttribs> {
+        // SAFETY: the handle's lifetime guarantees the texture is live.
+        if !unsafe { sys::wlr_texture_is_vk(self.raw.as_ptr()) } {
+            return None;
+        }
+        let mut attribs = sys::wlr_vk_image_attribs {
+            image: std::ptr::null_mut(),
+            layout: sys::VkImageLayout(0),
+            format: sys::VkFormat(0),
+        };
+        // SAFETY: live texture, proved Vulkan by the test above, and `attribs`
+        // is a live local wlroots fills in.
+        unsafe { sys::wlr_vk_texture_get_image_attribs(self.raw.as_ptr(), &raw mut attribs) };
+        Some(super::VkImageAttribs {
+            image: attribs.image,
+            layout: attribs.layout.0,
+            format: attribs.format.0,
+        })
+    }
+
+    /// Whether this Vulkan texture's format has an alpha channel, or `None` if
+    /// it is not a Vulkan texture.
+    ///
+    /// The two `None`s are not distinguishable, which is wlroots' own doing:
+    /// `wlr_vk_texture_has_alpha` returns a bare `bool` and has no answer for
+    /// "not a Vulkan texture" other than undefined behaviour.
+    #[cfg(wlr_has_vulkan_renderer)]
+    pub fn vulkan_has_alpha(&self) -> Option<bool> {
+        // SAFETY: the handle's lifetime guarantees the texture is live.
+        if !unsafe { sys::wlr_texture_is_vk(self.raw.as_ptr()) } {
+            return None;
+        }
+        // SAFETY: live texture, proved Vulkan by the test above.
+        Some(unsafe { sys::wlr_vk_texture_has_alpha(self.raw.as_ptr()) })
+    }
+
+    /// The `pixman_image_t` backing this texture, or `None` if it is not a
+    /// pixman texture.
+    ///
+    /// # Safety
+    ///
+    /// The image is **borrowed**: the texture owns it and destroys it, so it
+    /// must never be `pixman_image_unref`ed, and it dies with the texture.
+    /// Using it at all requires pixman, which this crate does not wrap — see
+    /// `render/pixman.rs`.
+    pub unsafe fn pixman_image(&self) -> Option<*mut sys::pixman_image_t> {
+        // SAFETY: the handle's lifetime guarantees the texture is live.
+        if !unsafe { sys::wlr_texture_is_pixman(self.raw.as_ptr()) } {
+            return None;
+        }
+        // SAFETY: live texture, proved pixman by the test above.
+        let image = unsafe { sys::wlr_pixman_texture_get_image(self.raw.as_ptr()) };
+        if image.is_null() {
+            return None;
+        }
+        Some(image)
+    }
 }
 
 impl std::fmt::Debug for Texture<'_> {

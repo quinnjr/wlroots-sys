@@ -110,12 +110,19 @@ pub use log::{LogLevel, init_logging, log_verbosity};
 pub use output::Output;
 pub use region::{Region, RegionRef};
 pub use render::{
-    Allocator, AllocatorRef, BlendMode, BufferCaps, BufferPassOptions, DMABUF_MAX_PLANES,
-    DmabufAttributes, DmabufAttributesRef, DmabufPlane, DrmFormat, DrmFormatRef, DrmFormatSet,
-    DrmFormatSetRef, FilterMode, FourCc, LockedBuffer, Modifier, OwnedBuffer, ReadPixels,
-    RectOptions, RenderColor, RenderPass, RenderTimer, Renderer, RendererFeatures, RendererRef,
-    SWAPCHAIN_CAP, Swapchain, Texture, TextureOptions,
+    Allocator, AllocatorRef, AlphaMode, BlendMode, BufferCaps, BufferPassOptions, ChromaLocation,
+    Cie1931Xy, ColorEncoding, ColorEncodings, ColorLuminances, ColorPrimaries, ColorRange,
+    ColorTransform, DMABUF_MAX_PLANES, DmabufAttributes, DmabufAttributesRef, DmabufPlane,
+    DrmFormat, DrmFormatRef, DrmFormatSet, DrmFormatSetRef, Egl, FilterMode, FourCc, LockedBuffer,
+    Modifier, NamedPrimaries, OwnedBuffer, Pixman, ReadPixels, RectOptions, RenderColor,
+    RenderPass, RenderTimer, Renderer, RendererFeatures, RendererRef, SWAPCHAIN_CAP, Swapchain,
+    SyncFlags, SyncTimeline, SyncWaiter, Texture, TextureOptions, TransferFunction,
+    TransferFunctions,
 };
+#[cfg(wlr_has_gles2_renderer)]
+pub use render::{Gles2, Gles2TextureAttribs};
+#[cfg(wlr_has_vulkan_renderer)]
+pub use render::{Vk, VkImageAttribs};
 pub use runtime::{Band, Runtime};
 pub use scene::RectId;
 pub use seat::{KeyEvent, Modifiers};

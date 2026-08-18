@@ -25,9 +25,37 @@
 //! | [`OwnedBuffer`] | `wlr_buffer_drop` (**producer**) | — |
 //! | [`LockedBuffer`] | `wlr_buffer_unlock` (**consumer**) | — |
 //! | [`Swapchain`] | `wlr_swapchain_destroy` | — |
+//! | [`ColorTransform`] | `wlr_color_transform_unref` (**refcounted**) | — |
+//! | [`SyncTimeline`] | `wlr_drm_syncobj_timeline_unref` (**refcounted**) | its waiters |
+//! | [`SyncWaiter`] | `wlr_drm_syncobj_timeline_waiter_finish` | — |
+//! | [`Egl`] | nothing — see below | — |
 //!
-//! The producer/consumer split in the last three rows is the one to get right;
-//! `crates/wlr/src/buffer.rs`'s "Refcount story" is the long version.
+//! The producer/consumer split in the `OwnedBuffer`/`LockedBuffer`/`Swapchain`
+//! rows is the one to get right; `crates/wlr/src/buffer.rs`'s "Refcount story"
+//! is the long version.
+//!
+//! Two rows are not like the others. [`ColorTransform`] and [`SyncTimeline`]
+//! are reference-counted by wlroots, so `Clone` on them is a genuine second
+//! reference and neither borrows anything — a colour transform may outlive
+//! every renderer that ever applied it. [`Egl`] has **no** release path at all
+//! except being consumed by
+//! [`Renderer::gles2_from_egl`](Renderer::gles2_from_egl); wlroots ships no
+//! `wlr_egl_destroy`, so one that is never handed to a renderer leaks. That is
+//! wlroots' API, not an omission here.
+//!
+//! # Backend-specific surfaces
+//!
+//! wlroots' GLES2, Vulkan and pixman accessors all share one hazard: each is
+//! undefined behaviour on a renderer or texture of the wrong kind, and each
+//! ships with a separate `wlr_*_is_*` test the caller is trusted to have run.
+//! [`Renderer::as_pixman`], `Renderer::as_gles2` and `Renderer::as_vulkan` turn
+//! that test into a value — [`Pixman`], `Gles2`, `Vk` — so the precondition
+//! cannot be skipped. `pixman.rs` has the long version.
+//!
+//! The GLES2 and Vulkan halves are `#[cfg]`-gated on `wlr_has_gles2_renderer`
+//! and `wlr_has_vulkan_renderer`, which is why they are named here in plain
+//! code spans rather than linked: a doc link to an item a smaller feature set
+//! does not build is a hard error under `-D warnings`.
 //!
 //! # Owned versus borrowed renderers
 //!
@@ -78,14 +106,26 @@
 //!   (`render/drm_syncobj.c`), so it must outlive the timeline.
 
 mod allocator;
+mod color;
 mod dmabuf;
+mod egl;
 mod format;
+#[cfg(wlr_has_gles2_renderer)]
+mod gles2;
 mod pass;
 mod pixel_format;
+mod pixman;
 mod swapchain;
+mod sync;
 mod texture;
+#[cfg(wlr_has_vulkan_renderer)]
+mod vulkan;
 
 use std::cell::Cell;
+// `AsRawFd` is reached only by the two gated `*_with_drm_fd` constructors
+// below; without either subsystem the import would be dead.
+#[cfg(any(wlr_has_gles2_renderer, wlr_has_vulkan_renderer))]
+use std::os::fd::AsRawFd;
 use std::os::fd::BorrowedFd;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -97,14 +137,26 @@ use crate::error::{Error, Result};
 use crate::sys;
 
 pub use allocator::{Allocator, AllocatorRef, OwnedBuffer};
+pub use color::{
+    AlphaMode, ChromaLocation, Cie1931Xy, ColorEncoding, ColorEncodings, ColorLuminances,
+    ColorPrimaries, ColorRange, ColorTransform, NamedPrimaries, TransferFunction,
+    TransferFunctions,
+};
 pub use dmabuf::{DMABUF_MAX_PLANES, DmabufAttributes, DmabufAttributesRef, DmabufPlane};
+pub use egl::Egl;
 pub use format::{DrmFormat, DrmFormatRef, DrmFormatSet, DrmFormatSetRef, FourCc, Modifier};
+#[cfg(wlr_has_gles2_renderer)]
+pub use gles2::{Gles2, Gles2TextureAttribs};
 pub use pass::{
     BlendMode, BufferPassOptions, FilterMode, RectOptions, RenderColor, RenderPass, RenderTimer,
     TextureOptions,
 };
+pub use pixman::Pixman;
 pub use swapchain::{LockedBuffer, SWAPCHAIN_CAP, Swapchain};
+pub use sync::{SyncFlags, SyncTimeline, SyncWaiter};
 pub use texture::{ReadPixels, Texture};
+#[cfg(wlr_has_vulkan_renderer)]
+pub use vulkan::{Vk, VkImageAttribs};
 
 /// The kinds of buffer a renderer or allocator can deal in.
 ///
@@ -181,8 +233,16 @@ pub struct RendererFeatures {
 ///
 /// Every function here requires `raw` to point at a live `wlr_renderer`.
 mod imp {
-    use super::{BufferCaps, DrmFormatSetRef, Error, RendererFeatures, Result, sys};
+    use super::{
+        BufferCaps, ColorEncodings, DrmFormatSetRef, Error, RendererFeatures, Result, sys,
+    };
     use std::os::fd::BorrowedFd;
+
+    pub(super) unsafe fn color_encodings(raw: *mut sys::wlr_renderer) -> ColorEncodings {
+        // SAFETY: the caller guarantees `raw` is live; this is a plain field
+        // read of a mask wlroots fills in at creation and never changes.
+        ColorEncodings::from_bits(unsafe { (*raw).color_encodings })
+    }
 
     pub(super) unsafe fn features(raw: *mut sys::wlr_renderer) -> RendererFeatures {
         // SAFETY: the caller guarantees `raw` is live; these are plain field
@@ -364,6 +424,16 @@ impl Renderer {
     pub fn buffer_caps(&self) -> BufferCaps {
         // SAFETY: as above.
         unsafe { imp::buffer_caps(self.raw.as_ptr()) }
+    }
+
+    /// The YCbCr colour encodings this renderer can convert from.
+    ///
+    /// A *set*, unlike [`TextureOptions::color_encoding`], which names one —
+    /// wlroots uses the same C enum in both roles, which is why this crate has
+    /// two types for it.
+    pub fn color_encodings(&self) -> ColorEncodings {
+        // SAFETY: as above.
+        unsafe { imp::color_encodings(self.raw.as_ptr()) }
     }
 
     /// The formats this renderer can sample from, for buffers with `caps`.
@@ -568,7 +638,11 @@ impl Renderer {
     /// [`Error::Reentrant`] if a pass begun on this renderer is still live —
     /// nesting is a stack discipline this crate does not model, and getting it
     /// wrong on the GLES2 renderer corrupts the EGL context rather than
-    /// failing. [`Error::Create`] if the renderer refused the buffer.
+    /// failing. [`Error::Operation`] if `options` name a colour transform or a
+    /// signal timeline this renderer does not support — wlroots ignores both
+    /// silently, and a colour-managed compositor that is quietly not
+    /// colour-managed is worse than one that fails. [`Error::Create`] if the
+    /// renderer refused the buffer.
     pub fn begin_buffer_pass<'r, 'b>(
         &'r self,
         buffer: &'b Buffer<'b>,
@@ -576,6 +650,9 @@ impl Renderer {
     ) -> Result<RenderPass<'r, 'b>> {
         if self.pass_live.get() {
             return Err(Error::Reentrant("Renderer::begin_buffer_pass"));
+        }
+        if options.unsupported_by(&self.features()) {
+            return Err(Error::Operation("wlr_renderer_begin_buffer_pass"));
         }
 
         let raw_options = options.to_sys();
@@ -602,6 +679,101 @@ impl Renderer {
     /// submitted, which is the only way a pass ends.
     pub(crate) fn clear_pass_live(&self) {
         self.pass_live.set(false);
+    }
+
+    /// This renderer's pixman-specific surface, or `None` if it is not the
+    /// pixman renderer.
+    ///
+    /// Named `as_pixman` because [`Renderer::pixman`] is the constructor. The
+    /// three `as_*` accessors are the only way to reach a backend-specific
+    /// wlroots call, and the view they hand back *is* the type test — see
+    /// `pixman.rs` for why that matters.
+    pub fn as_pixman(&self) -> Option<Pixman<'_>> {
+        // SAFETY: this value owns a live renderer.
+        if !unsafe { sys::wlr_renderer_is_pixman(self.raw.as_ptr()) } {
+            return None;
+        }
+        // SAFETY: live, and the test above is the precondition `Pixman` needs.
+        Some(unsafe { Pixman::from_raw(self.raw.as_ptr()) })
+    }
+
+    /// This renderer's GLES2-specific surface, or `None` if it is not the GLES2
+    /// renderer.
+    #[cfg(wlr_has_gles2_renderer)]
+    pub fn as_gles2(&self) -> Option<Gles2<'_>> {
+        // SAFETY: this value owns a live renderer.
+        if !unsafe { sys::wlr_renderer_is_gles2(self.raw.as_ptr()) } {
+            return None;
+        }
+        // SAFETY: live, and the test above is the precondition `Gles2` needs.
+        Some(unsafe { Gles2::from_raw(self.raw.as_ptr()) })
+    }
+
+    /// This renderer's Vulkan-specific surface, or `None` if it is not the
+    /// Vulkan renderer.
+    #[cfg(wlr_has_vulkan_renderer)]
+    pub fn as_vulkan(&self) -> Option<Vk<'_>> {
+        // SAFETY: this value owns a live renderer.
+        if !unsafe { sys::wlr_renderer_is_vk(self.raw.as_ptr()) } {
+            return None;
+        }
+        // SAFETY: live, and the test above is the precondition `Vk` needs.
+        Some(unsafe { Vk::from_raw(self.raw.as_ptr()) })
+    }
+
+    /// Create a GLES2 renderer on the DRM device `fd` names.
+    ///
+    /// `fd` is **borrowed**: wlroots uses it only to identify the device and
+    /// opens its own render node (`open_render_node` in `render/egl.c`), so it
+    /// neither dups nor closes it and the caller may close it as soon as this
+    /// returns.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Create`] if EGL initialisation failed — no GBM device, no
+    /// suitable EGL config, missing extensions.
+    #[cfg(wlr_has_gles2_renderer)]
+    pub fn gles2_with_drm_fd(fd: BorrowedFd<'_>) -> Result<Renderer> {
+        // SAFETY: the borrow keeps the descriptor open for the call, which is
+        // the only time wlroots reads it.
+        let raw = unsafe { sys::wlr_gles2_renderer_create_with_drm_fd(fd.as_raw_fd()) };
+        Renderer::adopt(raw, "wlr_gles2_renderer_create_with_drm_fd")
+    }
+
+    /// Create a GLES2 renderer on a caller-initialised EGL display and context.
+    ///
+    /// **Consumes `egl`**, which is the only way to release one: wlroots takes
+    /// ownership and destroys it with the renderer, and there is no
+    /// `wlr_egl_destroy`. Taking it by value is what makes that a move rather
+    /// than a rule — see `egl.rs`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Create`] if the renderer could not be built. `egl` is consumed
+    /// either way: wlroots' failure paths do not hand it back, and there is no
+    /// destructor to give the caller.
+    #[cfg(wlr_has_gles2_renderer)]
+    pub fn gles2_from_egl(egl: Egl) -> Result<Renderer> {
+        // SAFETY: `egl` is a live `wlr_egl` this call takes ownership of; the
+        // `into_raw` consumes the wrapper so nothing here can use it again.
+        let raw = unsafe { sys::wlr_gles2_renderer_create(egl.into_raw()) };
+        Renderer::adopt(raw, "wlr_gles2_renderer_create")
+    }
+
+    /// Create a Vulkan renderer on the DRM device `fd` names.
+    ///
+    /// `fd` is **borrowed**: wlroots uses it only to match a physical device
+    /// (`render/vulkan/renderer.c`) and neither dups nor closes it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Create`] if no Vulkan device matched, or initialisation failed.
+    #[cfg(wlr_has_vulkan_renderer)]
+    pub fn vulkan_with_drm_fd(fd: BorrowedFd<'_>) -> Result<Renderer> {
+        // SAFETY: the borrow keeps the descriptor open for the call, which is
+        // the only time wlroots reads it.
+        let raw = unsafe { sys::wlr_vk_renderer_create_with_drm_fd(fd.as_raw_fd()) };
+        Renderer::adopt(raw, "wlr_vk_renderer_create_with_drm_fd")
     }
 }
 
@@ -675,6 +847,12 @@ impl<'a> RendererRef<'a> {
     pub fn buffer_caps(&self) -> BufferCaps {
         // SAFETY: as above.
         unsafe { imp::buffer_caps(self.raw.as_ptr()) }
+    }
+
+    /// The YCbCr colour encodings this renderer can convert from.
+    pub fn color_encodings(&self) -> ColorEncodings {
+        // SAFETY: as above.
+        unsafe { imp::color_encodings(self.raw.as_ptr()) }
     }
 
     /// The formats this renderer can sample from, for buffers with `caps`.

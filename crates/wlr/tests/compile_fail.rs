@@ -128,3 +128,31 @@ fn a_render_timer_cannot_die_before_the_pass_that_names_it() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/timer_outlives_pass.rs");
 }
+
+/// A backend view — `Gles2`, `Vk`, `Pixman` — carries the proof that a
+/// renderer is of that kind, and every accessor on it dereferences that
+/// renderer. The borrow is what stops the proof outliving the thing it is
+/// about.
+///
+/// GLES2 rather than pixman because the gated modules are the ones a build
+/// script mistake could silently delete; if `wlr_has_gles2_renderer` ever
+/// stopped being set, this fixture would fail to compile *for the wrong
+/// reason*, which the `#[cfg]` on the test makes visible as a skipped test
+/// rather than a passing one.
+#[cfg(wlr_has_gles2_renderer)]
+#[test]
+fn a_backend_view_cannot_outlive_the_renderer_it_proves_something_about() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/gles2_view_outlives_renderer.rs");
+}
+
+/// A `SyncWaiter`'s destructor removes an event source from the display's
+/// loop, so outliving the display is a use-after-free rather than a leak. The
+/// borrow that prevents it is not in the plan's original sketch — it was added
+/// once the destructor's requirements were pinned down — and this is what
+/// keeps it.
+#[test]
+fn a_timeline_waiter_cannot_outlive_the_display_whose_loop_it_is_on() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/sync_waiter_outlives_display.rs");
+}

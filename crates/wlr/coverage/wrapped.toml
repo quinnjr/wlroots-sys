@@ -54,6 +54,11 @@ module = "render::allocator"
 item   = "Allocator (Drop)"
 
 [[wrapped]]
+symbol = "wlr_alpha_mode"
+module = "render::color"
+item   = "AlphaMode"
+
+[[wrapped]]
 symbol = "wlr_backend"
 module = "backend"
 item   = "Backend"
@@ -144,6 +149,101 @@ module = "render::swapchain"
 item   = "LockedBuffer (Drop)"
 
 [[wrapped]]
+symbol = "wlr_color_chroma_location"
+module = "render::color"
+item   = "ChromaLocation"
+
+[[wrapped]]
+symbol = "wlr_color_cie1931_xy"
+module = "render::color"
+item   = "Cie1931Xy"
+
+[[wrapped]]
+symbol = "wlr_color_encoding"
+module = "render::color"
+item   = "ColorEncoding"
+
+[[wrapped]]
+symbol = "wlr_color_luminances"
+module = "render::color"
+item   = "ColorLuminances"
+
+[[wrapped]]
+symbol = "wlr_color_named_primaries"
+module = "render::color"
+item   = "NamedPrimaries"
+
+[[wrapped]]
+symbol = "wlr_color_primaries"
+module = "render::color"
+item   = "ColorPrimaries"
+
+[[wrapped]]
+symbol = "wlr_color_primaries_from_named"
+module = "render::color"
+item   = "ColorPrimaries::named"
+
+[[wrapped]]
+symbol = "wlr_color_primaries_transform_absolute_colorimetric"
+module = "render::color"
+item   = "ColorPrimaries::transform_absolute_colorimetric"
+
+[[wrapped]]
+symbol = "wlr_color_range"
+module = "render::color"
+item   = "ColorRange"
+
+[[wrapped]]
+symbol = "wlr_color_transfer_function"
+module = "render::color"
+item   = "TransferFunction"
+
+[[wrapped]]
+symbol = "wlr_color_transform"
+module = "render::color"
+item   = "ColorTransform"
+
+[[wrapped]]
+symbol = "wlr_color_transform_eval"
+module = "render::color"
+item   = "ColorTransform::eval"
+
+[[wrapped]]
+symbol = "wlr_color_transform_init_linear_to_icc"
+module = "render::color"
+item   = "ColorTransform::from_icc"
+
+[[wrapped]]
+symbol = "wlr_color_transform_init_linear_to_inverse_eotf"
+module = "render::color"
+item   = "ColorTransform::inverse_eotf"
+
+[[wrapped]]
+symbol = "wlr_color_transform_init_lut_3x1d"
+module = "render::color"
+item   = "ColorTransform::lut_3x1d"
+
+[[wrapped]]
+symbol = "wlr_color_transform_init_matrix"
+module = "render::color"
+item   = "ColorTransform::matrix"
+
+[[wrapped]]
+symbol = "wlr_color_transform_init_pipeline"
+module = "render::color"
+item   = "ColorTransform::pipeline"
+
+[[wrapped]]
+symbol = "wlr_color_transform_ref"
+module = "render::color"
+item   = "ColorTransform (Clone)"
+
+[[wrapped]]
+symbol = "wlr_color_transform_unref"
+module = "render::color"
+item   = "ColorTransform (Drop)"
+
+[[wrapped]]
 symbol = "wlr_compositor_create"
 module = "runtime"
 item   = "Runtime::init_graphics"
@@ -219,9 +319,104 @@ module = "render::format"
 item   = "DrmFormatSet::union"
 
 [[wrapped]]
+symbol = "wlr_drm_syncobj_timeline"
+module = "render::sync"
+item   = "SyncTimeline"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_check"
+module = "render::sync"
+item   = "SyncTimeline::check"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_create"
+module = "render::sync"
+item   = "SyncTimeline::create"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_export"
+module = "render::sync"
+item   = "SyncTimeline::export"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_export_sync_file"
+module = "render::sync"
+item   = "SyncTimeline::export_sync_file"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_import"
+module = "render::sync"
+item   = "SyncTimeline::import"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_import_sync_file"
+module = "render::sync"
+item   = "SyncTimeline::import_sync_file"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_ready_callback"
+module = "render::sync"
+item   = "EventLoop::wait_for_timeline"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_ref"
+module = "render::sync"
+item   = "SyncTimeline (Clone)"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_signal"
+module = "render::sync"
+item   = "SyncTimeline::signal"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_transfer"
+module = "render::sync"
+item   = "SyncTimeline::transfer"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_unref"
+module = "render::sync"
+item   = "SyncTimeline (Drop)"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_waiter"
+module = "render::sync"
+item   = "SyncWaiter"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_waiter_finish"
+module = "render::sync"
+item   = "SyncWaiter (Drop)"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_waiter_init"
+module = "render::sync"
+item   = "EventLoop::wait_for_timeline"
+
+[[wrapped]]
 symbol = "wlr_edges"
 module = "toplevel"
 item   = "Edges"
+
+[[wrapped]]
+symbol = "wlr_egl"
+module = "render::egl"
+item   = "Egl"
+
+[[wrapped]]
+symbol = "wlr_egl_create_with_context"
+module = "render::egl"
+item   = "Egl::create_with_context"
+
+[[wrapped]]
+symbol = "wlr_egl_get_context"
+module = "render::egl"
+item   = "Egl::context"
+
+[[wrapped]]
+symbol = "wlr_egl_get_display"
+module = "render::egl"
+item   = "Egl::display"
 
 [[wrapped]]
 symbol = "wlr_fbox"
@@ -242,6 +437,41 @@ item   = "FBox::equals"
 symbol = "wlr_fbox_transform"
 module = "geom"
 item   = "FBox::transformed"
+
+[[wrapped]]
+symbol = "wlr_gles2_renderer_check_ext"
+module = "render::gles2"
+item   = "Gles2::check_ext"
+
+[[wrapped]]
+symbol = "wlr_gles2_renderer_create"
+module = "render::gles2"
+item   = "Renderer::gles2_from_egl"
+
+[[wrapped]]
+symbol = "wlr_gles2_renderer_create_with_drm_fd"
+module = "render::gles2"
+item   = "Renderer::gles2_with_drm_fd"
+
+[[wrapped]]
+symbol = "wlr_gles2_renderer_get_buffer_fbo"
+module = "render::gles2"
+item   = "Gles2::buffer_fbo"
+
+[[wrapped]]
+symbol = "wlr_gles2_renderer_get_egl"
+module = "render::gles2"
+item   = "Gles2::egl"
+
+[[wrapped]]
+symbol = "wlr_gles2_texture_attribs"
+module = "render::gles2"
+item   = "Gles2TextureAttribs"
+
+[[wrapped]]
+symbol = "wlr_gles2_texture_get_attribs"
+module = "render::texture"
+item   = "Texture::gles2_attribs"
 
 [[wrapped]]
 symbol = "wlr_keyboard_get_modifiers"
@@ -369,6 +599,16 @@ module = "render"
 item   = "Renderer::pixman"
 
 [[wrapped]]
+symbol = "wlr_pixman_renderer_get_buffer_image"
+module = "render::pixman"
+item   = "Pixman::buffer_image"
+
+[[wrapped]]
+symbol = "wlr_pixman_texture_get_image"
+module = "render::texture"
+item   = "Texture::pixman_image"
+
+[[wrapped]]
 symbol = "wlr_pointer_button_event"
 module = "backend"
 item   = "SeatHandler::pointer_button"
@@ -479,6 +719,11 @@ module = "render::pass"
 item   = "RenderTimer::duration_ns"
 
 [[wrapped]]
+symbol = "wlr_render_timer_is_gles2"
+module = "render::pass"
+item   = "RenderTimer::is_gles2"
+
+[[wrapped]]
 symbol = "wlr_renderer"
 module = "render"
 item   = "Renderer"
@@ -517,6 +762,21 @@ item   = "Renderer::init_wl_display"
 symbol = "wlr_renderer_init_wl_shm"
 module = "render"
 item   = "Renderer::init_wl_shm"
+
+[[wrapped]]
+symbol = "wlr_renderer_is_gles2"
+module = "render::gles2"
+item   = "Renderer::as_gles2"
+
+[[wrapped]]
+symbol = "wlr_renderer_is_pixman"
+module = "render::pixman"
+item   = "Renderer::as_pixman"
+
+[[wrapped]]
+symbol = "wlr_renderer_is_vk"
+module = "render::vulkan"
+item   = "Renderer::as_vulkan"
 
 [[wrapped]]
 symbol = "wlr_scale_filter_mode"
@@ -704,6 +964,21 @@ module = "render"
 item   = "Renderer::texture_from_pixels"
 
 [[wrapped]]
+symbol = "wlr_texture_is_gles2"
+module = "render::texture"
+item   = "Texture::gles2_attribs"
+
+[[wrapped]]
+symbol = "wlr_texture_is_pixman"
+module = "render::texture"
+item   = "Texture::pixman_image"
+
+[[wrapped]]
+symbol = "wlr_texture_is_vk"
+module = "render::texture"
+item   = "Texture::vulkan_attribs"
+
+[[wrapped]]
 symbol = "wlr_texture_preferred_read_format"
 module = "render::texture"
 item   = "Texture::preferred_read_format"
@@ -732,6 +1007,46 @@ item   = "Runtime::create_virtual_keyboard_manager"
 symbol = "wlr_virtual_pointer_manager_v1_create"
 module = "runtime"
 item   = "Runtime::create_virtual_pointer_manager"
+
+[[wrapped]]
+symbol = "wlr_vk_image_attribs"
+module = "render::vulkan"
+item   = "VkImageAttribs"
+
+[[wrapped]]
+symbol = "wlr_vk_renderer_create_with_drm_fd"
+module = "render::vulkan"
+item   = "Renderer::vulkan_with_drm_fd"
+
+[[wrapped]]
+symbol = "wlr_vk_renderer_get_device"
+module = "render::vulkan"
+item   = "Vk::device"
+
+[[wrapped]]
+symbol = "wlr_vk_renderer_get_instance"
+module = "render::vulkan"
+item   = "Vk::instance"
+
+[[wrapped]]
+symbol = "wlr_vk_renderer_get_physical_device"
+module = "render::vulkan"
+item   = "Vk::physical_device"
+
+[[wrapped]]
+symbol = "wlr_vk_renderer_get_queue_family"
+module = "render::vulkan"
+item   = "Vk::queue_family"
+
+[[wrapped]]
+symbol = "wlr_vk_texture_get_image_attribs"
+module = "render::texture"
+item   = "Texture::vulkan_attribs"
+
+[[wrapped]]
+symbol = "wlr_vk_texture_has_alpha"
+module = "render::texture"
+item   = "Texture::vulkan_has_alpha"
 
 [[wrapped]]
 symbol = "wlr_xdg_decoration_manager_v1_create"
