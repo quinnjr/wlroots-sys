@@ -200,9 +200,16 @@ impl<'h> Toplevel<'h> {
             if client.is_null() {
                 return None;
             }
-            let mut pid: sys::pid_t = 0;
-            let mut uid: u32 = 0;
-            let mut gid: u32 = 0;
+            // The three out-parameters are `wayland-sys`' own types, not
+            // bindgen's look-alikes: `wl_client_get_credentials` is
+            // libwayland's, so the identity that has to match is the one the
+            // `ffi_dispatch!` function pointer was declared with. bindgen's
+            // `sys::pid_t` also only exists when some *gated* wlroots header
+            // happens to pull in `<sys/types.h>`, which made this line fail to
+            // compile with `--no-default-features`.
+            let mut pid: sys::wayland_sys::pid_t = 0;
+            let mut uid: sys::wayland_sys::uid_t = 0;
+            let mut gid: sys::wayland_sys::gid_t = 0;
             ffi_dispatch!(
                 sys::wayland_sys::server::wayland_server_handle(),
                 wl_client_get_credentials,
