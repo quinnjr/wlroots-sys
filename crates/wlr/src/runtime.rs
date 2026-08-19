@@ -594,11 +594,20 @@ pub(crate) struct LayerSurfaceEntry {
 /// vocabulary or force a fifth variant onto a type whose four variants are
 /// already frozen as of 0.20.x's layer-shell surface. `Band` is a new,
 /// separate enum instead, covering exactly the six bands
-/// [`Runtime::add_rect_in_band`] can target — including [`Band::Lock`],
-/// which the crate itself uses for the session-lock fill and which a
-/// compositor may target too. Clients cannot reach this API at all, so the
-/// lock band being writable is a compositor's own business, not a way past
-/// the lock.
+/// [`Runtime::add_rect_in_band`] can target — [`Band::Lock`] included.
+///
+/// That Lock is targetable is deliberate and **load-bearing, not an
+/// oversight to close**. The opaque fill this crate drops over every output
+/// when a locker dies without unlocking is itself an
+/// `add_rect_in_band(Band::Lock, ..)` call, so a guard rejecting that band
+/// would break the stay-locked-on-death path — turning a locked session into
+/// an exposed desktop, which is the one outcome the lock state machine
+/// exists to prevent.
+///
+/// It is not a way past the lock either: this API is compositor-facing and
+/// no client can reach it. The boundary the lock defends is
+/// compositor-vs-client, and a compositor drawing into its own lock band is
+/// its own business.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Band {
     /// Beneath everything — `Graphics::background_band`.
