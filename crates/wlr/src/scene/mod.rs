@@ -32,12 +32,22 @@
 //!   got an id only because something *observed* it
 //!   ([`Runtime::node_at`](crate::Runtime::node_at), [`Runtime::node_children`](crate::Runtime::node_children),
 //!   [`Runtime::for_each_buffer`](crate::Runtime::for_each_buffer)). A toplevel's tree, a layer surface's tree,
-//!   a client surface's buffer node. These are read-only through this API;
-//!   mutate them through [`Runtime::raise_toplevel`](crate::Runtime::raise_toplevel) and its siblings, which
-//!   keep the crate's own bookkeeping straight.
+//!   a client surface's buffer node. Their *placement* is read-only through
+//!   this API; move and restack them through
+//!   [`Runtime::raise_toplevel`](crate::Runtime::raise_toplevel) and its
+//!   siblings, which keep the crate's own bookkeeping straight. Their
+//!   *appearance* is not: opacity, filter, transform, the colour metadata, the
+//!   source box, the destination size and the opaque region all apply, because
+//!   fading or recolouring a client's window is the ordinary reason to hold one
+//!   of these ids and none of it touches the bookkeeping the placement rule
+//!   protects.
 //!
-//! Every mutator on a protected or foreign node returns `None`, exactly as it
-//! does for an id that never existed.
+//! So the rule is about placement, not ownership: every mutator that *moves,
+//! restacks, reparents or destroys* a protected or foreign node returns `None`,
+//! exactly as it does for an id that never existed. The one appearance-side
+//! exception is [`Runtime::set_node_enabled`](crate::Runtime::set_node_enabled),
+//! which refuses to hide [`Band::Lock`](crate::Band::Lock) while the session is
+//! locked — see its own doc.
 
 use std::cell::Cell;
 use std::marker::PhantomData;

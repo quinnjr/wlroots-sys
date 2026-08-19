@@ -2565,8 +2565,33 @@ impl Runtime {
     /// Disabling does not change any descendant's own flag; wlroots composes
     /// them at draw time, which is why re-enabling restores exactly what the
     /// subtree looked like. `None` for an unknown or stale id.
+    ///
+    /// Also `None` for disabling [`Band::Lock`] while the session is locked.
+    /// That band is what a lock is *made of* — the opaque fill and every lock
+    /// surface live in it — so hiding it uncovers the desktop underneath while
+    /// [`is_session_locked`](Runtime::is_session_locked) still reports `true`
+    /// and every other part of the crate still behaves as though locked. The
+    /// screen shows a session the compositor believes is locked. Input stays
+    /// isolated, so this was only ever visual, which is precisely the whole
+    /// point of a lock screen.
+    ///
+    /// Re-*enabling* it is always allowed, and so is disabling it when no lock
+    /// is held — an unlocked Lock band is empty, and refusing there would make
+    /// the band uniquely unmanageable for no benefit.
     pub fn set_node_enabled(&self, node: NodeId, enabled: bool) -> Option<()> {
         let raw = self.node_ptr(node)?;
+        if !enabled
+            && self.is_session_locked()
+            && let Some(band) = self.band_ptr(Band::Lock)
+        {
+            // SAFETY: `band_ptr` returns this runtime's own scene tree, alive
+            // for as long as the runtime's graphics are; taking the address of
+            // its embedded `node` reads nothing.
+            let band_node = unsafe { &raw mut (*band.as_ptr()).node };
+            if std::ptr::eq(band_node, raw.as_ptr()) {
+                return None;
+            }
+        }
         // SAFETY: a resolvable id names a live node.
         unsafe { sys::wlr_scene_node_set_enabled(raw.as_ptr(), enabled) };
         Some(())
@@ -3365,7 +3390,7 @@ impl Runtime {
         node: NodeId,
         region: Option<&Region>,
     ) -> Option<()> {
-        let raw = self.movable_scene_buffer_ptr(node)?;
+        let raw = self.restylable_scene_buffer_ptr(node)?;
         let ptr = region.map_or(std::ptr::null(), |r| r.as_ptr());
         // SAFETY: a resolvable id of the right tag names a live buffer node;
         // `ptr` is null or a live region wlroots copies out of.
@@ -3389,7 +3414,7 @@ impl Runtime {
                 return None;
             }
         }
-        let raw = self.movable_scene_buffer_ptr(node)?;
+        let raw = self.restylable_scene_buffer_ptr(node)?;
         let ptr = source.as_ref().map_or(std::ptr::null(), FBox::as_c);
         // SAFETY: a resolvable id of the right tag names a live buffer node;
         // `ptr` is null or points at `source`, a live local for this call,
@@ -3409,7 +3434,7 @@ impl Runtime {
         if width < 0 || height < 0 {
             return None;
         }
-        let raw = self.movable_scene_buffer_ptr(node)?;
+        let raw = self.restylable_scene_buffer_ptr(node)?;
         // SAFETY: a resolvable id of the right tag names a live buffer node,
         // and the dimensions were checked against wlroots' assert above.
         unsafe { sys::wlr_scene_buffer_set_dest_size(raw.as_ptr(), width, height) };
@@ -3419,7 +3444,7 @@ impl Runtime {
     /// Apply a transform to a buffer node's contents. `None` if the id is
     /// unknown, stale or not a buffer node.
     pub fn set_scene_buffer_transform(&self, node: NodeId, transform: Transform) -> Option<()> {
-        let raw = self.movable_scene_buffer_ptr(node)?;
+        let raw = self.restylable_scene_buffer_ptr(node)?;
         // SAFETY: a resolvable id of the right tag names a live buffer node.
         unsafe { sys::wlr_scene_buffer_set_transform(raw.as_ptr(), transform.into()) };
         Some(())
@@ -3435,7 +3460,7 @@ impl Runtime {
         if !(0.0..=1.0).contains(&opacity) {
             return None;
         }
-        let raw = self.movable_scene_buffer_ptr(node)?;
+        let raw = self.restylable_scene_buffer_ptr(node)?;
         // SAFETY: a resolvable id of the right tag names a live buffer node.
         unsafe { sys::wlr_scene_buffer_set_opacity(raw.as_ptr(), opacity) };
         Some(())
@@ -3444,7 +3469,7 @@ impl Runtime {
     /// Choose how a buffer node is sampled when scaled. `None` if the id is
     /// unknown, stale or not a buffer node.
     pub fn set_scene_buffer_filter(&self, node: NodeId, filter: FilterMode) -> Option<()> {
-        let raw = self.movable_scene_buffer_ptr(node)?;
+        let raw = self.restylable_scene_buffer_ptr(node)?;
         // SAFETY: a resolvable id of the right tag names a live buffer node.
         unsafe { sys::wlr_scene_buffer_set_filter_mode(raw.as_ptr(), filter.into()) };
         Some(())
@@ -3457,7 +3482,7 @@ impl Runtime {
         node: NodeId,
         transfer_function: TransferFunction,
     ) -> Option<()> {
-        let raw = self.movable_scene_buffer_ptr(node)?;
+        let raw = self.restylable_scene_buffer_ptr(node)?;
         // SAFETY: a resolvable id of the right tag names a live buffer node.
         unsafe {
             sys::wlr_scene_buffer_set_transfer_function(raw.as_ptr(), transfer_function.into());
@@ -3477,7 +3502,7 @@ impl Runtime {
         node: NodeId,
         primaries: NamedPrimaries,
     ) -> Option<()> {
-        let raw = self.movable_scene_buffer_ptr(node)?;
+        let raw = self.restylable_scene_buffer_ptr(node)?;
         // SAFETY: a resolvable id of the right tag names a live buffer node.
         unsafe { sys::wlr_scene_buffer_set_primaries(raw.as_ptr(), primaries.into()) };
         Some(())
@@ -3490,7 +3515,7 @@ impl Runtime {
         node: NodeId,
         encoding: ColorEncoding,
     ) -> Option<()> {
-        let raw = self.movable_scene_buffer_ptr(node)?;
+        let raw = self.restylable_scene_buffer_ptr(node)?;
         // SAFETY: a resolvable id of the right tag names a live buffer node.
         unsafe { sys::wlr_scene_buffer_set_color_encoding(raw.as_ptr(), encoding.into()) };
         Some(())
@@ -3499,7 +3524,7 @@ impl Runtime {
     /// Declare whether a buffer node's encoding uses the full or the limited
     /// value range. `None` if the id is unknown, stale or not a buffer node.
     pub fn set_scene_buffer_color_range(&self, node: NodeId, range: ColorRange) -> Option<()> {
-        let raw = self.movable_scene_buffer_ptr(node)?;
+        let raw = self.restylable_scene_buffer_ptr(node)?;
         // SAFETY: a resolvable id of the right tag names a live buffer node.
         unsafe { sys::wlr_scene_buffer_set_color_range(raw.as_ptr(), range.into()) };
         Some(())
@@ -3522,6 +3547,38 @@ impl Runtime {
         // a stale set answered after the run had ended would be worse than a
         // miss.
         self.inner.scene_buffer_outputs.borrow_mut().clear();
+    }
+
+    /// `id`'s node as a buffer node, if changing how it *looks* is allowed.
+    ///
+    /// Accepts a foreign node, unlike
+    /// [`movable_scene_buffer_ptr`](Runtime::movable_scene_buffer_ptr). The
+    /// Owned-only rule exists for one reason — this crate keeps placement
+    /// bookkeeping for the nodes it hands out ids to, and a direct move would
+    /// invalidate it behind `set_toplevel_position` and `raise_toplevel`'s
+    /// backs. None of the appearance setters touch that bookkeeping: opacity,
+    /// filter, transform, the colour metadata, the source box, the
+    /// destination size and the opaque region change what a node looks like,
+    /// not where it sits or what it sits above.
+    ///
+    /// Applying the placement rule to them made the single most ordinary
+    /// compositor operation — fading a client's window, from the `NodeId`
+    /// `node_at` just returned — come back `None` with no diagnostic, and
+    /// contradicted each of those methods' own documented `None` cases
+    /// ("unknown, stale, or not a buffer node").
+    ///
+    /// Note that wlroots itself sets several of these on a
+    /// `wlr_scene_surface`'s buffer node on every surface commit, so a value
+    /// written to a client's node may not survive the client's next frame.
+    /// That is wlroots' behaviour showing through, not a refusal, and the
+    /// caller can see it.
+    ///
+    /// `set_scene_buffer_buffer_with_options` deliberately does **not** use
+    /// this: replacing the buffer of a node wlroots is filling from a surface
+    /// is not an appearance change, it is fighting wlroots for ownership of
+    /// the content.
+    fn restylable_scene_buffer_ptr(&self, id: NodeId) -> Option<NonNull<sys::wlr_scene_buffer>> {
+        self.scene_buffer_ptr(id)
     }
 
     /// `id`'s node as a buffer node, whoever owns it.
@@ -4072,7 +4129,7 @@ impl Runtime {
         scene_output: SceneOutputId,
         when: std::time::Duration,
     ) -> Option<()> {
-        let raw = self.movable_scene_buffer_ptr(node)?;
+        let raw = self.restylable_scene_buffer_ptr(node)?;
         let output = self.scene_output_ptr(scene_output)?;
         let mut event = sys::wlr_scene_frame_done_event {
             output: output.as_ptr(),
@@ -8004,6 +8061,92 @@ mod tests {
         );
         assert_eq!(rt.remove_rect(rect), None, "and remove_rect now misses");
         assert_eq!(rt.node_kind(node), None);
+    }
+
+    /// The Lock band cannot be hidden while a lock is held.
+    ///
+    /// It is what a lock is made of — the opaque fill and every lock surface
+    /// live in it — so disabling it uncovered the desktop while
+    /// `is_session_locked()` still said `true` and the rest of the crate went
+    /// on behaving as locked. A screen showing a session the compositor
+    /// believes is locked. `set_node_enabled` accepts protected nodes by
+    /// design (the module doc says so), which is exactly why this one band
+    /// needs the explicit refusal.
+    #[test]
+    fn the_lock_band_cannot_be_hidden_while_the_session_is_locked() {
+        let rt = headless_runtime();
+        let band = rt.band_node(Band::Lock).expect("lock band");
+
+        // Unlocked, the band is ordinary: an empty band nothing is relying on.
+        assert_eq!(rt.set_node_enabled(band, false), Some(()));
+        assert_eq!(rt.set_node_enabled(band, true), Some(()));
+
+        rt.inner.session_locked.set(true);
+        assert_eq!(
+            rt.set_node_enabled(band, false),
+            None,
+            "hiding the lock band while locked uncovers the desktop"
+        );
+        // Re-enabling is always allowed — it can only ever make the lock more
+        // complete, never less.
+        assert_eq!(rt.set_node_enabled(band, true), Some(()));
+
+        // Only this band. Every other band stays hideable under a lock.
+        for other in [Band::Background, Band::Bottom, Band::Top, Band::Overlay] {
+            let node = rt.band_node(other).expect("band");
+            assert_eq!(
+                rt.set_node_enabled(node, false),
+                Some(()),
+                "{other:?} is not the lock band"
+            );
+            assert_eq!(rt.set_node_enabled(node, true), Some(()));
+        }
+        rt.inner.session_locked.set(false);
+    }
+
+    /// Appearance setters reach a foreign node; placement ones still do not.
+    ///
+    /// The Owned-only rule exists for this crate's placement bookkeeping,
+    /// which `set_toplevel_position` and `raise_toplevel` maintain. Applying
+    /// it to the appearance setters made fading a client's window — from the
+    /// very `NodeId` `node_at` hands back — return `None` with no diagnostic,
+    /// and contradicted each of those methods' own documented `None` cases.
+    #[test]
+    fn appearance_setters_reach_a_foreign_node_but_placement_does_not() {
+        let rt = headless_runtime();
+        let band = rt.band_node(Band::Overlay).expect("band");
+        let owned = rt.create_scene_buffer(band, None).expect("buffer node");
+
+        // Re-observing an owned node through the child walk yields the same
+        // id, so to get a genuinely foreign one this forces the origin
+        // directly — the same state `node_at` on a client surface produces.
+        rt.inner
+            .nodes
+            .borrow_mut()
+            .get_mut(&owned)
+            .expect("row")
+            .origin = NodeOrigin::Foreign;
+
+        assert_eq!(
+            rt.set_scene_buffer_opacity(owned, 0.5),
+            Some(()),
+            "fading a client's window is the ordinary case"
+        );
+        assert_eq!(
+            rt.set_scene_buffer_filter(owned, FilterMode::Nearest),
+            Some(())
+        );
+        assert_eq!(
+            rt.set_scene_buffer_transform(owned, Transform::R90),
+            Some(())
+        );
+        assert_eq!(rt.set_scene_buffer_dest_size(owned, 8, 8), Some(()));
+
+        assert_eq!(
+            rt.set_node_position(owned, 1, 1),
+            None,
+            "placement still goes through the toplevel and layer APIs"
+        );
     }
 
     /// The reverse pairing: the published `remove_rect` path must leave no
