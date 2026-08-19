@@ -17,20 +17,47 @@ use std::path::Path;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        Some("coverage") => {
-            let check = args.next().as_deref() == Some("--check");
-            coverage_report(check)
-        }
-        other => {
-            if let Some(cmd) = other {
-                eprintln!("unknown command `{cmd}`");
-            }
+    match parse(std::env::args().skip(1)) {
+        Ok(Command::Coverage { check }) => coverage_report(check),
+        Err(err) => {
+            eprintln!("{err}");
             eprintln!("usage: cargo xtask coverage [--check]");
             ExitCode::from(2)
         }
     }
+}
+
+/// What the command line asked for.
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    Coverage { check: bool },
+}
+
+/// Parse the command line, rejecting anything not understood.
+///
+/// Rejecting is the whole point. `--check` used to be recognised by comparing
+/// one argument for equality and ignoring everything else, so
+/// `cargo xtask coverage --chek` — or `--check` with a stray extra argument —
+/// quietly became the *reporting* mode and exited 0 over a dirty ledger. A
+/// gate that answers "fine" when it was never asked to check is worse than no
+/// gate, because the green tick is what people read.
+fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
+    let mut args = args;
+    let Some(cmd) = args.next() else {
+        return Err("no command given".to_string());
+    };
+    if cmd != "coverage" {
+        return Err(format!("unknown command `{cmd}`"));
+    }
+    let mut check = false;
+    for arg in args {
+        match arg.as_str() {
+            "--check" if !check => check = true,
+            "--check" => return Err("`--check` given twice".to_string()),
+            other => return Err(format!("unknown argument `{other}`")),
+        }
+    }
+    Ok(Command::Coverage { check })
 }
 
 fn coverage_report(check: bool) -> ExitCode {
@@ -108,4 +135,47 @@ fn read(path: &Path) -> Result<String, String> {
 fn fail(message: &str) -> ExitCode {
     eprintln!("xtask: {message}");
     ExitCode::FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, parse};
+
+    fn go(args: &[&str]) -> Result<Command, String> {
+        parse(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn coverage_defaults_to_reporting() {
+        assert_eq!(go(&["coverage"]), Ok(Command::Coverage { check: false }));
+    }
+
+    #[test]
+    fn check_is_recognised() {
+        assert_eq!(
+            go(&["coverage", "--check"]),
+            Ok(Command::Coverage { check: true })
+        );
+    }
+
+    /// The bug this parser exists for: a typo used to leave `check` false and
+    /// exit 0, so CI reported a clean ledger it had never inspected.
+    #[test]
+    fn a_typo_is_rejected_rather_than_silently_reporting() {
+        assert!(go(&["coverage", "--chek"]).is_err());
+        assert!(go(&["coverage", "-check"]).is_err());
+        assert!(go(&["coverage", "check"]).is_err());
+    }
+
+    #[test]
+    fn a_stray_extra_argument_is_rejected() {
+        assert!(go(&["coverage", "--check", "extra"]).is_err());
+        assert!(go(&["coverage", "extra"]).is_err());
+    }
+
+    #[test]
+    fn an_unknown_or_missing_command_is_rejected() {
+        assert!(go(&["covrage"]).is_err());
+        assert!(go(&[]).is_err());
+    }
 }

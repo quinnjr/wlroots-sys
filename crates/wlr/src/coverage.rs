@@ -452,10 +452,48 @@ fn collect_sys_uses(text: &str, out: &mut BTreeSet<String>) {
     let mut rest = text;
     while let Some(at) = rest.find("sys::") {
         rest = &rest[at + "sys::".len()..];
-        if let Some((name, _)) = leading_ident(rest)
-            && name.starts_with("wlr_")
-        {
-            out.insert(name.to_owned());
+        // `sys::wlr_foo` — the common shape.
+        if let Some((name, _)) = leading_ident(rest) {
+            if name.starts_with("wlr_") {
+                out.insert(name.to_owned());
+            }
+            continue;
+        }
+        // `use crate::sys::{wlr_a, wlr_b};` — a brace group. Missing these
+        // used to be silent *and* backwards: a row in `wrapped.toml` whose
+        // only use was a grouped import scanned as unused, so the audit
+        // reported a stale wrapper and failed CI over a wrapper that was
+        // perfectly fine. Nothing imports that way today, which is exactly
+        // why it would have gone unnoticed until the first refactor did.
+        if rest.starts_with('{') {
+            let mut depth = 0usize;
+            let mut end = rest.len();
+            for (i, c) in rest.char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let group = &rest[1..end.min(rest.len())];
+            let mut scan = group;
+            while !scan.is_empty() {
+                match leading_ident(scan) {
+                    Some((name, tail)) => {
+                        if name.starts_with("wlr_") {
+                            out.insert(name.to_owned());
+                        }
+                        scan = tail;
+                    }
+                    None => scan = &scan[scan.chars().next().map_or(0, char::len_utf8)..],
+                }
+            }
         }
     }
 }
@@ -1103,6 +1141,44 @@ milestone = \"M5\"
         assert!(found.contains("wlr_scene_create"));
         assert!(found.contains("wlr_box"));
         assert!(!found.contains("wl_listener"));
+    }
+
+    /// A grouped import is a use, and used to scan as none.
+    ///
+    /// The failure was backwards, which is why it would have been confusing:
+    /// a `wrapped.toml` row whose only use was a grouped import looked stale,
+    /// so the audit failed CI over a wrapper that was working. Nothing
+    /// imports this way today — the first refactor that did would have been
+    /// blamed for the breakage.
+    #[test]
+    fn a_grouped_sys_import_counts_as_a_use() {
+        let mut found = BTreeSet::new();
+        collect_sys_uses(
+            "use crate::sys::{wlr_scene_create, wlr_box};\n\
+             use crate::sys::{wlr_output, wl_listener};\n",
+            &mut found,
+        );
+        assert!(found.contains("wlr_scene_create"));
+        assert!(found.contains("wlr_box"));
+        assert!(found.contains("wlr_output"));
+        assert!(
+            !found.contains("wl_listener"),
+            "the wlr_ filter still applies inside a group"
+        );
+    }
+
+    /// Nested groups and renames must not swallow the symbols after them.
+    #[test]
+    fn a_nested_group_does_not_end_the_scan_early() {
+        let mut found = BTreeSet::new();
+        collect_sys_uses(
+            "use crate::sys::{wlr_a, nested::{wlr_b}, wlr_c};\n\
+             let x = sys::wlr_after_the_group();\n",
+            &mut found,
+        );
+        for want in ["wlr_a", "wlr_b", "wlr_c", "wlr_after_the_group"] {
+            assert!(found.contains(want), "missing {want}");
+        }
     }
 
     /// The staleness check is only worth anything if the audit cannot answer it
