@@ -12,6 +12,7 @@ use std::ffi::CStr;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
+use crate::geom::Transform;
 use crate::id::{OutputId, find_id};
 use crate::{Error, Result, sys};
 
@@ -274,6 +275,173 @@ impl<'h> Output<'h> {
     pub(crate) fn as_ptr(&self) -> *mut sys::wlr_output {
         self.raw.as_ptr()
     }
+
+    /// The output's advertised modes.
+    ///
+    /// Walks `wlr_output.modes`, a `wl_list` of `wlr_output_mode` linked
+    /// through their own `link` field (not nested inside a listener, so the
+    /// field path passed to [`wl_list_for_each!`](sys::wl_list_for_each) is
+    /// just `link`). Every entry is copied into an owned [`Mode`] before this
+    /// returns, so the result stays valid regardless of what happens to the
+    /// output afterwards — including a later commit that could in principle
+    /// reshuffle the list.
+    ///
+    /// Some outputs (headless, some nested backends) advertise no modes at
+    /// all; those report an empty `Vec` rather than an error, matching
+    /// [`enable_with_preferred_mode`](Output::enable_with_preferred_mode)'s
+    /// treatment of the same case.
+    pub fn modes(&self) -> Vec<Mode> {
+        // SAFETY: the handle's lifetime guarantees the output is live, so
+        // `modes` is an initialised `wl_list` sentinel head for as long as
+        // this call runs. Nothing here dispatches or frees while the
+        // iterator is outstanding — each entry is copied into an owned
+        // `Mode` and the raw pointer is never retained past this loop body.
+        unsafe {
+            sys::wl_list_for_each!(&raw mut (*self.raw.as_ptr()).modes, sys::wlr_output_mode, link)
+                .map(|mode| Mode {
+                    width: (*mode).width,
+                    height: (*mode).height,
+                    refresh_mhz: (*mode).refresh,
+                    preferred: (*mode).preferred,
+                })
+                .collect()
+        }
+    }
+
+    /// Set a custom mode (width, height, refresh in mHz) and commit.
+    ///
+    /// This is `wlr_output_state_set_custom_mode`, not
+    /// `wlr_output_state_set_mode`: it does not pick one of the modes
+    /// [`modes`](Output::modes) reports, it asks the backend for an arbitrary
+    /// size and refresh rate. On an output that advertises fixed modes (most
+    /// real DRM outputs), a custom mode is not guaranteed to work correctly
+    /// and may produce visual artifacts — wlroots' own documentation
+    /// recommends preferring a listed mode there. It is the right call on
+    /// backends that have no fixed mode list, such as headless and most
+    /// nested backends, where it is the only way to choose a size at all.
+    /// Passing `0` for `refresh_mhz` lets the backend pick a value; the
+    /// output must already be enabled.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] if wlroots rejected the commit.
+    pub fn set_mode(&self, width: i32, height: i32, refresh_mhz: i32) -> Result<()> {
+        // SAFETY: the handle's lifetime guarantees the output is live. The
+        // state is initialised before any field is set and finished before
+        // it drops, as wlroots requires, on every return path.
+        unsafe {
+            let mut state = std::mem::MaybeUninit::<sys::wlr_output_state>::uninit();
+            sys::wlr_output_state_init(state.as_mut_ptr());
+            let mut state = state.assume_init();
+            sys::wlr_output_state_set_custom_mode(&raw mut state, width, height, refresh_mhz);
+
+            let ok = sys::wlr_output_commit_state(self.raw.as_ptr(), &raw const state);
+            sys::wlr_output_state_finish(&raw mut state);
+
+            if ok {
+                Ok(())
+            } else {
+                Err(Error::Operation("wlr_output_commit_state"))
+            }
+        }
+    }
+
+    /// Set the output's scale and commit.
+    ///
+    /// The scale used to size UI elements up on high-DPI outputs.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] if wlroots rejected the commit.
+    pub fn set_scale(&self, scale: f32) -> Result<()> {
+        // SAFETY: as in `set_mode`.
+        unsafe {
+            let mut state = std::mem::MaybeUninit::<sys::wlr_output_state>::uninit();
+            sys::wlr_output_state_init(state.as_mut_ptr());
+            let mut state = state.assume_init();
+            sys::wlr_output_state_set_scale(&raw mut state, scale);
+
+            let ok = sys::wlr_output_commit_state(self.raw.as_ptr(), &raw const state);
+            sys::wlr_output_state_finish(&raw mut state);
+
+            if ok {
+                Ok(())
+            } else {
+                Err(Error::Operation("wlr_output_commit_state"))
+            }
+        }
+    }
+
+    /// Set the output's transform and commit.
+    ///
+    /// The transform rotates or flips the output's contents.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] if wlroots rejected the commit.
+    pub fn set_transform(&self, transform: Transform) -> Result<()> {
+        // SAFETY: as in `set_mode`.
+        unsafe {
+            let mut state = std::mem::MaybeUninit::<sys::wlr_output_state>::uninit();
+            sys::wlr_output_state_init(state.as_mut_ptr());
+            let mut state = state.assume_init();
+            sys::wlr_output_state_set_transform(&raw mut state, transform.into());
+
+            let ok = sys::wlr_output_commit_state(self.raw.as_ptr(), &raw const state);
+            sys::wlr_output_state_finish(&raw mut state);
+
+            if ok {
+                Ok(())
+            } else {
+                Err(Error::Operation("wlr_output_commit_state"))
+            }
+        }
+    }
+
+    /// Disable the output and commit.
+    ///
+    /// The inverse of [`enable_with_preferred_mode`](Output::enable_with_preferred_mode):
+    /// after this call the output produces no frames until it is re-enabled.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] if wlroots rejected the commit.
+    pub fn disable(&self) -> Result<()> {
+        // SAFETY: as in `set_mode`.
+        unsafe {
+            let mut state = std::mem::MaybeUninit::<sys::wlr_output_state>::uninit();
+            sys::wlr_output_state_init(state.as_mut_ptr());
+            let mut state = state.assume_init();
+            sys::wlr_output_state_set_enabled(&raw mut state, false);
+
+            let ok = sys::wlr_output_commit_state(self.raw.as_ptr(), &raw const state);
+            sys::wlr_output_state_finish(&raw mut state);
+
+            if ok {
+                Ok(())
+            } else {
+                Err(Error::Operation("wlr_output_commit_state"))
+            }
+        }
+    }
+}
+
+/// A single mode an output advertises: a size and refresh rate the backend
+/// can drive it at.
+///
+/// Returned by [`Output::modes`]. Owned and copied out of wlroots' own list,
+/// so it stays valid independent of the output's lifetime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mode {
+    /// Width in pixels.
+    pub width: i32,
+    /// Height in pixels.
+    pub height: i32,
+    /// Refresh rate in mHz (millihertz) — divide by 1000 for Hz.
+    pub refresh_mhz: i32,
+    /// Whether the backend advertises this as its preferred mode. At most
+    /// one mode in a given [`Output::modes`] list normally reports `true`.
+    pub preferred: bool,
 }
 
 #[cfg(test)]
@@ -420,5 +588,72 @@ mod tests {
         // SAFETY: as in the tests above.
         let handle = unsafe { Output::from_raw(output.0) };
         assert_eq!(handle.transformed_size(), handle.size());
+    }
+
+    /// `modes` walks `wlr_output.modes` and copies each entry out as an
+    /// owned [`Mode`].
+    ///
+    /// The list head lives inside `ScratchOutput`'s zeroed allocation, so it
+    /// is initialised explicitly here rather than relying on any zero bit
+    /// pattern being a valid empty `wl_list` (it happens not to be: an empty
+    /// `wl_list`'s `next`/`prev` must point at the head itself, which zeroed
+    /// null pointers do not). One `wlr_output_mode` is allocated separately
+    /// on the heap and linked in, then freed after the assertions run.
+    ///
+    /// Mutation-covering: flipping any field copied in `modes` (width,
+    /// height, `refresh` vs `refresh_mhz`, `preferred`), returning an empty
+    /// `Vec` unconditionally, or getting the `link` field offset wrong (which
+    /// would panic or read garbage rather than the mode's real fields) fails
+    /// this assertion.
+    #[test]
+    fn modes_reports_the_outputs_linked_modes() {
+        let output = ScratchOutput::new();
+        // SAFETY: `output.0` is exclusively owned by this test and live; its
+        // `modes` field is uninitialised (from `alloc_zeroed`, not a valid
+        // `wl_list`) until `wl_list_init` runs here.
+        unsafe { sys::wayland_sys::server::wl_list_init(&raw mut (*output.0).modes) };
+
+        let mode_layout = Layout::new::<sys::wlr_output_mode>();
+        // SAFETY: `mode_layout` is non-zero-sized, so `alloc_zeroed` returns
+        // either null (checked below) or a suitably aligned, zeroed
+        // allocation of exactly that size.
+        let mode = unsafe { alloc_zeroed(mode_layout) }.cast::<sys::wlr_output_mode>();
+        assert!(!mode.is_null(), "allocation failed");
+        // SAFETY: `mode` is a fresh, exclusively-owned allocation sized for
+        // `wlr_output_mode`; these writes are all in bounds of it, and
+        // `wl_list_insert` only touches the `link` field's own `wl_list`
+        // plus the (now-initialised) list head, both live for the duration
+        // of this test.
+        unsafe {
+            (*mode).width = 1920;
+            (*mode).height = 1080;
+            (*mode).refresh = 60_000;
+            (*mode).preferred = true;
+            sys::wayland_sys::server::wl_list_insert(&raw mut (*output.0).modes, &raw mut (*mode).link);
+        }
+
+        // SAFETY: `output.0` is live and its `modes` list is initialised and
+        // has exactly the one entry linked above.
+        let handle = unsafe { Output::from_raw(output.0) };
+        let modes = handle.modes();
+
+        // SAFETY: `mode` is not used again after this point; `link` was
+        // never removed from the list, but the list head itself (part of
+        // `output.0`'s allocation) is torn down independently in
+        // `ScratchOutput::drop`, so this free does not leave a dangling
+        // entry any later code walks.
+        unsafe { dealloc(mode.cast::<u8>(), mode_layout) };
+
+        assert_eq!(
+            modes,
+            vec![Mode {
+                width: 1920,
+                height: 1080,
+                refresh_mhz: 60_000,
+                preferred: true,
+            }],
+            "modes() must report the one linked wlr_output_mode with its \
+             real fields, not an empty or wrong list"
+        );
     }
 }
