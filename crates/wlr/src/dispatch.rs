@@ -44,7 +44,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
-use crate::{DecorationMode, Edges, LayerSurfaceId, OutputId, ToplevelId};
+use crate::{DecorationMode, Edges, LayerSurfaceId, NodeId, OutputId, SceneOutputId, ToplevelId};
 
 /// An event awaiting delivery.
 ///
@@ -55,6 +55,15 @@ pub(crate) enum Event {
     NewOutput(OutputId),
     OutputFrame(OutputId),
     OutputDestroyed(OutputId),
+
+    /// The runtime's renderer emitted `events.lost`: the GPU was reset and
+    /// everything derived from that renderer is invalid.
+    ///
+    /// Carries nothing, because there is nothing to carry — the run has exactly
+    /// one renderer, and wlroots passes the renderer itself as the signal's
+    /// data, which this crate must not turn into a handle for the usual reason
+    /// (a deferred event may name a dead object).
+    RendererLost,
 
     /// An fd source is ready. Carries the readiness mask rather than a
     /// [`Readiness`](crate::Readiness) so the enum stays `Copy` and `Eq`
@@ -99,6 +108,29 @@ pub(crate) enum Event {
     LayerSurfaceMapped(LayerSurfaceId),
     LayerSurfaceUnmapped(LayerSurfaceId),
     LayerSurfaceDestroyed(LayerSurfaceId),
+
+    /// An observed scene buffer node is now displayed on a scene output.
+    SceneBufferOutputEnter(NodeId, SceneOutputId),
+    /// An observed scene buffer node is no longer displayed on a scene output.
+    SceneBufferOutputLeave(NodeId, SceneOutputId),
+    /// The set of outputs an observed scene buffer node is displayed on
+    /// changed.
+    ///
+    /// Carries no payload beyond the node, deliberately. wlroots hands the
+    /// signal a C array that is valid only for the emission, and this enum is
+    /// `Copy + Eq` (this module's own reentrancy tests compare events with
+    /// `assert_eq!`), so a `Vec` cannot live here. The array is snapshotted at
+    /// emission time into the runtime instead, and
+    /// [`Runtime::scene_buffer_active_outputs`](crate::Runtime::scene_buffer_active_outputs)
+    /// reads it back at delivery — see that method's own doc for what a
+    /// deferred delivery therefore reports.
+    SceneBufferOutputsUpdate(NodeId),
+    /// An observed scene buffer node was sampled while rendering a scene
+    /// output. The bool is whether it was scanned out directly.
+    SceneBufferOutputSample(NodeId, SceneOutputId, bool),
+    /// An observed scene buffer node's own `frame_done` fired. The duration is
+    /// the timestamp wlroots named, read at emission time.
+    SceneBufferFrameDone(NodeId, SceneOutputId, std::time::Duration),
 
     Key {
         keysym: u32,
@@ -166,6 +198,33 @@ thread_local! {
 /// elsewhere in the crate.
 pub(crate) fn in_handler() -> bool {
     IN_HANDLER.get()
+}
+
+thread_local! {
+    /// Set while a handler *delivery* is running on this thread.
+    ///
+    /// Narrower than [`IN_HANDLER`], which any borrow guard also raises. Only
+    /// [`HandlerGuard`] sets this one, so it answers "could a handler be
+    /// holding a [`BorrowedFd`](std::os::fd::BorrowedFd) this crate handed
+    /// it", which is a different question from "could a handle be live".
+    ///
+    /// [`crate::Runtime::remove_fd`] needs the narrow one. It defers the
+    /// `OwnedFd`'s close when a handler might still be reading the
+    /// descriptor, and the deferred queue is drained per-turn by a run. Asking
+    /// `in_handler()` made a scene borrow taken with no run on the stack — the
+    /// ordinary way to inspect the scene by id — look like a delivery, so
+    /// `rt.with_node(id, |_| rt.remove_fd(src))` queued the fd against a drain
+    /// that was never going to happen and leaked it for the process's life.
+    /// A borrow guard cannot be holding an fd borrow: the fd borrow only
+    /// exists for the duration of a `fd_ready` call, and that is exactly what
+    /// raises this flag.
+    static IN_DELIVERY: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether a handler delivery — not merely a borrow guard — is on this
+/// thread's stack. See [`IN_DELIVERY`].
+pub(crate) fn in_delivery() -> bool {
+    IN_DELIVERY.get()
 }
 
 thread_local! {
@@ -238,6 +297,10 @@ impl Drop for DisplayPinGuard {
 struct HandlerGuard<'a> {
     in_dispatch: &'a Cell<bool>,
 
+    /// As `previous`, for [`IN_DELIVERY`] — the narrower flag that says a
+    /// delivery specifically, rather than any borrow guard, is on the stack.
+    previous_delivery: bool,
+
     /// What [`IN_HANDLER`] read on the way in, restored rather than cleared on
     /// the way out. Today it is always `false` — a second dispatcher on one
     /// thread is what `Backend::run`'s `ReentryGuard` refuses — but restoring
@@ -250,9 +313,11 @@ impl<'a> HandlerGuard<'a> {
     fn enter(in_dispatch: &'a Cell<bool>) -> Self {
         in_dispatch.set(true);
         let previous = IN_HANDLER.replace(true);
+        let previous_delivery = IN_DELIVERY.replace(true);
         HandlerGuard {
             in_dispatch,
             previous,
+            previous_delivery,
         }
     }
 }
@@ -260,8 +325,77 @@ impl<'a> HandlerGuard<'a> {
 impl Drop for HandlerGuard<'_> {
     fn drop(&mut self) {
         IN_HANDLER.set(self.previous);
+        IN_DELIVERY.set(self.previous_delivery);
         self.in_dispatch.set(false);
     }
+}
+
+/// Marks an `extern "C"` frame that runs consumer code but is not a
+/// [`Dispatcher`] delivery.
+///
+/// [`HandlerGuard`] needs a dispatcher to set its per-dispatcher flag, and some
+/// callbacks have none: `render::sync`'s timeline waiter is invoked by
+/// libwayland from inside `wl_event_loop_dispatch`, with a plain closure and no
+/// `&mut S` anywhere. Deferral is therefore not the question — there is no
+/// second `&mut S` to alias — but *refusal* still is, because the closure can
+/// hold a `&Display` and drive the loop from underneath the dispatch that is
+/// running it.
+///
+/// So this sets [`IN_HANDLER`], and restores rather than clears it for the same
+/// reason `HandlerGuard` does: a frame nested inside a real handler delivery
+/// must not reopen the loop when it returns.
+///
+/// It also raises [`FOREIGN_FRAMES`], which is what makes scene destroys and
+/// insertions refuse. Seven of the eight sites that enter one of these
+/// happened to pair it with a `NodeBorrowGuard`, and that pairing — not this
+/// type — was doing that work; `render::sync`'s timeline waiter is the eighth
+/// and had no runtime to raise a guard on. So a callback there could commit a
+/// scene output, have wlroots emit `output_sample` per observed node,
+/// and — because no dispatcher is in dispatch — see that delivered
+/// synchronously into a handler that destroys a node mid-commit, which wlroots
+/// asserts on. Carrying the refusal here covers that site and every future one
+/// without anybody remembering the pairing.
+pub(crate) struct ForeignFrame {
+    previous: bool,
+}
+
+impl ForeignFrame {
+    pub(crate) fn enter() -> ForeignFrame {
+        FOREIGN_FRAMES.set(FOREIGN_FRAMES.get() + 1);
+        ForeignFrame {
+            previous: IN_HANDLER.replace(true),
+        }
+    }
+}
+
+impl Drop for ForeignFrame {
+    fn drop(&mut self) {
+        IN_HANDLER.set(self.previous);
+        FOREIGN_FRAMES.set(FOREIGN_FRAMES.get() - 1);
+    }
+}
+
+thread_local! {
+    /// How many [`ForeignFrame`]s are on this thread's stack.
+    ///
+    /// A count rather than a flag because these nest: a timeline callback that
+    /// commits a scene output enters one, and the scene borrows the commit
+    /// path takes enter more.
+    ///
+    /// Thread-local rather than per-runtime because the frame is entered from
+    /// `extern "C"` callbacks that have no runtime to hand. That makes it
+    /// conservative — a foreign frame refuses scene mutation on *every*
+    /// runtime on the thread, not just the one involved. With `Runtime` being
+    /// `!Send` and a compositor having one, that costs nothing real, and
+    /// erring toward refusal is the right direction for a guard whose failure
+    /// mode is a use-after-free inside wlroots' own iteration.
+    static FOREIGN_FRAMES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Whether wlroots is running consumer code from inside one of its own calls,
+/// where mutating the scene graph is unsafe. See [`ForeignFrame`].
+pub(crate) fn in_foreign_frame() -> bool {
+    FOREIGN_FRAMES.get() != 0
 }
 
 /// Routes events to handler traits, one at a time.
@@ -278,6 +412,27 @@ impl<S> Dispatcher<S> {
             in_dispatch: Cell::new(false),
             deferred: RefCell::new(VecDeque::new()),
         }
+    }
+
+    /// Run `f` as a handler frame: events it causes are deferred rather than
+    /// delivered, and the loop cannot be driven from inside it.
+    ///
+    /// `run_inner`'s between-turn `should_stop` needs this. It derefs
+    /// [`state_ptr`](Dispatcher::state_ptr) into a `&mut S` and holds it for
+    /// the whole call, and it was made with every flag down — `in_dispatch`,
+    /// `IN_HANDLER`, `IN_DELIVERY` and `node_borrows` all clear. So a
+    /// `should_stop` that called one plain safe mutator on an observed scene
+    /// buffer had its event delivered *synchronously*, re-entering the
+    /// handlers with a second `&mut S` aliasing the live one — the exact thing
+    /// [`emit`](Dispatcher::emit)'s own `# Safety` forbids — and a handler
+    /// reached that way saw `node_borrows == 0` and could destroy a node
+    /// mid-commit, which wlroots asserts on.
+    ///
+    /// It is a handler in every way that matters; it was simply never marked
+    /// as one, because it is spelled as a query.
+    pub(crate) fn in_handler_frame<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _guard = HandlerGuard::enter(&self.in_dispatch);
+        f()
     }
 
     /// The state pointer, for `run_inner`'s between-turn `should_stop` check.
@@ -375,6 +530,24 @@ mod tests {
         assert_not_impl_any!(crate::EventLoop<'static>: Send, Sync);
         assert_not_impl_any!(crate::Backend<'static>: Send, Sync);
         assert_not_impl_any!(crate::Output<'static>: Send, Sync);
+        // `Region` owns a C allocation and `RegionRef` borrows one, so neither
+        // may cross a thread; the raw pointer inside each is what makes that
+        // true today, and this is what keeps it true if the representation
+        // changes.
+        assert_not_impl_any!(crate::Region: Send, Sync);
+        assert_not_impl_any!(crate::RegionRef<'static>: Send, Sync);
+    }
+
+    /// The other half of the same argument: the plain value types carry no
+    /// wlroots ownership at all, so refusing to let them cross a thread would
+    /// be a cost with no safety behind it.
+    mod thread_free {
+        use static_assertions::assert_impl_all;
+
+        assert_impl_all!(crate::Box2D: Send, Sync);
+        assert_impl_all!(crate::FBox: Send, Sync);
+        assert_impl_all!(crate::Transform: Send, Sync);
+        assert_impl_all!(crate::LogLevel: Send, Sync);
     }
 
     /// Records delivery order, and re-enters the dispatcher from inside a

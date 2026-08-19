@@ -1,0 +1,10 @@
+error[E0621]: explicit lifetime required in the type of `node`
+  --> tests/ui/scene_node_escapes_borrow.rs:12:5
+   |
+12 |     sink.push(node);
+   |     ^^^^^^^^^^^^^^^ lifetime `'h` required
+   |
+help: add explicit lifetime `'h` to the type of `node`
+   |
+10 | fn handler<'h>(node: &'h SceneNode<'h>, sink: &mut Vec<&'h SceneNode<'h>>) {
+   |                       ++

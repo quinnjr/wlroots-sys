@@ -1,0 +1,1854 @@
+# Symbols the safe `wlr` API covers.
+#
+# One `[[wrapped]]` block per `wlr_*` symbol, with the module that reaches it
+# and the safe public item a consumer calls to get its effect. See README.md in
+# this directory for the format, the rules, and how to edit this file.
+#
+# Every row is validated twice by `cargo test -p wlr --test coverage_audit`:
+# the symbol must exist in the generated bindings, and it must still appear in
+# a `sys::` use somewhere under `crates/wlr/src`.
+
+[[wrapped]]
+symbol = "wlr_addon"
+module = "addon"
+item   = "OutputId"
+
+[[wrapped]]
+symbol = "wlr_addon_find"
+module = "addon"
+item   = "Output::id"
+
+[[wrapped]]
+symbol = "wlr_addon_finish"
+module = "addon"
+item   = "OutputHandler::destroyed"
+
+[[wrapped]]
+symbol = "wlr_addon_init"
+module = "addon"
+item   = "OutputId"
+
+[[wrapped]]
+symbol = "wlr_addon_interface"
+module = "addon"
+item   = "OutputId"
+
+[[wrapped]]
+symbol = "wlr_allocator"
+module = "render::allocator"
+item   = "Allocator"
+
+[[wrapped]]
+symbol = "wlr_allocator_autocreate"
+module = "render::allocator"
+item   = "Allocator::autocreate"
+
+[[wrapped]]
+symbol = "wlr_allocator_create_buffer"
+module = "render::allocator"
+item   = "Allocator::create_buffer"
+
+[[wrapped]]
+symbol = "wlr_allocator_destroy"
+module = "render::allocator"
+item   = "Allocator (Drop)"
+
+[[wrapped]]
+symbol = "wlr_alpha_mode"
+module = "render::color"
+item   = "AlphaMode"
+
+[[wrapped]]
+symbol = "wlr_backend"
+module = "backend"
+item   = "Backend"
+
+[[wrapped]]
+symbol = "wlr_backend_autocreate"
+module = "backend"
+item   = "Backend::autocreate"
+
+[[wrapped]]
+symbol = "wlr_backend_start"
+module = "backend"
+item   = "Backend::run_all"
+
+[[wrapped]]
+symbol = "wlr_box"
+module = "geom"
+item   = "Box2D"
+
+[[wrapped]]
+symbol = "wlr_box_closest_point"
+module = "geom"
+item   = "Box2D::closest_point"
+
+[[wrapped]]
+symbol = "wlr_box_contains_box"
+module = "geom"
+item   = "Box2D::contains_box"
+
+[[wrapped]]
+symbol = "wlr_box_contains_point"
+module = "geom"
+item   = "Box2D::contains_point"
+
+[[wrapped]]
+symbol = "wlr_box_empty"
+module = "geom"
+item   = "Box2D::empty"
+
+[[wrapped]]
+symbol = "wlr_box_equal"
+module = "geom"
+item   = "Box2D::equals"
+
+[[wrapped]]
+symbol = "wlr_box_intersection"
+module = "geom"
+item   = "Box2D::intersection"
+
+[[wrapped]]
+symbol = "wlr_box_transform"
+module = "geom"
+item   = "Box2D::transformed"
+
+[[wrapped]]
+symbol = "wlr_buffer"
+module = "buffer"
+item   = "Buffer"
+
+[[wrapped]]
+symbol = "wlr_buffer_begin_data_ptr_access"
+module = "buffer"
+item   = "Buffer::begin_data_ptr_access"
+
+[[wrapped]]
+symbol = "wlr_buffer_cap"
+module = "render"
+item   = "BufferCaps"
+
+[[wrapped]]
+symbol = "wlr_buffer_data_ptr_access_flag"
+module = "buffer"
+item   = "DataPtrAccess"
+
+[[wrapped]]
+symbol = "wlr_buffer_drop"
+module = "render::allocator"
+item   = "OwnedBuffer (Drop)"
+
+[[wrapped]]
+symbol = "wlr_buffer_end_data_ptr_access"
+module = "buffer"
+item   = "BufferDataAccess"
+
+[[wrapped]]
+symbol = "wlr_buffer_get_dmabuf"
+module = "buffer"
+item   = "Buffer::dmabuf"
+
+[[wrapped]]
+symbol = "wlr_buffer_get_shm"
+module = "buffer"
+item   = "Buffer::shm"
+
+[[wrapped]]
+symbol = "wlr_buffer_is_opaque"
+module = "buffer"
+item   = "Buffer::is_opaque"
+
+[[wrapped]]
+symbol = "wlr_buffer_pass_options"
+module = "render::pass"
+item   = "BufferPassOptions"
+
+[[wrapped]]
+symbol = "wlr_buffer_unlock"
+module = "render::swapchain"
+item   = "LockedBuffer (Drop)"
+
+[[wrapped]]
+symbol = "wlr_color_chroma_location"
+module = "render::color"
+item   = "ChromaLocation"
+
+[[wrapped]]
+symbol = "wlr_color_cie1931_xy"
+module = "render::color"
+item   = "Cie1931Xy"
+
+[[wrapped]]
+symbol = "wlr_color_encoding"
+module = "render::color"
+item   = "ColorEncoding"
+
+[[wrapped]]
+symbol = "wlr_color_luminances"
+module = "render::color"
+item   = "ColorLuminances"
+
+[[wrapped]]
+symbol = "wlr_color_named_primaries"
+module = "render::color"
+item   = "NamedPrimaries"
+
+[[wrapped]]
+symbol = "wlr_color_primaries"
+module = "render::color"
+item   = "ColorPrimaries"
+
+[[wrapped]]
+symbol = "wlr_color_primaries_from_named"
+module = "render::color"
+item   = "ColorPrimaries::named"
+
+[[wrapped]]
+symbol = "wlr_color_primaries_transform_absolute_colorimetric"
+module = "render::color"
+item   = "ColorPrimaries::transform_absolute_colorimetric"
+
+[[wrapped]]
+symbol = "wlr_color_range"
+module = "render::color"
+item   = "ColorRange"
+
+[[wrapped]]
+symbol = "wlr_color_transfer_function"
+module = "render::color"
+item   = "TransferFunction"
+
+[[wrapped]]
+symbol = "wlr_color_transform"
+module = "render::color"
+item   = "ColorTransform"
+
+[[wrapped]]
+symbol = "wlr_color_transform_eval"
+module = "render::color"
+item   = "ColorTransform::eval"
+
+[[wrapped]]
+symbol = "wlr_color_transform_init_linear_to_icc"
+module = "render::color"
+item   = "ColorTransform::from_icc"
+
+[[wrapped]]
+symbol = "wlr_color_transform_init_linear_to_inverse_eotf"
+module = "render::color"
+item   = "ColorTransform::inverse_eotf"
+
+[[wrapped]]
+symbol = "wlr_color_transform_init_lut_3x1d"
+module = "render::color"
+item   = "ColorTransform::lut_3x1d"
+
+[[wrapped]]
+symbol = "wlr_color_transform_init_matrix"
+module = "render::color"
+item   = "ColorTransform::matrix"
+
+[[wrapped]]
+symbol = "wlr_color_transform_init_pipeline"
+module = "render::color"
+item   = "ColorTransform::pipeline"
+
+[[wrapped]]
+symbol = "wlr_color_transform_ref"
+module = "render::color"
+item   = "ColorTransform (Clone)"
+
+[[wrapped]]
+symbol = "wlr_color_transform_unref"
+module = "render::color"
+item   = "ColorTransform (Drop)"
+
+[[wrapped]]
+symbol = "wlr_compositor_create"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_cursor"
+module = "runtime"
+item   = "Runtime::create_seat"
+
+[[wrapped]]
+symbol = "wlr_cursor_attach_input_device"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_cursor_attach_output_layout"
+module = "runtime"
+item   = "Runtime::create_seat"
+
+[[wrapped]]
+symbol = "wlr_cursor_create"
+module = "runtime"
+item   = "Runtime::create_seat"
+
+[[wrapped]]
+symbol = "wlr_cursor_move"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_cursor_set_xcursor"
+module = "runtime"
+item   = "Runtime::pointer_position"
+
+[[wrapped]]
+symbol = "wlr_cursor_warp_absolute"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_damage_ring"
+module = "scene::damage"
+item   = "DamageRing"
+
+[[wrapped]]
+symbol = "wlr_damage_ring_add"
+module = "scene::damage"
+item   = "DamageRing::add"
+
+[[wrapped]]
+symbol = "wlr_damage_ring_add_box"
+module = "scene::damage"
+item   = "DamageRing::add_box"
+
+[[wrapped]]
+symbol = "wlr_damage_ring_add_whole"
+module = "scene::damage"
+item   = "DamageRing::add_whole"
+
+[[wrapped]]
+symbol = "wlr_damage_ring_finish"
+module = "scene::damage"
+item   = "DamageRing"
+
+[[wrapped]]
+symbol = "wlr_damage_ring_init"
+module = "scene::damage"
+item   = "DamageRing::new"
+
+[[wrapped]]
+symbol = "wlr_damage_ring_rotate_buffer"
+module = "scene::damage"
+item   = "DamageRing::rotate_buffer"
+
+[[wrapped]]
+symbol = "wlr_data_control_manager_v1"
+module = "runtime"
+item   = "Runtime::create_data_control_manager"
+
+[[wrapped]]
+symbol = "wlr_data_control_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_data_control_manager"
+
+[[wrapped]]
+symbol = "wlr_data_device_manager_create"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_dmabuf_attributes"
+module = "render::dmabuf"
+item   = "DmabufAttributes"
+
+[[wrapped]]
+symbol = "wlr_dmabuf_attributes_copy"
+module = "render::dmabuf"
+item   = "DmabufAttributesRef::try_clone"
+
+[[wrapped]]
+symbol = "wlr_dmabuf_attributes_finish"
+module = "render::dmabuf"
+item   = "DmabufAttributes (Drop)"
+
+[[wrapped]]
+symbol = "wlr_drag"
+module = "backend"
+item   = "Runtime::drag_icon_position"
+
+[[wrapped]]
+symbol = "wlr_drm_format"
+module = "render::format"
+item   = "DrmFormat"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set"
+module = "render::format"
+item   = "DrmFormatSet"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set_add"
+module = "render::format"
+item   = "DrmFormatSet::add"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set_finish"
+module = "render::format"
+item   = "DrmFormatSet (Drop)"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set_get"
+module = "render::format"
+item   = "DrmFormatSet::get"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set_has"
+module = "render::format"
+item   = "DrmFormatSet::has"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set_intersect"
+module = "render::format"
+item   = "DrmFormatSet::intersect"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set_remove"
+module = "render::format"
+item   = "DrmFormatSet::remove"
+
+[[wrapped]]
+symbol = "wlr_drm_format_set_union"
+module = "render::format"
+item   = "DrmFormatSet::union"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline"
+module = "render::sync"
+item   = "SyncTimeline"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_check"
+module = "render::sync"
+item   = "SyncTimeline::check"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_create"
+module = "render::sync"
+item   = "SyncTimeline::create"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_export"
+module = "render::sync"
+item   = "SyncTimeline::export"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_export_sync_file"
+module = "render::sync"
+item   = "SyncTimeline::export_sync_file"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_import"
+module = "render::sync"
+item   = "SyncTimeline::import"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_import_sync_file"
+module = "render::sync"
+item   = "SyncTimeline::import_sync_file"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_ready_callback"
+module = "render::sync"
+item   = "EventLoop::wait_for_timeline"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_ref"
+module = "render::sync"
+item   = "SyncTimeline (Clone)"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_signal"
+module = "render::sync"
+item   = "SyncTimeline::signal"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_transfer"
+module = "render::sync"
+item   = "SyncTimeline::transfer"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_unref"
+module = "render::sync"
+item   = "SyncTimeline (Drop)"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_waiter"
+module = "render::sync"
+item   = "SyncWaiter"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_waiter_finish"
+module = "render::sync"
+item   = "SyncWaiter (Drop)"
+
+[[wrapped]]
+symbol = "wlr_drm_syncobj_timeline_waiter_init"
+module = "render::sync"
+item   = "EventLoop::wait_for_timeline"
+
+[[wrapped]]
+symbol = "wlr_edges"
+module = "toplevel"
+item   = "Edges"
+
+[[wrapped]]
+symbol = "wlr_egl"
+module = "render::egl"
+item   = "Egl"
+
+[[wrapped]]
+symbol = "wlr_egl_create_with_context"
+module = "render::egl"
+item   = "Egl::create_with_context"
+
+[[wrapped]]
+symbol = "wlr_egl_get_context"
+module = "render::egl"
+item   = "Egl::context"
+
+[[wrapped]]
+symbol = "wlr_egl_get_display"
+module = "render::egl"
+item   = "Egl::display"
+
+[[wrapped]]
+symbol = "wlr_fbox"
+module = "geom"
+item   = "FBox"
+
+[[wrapped]]
+symbol = "wlr_fbox_empty"
+module = "geom"
+item   = "FBox::empty"
+
+[[wrapped]]
+symbol = "wlr_fbox_equal"
+module = "geom"
+item   = "FBox::equals"
+
+[[wrapped]]
+symbol = "wlr_fbox_transform"
+module = "geom"
+item   = "FBox::transformed"
+
+[[wrapped]]
+symbol = "wlr_gles2_renderer_check_ext"
+module = "render::gles2"
+item   = "Gles2::check_ext"
+
+[[wrapped]]
+symbol = "wlr_gles2_renderer_create"
+module = "render::gles2"
+item   = "Renderer::gles2_from_egl"
+
+[[wrapped]]
+symbol = "wlr_gles2_renderer_create_with_drm_fd"
+module = "render::gles2"
+item   = "Renderer::gles2_with_drm_fd"
+
+[[wrapped]]
+symbol = "wlr_gles2_renderer_get_buffer_fbo"
+module = "render::gles2"
+item   = "Gles2::buffer_fbo"
+
+[[wrapped]]
+symbol = "wlr_gles2_renderer_get_egl"
+module = "render::gles2"
+item   = "Gles2::egl"
+
+[[wrapped]]
+symbol = "wlr_gles2_texture_attribs"
+module = "render::gles2"
+item   = "Gles2TextureAttribs"
+
+[[wrapped]]
+symbol = "wlr_gles2_texture_get_attribs"
+module = "render::texture"
+item   = "Texture::gles2_attribs"
+
+[[wrapped]]
+symbol = "wlr_idle_inhibit_manager_v1"
+module = "runtime"
+item   = "Runtime::create_idle_inhibit_manager"
+
+[[wrapped]]
+symbol = "wlr_idle_inhibit_v1_create"
+module = "runtime"
+item   = "Runtime::create_idle_inhibit_manager"
+
+[[wrapped]]
+symbol = "wlr_idle_inhibitor_v1"
+module = "backend"
+item   = "Runtime::create_idle_inhibit_manager"
+
+[[wrapped]]
+symbol = "wlr_idle_notifier_v1"
+module = "runtime"
+item   = "Runtime::create_idle_notifier"
+
+[[wrapped]]
+symbol = "wlr_idle_notifier_v1_create"
+module = "runtime"
+item   = "Runtime::create_idle_notifier"
+
+[[wrapped]]
+symbol = "wlr_idle_notifier_v1_notify_activity"
+module = "runtime"
+item   = "Runtime::create_idle_notifier"
+
+[[wrapped]]
+symbol = "wlr_idle_notifier_v1_set_inhibited"
+module = "runtime"
+item   = "Runtime::create_idle_inhibit_manager"
+
+[[wrapped]]
+symbol = "wlr_input_device"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_input_device_type"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_keyboard"
+module = "backend"
+item   = "SeatHandler::key"
+
+[[wrapped]]
+symbol = "wlr_keyboard_from_input_device"
+module = "backend"
+item   = "SeatHandler::key"
+
+[[wrapped]]
+symbol = "wlr_keyboard_get_modifiers"
+module = "seat"
+item   = "KeyEvent::modifiers"
+
+[[wrapped]]
+symbol = "wlr_keyboard_key_event"
+module = "seat"
+item   = "KeyEvent"
+
+[[wrapped]]
+symbol = "wlr_keyboard_modifier"
+module = "seat"
+item   = "Modifiers"
+
+[[wrapped]]
+symbol = "wlr_keyboard_set_keymap"
+module = "backend"
+item   = "SeatHandler::key"
+
+[[wrapped]]
+symbol = "wlr_keyboard_set_repeat_info"
+module = "backend"
+item   = "SeatHandler::key"
+
+[[wrapped]]
+symbol = "wlr_layer_shell_v1"
+module = "runtime"
+item   = "Runtime::create_layer_shell"
+
+[[wrapped]]
+symbol = "wlr_layer_shell_v1_create"
+module = "runtime"
+item   = "Runtime::create_layer_shell"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1"
+module = "layer"
+item   = "LayerSurface"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_configure"
+module = "runtime"
+item   = "Runtime::configure_layer_surface"
+
+[[wrapped]]
+symbol = "wlr_log_func_t"
+module = "log"
+item   = "init_logging"
+
+[[wrapped]]
+symbol = "wlr_log_get_verbosity"
+module = "log"
+item   = "log_verbosity"
+
+[[wrapped]]
+symbol = "wlr_log_importance"
+module = "log"
+item   = "LogLevel"
+
+[[wrapped]]
+symbol = "wlr_log_init"
+module = "log"
+item   = "init_logging"
+
+[[wrapped]]
+symbol = "wlr_output"
+module = "output"
+item   = "Output"
+
+[[wrapped]]
+symbol = "wlr_output_commit_state"
+module = "output"
+item   = "Output::commit"
+
+[[wrapped]]
+symbol = "wlr_output_init_render"
+module = "runtime"
+item   = "Runtime::init_output"
+
+[[wrapped]]
+symbol = "wlr_output_layout"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_output_layout_add"
+module = "runtime"
+item   = "Runtime::set_output_position"
+
+[[wrapped]]
+symbol = "wlr_output_layout_add_auto"
+module = "runtime"
+item   = "Runtime::init_output"
+
+[[wrapped]]
+symbol = "wlr_output_layout_create"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_output_layout_get_box"
+module = "runtime"
+item   = "Runtime::output_layout_box"
+
+[[wrapped]]
+symbol = "wlr_output_preferred_mode"
+module = "output"
+item   = "Output::enable_with_preferred_mode"
+
+[[wrapped]]
+symbol = "wlr_output_schedule_frame"
+module = "output"
+item   = "Output::schedule_frame"
+
+[[wrapped]]
+symbol = "wlr_output_state"
+module = "output"
+item   = "Output::commit"
+
+[[wrapped]]
+symbol = "wlr_output_state_finish"
+module = "output"
+item   = "Output::commit"
+
+[[wrapped]]
+symbol = "wlr_output_state_init"
+module = "output"
+item   = "Output::commit"
+
+[[wrapped]]
+symbol = "wlr_output_state_set_enabled"
+module = "output"
+item   = "Output::enable_with_preferred_mode"
+
+[[wrapped]]
+symbol = "wlr_output_state_set_mode"
+module = "output"
+item   = "Output::enable_with_preferred_mode"
+
+[[wrapped]]
+symbol = "wlr_output_transform_compose"
+module = "geom"
+item   = "Transform::compose"
+
+[[wrapped]]
+symbol = "wlr_output_transform_coords"
+module = "geom"
+item   = "Transform::apply_coords"
+
+[[wrapped]]
+symbol = "wlr_output_transform_invert"
+module = "geom"
+item   = "Transform::invert"
+
+[[wrapped]]
+symbol = "wlr_output_transformed_resolution"
+module = "output"
+item   = "Output::transformed_size"
+
+[[wrapped]]
+symbol = "wlr_pixman_renderer_create"
+module = "render"
+item   = "Renderer::pixman"
+
+[[wrapped]]
+symbol = "wlr_pixman_renderer_get_buffer_image"
+module = "render::pixman"
+item   = "Pixman::buffer_image"
+
+[[wrapped]]
+symbol = "wlr_pixman_texture_get_image"
+module = "render::texture"
+item   = "Texture::pixman_image"
+
+[[wrapped]]
+symbol = "wlr_pointer"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_pointer_button_event"
+module = "backend"
+item   = "SeatHandler::pointer_button"
+
+[[wrapped]]
+symbol = "wlr_pointer_from_input_device"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_pointer_motion_absolute_event"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_pointer_motion_event"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_primary_selection_v1_device_manager"
+module = "runtime"
+item   = "Runtime::create_primary_selection_manager"
+
+[[wrapped]]
+symbol = "wlr_primary_selection_v1_device_manager_create"
+module = "runtime"
+item   = "Runtime::create_primary_selection_manager"
+
+[[wrapped]]
+symbol = "wlr_region_confine"
+module = "region"
+item   = "Region::confine"
+
+[[wrapped]]
+symbol = "wlr_region_expand"
+module = "region"
+item   = "Region::expanded"
+
+[[wrapped]]
+symbol = "wlr_region_rotated_bounds"
+module = "region"
+item   = "Region::rotated_bounds"
+
+[[wrapped]]
+symbol = "wlr_region_scale"
+module = "region"
+item   = "Region::scaled"
+
+[[wrapped]]
+symbol = "wlr_region_scale_xy"
+module = "region"
+item   = "Region::scaled_xy"
+
+[[wrapped]]
+symbol = "wlr_region_transform"
+module = "region"
+item   = "Region::transformed"
+
+[[wrapped]]
+symbol = "wlr_render_blend_mode"
+module = "render::pass"
+item   = "BlendMode"
+
+[[wrapped]]
+symbol = "wlr_render_color"
+module = "render::pass"
+item   = "RenderColor"
+
+[[wrapped]]
+symbol = "wlr_render_pass"
+module = "render::pass"
+item   = "RenderPass"
+
+[[wrapped]]
+symbol = "wlr_render_pass_add_rect"
+module = "render::pass"
+item   = "RenderPass::add_rect"
+
+[[wrapped]]
+symbol = "wlr_render_pass_add_texture"
+module = "render::pass"
+item   = "RenderPass::add_texture"
+
+[[wrapped]]
+symbol = "wlr_render_pass_submit"
+module = "render::pass"
+item   = "RenderPass::submit"
+
+[[wrapped]]
+symbol = "wlr_render_rect_options"
+module = "render::pass"
+item   = "RectOptions"
+
+[[wrapped]]
+symbol = "wlr_render_texture_options"
+module = "render::pass"
+item   = "TextureOptions"
+
+[[wrapped]]
+symbol = "wlr_render_timer"
+module = "render::pass"
+item   = "RenderTimer"
+
+[[wrapped]]
+symbol = "wlr_render_timer_create"
+module = "render"
+item   = "Renderer::create_timer"
+
+[[wrapped]]
+symbol = "wlr_render_timer_destroy"
+module = "render::pass"
+item   = "RenderTimer (Drop)"
+
+[[wrapped]]
+symbol = "wlr_render_timer_get_duration_ns"
+module = "render::pass"
+item   = "RenderTimer::duration_ns"
+
+[[wrapped]]
+symbol = "wlr_render_timer_is_gles2"
+module = "render::pass"
+item   = "RenderTimer::is_gles2"
+
+[[wrapped]]
+symbol = "wlr_renderer"
+module = "render"
+item   = "Renderer"
+
+[[wrapped]]
+symbol = "wlr_renderer_autocreate"
+module = "render"
+item   = "Renderer::autocreate"
+
+[[wrapped]]
+symbol = "wlr_renderer_begin_buffer_pass"
+module = "render"
+item   = "Renderer::begin_buffer_pass"
+
+[[wrapped]]
+symbol = "wlr_renderer_destroy"
+module = "render"
+item   = "Renderer (Drop)"
+
+[[wrapped]]
+symbol = "wlr_renderer_get_drm_fd"
+module = "render"
+item   = "Renderer::drm_fd"
+
+[[wrapped]]
+symbol = "wlr_renderer_get_texture_formats"
+module = "render"
+item   = "Renderer::texture_formats"
+
+[[wrapped]]
+symbol = "wlr_renderer_init_wl_display"
+module = "render"
+item   = "Renderer::init_wl_display"
+
+[[wrapped]]
+symbol = "wlr_renderer_init_wl_shm"
+module = "render"
+item   = "Renderer::init_wl_shm"
+
+[[wrapped]]
+symbol = "wlr_renderer_is_gles2"
+module = "render::gles2"
+item   = "Renderer::as_gles2"
+
+[[wrapped]]
+symbol = "wlr_renderer_is_pixman"
+module = "render::pixman"
+item   = "Renderer::as_pixman"
+
+[[wrapped]]
+symbol = "wlr_renderer_is_vk"
+module = "render::vulkan"
+item   = "Renderer::as_vulkan"
+
+[[wrapped]]
+symbol = "wlr_scale_filter_mode"
+module = "render::pass"
+item   = "FilterMode"
+
+[[wrapped]]
+symbol = "wlr_scene"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_scene_attach_output_layout"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer"
+module = "scene::buffer"
+item   = "SceneBuffer"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_create"
+module = "runtime"
+item   = "Runtime::add_buffer"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_from_node"
+module = "scene"
+item   = "SceneNode::try_as_buffer"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_iterator_func_t"
+module = "runtime"
+item   = "Runtime::for_each_buffer"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_send_frame_done"
+module = "runtime"
+item   = "Runtime::send_scene_buffer_frame_done"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_buffer"
+module = "runtime"
+item   = "Runtime::update_buffer"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_buffer_options"
+module = "scene::buffer"
+item   = "SceneBufferOptions"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_buffer_with_options"
+module = "runtime"
+item   = "Runtime::set_scene_buffer"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_color_encoding"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_color_encoding"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_color_range"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_color_range"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_dest_size"
+module = "runtime"
+item   = "Runtime::set_buffer_dest_size"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_filter_mode"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_filter"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_opacity"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_opacity"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_opaque_region"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_opaque_region"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_primaries"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_primaries"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_source_box"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_source_box"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_transfer_function"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_transfer_function"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_set_transform"
+module = "runtime"
+item   = "Runtime::set_scene_buffer_transform"
+
+[[wrapped]]
+symbol = "wlr_scene_create"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_scene_drag_icon_create"
+module = "backend"
+item   = "Runtime::drag_icon_position"
+
+[[wrapped]]
+symbol = "wlr_scene_frame_done_event"
+module = "backend"
+item   = "OutputHandler::scene_buffer_frame_done"
+
+[[wrapped]]
+symbol = "wlr_scene_get_scene_output"
+module = "runtime"
+item   = "Runtime::commit_output"
+
+[[wrapped]]
+symbol = "wlr_scene_layer_surface_v1"
+module = "runtime"
+item   = "Runtime::configure_scene_layer_surface"
+
+[[wrapped]]
+symbol = "wlr_scene_layer_surface_v1_configure"
+module = "runtime"
+item   = "Runtime::configure_scene_layer_surface"
+
+[[wrapped]]
+symbol = "wlr_scene_layer_surface_v1_create"
+module = "backend"
+item   = "ToplevelHandler::new_layer_surface"
+
+[[wrapped]]
+symbol = "wlr_scene_node"
+module = "scene"
+item   = "SceneNode"
+
+[[wrapped]]
+symbol = "wlr_scene_node_at"
+module = "runtime"
+item   = "Runtime::toplevel_at"
+
+[[wrapped]]
+symbol = "wlr_scene_node_coords"
+module = "runtime"
+item   = "Runtime::drag_icon_position"
+
+[[wrapped]]
+symbol = "wlr_scene_node_destroy"
+module = "runtime"
+item   = "Runtime::remove_rect"
+
+[[wrapped]]
+symbol = "wlr_scene_node_for_each_buffer"
+module = "runtime"
+item   = "Runtime::for_each_buffer"
+
+[[wrapped]]
+symbol = "wlr_scene_node_lower_to_bottom"
+module = "runtime"
+item   = "Runtime::lower_rect_to_bottom"
+
+[[wrapped]]
+symbol = "wlr_scene_node_place_above"
+module = "runtime"
+item   = "Runtime::place_node_above"
+
+[[wrapped]]
+symbol = "wlr_scene_node_place_below"
+module = "runtime"
+item   = "Runtime::place_node_below"
+
+[[wrapped]]
+symbol = "wlr_scene_node_raise_to_top"
+module = "runtime"
+item   = "Runtime::raise_toplevel"
+
+[[wrapped]]
+symbol = "wlr_scene_node_reparent"
+module = "runtime"
+item   = "Runtime::reparent_node"
+
+[[wrapped]]
+symbol = "wlr_scene_node_set_enabled"
+module = "runtime"
+item   = "Runtime::set_toplevel_visible"
+
+[[wrapped]]
+symbol = "wlr_scene_node_set_position"
+module = "runtime"
+item   = "Runtime::set_rect_position"
+
+[[wrapped]]
+symbol = "wlr_scene_node_type"
+module = "scene"
+item   = "NodeKind"
+
+[[wrapped]]
+symbol = "wlr_scene_output"
+module = "scene::output"
+item   = "SceneOutput"
+
+[[wrapped]]
+symbol = "wlr_scene_output_commit"
+module = "runtime"
+item   = "Runtime::commit_output"
+
+[[wrapped]]
+symbol = "wlr_scene_output_create"
+module = "runtime"
+item   = "Runtime::init_output"
+
+[[wrapped]]
+symbol = "wlr_scene_output_destroy"
+module = "runtime"
+item   = "Runtime::destroy_scene_output"
+
+[[wrapped]]
+symbol = "wlr_scene_output_for_each_buffer"
+module = "runtime"
+item   = "Runtime::scene_output_for_each_buffer"
+
+[[wrapped]]
+symbol = "wlr_scene_output_layout"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_scene_output_layout_add_output"
+module = "runtime"
+item   = "Runtime::init_output"
+
+[[wrapped]]
+symbol = "wlr_scene_output_needs_frame"
+module = "scene::output"
+item   = "SceneOutput::needs_frame"
+
+[[wrapped]]
+symbol = "wlr_scene_output_sample_event"
+module = "backend"
+item   = "OutputHandler::scene_buffer_output_sample"
+
+[[wrapped]]
+symbol = "wlr_scene_output_send_frame_done"
+module = "runtime"
+item   = "Runtime::commit_output"
+
+[[wrapped]]
+symbol = "wlr_scene_output_set_position"
+module = "runtime"
+item   = "Runtime::set_scene_output_position"
+
+[[wrapped]]
+symbol = "wlr_scene_output_state_options"
+module = "scene::output"
+item   = "SceneOutputStateOptions"
+
+[[wrapped]]
+symbol = "wlr_scene_outputs_update_event"
+module = "backend"
+item   = "OutputHandler::scene_buffer_outputs_update"
+
+[[wrapped]]
+symbol = "wlr_scene_rect"
+module = "scene::rect"
+item   = "SceneRect"
+
+[[wrapped]]
+symbol = "wlr_scene_rect_create"
+module = "runtime"
+item   = "Runtime::add_rect"
+
+[[wrapped]]
+symbol = "wlr_scene_rect_from_node"
+module = "scene"
+item   = "SceneNode::try_as_rect"
+
+[[wrapped]]
+symbol = "wlr_scene_rect_set_color"
+module = "runtime"
+item   = "Runtime::set_rect_color"
+
+[[wrapped]]
+symbol = "wlr_scene_rect_set_size"
+module = "runtime"
+item   = "Runtime::set_rect_size"
+
+[[wrapped]]
+symbol = "wlr_scene_subsurface_tree_create"
+module = "backend"
+item   = "SeatHandler::session_lock_changed"
+
+[[wrapped]]
+symbol = "wlr_scene_subsurface_tree_set_clip"
+module = "runtime"
+item   = "Runtime::set_subsurface_tree_clip"
+
+[[wrapped]]
+symbol = "wlr_scene_surface"
+module = "scene::surface"
+item   = "SceneSurface"
+
+[[wrapped]]
+symbol = "wlr_scene_surface_send_frame_done"
+module = "runtime"
+item   = "Runtime::send_scene_surface_frame_done"
+
+[[wrapped]]
+symbol = "wlr_scene_surface_try_from_buffer"
+module = "runtime"
+item   = "Runtime::with_scene_surface"
+
+[[wrapped]]
+symbol = "wlr_scene_timer"
+module = "scene::output"
+item   = "SceneTimer"
+
+[[wrapped]]
+symbol = "wlr_scene_timer_finish"
+module = "scene::output"
+item   = "SceneTimer"
+
+[[wrapped]]
+symbol = "wlr_scene_timer_get_duration_ns"
+module = "scene::output"
+item   = "SceneTimer::duration_ns"
+
+[[wrapped]]
+symbol = "wlr_scene_tree"
+module = "scene"
+item   = "SceneTree"
+
+[[wrapped]]
+symbol = "wlr_scene_tree_create"
+module = "runtime"
+item   = "Runtime::create_tree_in_band"
+
+[[wrapped]]
+symbol = "wlr_scene_tree_from_node"
+module = "scene"
+item   = "SceneNode::try_as_tree"
+
+[[wrapped]]
+symbol = "wlr_scene_xdg_surface_create"
+module = "backend"
+item   = "ToplevelHandler::new_toplevel"
+
+[[wrapped]]
+symbol = "wlr_screencopy_manager_v1"
+module = "runtime"
+item   = "Runtime::create_screencopy_manager"
+
+[[wrapped]]
+symbol = "wlr_screencopy_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_screencopy_manager"
+
+[[wrapped]]
+symbol = "wlr_seat"
+module = "runtime"
+item   = "Runtime::create_seat"
+
+[[wrapped]]
+symbol = "wlr_seat_create"
+module = "runtime"
+item   = "Runtime::create_seat"
+
+[[wrapped]]
+symbol = "wlr_seat_get_keyboard"
+module = "runtime"
+item   = "Runtime::focus_toplevel_keyboard"
+
+[[wrapped]]
+symbol = "wlr_seat_keyboard_notify_clear_focus"
+module = "runtime"
+item   = "Runtime::clear_keyboard_focus"
+
+[[wrapped]]
+symbol = "wlr_seat_keyboard_notify_enter"
+module = "runtime"
+item   = "Runtime::focus_toplevel_keyboard"
+
+[[wrapped]]
+symbol = "wlr_seat_keyboard_notify_key"
+module = "backend"
+item   = "SeatHandler::key"
+
+[[wrapped]]
+symbol = "wlr_seat_keyboard_notify_modifiers"
+module = "backend"
+item   = "SeatHandler::key"
+
+[[wrapped]]
+symbol = "wlr_seat_pointer_notify_button"
+module = "backend"
+item   = "SeatHandler::pointer_button"
+
+[[wrapped]]
+symbol = "wlr_seat_pointer_notify_clear_focus"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_seat_pointer_notify_enter"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_seat_pointer_notify_frame"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_seat_pointer_notify_motion"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_seat_request_set_primary_selection_event"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_request_set_selection_event"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_request_start_drag_event"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_set_capabilities"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_set_keyboard"
+module = "backend"
+item   = "SeatHandler::key"
+
+[[wrapped]]
+symbol = "wlr_seat_set_primary_selection"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_set_selection"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_start_pointer_drag"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_start_touch_drag"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_notify_down"
+module = "runtime"
+item   = "Runtime::inject_touch_down"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_notify_motion"
+module = "runtime"
+item   = "Runtime::inject_touch_motion"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_notify_up"
+module = "runtime"
+item   = "Runtime::inject_touch_up"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_point_focus"
+module = "runtime"
+item   = "Runtime::inject_touch_motion"
+
+[[wrapped]]
+symbol = "wlr_seat_validate_pointer_grab_serial"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_validate_touch_grab_serial"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_session_lock_manager_v1"
+module = "runtime"
+item   = "Runtime::create_session_lock_manager"
+
+[[wrapped]]
+symbol = "wlr_session_lock_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_session_lock_manager"
+
+[[wrapped]]
+symbol = "wlr_session_lock_surface_v1"
+module = "backend"
+item   = "SeatHandler::session_lock_changed"
+
+[[wrapped]]
+symbol = "wlr_session_lock_surface_v1_configure"
+module = "backend"
+item   = "SeatHandler::session_lock_changed"
+
+[[wrapped]]
+symbol = "wlr_session_lock_v1"
+module = "runtime"
+item   = "Runtime::is_session_locked"
+
+[[wrapped]]
+symbol = "wlr_session_lock_v1_destroy"
+module = "backend"
+item   = "Runtime::is_session_locked"
+
+[[wrapped]]
+symbol = "wlr_session_lock_v1_send_locked"
+module = "runtime"
+item   = "Runtime::is_session_locked"
+
+[[wrapped]]
+symbol = "wlr_shm_attributes"
+module = "render::shm"
+item   = "ShmAttributesRef"
+
+[[wrapped]]
+symbol = "wlr_subcompositor_create"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_surface"
+module = "toplevel"
+item   = "Toplevel::current_size"
+
+[[wrapped]]
+symbol = "wlr_swapchain"
+module = "render::swapchain"
+item   = "Swapchain"
+
+[[wrapped]]
+symbol = "wlr_swapchain_acquire"
+module = "render::swapchain"
+item   = "Swapchain::acquire"
+
+[[wrapped]]
+symbol = "wlr_swapchain_create"
+module = "render::swapchain"
+item   = "Swapchain::create"
+
+[[wrapped]]
+symbol = "wlr_swapchain_destroy"
+module = "render::swapchain"
+item   = "Swapchain (Drop)"
+
+[[wrapped]]
+symbol = "wlr_swapchain_has_buffer"
+module = "render::swapchain"
+item   = "Swapchain::has_buffer"
+
+[[wrapped]]
+symbol = "wlr_swapchain_slot"
+module = "render::swapchain"
+item   = "Swapchain::in_flight"
+
+[[wrapped]]
+symbol = "wlr_texture"
+module = "render::texture"
+item   = "Texture"
+
+[[wrapped]]
+symbol = "wlr_texture_destroy"
+module = "render::texture"
+item   = "Texture (Drop)"
+
+[[wrapped]]
+symbol = "wlr_texture_from_buffer"
+module = "render"
+item   = "Renderer::texture_from_buffer"
+
+[[wrapped]]
+symbol = "wlr_texture_from_dmabuf"
+module = "render"
+item   = "Renderer::texture_from_dmabuf"
+
+[[wrapped]]
+symbol = "wlr_texture_from_pixels"
+module = "render"
+item   = "Renderer::texture_from_pixels"
+
+[[wrapped]]
+symbol = "wlr_texture_is_gles2"
+module = "render::texture"
+item   = "Texture::gles2_attribs"
+
+[[wrapped]]
+symbol = "wlr_texture_is_pixman"
+module = "render::texture"
+item   = "Texture::pixman_image"
+
+[[wrapped]]
+symbol = "wlr_texture_is_vk"
+module = "render::texture"
+item   = "Texture::vulkan_attribs"
+
+[[wrapped]]
+symbol = "wlr_texture_preferred_read_format"
+module = "render::texture"
+item   = "Texture::preferred_read_format"
+
+[[wrapped]]
+symbol = "wlr_texture_read_pixels"
+module = "render::texture"
+item   = "Texture::read_pixels"
+
+[[wrapped]]
+symbol = "wlr_texture_read_pixels_options"
+module = "render::texture"
+item   = "ReadPixels"
+
+[[wrapped]]
+symbol = "wlr_texture_update_from_buffer"
+module = "render::texture"
+item   = "Texture::update_from_buffer"
+
+[[wrapped]]
+symbol = "wlr_touch_point"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_virtual_keyboard_manager_v1"
+module = "runtime"
+item   = "Runtime::create_virtual_keyboard_manager"
+
+[[wrapped]]
+symbol = "wlr_virtual_keyboard_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_virtual_keyboard_manager"
+
+[[wrapped]]
+symbol = "wlr_virtual_keyboard_v1"
+module = "backend"
+item   = "Runtime::create_virtual_keyboard_manager"
+
+[[wrapped]]
+symbol = "wlr_virtual_pointer_manager_v1"
+module = "runtime"
+item   = "Runtime::create_virtual_pointer_manager"
+
+[[wrapped]]
+symbol = "wlr_virtual_pointer_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_virtual_pointer_manager"
+
+[[wrapped]]
+symbol = "wlr_virtual_pointer_v1_new_pointer_event"
+module = "backend"
+item   = "Runtime::create_virtual_pointer_manager"
+
+[[wrapped]]
+symbol = "wlr_vk_image_attribs"
+module = "render::vulkan"
+item   = "VkImageAttribs"
+
+[[wrapped]]
+symbol = "wlr_vk_renderer_create_with_drm_fd"
+module = "render::vulkan"
+item   = "Renderer::vulkan_with_drm_fd"
+
+[[wrapped]]
+symbol = "wlr_vk_renderer_get_device"
+module = "render::vulkan"
+item   = "Vk::device"
+
+[[wrapped]]
+symbol = "wlr_vk_renderer_get_instance"
+module = "render::vulkan"
+item   = "Vk::instance"
+
+[[wrapped]]
+symbol = "wlr_vk_renderer_get_physical_device"
+module = "render::vulkan"
+item   = "Vk::physical_device"
+
+[[wrapped]]
+symbol = "wlr_vk_renderer_get_queue_family"
+module = "render::vulkan"
+item   = "Vk::queue_family"
+
+[[wrapped]]
+symbol = "wlr_vk_texture_get_image_attribs"
+module = "render::texture"
+item   = "Texture::vulkan_attribs"
+
+[[wrapped]]
+symbol = "wlr_vk_texture_has_alpha"
+module = "render::texture"
+item   = "Texture::vulkan_has_alpha"
+
+[[wrapped]]
+symbol = "wlr_xcursor_manager"
+module = "runtime"
+item   = "Runtime::create_seat"
+
+[[wrapped]]
+symbol = "wlr_xcursor_manager_create"
+module = "runtime"
+item   = "Runtime::create_seat"
+
+[[wrapped]]
+symbol = "wlr_xcursor_manager_load"
+module = "runtime"
+item   = "Runtime::pointer_position"
+
+[[wrapped]]
+symbol = "wlr_xdg_decoration_manager_v1"
+module = "runtime"
+item   = "Runtime::create_xdg_decoration_manager"
+
+[[wrapped]]
+symbol = "wlr_xdg_decoration_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_xdg_decoration_manager"
+
+[[wrapped]]
+symbol = "wlr_xdg_shell"
+module = "runtime"
+item   = "Runtime::create_xdg_shell"
+
+[[wrapped]]
+symbol = "wlr_xdg_shell_create"
+module = "runtime"
+item   = "Runtime::create_xdg_shell"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface"
+module = "toplevel"
+item   = "Toplevel::current_size"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_schedule_configure"
+module = "runtime"
+item   = "Runtime::configure_toplevel"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel"
+module = "toplevel"
+item   = "Toplevel"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_decoration_v1"
+module = "runtime"
+item   = "Runtime::set_decoration_mode"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_decoration_v1_mode"
+module = "decoration"
+item   = "DecorationMode"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_decoration_v1_set_mode"
+module = "runtime"
+item   = "Runtime::set_decoration_mode"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_resize_event"
+module = "backend"
+item   = "ToplevelHandler::request_resize"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_send_close"
+module = "runtime"
+item   = "Runtime::close_toplevel"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_activated"
+module = "runtime"
+item   = "Runtime::set_toplevel_activated"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_fullscreen"
+module = "runtime"
+item   = "Runtime::set_toplevel_fullscreen"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_maximized"
+module = "runtime"
+item   = "Runtime::set_toplevel_maximized"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_size"
+module = "runtime"
+item   = "Runtime::set_toplevel_size"
+
+[[wrapped]]
+symbol = "wlr_cursor_absolute_to_layout_coords"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_cursor_warp_closest"
+module = "runtime"
+item   = "Runtime::cursor_position"
+
+[[wrapped]]
+symbol = "wlr_pointer_constraint_v1"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_pointer_constraint_v1_send_activated"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_pointer_constraint_v1_send_deactivated"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_pointer_constraint_v1_type"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_pointer_constraints_v1"
+module = "runtime"
+item   = "Runtime::create_pointer_constraints_manager"
+
+[[wrapped]]
+symbol = "wlr_pointer_constraints_v1_create"
+module = "runtime"
+item   = "Runtime::create_pointer_constraints_manager"
+
+[[wrapped]]
+symbol = "wlr_relative_pointer_manager_v1"
+module = "runtime"
+item   = "Runtime::create_relative_pointer_manager"
+
+[[wrapped]]
+symbol = "wlr_relative_pointer_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_relative_pointer_manager"
+
+[[wrapped]]
+symbol = "wlr_relative_pointer_manager_v1_send_relative_motion"
+module = "runtime"
+item   = "Runtime::create_relative_pointer_manager"

@@ -75,34 +75,60 @@
 
 pub(crate) mod sys;
 
+mod addon;
 mod backend;
 mod buffer;
 mod decoration;
 mod dispatch;
 mod display;
 mod error;
+mod geom;
 mod handler;
 mod id;
 mod interest;
 mod layer;
+mod log;
 mod output;
+mod region;
+mod render;
 mod runtime;
 mod scene;
 mod seat;
 mod toplevel;
 
 pub use backend::{Backend, Until};
-pub use buffer::BufferId;
+pub use buffer::{Buffer, BufferDataAccess, BufferId, DataPtrAccess};
 pub use decoration::DecorationMode;
 pub use display::{Display, EventLoop};
 pub use error::{Error, Result};
+pub use geom::{Box2D, FBox, Transform};
 pub use handler::{FdHandler, Handlers, LoopHandler, OutputHandler, SeatHandler, ToplevelHandler};
 pub use id::{OutputId, SourceId};
 pub use interest::{Interest, Readiness};
 pub use layer::{Anchor, Layer, LayerSurface, LayerSurfaceId};
+pub use log::{LogLevel, init_logging, log_verbosity};
 pub use output::Output;
+pub use region::{Region, RegionRef};
+pub use render::{
+    Allocator, AllocatorRef, AlphaMode, BlendMode, BufferCaps, BufferPassOptions, ChromaLocation,
+    Cie1931Xy, ColorEncoding, ColorEncodings, ColorLuminances, ColorPrimaries, ColorRange,
+    ColorTransform, DMABUF_MAX_PLANES, DmabufAttributes, DmabufAttributesRef, DmabufPlane,
+    DrmFormat, DrmFormatRef, DrmFormatSet, DrmFormatSetRef, Egl, FilterMode, FourCc, LockedBuffer,
+    Modifier, NamedPrimaries, OwnedBuffer, Pixman, ReadPixels, RectOptions, RenderColor,
+    RenderPass, RenderTimer, Renderer, RendererFeatures, RendererRef, SWAPCHAIN_CAP,
+    ShmAttributesRef, Swapchain, SyncFlags, SyncTimeline, SyncWaiter, Texture, TextureOptions,
+    TransferFunction, TransferFunctions,
+};
+#[cfg(wlr_has_gles2_renderer)]
+pub use render::{Gles2, Gles2TextureAttribs};
+#[cfg(wlr_has_vulkan_renderer)]
+pub use render::{Vk, VkImageAttribs};
 pub use runtime::{Band, Runtime};
-pub use scene::RectId;
+pub use scene::{
+    DamageRing, DamageRingRef, NodeId, NodeKind, RectId, SceneBuffer, SceneBufferOptions,
+    SceneNode, SceneOutput, SceneOutputId, SceneOutputStateOptions, SceneRect, SceneSurface,
+    SceneTimer, SceneTree,
+};
 pub use seat::{KeyEvent, Modifiers};
 pub use toplevel::{Edges, Toplevel, ToplevelId};
 

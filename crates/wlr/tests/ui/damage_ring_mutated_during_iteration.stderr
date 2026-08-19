@@ -1,0 +1,11 @@
+error[E0502]: cannot borrow `ring` as mutable because it is also borrowed as immutable
+  --> tests/ui/damage_ring_mutated_during_iteration.rs:18:5
+   |
+14 |     let current = ring.current();
+   |                   ---- immutable borrow occurs here
+...
+18 |     ring.add_box(wlr::Box2D::new(100, 100, 10, 10));
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable borrow occurs here
+19 |
+20 |     let _ = rects.next();
+   |             ----- immutable borrow later used here

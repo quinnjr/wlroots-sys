@@ -1,0 +1,18 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+description = "Workspace maintenance commands; not published"
+# `members = ["crates/*"]` would otherwise sweep this into a release, and a
+# name as generic as `xtask` on crates.io would be someone else's mistake to
+# live with.
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# No dependencies, deliberately. The coverage logic is included from
+# `crates/wlr/src/coverage.rs` by path rather than imported, so this binary
+# never pulls `wlr` — and therefore never triggers a wlroots build — just to
+# print a report that only reads text files.
+[dependencies]

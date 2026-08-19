@@ -1,0 +1,13 @@
+error[E0505]: cannot move out of `display` because it is borrowed
+  --> tests/ui/sync_waiter_outlives_display.rs:19:10
+   |
+13 |     let display = Display::new().expect("display");
+   |         ------- binding `display` declared here
+14 |     let waiter = display
+   |                  ------- borrow of `display` occurs here
+...
+19 |     drop(display);
+   |          ^^^^^^^ move out of `display` occurs here
+20 |
+21 |     let _ = waiter;
+   |             ------ borrow later used here

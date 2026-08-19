@@ -200,9 +200,16 @@ impl<'h> Toplevel<'h> {
             if client.is_null() {
                 return None;
             }
-            let mut pid: sys::pid_t = 0;
-            let mut uid: u32 = 0;
-            let mut gid: u32 = 0;
+            // The three out-parameters are `wayland-sys`' own types, not
+            // bindgen's look-alikes: `wl_client_get_credentials` is
+            // libwayland's, so the identity that has to match is the one the
+            // `ffi_dispatch!` function pointer was declared with. bindgen's
+            // `sys::pid_t` also only exists when some *gated* wlroots header
+            // happens to pull in `<sys/types.h>`, which made this line fail to
+            // compile with `--no-default-features`.
+            let mut pid: sys::wayland_sys::pid_t = 0;
+            let mut uid: sys::wayland_sys::uid_t = 0;
+            let mut gid: sys::wayland_sys::gid_t = 0;
             ffi_dispatch!(
                 sys::wayland_sys::server::wayland_server_handle(),
                 wl_client_get_credentials,
@@ -439,6 +446,49 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    /// `Edges` is this crate's spelling of `enum wlr_edges` as well as of
+    /// xdg-shell's resize-edge bitmask — wlroots assigns the same four bits to
+    /// the same four edges, which is what lets one type serve both. Pin that
+    /// against wlroots' own constants rather than against the comment saying
+    /// so: if a future wlroots renumbered `wlr_edges`, `Edges` would silently
+    /// start decoding it wrong everywhere it is used.
+    #[test]
+    fn edge_bit_values_match_the_wlroots_header() {
+        assert_eq!(sys::wlr_edges::WLR_EDGE_NONE.0, 0);
+        assert_eq!(
+            Edges::from_xdg(sys::wlr_edges::WLR_EDGE_NONE.0),
+            Edges::default()
+        );
+
+        for (bits, expected) in [
+            (sys::wlr_edges::WLR_EDGE_TOP, (true, false, false, false)),
+            (sys::wlr_edges::WLR_EDGE_BOTTOM, (false, true, false, false)),
+            (sys::wlr_edges::WLR_EDGE_LEFT, (false, false, true, false)),
+            (sys::wlr_edges::WLR_EDGE_RIGHT, (false, false, false, true)),
+        ] {
+            let (top, bottom, left, right) = expected;
+            assert_eq!(
+                Edges::from_xdg(bits.0),
+                Edges {
+                    top,
+                    bottom,
+                    left,
+                    right
+                },
+                "wlr_edges bit {}",
+                bits.0
+            );
+        }
+
+        // Every edge at once, which is also the whole of the enum's domain.
+        let all = sys::wlr_edges::WLR_EDGE_TOP.0
+            | sys::wlr_edges::WLR_EDGE_BOTTOM.0
+            | sys::wlr_edges::WLR_EDGE_LEFT.0
+            | sys::wlr_edges::WLR_EDGE_RIGHT.0;
+        assert_eq!(all, 0b1111);
+        assert!(!Edges::from_xdg(all).is_empty());
     }
 
     /// Both test constructors sit at the top of the id space, which a

@@ -5,8 +5,8 @@
 //! implements only what they use.
 
 use crate::{
-    DecorationMode, Edges, KeyEvent, LayerSurface, LayerSurfaceId, Output, OutputId, Toplevel,
-    ToplevelId,
+    DecorationMode, Edges, KeyEvent, LayerSurface, LayerSurfaceId, NodeId, Output, OutputId,
+    SceneOutputId, Toplevel, ToplevelId,
 };
 
 /// Output lifecycle and frame events.
@@ -90,6 +90,126 @@ pub trait OutputHandler {
     fn destroyed(&mut self, id: OutputId) {
         let _ = id;
     }
+
+    /// The GPU was lost — reset, removed, or otherwise invalidated — and the
+    /// renderer [`Runtime::init_graphics`](crate::Runtime::init_graphics)
+    /// created can no longer be used.
+    ///
+    /// Every texture, swapchain and in-flight render pass derived from it is
+    /// invalid too. wlroots offers no recovery call: the only correct response
+    /// is to tear the graphics stack down and build a new one, which for this
+    /// crate today means ending the run and starting over. Ignoring it leaves a
+    /// compositor drawing into a renderer that will fail every call.
+    ///
+    /// `rt` is the runtime the run was given, so an implementor does not have
+    /// to have kept a clone of it to react. Added in 0.20.19.
+    ///
+    /// On a renderer a consumer created themselves
+    /// ([`Renderer::autocreate`](crate::Renderer::autocreate)) this is not
+    /// delivered — ask [`Renderer::is_lost`](crate::Renderer::is_lost) instead.
+    ///
+    /// **Only [`Backend::run_all`](crate::Backend::run_all) delivers this.**
+    /// [`Backend::run`](crate::Backend::run) requires this same trait — so an
+    /// implementation written against it compiles, and reads as though it were
+    /// wired up — but `run` builds its own empty
+    /// [`Runtime`](crate::Runtime) that never has graphics, so there is no
+    /// renderer to watch and this is never called. A consumer using `run` and
+    /// treating this as their GPU-reset recovery path has no recovery path at
+    /// all: on a reset the compositor keeps drawing into a renderer that fails
+    /// every call, with no notification and no error. Use `run_all` if you need
+    /// it, or poll [`Renderer::is_lost`](crate::Renderer::is_lost) on a
+    /// renderer you own.
+    ///
+    /// **Call [`Runtime::init_graphics`](crate::Runtime::init_graphics) before
+    /// [`Backend::run_all`](crate::Backend::run_all), not from inside a
+    /// handler.** The listener behind this method is linked once, when the run
+    /// registers its listeners, and only if a renderer exists by then. A run
+    /// whose graphics are initialised later — from inside
+    /// [`new_output`](OutputHandler::new_output), say — gets a renderer nobody
+    /// is watching, and this method is never called for the rest of that run.
+    /// The run still works; the notification is simply absent, which is the
+    /// hard kind of absence to notice, since a lost renderer is rare and its
+    /// symptom is every later draw failing rather than a missing callback.
+    fn renderer_lost(&mut self, rt: &crate::Runtime) {
+        let _ = rt;
+    }
+
+    /// An observed scene buffer node is now displayed on `scene_output`.
+    ///
+    /// Delivered only for nodes a consumer asked about with
+    /// [`Runtime::observe_scene_buffer`](crate::Runtime::observe_scene_buffer):
+    /// these signals fire per buffer node, and linking a listener into every
+    /// node in a scene to deliver events nobody wanted would be a cost with no
+    /// buyer. Added in 0.20.19.
+    ///
+    /// This is the signal a compositor uses to follow a window between
+    /// monitors — it fires for a client's surface node as readily as for one
+    /// this crate created.
+    fn scene_buffer_output_enter(
+        &mut self,
+        rt: &crate::Runtime,
+        node: NodeId,
+        scene_output: SceneOutputId,
+    ) {
+        let _ = (rt, node, scene_output);
+    }
+
+    /// An observed scene buffer node is no longer displayed on `scene_output`.
+    /// The mirror of
+    /// [`scene_buffer_output_enter`](OutputHandler::scene_buffer_output_enter),
+    /// with the same opt-in. Added in 0.20.19.
+    fn scene_buffer_output_leave(
+        &mut self,
+        rt: &crate::Runtime,
+        node: NodeId,
+        scene_output: SceneOutputId,
+    ) {
+        let _ = (rt, node, scene_output);
+    }
+
+    /// The set of scene outputs an observed node is displayed on changed.
+    ///
+    /// The set itself is **not** carried: ask
+    /// [`Runtime::scene_buffer_active_outputs`](crate::Runtime::scene_buffer_active_outputs)
+    /// for it. wlroots hands this signal an array valid only for its own
+    /// emission, and this crate's events carry ids and scalars so that a
+    /// deferred one cannot name freed memory; the array is snapshotted when the
+    /// signal fires and read back here. Added in 0.20.19.
+    fn scene_buffer_outputs_update(&mut self, rt: &crate::Runtime, node: NodeId) {
+        let _ = (rt, node);
+    }
+
+    /// An observed scene buffer node was sampled while `scene_output` was
+    /// rendered.
+    ///
+    /// `direct_scanout` is true when wlroots handed the buffer straight to the
+    /// display controller instead of compositing it — which is what a
+    /// compositor tuning for full-screen video wants to know. Added in 0.20.19.
+    fn scene_buffer_output_sample(
+        &mut self,
+        rt: &crate::Runtime,
+        node: NodeId,
+        scene_output: SceneOutputId,
+        direct_scanout: bool,
+    ) {
+        let _ = (rt, node, scene_output, direct_scanout);
+    }
+
+    /// An observed scene buffer node may draw its next frame.
+    ///
+    /// `when` is the timestamp wlroots named, read when the signal fired rather
+    /// than when this was delivered. For a client's surface the scene answers
+    /// this itself; this is the notification for a buffer node whose pixels the
+    /// compositor produces. Added in 0.20.19.
+    fn scene_buffer_frame_done(
+        &mut self,
+        rt: &crate::Runtime,
+        node: NodeId,
+        scene_output: SceneOutputId,
+        when: std::time::Duration,
+    ) {
+        let _ = (rt, node, scene_output, when);
+    }
 }
 
 /// File-descriptor source readiness.
@@ -130,8 +250,14 @@ pub trait LoopHandler {
     /// delivered. Return `true` to end the run.
     ///
     /// Consulted under both [`Until::Turns`](crate::Until::Turns) and
-    /// [`Until::Stop`](crate::Until::Stop), so an early exit is always
-    /// available.
+    /// [`Until::Stop`](crate::Until::Stop) — but *between* turns, never
+    /// during one. Under [`Until::Stop`](crate::Until::Stop) a turn only
+    /// happens when the loop has something to dispatch, so a run whose events
+    /// dry up blocks in `poll` and never asks again: this bounds a run that
+    /// keeps receiving events, and cannot rescue one that stops. If you need
+    /// a run that ends whatever the event traffic does, use
+    /// [`Until::Turns`](crate::Until::Turns), whose count is enforced by
+    /// `run_all` itself.
     fn should_stop(&mut self) -> bool {
         false
     }

@@ -180,6 +180,30 @@ impl<'h> Output<'h> {
         }
     }
 
+    /// [`size`](Output::size) with the output's transform applied, as
+    /// `(width, height)`.
+    ///
+    /// A `R90`/`R270`/`Flipped90`/`Flipped270` transform swaps the axes, so
+    /// this can differ from `size()` even though no scaling is involved —
+    /// `wlr_output_transformed_resolution` is `size()` composed with
+    /// [`Transform::apply_coords`](crate::Transform::apply_coords).
+    /// Scale is not applied; for that, see `wlr_output_effective_resolution`
+    /// (not yet wrapped).
+    pub fn transformed_size(&self) -> (i32, i32) {
+        let mut width = 0;
+        let mut height = 0;
+        // SAFETY: the handle's lifetime guarantees the output is live, and
+        // both out-parameters point at live locals that outlive the call.
+        unsafe {
+            sys::wlr_output_transformed_resolution(
+                self.raw.as_ptr(),
+                &raw mut width,
+                &raw mut height,
+            );
+        }
+        (width, height)
+    }
+
     /// Enable the output at its preferred mode and commit.
     ///
     /// The one call that turns an announced output into one that produces
@@ -366,5 +390,35 @@ mod tests {
         // SAFETY: as in the tests above.
         let handle = unsafe { Output::from_raw(output.0) };
         assert_eq!(handle.size(), (1280, 720));
+    }
+
+    /// A quarter-turn transform swaps width and height without scaling.
+    #[test]
+    fn transformed_size_swaps_axes_under_a_quarter_turn() {
+        let output = ScratchOutput::new();
+        // SAFETY: `output.0` is exclusively owned by this test and live.
+        unsafe {
+            (*output.0).width = 1280;
+            (*output.0).height = 720;
+            (*output.0).transform = sys::wl_output_transform::WL_OUTPUT_TRANSFORM_90;
+        }
+        // SAFETY: as in the tests above.
+        let handle = unsafe { Output::from_raw(output.0) };
+        assert_eq!(handle.transformed_size(), (720, 1280));
+    }
+
+    /// `Normal` is a no-op, matching [`Output::size`] exactly.
+    #[test]
+    fn transformed_size_matches_size_under_the_normal_transform() {
+        let output = ScratchOutput::new();
+        // SAFETY: `output.0` is exclusively owned by this test and live.
+        unsafe {
+            (*output.0).width = 1280;
+            (*output.0).height = 720;
+            (*output.0).transform = sys::wl_output_transform::WL_OUTPUT_TRANSFORM_NORMAL;
+        }
+        // SAFETY: as in the tests above.
+        let handle = unsafe { Output::from_raw(output.0) };
+        assert_eq!(handle.transformed_size(), handle.size());
     }
 }

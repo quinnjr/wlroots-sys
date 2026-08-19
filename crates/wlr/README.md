@@ -97,6 +97,283 @@ Pointer constraints and relative pointer motion. All additive.
 Errors if either `create_*` is called twice. No existing item's name or
 signature changed.
 
+## Unreleased — M5, render & scene foundations
+
+Work in progress. This section collects everything M5 adds and is renamed to a
+version at release; nothing here has shipped. Purely additive so far.
+
+### Geometry, transforms and regions
+
+- `Box2D` and `FBox` — `wlr_box` and `wlr_fbox`, with the layout pinned to
+  wlroots' at compile time so passing one across is a pointer cast. Predicates
+  (`empty`, `contains_point`, `contains_box`, `closest_point`, `intersection`,
+  `transformed`, `equals`) are FFI calls rather than reimplementations, so the
+  edge cases cannot drift: containment is half-open, `contains_box` is false
+  when *either* box is empty, and `closest_point` reports `None` where wlroots
+  writes NaN. `From`/`Into` for `(x, y, width, height)` tuples, which is what
+  the older signatures such as `Runtime::output_layout_box` use.
+- `Transform` — the eight `wl_output_transform` values, with `invert`,
+  `compose` (documented as non-commutative once a flip is involved),
+  `apply_coords`, and lossless conversion to and from
+  `wlr-sys`'s `wl_output_transform`, so a `wayland-server` consumer is never
+  forced to launder a transform through this crate's type.
+  **`apply_coords` is not a point transform** despite its C name: it swaps the
+  axes for the four transforms that turn them and does nothing otherwise. Its
+  doc says so; `Box2D::transformed` is the real one.
+- `Region` and `RegionRef<'_>` — owned and borrowed pixel regions, covering
+  both pixman's set operations (`union`, `intersect`, `subtract`, `translated`,
+  `rectangles`, `extents`, `contains_point`) and wlroots' own helpers
+  (`scaled`, `scaled_xy`, `transformed`, `expanded`, `rotated_bounds`,
+  `confine`). No public API takes or returns a raw `pixman_region32`.
+  `expanded` takes a `u32`, making wlroots' non-negativity precondition
+  unrepresentable; `rotated_bounds` takes **radians**, which the headers do not
+  say and which `tests/region.rs` pins.
+
+### Rendering
+
+The one part of wlroots a compositor genuinely *owns*: a renderer, an
+allocator, a swapchain, a texture and a render pass are all created by the
+compositor and freed by the compositor. Verified rather than assumed — the only
+`wlr_renderer_destroy`/`wlr_allocator_destroy` calls inside wlroots 0.20.2 are
+for the DRM backend's own internal renderer — so these types have real `Drop`
+impls, and there is no "was it destroyed behind my back?" error among their
+failures.
+
+- `Renderer` — `autocreate` (whatever wlroots picks for a backend) or `pixman`
+  (software, no GPU, no backend needed). Reports `features()`, `buffer_caps()`,
+  `texture_formats()` and a **borrowed** `drm_fd()`; registers the buffer
+  factory globals with `init_wl_display`/`init_wl_shm`; makes textures, render
+  timers and render passes. `is_lost()` latches when the GPU is reset, and a
+  compositor driven by `Backend::run_all` hears about the runtime's own renderer
+  through the new `OutputHandler::renderer_lost` instead.
+- `RendererRef<'_>` and `AllocatorRef<'_>`, from `Runtime::renderer_ref()` and
+  `Runtime::allocator_ref()` — **non-owning** views of the pair
+  `Runtime::init_graphics` creates and deliberately never frees. They carry the
+  same queries with no `Drop` and no way to acquire one, because handing out an
+  owning type for those would put a double free one `drop` away.
+- `Texture<'r>` — borrows the renderer that made it, which is how wlroots'
+  "textures must be destroyed separately" stops being a rule to remember and
+  becomes a compile error (`tests/ui/texture_outlives_renderer.rs`).
+  `update_from_buffer` documents its own **routine** failure: the pixman
+  renderer implements no update path at all, and callers must be prepared to
+  rebuild the texture instead. `read_pixels` bounds-checks the destination
+  slice, which wlroots does not.
+- `RenderPass<'r, 'b>`, with `TextureOptions`/`RectOptions` builders,
+  `RenderColor`, `BlendMode` and `FilterMode`. **Dropping a pass submits it**:
+  `wlr_render_pass_submit` is the only thing that frees a pass, wlroots has no
+  cancel, and a forgotten pass leaks GPU memory. `submit()` is the same call
+  with the answer returned. One live pass per renderer; a second returns
+  `Error::Reentrant`.
+- `Allocator<'r>` and `Swapchain<'a>`, with `SWAPCHAIN_CAP`. A swapchain whose
+  allocator died reports `Error::Destroyed("wlr_allocator")` from `acquire`
+  rather than calling into it — wlroots nulls the field from its own listener,
+  so that is a fact rather than a cached guess.
+- **`OwnedBuffer` and `LockedBuffer` are not interchangeable.** An allocator
+  hands out the *producer* reference (released with `wlr_buffer_drop`); a
+  swapchain hands out the *consumer* reference (released with
+  `wlr_buffer_unlock`). Mixing them up is a leak in one direction and a
+  premature free in the other, and wlroots diagnoses neither — so they are
+  different types that both deref to the read-only `Buffer<'_>`.
+- `DrmFormat`, `DrmFormatSet` (+ the `Ref` views), `FourCc` and `Modifier`.
+  `DrmFormatSet::intersect` returns `Err` for an **empty** intersection as well
+  as for a failure, because `wlr_drm_format_set_intersect` reports both as
+  `false` and gives nothing to tell them apart; guessing would be wrong half the
+  time.
+- `DmabufAttributes` / `DmabufAttributesRef<'_>` — owned (closes its
+  descriptors) and borrowed (closes none, because `Buffer::dmabuf`'s descriptors
+  belong to the buffer). `try_clone` dups. `plane_fd` dups too, rather than
+  handing out a descriptor the attributes still own.
+
+Four wlroots assertions are reachable from an obvious safe call here, and every
+distro builds wlroots without `NDEBUG`, so tripping one **aborts the process**.
+They are checked in Rust instead: a renderer's own listeners are unlinked before
+it is destroyed, `texture_from_pixels` rejects a zero dimension or a short
+slice, `add_rect` rejects a negative extent, `add_texture` rejects a source box
+outside its texture (and a texture belonging to another renderer), and
+`Swapchain::create` rejects a non-positive size.
+
+One implementation note worth knowing: `texture_from_pixels` keeps its own copy
+of the pixels. wlroots wraps the caller's pointer in a buffer it immediately
+drops, and the pixman renderer goes on reading through that *original* pointer —
+so a `&[u8]` argument cannot promise what the texture needs.
+
+### Colour
+
+`wlr/render/color.h` in full: the vocabulary the render API speaks, and the
+transforms a colour-managed compositor applies. Wrapped here rather than with
+the colour-management protocols later, because a render pass cannot be described
+without it.
+
+- `NamedPrimaries`, `TransferFunction`, `ColorEncoding`, `ColorRange`,
+  `ChromaLocation` and `AlphaMode`, plus the set types `ColorEncodings` and
+  `TransferFunctions`. **Three of those C enums are bitmask-valued and three are
+  sequential**, and nothing in the Rust shows which — `ColorEncoding::Bt709` is
+  2 while `ColorRange::Limited` is 1. `tests/render_color.rs` pins every value
+  against wlroots' own constants. The same enum is a *set* on the renderer
+  (`Renderer::color_encodings`) and a *single value* on a texture, which is why
+  there are two types rather than one.
+  `TransferFunction` deliberately has no `Default`: its variants start at
+  `1 << 0`, so the "unset" wlroots reads out of a zeroed struct is not a member
+  of the enum, and this crate spells it `Option<TransferFunction>`.
+- `Cie1931Xy`, `ColorPrimaries` and `ColorLuminances` — `#[repr(C)]` twins with
+  their layouts pinned to wlroots'. `ColorPrimaries::named` fills one from a
+  well-known volume; `transform_absolute_colorimetric` computes the 3×3
+  conversion between two, and refuses a degenerate one rather than letting
+  wlroots invert a singular matrix.
+- `ColorTransform` — immutable and reference-counted, so `Clone` is a genuine
+  second reference and one may outlive every renderer that ever applied it.
+  Built from an ICC profile (where wlroots was compiled with lcms2), an inverse
+  EOTF, three 1-D lookup tables, a matrix, or a pipeline of other transforms.
+  **The matrix is row-major**, verified against `multiply_matrix_vector` in
+  wlroots' `render/color.c` rather than guessed from a header that says only
+  "a 3×3 matrix" — and it is the same order `transform_absolute_colorimetric`
+  produces, so the two compose.
+- Three more wlroots assertions are checked in Rust: an empty transform pipeline
+  (`init_pipeline` asserts a non-zero length), mismatched or empty lookup
+  tables (`init_lut_3x1d` reads `dim` entries from all three pointers whatever
+  their real lengths, and a `dim` of 0 makes the evaluator index at `SIZE_MAX`),
+  and a degenerate colour volume (`matrix_invert` asserts `det != 0`, and
+  `ColorPrimaries::default()` is all zeroes — that one aborted the test binary
+  before the check existed).
+- The colour setters on `TextureOptions` and `BufferPassOptions` **fail** rather
+  than being ignored when the renderer cannot honour them. wlroots' own answer
+  is to draw anyway, untagged, which turns a colour-managed compositor into a
+  quietly mis-rendering one.
+
+### Explicit synchronisation
+
+- `SyncTimeline` — a reference-counted DRM sync-object timeline, with
+  `create`/`import`, `signal`, `check`, `transfer`, `export`, and the sync-file
+  pair. `check` collapses wlroots' two-level answer the only way that keeps
+  both: `Err` is "the ioctl failed", `Ok(false)` is "not ready yet".
+- `SyncFlags::WAIT_FOR_SUBMIT` and `WAIT_AVAILABLE`. These are libdrm's
+  `DRM_SYNCOBJ_WAIT_FLAGS_*`, not wlroots symbols, so they are not in `wlr-sys`
+  and this crate writes them out — and they are **not** bits 0 and 1, because
+  `WAIT_ALL` holds bit 0. `tests/render_sync.rs` reads the installed `drm.h` and
+  compares.
+- `EventLoop::wait_for_timeline` returns a `SyncWaiter<'_>`: a one-shot wait
+  registered on the loop, cancelled by dropping it. `wlr_..._waiter_finish` is
+  legal *and required* after the callback has fired — the callback path releases
+  nothing — which was verified in wlroots' source rather than inferred from the
+  header's word "cancel", since the two readings differ by a leak in one
+  direction and a double free in the other. The waiter borrows the loop, so
+  outliving the display is a compile error.
+- The timeline's DRM descriptor must outlive the timeline: wlroots keeps it and
+  uses it to destroy the kernel object. That one is documented rather than
+  borrow-checked, on purpose — a lifetime there would make storing a timeline
+  beside the renderer it came from a self-referential struct, and wlroots'
+  whole reason for reference-counting timelines is that they are stored.
+
+### Backend-specific renderer surfaces
+
+Every `wlr_gles2_*`, `wlr_vk_*` and `wlr_pixman_*` accessor is undefined
+behaviour on an object of the wrong kind, and each ships a separate
+`wlr_*_is_*` test the caller is trusted to have run. Here the test produces a
+value instead: `Renderer::as_pixman`, `as_gles2` and `as_vulkan` answer `Some`
+only when it passed, and every backend-specific call hangs off the view. The
+precondition is unrepresentable rather than documented.
+
+- `Pixman<'_>`, `Gles2<'_>` and `Vk<'_>`, plus `Texture::pixman_image`,
+  `gles2_attribs`, `vulkan_attribs` and `vulkan_has_alpha`, and
+  `RenderTimer::is_gles2` (there is no `wlr_render_timer_is_vk` to mirror).
+- `Egl`, for a compositor that initialises EGL itself, with
+  `Renderer::gles2_from_egl` **consuming** it — that is wlroots' only release
+  path, since there is no `wlr_egl_destroy`, so an `Egl` that never reaches a
+  renderer leaks. Stated rather than papered over.
+- GL names, Vulkan handles, `EGLDisplay` and `pixman_image_t` cross as whatever
+  `wlr-sys` generated, from `unsafe` functions, with no `gl`/`ash`/`pixman`
+  dependency and no normalisation. This crate wraps wlroots' *use* of those
+  libraries; re-typing a handle would put two definitions of it in one process.
+
+### The scene graph
+
+Before M5 the only thing a consumer could put in the scene was a rect or a
+pixel buffer, at the root, in a band, or in a toplevel. Now the graph itself is
+addressable: trees, nesting, restacking, reparenting and hit testing, all by id.
+
+- `NodeId` — the storable identity of a scene node, and the first id in this
+  crate that is **addon-backed for its whole family**. `wlr_scene_node_destroy`
+  frees the node *and every descendant* with no announcement; a payload on each
+  node's own `wlr_addon_set` is what tells this crate, because wlroots runs an
+  addon's destructor for every node it frees, cascade included. So a `NodeId`
+  goes stale at exactly the right instant and every call on it misses cleanly
+  from then on — see `tests/scene_destroy.rs`, which asserts that for a
+  three-deep tree through every entry point.
+- `NodeKind` and the borrow-scoped handles `SceneNode<'_>`, `SceneTree<'_>`,
+  `SceneRect<'_>`, `SceneBuffer<'_>`, reached through `Runtime::with_node`,
+  `with_tree`, `with_rect` and `with_scene_buffer`. Handles are read-only
+  observation surfaces; every mutation is a by-id call on `Runtime`. The
+  downcasts (`try_as_tree`/`try_as_rect`/`try_as_buffer`) check wlroots' type
+  tag first — the C helpers are bare pointer casts and undefined behaviour on a
+  mismatch.
+- While a handle borrow is live, `destroy_node`, `reparent_node`, `remove_rect`
+  and `remove_buffer` all return `None` without acting. A closure that freed
+  the node it was just handed would be left holding a dangling handle, and a
+  documented rule is weaker than a check.
+- Structure: `create_tree_in_band`, `create_tree_under`, `create_rect`,
+  `create_scene_buffer`, `destroy_node`, `reparent_node`, `set_node_enabled`,
+  `set_node_position`, `place_node_above`, `place_node_below`,
+  `raise_node_to_top`, `lower_node_to_bottom`.
+- Queries: `node_kind`, `node_position`, `node_coords`, `node_enabled`,
+  `node_parent`, `node_children`, `node_at`, `for_each_buffer`,
+  `scene_root_node`, `band_node`, `rect_node`, `buffer_node`.
+- Buffer nodes: `set_scene_buffer` (with `SceneBufferOptions` carrying a damage
+  region and an explicit-sync wait point), plus `set_scene_buffer_dest_size`,
+  `_source_box`, `_opaque_region`, `_transform`, `_opacity`, `_filter`,
+  `_transfer_function`, `_primaries`, `_color_encoding` and `_color_range`.
+- **Every wlroots `assert()` reachable from here is a `None` instead.** Arch
+  ships wlroots with assertions enabled, so an unchecked call would abort the
+  process rather than fail: `place_node_above`/`_below` refuse a node placed
+  against itself and a pair with different parents, `reparent_node` refuses a
+  cycle, the size setters refuse a negative dimension. `tests/scene_tree.rs`
+  exercises each one, and the process surviving that test *is* the assertion.
+- Three origins, because not every node in the scene is the consumer's to
+  restructure. Nodes this crate created for them are fully mutable; the scene
+  root and the six bands are readable and enable-able but never destroyed,
+  restacked or reparented; and a node wlroots owns — a toplevel's tree, a layer
+  surface's tree, a client's surface node — gets an id when `node_at` or
+  `node_children` reaches it, but only reads and property changes. Restack
+  those through `raise_toplevel` and its siblings, which keep this crate's own
+  placement bookkeeping straight.
+- `RectId` and `BufferId` are unchanged and still work exactly as before, but
+  the nodes under them now carry the same payload: `rect_node`/`buffer_node`
+  bridge to the node API, a cascade that frees such a node drops its row (so
+  `remove_rect` afterwards misses instead of double-destroying), and
+  `reparent_node` recomputes the parent tracking those two tables still use.
+
+### Cargo features
+
+`wlr` now re-exports `wlr-sys`' feature names one for one — `drm-backend`,
+`x11-backend`, `libinput-backend`, `session`, `gles2-renderer`,
+`vulkan-renderer`, `xwayland` — with the same default set, and forwards them
+rather than letting `wlr-sys` pick its own. They decide which wlroots headers
+are bound, and so which of the `wlr_has_*` cfgs are set: building without
+`gles2-renderer` removes `Renderer::as_gles2`, `Gles2` and
+`RenderTimer::is_gles2`, because the symbols behind them are no longer there.
+
+### Logging
+
+- `LogLevel`, `init_logging` and `log_verbosity`. `init_logging` installs a
+  process-global sink (wlroots' callback has no user-data pointer, so there can
+  only be one) and sets the verbosity.
+- Two things worth knowing before you install one. **wlroots does not apply the
+  verbosity filter to a custom callback** — that test lives inside its own
+  stderr logger — so this crate applies it in the trampoline, and `level` means
+  the same thing either way. And a **panic escaping the sink is caught and
+  discarded**: a logger that aborts the process is worse than one that loses a
+  line. Everywhere else in this crate a panic aborts, deliberately; this is the
+  one exception.
+- Lines longer than 4 KiB are truncated. Rust cannot read a `va_list`, so the
+  formatting goes back through C's `vsnprintf` into a fixed buffer, and
+  two-pass sizing would need `va_copy`, which stable Rust also lacks.
+
+### Internal
+
+- The `wlr_addon` code that backs `OutputId`/`ToplevelId`/`LayerSurfaceId` is
+  now a reusable substrate rather than one hand-rolled copy in `id.rs`. No
+  public API change; the existing suite passing unchanged is the acceptance
+  criterion.
+
 ## 0.20.20
 
 Session locking (`ext-session-lock-v1`) and idle management

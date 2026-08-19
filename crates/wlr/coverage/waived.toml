@@ -1,0 +1,5419 @@
+# Symbols the safe `wlr` API deliberately does not cover — yet, or ever.
+#
+# `reason = "not-yet"` rows are the backlog: 100% coverage is defined as this
+# file containing none of them. Every other reason is a permanent decision and
+# needs no milestone. See README.md in this directory before editing.
+#
+# A `not-yet` row whose symbol already appears in a `sys::` use under
+# `crates/wlr/src` fails `cargo test -p wlr --test coverage_audit`: the wrapper
+# exists, so the row belongs in wrapped.toml. Move it in the same commit as the
+# wrapper.
+
+[[waived]]
+symbol    = "wlr_addon_set"
+reason    = "interface-impl-only"
+note      = "Only an object that owns its own addon set calls these; nothing in wlr does."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_addon_set_finish"
+reason    = "interface-impl-only"
+note      = "Only an object that owns its own addon set calls these; nothing in wlr does."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_addon_set_init"
+reason    = "interface-impl-only"
+note      = "Only an object that owns its own addon set calls these; nothing in wlr does."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_allocator_init"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_allocator_interface"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_alpha_modifier_surface_v1_state"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_alpha_modifier_v1"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_alpha_modifier_v1_create"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_alpha_modifier_v1_get_surface_state"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_backend_commit"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_backend_destroy"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_backend_finish"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_backend_get_drm_fd"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_backend_impl"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_backend_init"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_backend_is_drm"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_backend_is_headless"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_backend_is_libinput"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_backend_is_multi"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_backend_is_wl"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_backend_is_x11"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_backend_output_state"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_backend_test"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_buffer_finish"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_buffer_impl"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_buffer_init"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_buffer_lock"
+reason    = "not-yet"
+note      = "Buffer type the render pipeline hands around."
+milestone = "M5"
+
+[[waived]]
+symbol    = "wlr_buffer_register_resource_interface"
+reason    = "not-yet"
+note      = "Installs a process-global wl_buffer vtable (wlr/interfaces/wlr_buffer.h) — the custom-vtable class M13 collects; also needs a public wl_resource surface the crate does not have."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_buffer_resource_interface"
+reason    = "not-yet"
+note      = "The vtable struct wlr_buffer_register_resource_interface takes; has no meaning apart from that registration, so it moves with it."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_buffer_try_from_resource"
+reason    = "not-yet"
+note      = "Takes a client-supplied `struct wl_resource *`; the crate exposes no wl_resource publicly, so it needs M10's client-buffer plumbing."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_button_state"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_client_buffer"
+reason    = "not-yet"
+note      = "Buffer type the render pipeline hands around."
+milestone = "M5"
+
+[[waived]]
+symbol    = "wlr_client_buffer_get"
+reason    = "not-yet"
+note      = "A downcast that returns NULL for anything but a client buffer, and every Buffer reachable today is compositor-produced; needs M10's wlr_surface.buffer source."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_color_manager_v1"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_manager_v1_create"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_manager_v1_features"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_manager_v1_options"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_manager_v1_primaries_from_wlr"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_manager_v1_primaries_list_from_renderer"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_manager_v1_primaries_to_wlr"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_manager_v1_set_surface_preferred_image_description"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_manager_v1_transfer_function_from_wlr"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_manager_v1_transfer_function_list_from_renderer"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_manager_v1_transfer_function_to_wlr"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_representation_manager_v1"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_representation_manager_v1_create"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_representation_manager_v1_create_with_renderer"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_representation_v1_alpha_mode_to_wlr"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_representation_v1_chroma_location_to_wlr"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_representation_v1_coeffs_and_range"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_representation_v1_color_encoding_to_wlr"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_representation_v1_color_range_to_wlr"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_representation_v1_get_surface_state"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_representation_v1_options"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_color_representation_v1_surface_state"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_compositor"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_compositor_set_renderer"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_content_type_manager_v1"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_content_type_manager_v1_create"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_cursor_destroy"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_cursor_detach_input_device"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_cursor_map_input_to_output"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_cursor_map_input_to_region"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_cursor_map_to_output"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_cursor_map_to_region"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_cursor_set_buffer"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_cursor_set_surface"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_cursor_shape_manager_v1"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_cursor_shape_manager_v1_create"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_cursor_shape_manager_v1_device_type"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_cursor_shape_manager_v1_request_set_shape_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_cursor_shape_v1_name"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_cursor_state"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_cursor_unset_image"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_cursor_warp"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_damage_ring_buffer"
+reason    = "not-yet"
+note      = "Deep wlr_scene / damage_ring surface."
+milestone = "M5"
+
+[[waived]]
+symbol    = "wlr_data_control_device_v1"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_data_control_device_v1_destroy"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_data_device_manager"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_data_offer"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_data_offer_type"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_data_source"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_data_source_accept"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_data_source_destroy"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_data_source_dnd_action"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_data_source_dnd_drop"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_data_source_dnd_finish"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_data_source_impl"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_data_source_init"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_data_source_send"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_device"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_device_change_event"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_device_change_type"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_device_hotplug_event"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_direction"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_dmabuf_v1_buffer"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_dmabuf_v1_buffer_try_from_buffer_resource"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drag_create"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_drag_drop_event"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_drag_grab_type"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_drag_icon"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_drag_motion_event"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_drm"
+reason    = "not-yet"
+note      = "types/wlr_drm.h: the legacy wl_drm global, not the DRM backend."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_backend"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_drm_backend_create"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_drm_backend_get_non_master_fd"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_drm_backend_get_parent"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_drm_buffer"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_buffer_try_from_resource"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_connector_add_mode"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_drm_connector_get_id"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_drm_connector_get_panel_orientation"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_drm_create"
+reason    = "not-yet"
+note      = "types/wlr_drm.h: the legacy wl_drm global, not the DRM backend."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_create_lease"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_drm_format_finish"
+reason    = "superseded-by"
+note      = "DrmFormat owns its modifiers as a Vec, so this would free Rust's memory; a C-owned format belongs to a set or a swapchain, which frees it with wlr_drm_format_set_finish / wlr_swapchain_destroy."
+
+[[waived]]
+symbol    = "wlr_drm_lease"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_lease_connector_v1"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_lease_device_v1"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_lease_request_v1"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_lease_request_v1_grant"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_lease_request_v1_reject"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_lease_terminate"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_lease_v1"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_lease_v1_manager"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_lease_v1_manager_create"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_lease_v1_manager_offer_output"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_lease_v1_manager_withdraw_output"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_lease_v1_revoke"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_drm_mode_get_info"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_drm_syncobj_merger"
+reason    = "not-yet"
+note      = "Opaque, and reachable only as a field of wlr_linux_drm_syncobj_v1_surface_state — no constructor, no functions. Belongs to that protocol, not to render/drm_syncobj.h."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_export_dmabuf_frame_v1"
+reason    = "deprecated"
+note      = "wlroots documents it as superseded by ext-image-copy-capture-v1, wrapped in M10."
+
+[[waived]]
+symbol    = "wlr_export_dmabuf_manager_v1"
+reason    = "deprecated"
+note      = "wlroots documents it as superseded by ext-image-copy-capture-v1, wrapped in M10."
+
+[[waived]]
+symbol    = "wlr_export_dmabuf_manager_v1_create"
+reason    = "deprecated"
+note      = "wlroots documents it as superseded by ext-image-copy-capture-v1, wrapped in M10."
+
+[[waived]]
+symbol    = "wlr_ext_data_control_device_v1"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_ext_data_control_device_v1_destroy"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_ext_data_control_manager_v1"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_ext_data_control_manager_v1_create"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_ext_foreign_toplevel_handle_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_foreign_toplevel_handle_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_foreign_toplevel_handle_v1_destroy"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_foreign_toplevel_handle_v1_from_resource"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_foreign_toplevel_handle_v1_state"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_foreign_toplevel_handle_v1_update_state"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_foreign_toplevel_image_capture_source_manager_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_foreign_toplevel_image_capture_source_manager_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request_accept"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_foreign_toplevel_list_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_foreign_toplevel_list_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_image_capture_source_v1"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_capture_source_v1_create_resource"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_capture_source_v1_create_with_scene_node"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_capture_source_v1_cursor"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_capture_source_v1_cursor_finish"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_capture_source_v1_cursor_init"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_capture_source_v1_finish"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_capture_source_v1_frame_event"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_capture_source_v1_from_resource"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_capture_source_v1_init"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_capture_source_v1_interface"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_capture_source_v1_set_constraints_from_swapchain"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_copy_capture_frame_v1"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_copy_capture_frame_v1_copy_buffer"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_copy_capture_frame_v1_fail"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_copy_capture_frame_v1_ready"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_copy_capture_manager_v1"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_copy_capture_manager_v1_create"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_image_copy_capture_session_v1"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_output_image_capture_source_manager_v1"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_output_image_capture_source_manager_v1_create"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_group_handle_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_group_handle_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_group_handle_v1_destroy"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_group_handle_v1_output_enter"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_group_handle_v1_output_leave"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_handle_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_handle_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_handle_v1_destroy"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_handle_v1_set_active"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_handle_v1_set_coordinates"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_handle_v1_set_group"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_handle_v1_set_hidden"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_handle_v1_set_name"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_handle_v1_set_urgent"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_manager_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_manager_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_v1_commit_event"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_v1_request"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_ext_workspace_v1_request_type"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_fixes"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_fixes_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_activated_event"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_destroy"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_fullscreen_event"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_maximized_event"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_minimized_event"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_output"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_output_enter"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_output_leave"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_set_activated"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_set_app_id"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_set_fullscreen"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_set_maximized"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_set_minimized"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_set_parent"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_set_rectangle_event"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_set_title"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_handle_v1_state"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_manager_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_foreign_toplevel_manager_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_fractional_scale_manager_v1"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_fractional_scale_manager_v1_create"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_fractional_scale_v1_notify_scale"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_gamma_control_manager_v1"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_gamma_control_manager_v1_create"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_gamma_control_manager_v1_get_control"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_gamma_control_manager_v1_set_gamma_event"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_gamma_control_v1"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_gamma_control_v1_apply"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_gamma_control_v1_get_color_transform"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_gamma_control_v1_send_failed_and_destroy"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_headless_add_output"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_headless_backend_create"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_image_description_v1_data"
+reason    = "not-yet"
+note      = "Colour-management protocol; layered on M5's render/color.h types."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_input_device_get_virtual_keyboard"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_input_device_is_libinput"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_input_device_is_wl"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_input_device_is_x11"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_input_method_keyboard_grab_v2"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_keyboard_grab_v2_destroy"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_keyboard_grab_v2_send_key"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_keyboard_grab_v2_send_modifiers"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_keyboard_grab_v2_set_keyboard"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_manager_v2"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_manager_v2_create"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_v2"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_v2_delete_surrounding_text"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_v2_preedit_string"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_v2_send_activate"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_v2_send_content_type"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_v2_send_deactivate"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_v2_send_done"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_v2_send_surrounding_text"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_v2_send_text_change_cause"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_v2_send_unavailable"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_method_v2_state"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_popup_surface_v2"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_popup_surface_v2_send_text_input_rectangle"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_input_popup_surface_v2_try_from_wlr_surface"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_finish"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_keyboard_grab_interface"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_group"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_group_add_keyboard"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_group_create"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_group_destroy"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_group_from_wlr_keyboard"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_group_remove_keyboard"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_impl"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_keyboard_init"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_keyboard_keymaps_match"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_keysym_to_pointer_button"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_keysym_to_pointer_motion"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_led"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_led_update"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_modifiers"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_notify_key"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_notify_modifiers"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_shortcuts_inhibit_manager_v1"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_shortcuts_inhibit_v1_create"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_shortcuts_inhibitor_v1"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_shortcuts_inhibitor_v1_activate"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_keyboard_shortcuts_inhibitor_v1_deactivate"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_layer_surface_v1_destroy"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_layer_surface_v1_for_each_popup_surface"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_layer_surface_v1_for_each_surface"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_layer_surface_v1_from_resource"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_layer_surface_v1_get_exclusive_edge"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_layer_surface_v1_popup_surface_at"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_layer_surface_v1_state"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_layer_surface_v1_state_field"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_layer_surface_v1_surface_at"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_layer_surface_v1_try_from_wlr_surface"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_libinput_backend_create"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_libinput_get_device_handle"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_libinput_get_tablet_tool_handle"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_linux_dmabuf_feedback_add_tranche"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_dmabuf_feedback_v1"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_dmabuf_feedback_v1_compiled"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_dmabuf_feedback_v1_finish"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_dmabuf_feedback_v1_init_options"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_dmabuf_feedback_v1_init_with_options"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_dmabuf_feedback_v1_tranche"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_dmabuf_v1"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_dmabuf_v1_create"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_dmabuf_v1_create_with_renderer"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_dmabuf_v1_set_check_dmabuf_callback"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_dmabuf_v1_set_surface_feedback"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_drm_syncobj_manager_v1"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_drm_syncobj_manager_v1_create"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_drm_syncobj_surface_v1_state"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_drm_syncobj_v1_get_surface_state"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_drm_syncobj_v1_state_add_release_point"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_linux_drm_syncobj_v1_state_signal_release_with_buffer"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_multi_backend_add"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_multi_backend_create"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_multi_backend_remove"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_multi_for_each_backend"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_multi_is_empty"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_output_adaptive_sync_status"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_add_software_cursors_to_render_pass"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_begin_render_pass"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_configuration_head_v1"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_configuration_head_v1_create"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_configuration_v1"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_configuration_v1_build_state"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_configuration_v1_create"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_configuration_v1_destroy"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_configuration_v1_send_failed"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_configuration_v1_send_succeeded"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_configure_primary_swapchain"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_create_global"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_cursor"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_cursor_create"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_cursor_destroy"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_cursor_move"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_cursor_set_buffer"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_cursor_size"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_destroy"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_output_destroy_global"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_effective_resolution"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_event_bind"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_event_commit"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_event_damage"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_event_precommit"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_event_present"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_event_request_state"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_finish"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_output_from_resource"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_get_gamma_size"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_get_primary_formats"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_head_v1"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_head_v1_state"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_head_v1_state_apply"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_image_description"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_impl"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_output_init"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_output_is_direct_scanout_allowed"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_is_drm"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_is_headless"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_is_wl"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_is_x11"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layer"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layer_create"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layer_destroy"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layer_feedback_event"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layer_state"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layout_adjacent_output"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layout_closest_point"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layout_contains_point"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layout_destroy"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layout_farthest_output"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layout_get"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layout_get_center_output"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layout_intersects"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layout_output"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layout_output_at"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layout_output_coords"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layout_remove"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_lock_attach_render"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_lock_software_cursors"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_manager_v1"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_manager_v1_create"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_manager_v1_set_configuration"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_mode"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_mode_aspect_ratio"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_power_manager_v1"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_power_manager_v1_create"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_power_v1"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_power_v1_set_mode_event"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_present_flag"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_schedule_done"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_send_frame"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_send_present"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_send_request_state"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_set_description"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_set_name"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_copy"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_field"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_mode_type"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_set_adaptive_sync_enabled"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_set_buffer"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_set_color_transform"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_set_custom_mode"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_set_damage"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_set_image_description"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_set_layers"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_set_render_format"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_set_scale"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_set_signal_timeline"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_set_subpixel"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_set_transform"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_state_set_wait_timeline"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_swapchain_manager"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_swapchain_manager_apply"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_swapchain_manager_finish"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_swapchain_manager_get_swapchain"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_swapchain_manager_init"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_swapchain_manager_prepare"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_test_state"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_try_from_ext_image_capture_source_v1"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_update_needs_frame"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_pointer_axis_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_constraint_v1_state"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_constraint_v1_state_field"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_constraints_v1_constraint_for_surface"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_finish"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_pointer_gestures_v1"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_gestures_v1_create"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_gestures_v1_send_hold_begin"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_gestures_v1_send_hold_end"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_gestures_v1_send_pinch_begin"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_gestures_v1_send_pinch_end"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_gestures_v1_send_pinch_update"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_gestures_v1_send_swipe_begin"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_gestures_v1_send_swipe_end"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_gestures_v1_send_swipe_update"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_grab_interface"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_hold_begin_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_hold_end_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_impl"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_pointer_init"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_pointer_notify_button"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_pinch_begin_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_pinch_end_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_pinch_update_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_swipe_begin_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_swipe_end_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_pointer_swipe_update_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_presentation"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_presentation_create"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_presentation_event"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_presentation_event_from_output"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_presentation_feedback"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_presentation_feedback_destroy"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_presentation_feedback_send_presented"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_presentation_surface_sampled"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_presentation_surface_scanned_out_on_output"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_presentation_surface_textured_on_output"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_primary_selection_source"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_primary_selection_source_destroy"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_primary_selection_source_impl"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_primary_selection_source_init"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_primary_selection_source_send"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_primary_selection_v1_device"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_readonly_data_buffer"
+reason    = "not-yet"
+note      = "Buffer type the render pipeline hands around."
+milestone = "M5"
+
+[[waived]]
+symbol    = "wlr_region_from_resource"
+reason    = "not-yet"
+note      = "Takes a wl_resource; belongs with compositor/surface depth, not util."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_relative_pointer_v1"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_relative_pointer_v1_from_resource"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_render_pass_impl"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_render_pass_init"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_render_rect_options_get_box"
+reason    = "interface-impl-only"
+note      = "Accessor a renderer implementation calls on options wlroots hands it."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_render_texture_options_get_alpha"
+reason    = "interface-impl-only"
+note      = "Accessor a renderer implementation calls on options wlroots hands it."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_render_texture_options_get_dst_box"
+reason    = "interface-impl-only"
+note      = "Accessor a renderer implementation calls on options wlroots hands it."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_render_texture_options_get_src_box"
+reason    = "interface-impl-only"
+note      = "Accessor a renderer implementation calls on options wlroots hands it."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_render_timer_impl"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_renderer_impl"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_renderer_init"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_scene_buffer_point_accepts_input_func_t"
+reason    = "interface-impl-only"
+note      = "A callback typedef, not a function: it types wlr_scene_buffer.point_accepts_input (wlr_scene.h:181), so the only thing wrappable is installing a C function pointer wlroots calls back per hit-test. No symbol here for a safe API to name."
+
+[[waived]]
+symbol    = "wlr_scene_buffer_set_buffer_with_damage"
+reason    = "superseded-by"
+note      = "Strict subset of wlr_scene_buffer_set_buffer_with_options, which the crate already calls behind Runtime::set_scene_buffer + SceneBufferOptions::damage — the options form carries the same damage region plus the wait timeline."
+
+[[waived]]
+symbol    = "wlr_scene_debug_damage_option"
+reason    = "internal"
+note      = "Selected by the WLR_SCENE_DEBUG_DAMAGE environment variable, not by API."
+
+[[waived]]
+symbol    = "wlr_scene_output_build_state"
+reason    = "not-yet"
+note      = "Deep wlr_scene / damage_ring surface."
+milestone = "M5"
+
+[[waived]]
+symbol    = "wlr_scene_set_color_manager_v1"
+reason    = "not-yet"
+note      = "Needs a wlr_color_manager_v1 the crate cannot create; color_management_v1 lands in M12. Asserts one is not already set, so it must be a checked once-only setter."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_scene_set_gamma_control_manager_v1"
+reason    = "not-yet"
+note      = "Needs a wlr_gamma_control_manager_v1 from the M6 output stack. Asserts one is not already set (wlr_scene.h:373), so a second call aborts on this NDEBUG-less build."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_scene_set_linux_dmabuf_v1"
+reason    = "not-yet"
+note      = "Needs a wlr_linux_dmabuf_v1, which arrives with M10 (scene/surface.rs:23 already defers dmabuf feedback on it). Same assert-if-already-set hazard."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_scene_surface_create"
+reason    = "not-yet"
+note      = "Deep wlr_scene / damage_ring surface."
+milestone = "M5"
+
+[[waived]]
+symbol    = "wlr_screencopy_frame_v1"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_screencopy_v1_client"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_seat_client"
+reason    = "not-yet"
+note      = "Seat core, alongside the pointer work."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_client_for_wl_client"
+reason    = "not-yet"
+note      = "Seat core, alongside the pointer work."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_client_from_pointer_resource"
+reason    = "not-yet"
+note      = "Seat core, alongside the pointer work."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_client_from_resource"
+reason    = "not-yet"
+note      = "Seat core, alongside the pointer work."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_client_next_serial"
+reason    = "not-yet"
+note      = "Seat core, alongside the pointer work."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_client_validate_event_serial"
+reason    = "not-yet"
+note      = "Seat core, alongside the pointer work."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_destroy"
+reason    = "not-yet"
+note      = "Seat core, alongside the pointer work."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_keyboard_clear_focus"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_seat_keyboard_end_grab"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_seat_keyboard_enter"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_seat_keyboard_focus_change_event"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_seat_keyboard_grab"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_seat_keyboard_has_grab"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_seat_keyboard_send_key"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_seat_keyboard_send_modifiers"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_seat_keyboard_start_grab"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_seat_keyboard_state"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_button"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_clear_focus"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_end_grab"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_enter"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_focus_change_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_grab"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_has_grab"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_notify_axis"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_request_set_cursor_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_send_axis"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_send_button"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_send_frame"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_send_motion"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_start_grab"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_state"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_surface_has_focus"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_pointer_warp"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_request_set_primary_selection"
+reason    = "not-yet"
+note      = "Selection and drag entry points on the seat."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_seat_request_set_selection"
+reason    = "not-yet"
+note      = "Selection and drag entry points on the seat."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_seat_request_start_drag"
+reason    = "not-yet"
+note      = "Selection and drag entry points on the seat."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_seat_set_name"
+reason    = "not-yet"
+note      = "Seat core, alongside the pointer work."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_start_drag"
+reason    = "not-yet"
+note      = "Selection and drag entry points on the seat."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_seat_touch_end_grab"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_touch_get_point"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_touch_grab"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_touch_has_grab"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_touch_notify_cancel"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_touch_notify_clear_focus"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_touch_notify_frame"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_touch_num_points"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_touch_point_clear_focus"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_touch_send_cancel"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_touch_send_down"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_touch_send_frame"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_touch_send_motion"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_touch_send_up"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_touch_start_grab"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_seat_touch_state"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_security_context_manager_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_security_context_manager_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_security_context_manager_v1_lookup_client"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_security_context_v1_commit_event"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_security_context_v1_state"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_pad_button"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_pad_enter"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_pad_leave"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_pad_mode"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_pad_ring"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_pad_strip"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_tool_button"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_tool_distance"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_tool_down"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_tool_motion"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_tool_pressure"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_tool_proximity_in"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_tool_proximity_out"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_tool_rotation"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_tool_slider"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_tool_tilt"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_tool_up"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_send_tablet_v2_tablet_tool_wheel"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_serial_range"
+reason    = "internal"
+note      = "Seat-internal serial bookkeeping; reachable only as a wlr_seat_client field."
+
+[[waived]]
+symbol    = "wlr_serial_ringset"
+reason    = "internal"
+note      = "Seat-internal serial bookkeeping; reachable only as a wlr_seat_client field."
+
+[[waived]]
+symbol    = "wlr_server_decoration"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_server_decoration_manager"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_server_decoration_manager_create"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_server_decoration_manager_mode"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_server_decoration_manager_set_default_mode"
+reason    = "not-yet"
+note      = "Selection, drag-and-drop and the small standalone protocols."
+milestone = "M11"
+
+[[waived]]
+symbol    = "wlr_session"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_session_add_event"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_session_change_vt"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_session_close_file"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_session_create"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_session_destroy"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_session_find_gpus"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_session_lock_surface_v1_state"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_session_lock_surface_v1_try_from_wlr_surface"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_session_open_file"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_shm"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_shm_create"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_shm_create_with_renderer"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_single_pixel_buffer_manager_v1"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_single_pixel_buffer_manager_v1_create"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_single_pixel_buffer_v1"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_single_pixel_buffer_v1_try_from_buffer"
+reason    = "not-yet"
+note      = "Buffer-sharing, screen capture and DRM lease protocols."
+milestone = "M10"
+
+[[waived]]
+symbol    = "wlr_subcompositor"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_subsurface"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_subsurface_parent_state"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_subsurface_try_from_wlr_surface"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_accepts_tablet_v2"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_accepts_touch"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_for_each_surface"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_from_resource"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_get_buffer_source_box"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_get_content_type_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_get_effective_damage"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_get_extents"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_get_image_description_v1_data"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_get_root_surface"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_get_texture"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_has_buffer"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_iterator_func_t"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_lock_pending"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_map"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_output"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_point_accepts_input"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_reject_pending"
+reason    = "not-yet"
+note      = "Shell completion. The one bound C variadic: Rust cannot forward into a va_list, so the wrapper must format first and pass a lone %s."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_role"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_surface_send_enter"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_send_frame_done"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_send_leave"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_set_preferred_buffer_scale"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_set_preferred_buffer_transform"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_set_role"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_set_role_object"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_state"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_state_field"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_state_has_buffer"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_surface_at"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_synced"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_synced_finish"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_synced_get_state"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_synced_impl"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_surface_synced_init"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_unlock_cached"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_surface_unmap"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_switch"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_switch_finish"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_switch_from_input_device"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_switch_impl"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_switch_init"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_switch_state"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_switch_toggle_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_switch_type"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_tablet"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_client_v2"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_create"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_finish"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_tablet_from_input_device"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_impl"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_tablet_init"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_tablet_manager_v2"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_pad"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_pad_button_event"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_pad_client_v2"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_pad_create"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_pad_finish"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_tablet_pad_from_input_device"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_pad_group"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_pad_impl"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_tablet_pad_init"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_tablet_pad_ring_event"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_pad_ring_source"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_pad_strip_event"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_pad_strip_source"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_pad_v2_grab"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_pad_v2_grab_interface"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_axes"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_axis_event"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_button_event"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_client_v2"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_create"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_proximity_event"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_proximity_state"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_tip_event"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_tip_state"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_type"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_v2_end_grab"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_v2_grab"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_v2_grab_interface"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_v2_has_implicit_grab"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_v2_start_grab"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_tool_v2_start_implicit_grab"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_create"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_end_grab"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_event_cursor"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_event_feedback"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_start_grab"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_pad"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_pad_notify_button"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_pad_notify_enter"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_pad_notify_leave"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_pad_notify_mode"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_pad_notify_ring"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_pad_notify_strip"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_tool"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_tool_notify_button"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_tool_notify_distance"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_tool_notify_down"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_tool_notify_motion"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_tool_notify_pressure"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_tool_notify_proximity_in"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_tool_notify_proximity_out"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_tool_notify_rotation"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_tool_notify_slider"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_tool_notify_tilt"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_tool_notify_up"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_tool_notify_wheel"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tearing_control_manager_v1"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_tearing_control_manager_v1_create"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_tearing_control_manager_v1_surface_hint_from_surface"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_tearing_control_v1"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_text_input_manager_v3"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_text_input_manager_v3_create"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_text_input_v3"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_text_input_v3_features"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_text_input_v3_send_commit_string"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_text_input_v3_send_delete_surrounding_text"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_text_input_v3_send_done"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_text_input_v3_send_enter"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_text_input_v3_send_leave"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_text_input_v3_send_preedit_string"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_text_input_v3_state"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_texture_impl"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_texture_init"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_texture_read_pixel_options_get_data"
+reason    = "interface-impl-only"
+note      = "Accessor a renderer implementation calls on options wlroots hands it."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_texture_read_pixels_options_get_src_box"
+reason    = "interface-impl-only"
+note      = "Accessor a renderer implementation calls on options wlroots hands it."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_touch"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_touch_cancel_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_touch_down_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_touch_finish"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_touch_from_input_device"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_touch_grab_interface"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_touch_impl"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_touch_init"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_touch_motion_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_touch_up_event"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_transient_seat_manager_v1"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_transient_seat_manager_v1_create"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_transient_seat_v1"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_transient_seat_v1_deny"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_transient_seat_v1_ready"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_version_get_major"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_version_get_micro"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_version_get_minor"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_viewporter"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_viewporter_create"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_virtual_keyboard_v1_from_resource"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_virtual_pointer_v1"
+reason    = "not-yet"
+note      = "Keyboard depth, tablet, and the input-method/text-input pair."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_wl_backend_create"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_wl_backend_get_remote_display"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_wl_output_create"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_wl_output_create_from_surface"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_wl_output_get_surface"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_wl_output_set_app_id"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_wl_output_set_title"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_x11_backend_create"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_x11_output_create"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_x11_output_set_title"
+reason    = "not-yet"
+note      = "Backend-specific construction and the interfaces milestone."
+milestone = "M13"
+
+[[waived]]
+symbol    = "wlr_xcursor"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_xcursor_frame"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_xcursor_get_resize_name"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_xcursor_image"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_xcursor_image_get_buffer"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_xcursor_manager_destroy"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_xcursor_manager_get_xcursor"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_xcursor_manager_theme"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_xcursor_theme"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_xcursor_theme_destroy"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_xcursor_theme_get_cursor"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_xcursor_theme_load"
+reason    = "not-yet"
+note      = "Pointer, cursor, touch and switch input."
+milestone = "M7"
+
+[[waived]]
+symbol    = "wlr_xdg_activation_token_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_activation_token_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_activation_token_v1_destroy"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_activation_token_v1_get_name"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_activation_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_activation_v1_add_token"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_activation_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_activation_v1_find_token"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_activation_v1_request_activate_event"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_client"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_dialog_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_dialog_v1_try_from_wlr_xdg_toplevel"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_exported_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_exported_v2"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_foreign_exported"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_foreign_exported_finish"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_foreign_exported_init"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_foreign_registry"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_foreign_registry_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_foreign_registry_find_by_handle"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_foreign_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_foreign_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_foreign_v2"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_foreign_v2_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_imported_child_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_imported_child_v2"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_imported_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_imported_v2"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_output_manager_v1"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_xdg_output_manager_v1_create"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_xdg_output_v1"
+reason    = "not-yet"
+note      = "Output stack completion."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_xdg_popup"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_popup_configure"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_popup_configure_field"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_popup_destroy"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_popup_from_resource"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_popup_get_position"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_popup_get_toplevel_coords"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_popup_grab"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_popup_state"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_popup_try_from_wlr_surface"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_popup_unconstrain_from_box"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_positioner"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_positioner_from_resource"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_positioner_is_complete"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_positioner_rules"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_positioner_rules_get_geometry"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_positioner_rules_unconstrain_box"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_surface_configure"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_surface_for_each_popup_surface"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_surface_for_each_surface"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_surface_from_resource"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_surface_ping"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_surface_popup_surface_at"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_surface_role"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_surface_state"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_surface_state_field"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_surface_surface_at"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_surface_try_from_wlr_surface"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_system_bell_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_system_bell_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_system_bell_v1_ring_event"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_configure"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_configure_field"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_decoration_v1_configure"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_decoration_v1_state"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_from_resource"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_icon_manager_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_icon_manager_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_icon_manager_v1_set_icon_event"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_icon_manager_v1_set_sizes"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_icon_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_icon_v1_buffer"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_icon_v1_ref"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_icon_v1_unref"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_move_event"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_requested"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_set_bounds"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_set_constrained"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_set_parent"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_set_resizing"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_set_suspended"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_set_tiled"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_set_wm_capabilities"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_show_window_menu_event"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_state"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_tag_manager_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_tag_manager_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_tag_manager_v1_set_description_event"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_tag_manager_v1_set_tag_event"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_try_from_wlr_surface"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_toplevel_wm_capabilities"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_wm_dialog_v1"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xdg_wm_dialog_v1_create"
+reason    = "not-yet"
+note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
+milestone = "M9"
+
+[[waived]]
+symbol    = "wlr_xwayland"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_create"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_create_with_server"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_destroy"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_get_xwm_connection"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_icccm_input_model"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_minimize_event"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_net_wm_window_type"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_remove_startup_info_event"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_resize_event"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_server"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_server_create"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_server_destroy"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_server_options"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_server_ready_event"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_set_cursor"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_set_seat"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_set_workareas"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_shell_v1"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_shell_v1_create"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_shell_v1_destroy"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_shell_v1_set_client"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_shell_v1_surface_from_serial"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_activate"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_close"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_configure"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_configure_event"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_decorations"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_fetch_icon"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_has_window_type"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_icccm_input_model"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_offer_focus"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_override_redirect_wants_focus"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_ping"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_restack"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_set_above"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_set_below"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_set_demands_attention"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_set_fullscreen"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_set_maximized"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_set_minimized"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_set_shaded"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_set_skip_pager"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_set_skip_taskbar"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_set_sticky"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_set_withdrawn"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_try_from_wlr_surface"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwayland_surface_v1"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_xwm"
+reason    = "not-yet"
+note      = "Xwayland, feature-gated."
+milestone = "M12"

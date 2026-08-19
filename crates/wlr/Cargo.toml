@@ -9,10 +9,48 @@ description = "Safe bindings to wlroots"
 keywords = ["wayland", "wlroots", "compositor"]
 categories = ["api-bindings", "gui"]
 readme = "README.md"
+# The coverage audit is development machinery, not part of the published
+# crate: `coverage/*.toml` is ~200K of ledger, and `src/coverage.rs` is
+# pulled into `tests/coverage_audit.rs` by `#[path]` rather than through
+# `lib.rs` precisely so it never ships. Nothing enforced that until CI grew a
+# `cargo package -p wlr` step, and all three were going out in the tarball.
+#
+# All three together: the test `#[path]`-includes the module, so excluding the
+# module alone would leave a test that cannot compile from a clean extraction.
+exclude = ["coverage/**", "src/coverage.rs", "tests/coverage_audit.rs"]
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+
+[features]
+# Re-exported 1:1 from `wlr-sys`, name for name, and deliberately nothing more:
+# a consumer who turns a wlroots subsystem off there must be able to spell the
+# same thing here, and a name that meant something different in the two crates
+# would be worse than no name at all. `default` mirrors `wlr-sys`' own default
+# for the same reason.
+#
+# These decide which *headers* `wlr-sys` binds, which is what makes the
+# `wlr_has_*` cfgs in `build.rs` true or false. Turning `gles2-renderer` off
+# removes `Renderer::as_gles2` and friends, because the symbols behind them are
+# no longer bound.
+default = [
+    "drm-backend",
+    "x11-backend",
+    "libinput-backend",
+    "session",
+    "gles2-renderer",
+    "xwayland",
+]
+
+drm-backend = ["wlr-sys/drm-backend"]
+x11-backend = ["wlr-sys/x11-backend"]
+libinput-backend = ["wlr-sys/libinput-backend"]
+session = ["wlr-sys/session"]
+gles2-renderer = ["wlr-sys/gles2-renderer"]
+# Off by default, exactly as in `wlr-sys`: it needs `vulkan-headers` installed.
+vulkan-renderer = ["wlr-sys/vulkan-renderer"]
+xwayland = ["wlr-sys/xwayland"]
 
 [dependencies]
 # This branch binds wlroots 0.20, so it names the workspace member directly.
@@ -20,12 +58,24 @@ rust-version.workspace = true
 # packages with `links = "wlroots"` in the graph and breaking the whole
 # workspace. Older wlroots minors live on `support/*` branches, each with its
 # own `wlr` minor — cargo cannot resolve a manifest listing two of them.
-wlr-sys = { version = "0.20", path = "../wlr-sys" }
+#
+# `default-features = false` because the `[features]` table above forwards them
+# one for one. Without it `wlr --no-default-features` would still hand `wlr-sys`
+# its own defaults, and the re-export would be a lie: turning `gles2-renderer`
+# off here would leave the subsystem bound and the `wlr_has_*` cfg set. `wlr`'s
+# own `default` list is the same six names, so the default build is unchanged.
+wlr-sys = { version = "0.20", path = "../wlr-sys", default-features = false }
 # The same xkbcommon this branch's wlr-sys blocklists and re-imports, so the
 # `xkb_state`/`xkb_keymap` pointers on `wlr_keyboard` are the same nominal
 # types here as they are there. Naming a different version would silently
 # produce look-alike types (see wlr-sys's own tests/interop.rs).
 xkbcommon-sys = "1.4"
+
+[build-dependencies]
+# build.rs re-emits wlr-sys's subsystem cfgs (they do not cross the package
+# boundary) and probes pixman-1, which wlroots keeps in Requires.private and so
+# never puts on our link line.
+pkg-config = "0.3"
 
 [dev-dependencies]
 trybuild = "1.0"

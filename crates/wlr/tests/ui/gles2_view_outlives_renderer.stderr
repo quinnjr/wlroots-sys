@@ -1,0 +1,13 @@
+error[E0505]: cannot move out of `renderer` because it is borrowed
+  --> tests/ui/gles2_view_outlives_renderer.rs:11:10
+   |
+ 8 |     let renderer = Renderer::pixman().expect("pixman renderer");
+   |         -------- binding `renderer` declared here
+ 9 |     let view = renderer.as_gles2();
+   |                -------- borrow of `renderer` occurs here
+10 |
+11 |     drop(renderer);
+   |          ^^^^^^^^ move out of `renderer` occurs here
+12 |
+13 |     let _ = view.map(|view| view.check_ext("GL_OES_EGL_image_external"));
+   |             ---- borrow later used here

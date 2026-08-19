@@ -1,0 +1,11 @@
+error[E0515]: cannot return value referencing local variable `renderer`
+  --> tests/ui/pass_escapes_renderer.rs:11:5
+   |
+11 |       renderer
+   |       ^-------
+   |       |
+   |  _____`renderer` is borrowed here
+   | |
+12 | |         .begin_buffer_pass(buffer, &BufferPassOptions::new())
+13 | |         .expect("pass")
+   | |_______________________^ returns a value referencing data owned by the current function

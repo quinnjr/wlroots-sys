@@ -1,0 +1,13 @@
+error[E0624]: associated function `from_raw` is private
+ --> tests/ui/texture_from_raw_is_private.rs:7:33
+  |
+7 |       let _ = Texture::<'static>::from_raw;
+  |                                   ^^^^^^^^ private associated function
+  |
+ ::: src/render/texture.rs
+  |
+  | /     pub(crate) unsafe fn from_raw(
+  | |         raw: *mut sys::wlr_texture,
+  | |         pixels: Option<Box<[u8]>>,
+  | |     ) -> Texture<'r> {
+  | |____________________- private associated function defined here

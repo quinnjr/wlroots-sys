@@ -37,11 +37,17 @@ use crate::buffer::create_pixel_buffer;
 use crate::decoration::{DecorationEntry, DecorationMode};
 use crate::id::{SourceId, next_id};
 use crate::layer::Layer;
-use crate::scene::RectId;
-use crate::{
-    Backend, BufferId, Display, Error, Interest, LayerSurfaceId, Output, OutputId, Result,
-    ToplevelId, sys,
+use crate::scene::output::SceneOutputEntry;
+use crate::scene::{
+    LegacyId, NodeId, NodeKind, SceneBuffer, SceneBufferOptions, SceneNode, SceneOutput,
+    SceneOutputId, SceneOutputStateOptions, SceneRect, SceneSurface, SceneTree, attach_node_id,
+    find_node_id, timespec_of,
 };
+use crate::{
+    AllocatorRef, Backend, Box2D, Buffer, BufferId, Display, Error, FBox, Interest, LayerSurfaceId,
+    Output, OutputId, RectId, Region, RendererRef, Result, ToplevelId, Transform, sys,
+};
+use crate::{ColorEncoding, ColorRange, FilterMode, NamedPrimaries, TransferFunction};
 
 /// A declared fd source: the descriptor, what it wants, and its id.
 ///
@@ -77,9 +83,66 @@ pub(crate) struct RuntimeInner {
 
     pub(crate) rects: RefCell<HashMap<RectId, RectEntry>>,
 
+    /// Every scene node this runtime has issued a [`NodeId`] for.
+    ///
+    /// Written by `ensure_node_id` (which is where every id in the crate is
+    /// minted) and purged by [`crate::scene::NodePurge`]'s `Drop`, which
+    /// wlroots runs from the dying node's own addon set — including for every
+    /// node of a recursive destroy cascade. That is why this table needs no
+    /// parent tracking of its own, unlike `rects`/`buffers`, whose published
+    /// id types predate the mechanism.
+    pub(crate) nodes: RefCell<HashMap<NodeId, NodeEntry>>,
+
+    /// How many [`Runtime::with_node`] borrows and [`Runtime::for_each_buffer`]
+    /// walks are live on this thread.
+    ///
+    /// A [`SceneNode`](crate::SceneNode) handle holds a raw pointer, so a
+    /// destroy reached from inside the closure that was handed the handle
+    /// would leave it dangling for the rest of that call; a destroy reached
+    /// from inside a `for_each_buffer` visitor is worse still, because wlroots
+    /// is mid-`wl_list_for_each` over the very list the node sits in. Rather
+    /// than documenting the hazard away, every call that can free or unlink a
+    /// node refuses while this is non-zero. `Cell`, not `RefCell`: it is read
+    /// from paths that must not be able to fail.
+    pub(crate) node_borrows: std::cell::Cell<usize>,
+
     /// Every live RGBA pixel-buffer scene node. Same shape and same purge
     /// rules as `rects` — see [`BufferEntry`]'s own doc.
     pub(crate) buffers: RefCell<HashMap<BufferId, BufferEntry>>,
+
+    /// The live run's scene-buffer observer, or `None` when no run is on the
+    /// stack.
+    ///
+    /// Installed by `run_inner` for exactly the duration of one
+    /// [`Backend::run_all`](crate::Backend::run_all) call and cleared by its
+    /// guard on every exit path — see [`SceneObserver`] for why the indirection
+    /// exists at all. `Cell`, not `RefCell`: it is read from
+    /// [`Runtime::observe_scene_buffer`] and friends, which must not be able to
+    /// fail on a borrow.
+    pub(crate) scene_observer: std::cell::Cell<Option<SceneObserver>>,
+
+    /// The scene outputs each observed buffer node was last reported to be
+    /// displayed on.
+    ///
+    /// Snapshotted by `backend.rs`'s `on_scene_buffer_outputs_update` when the
+    /// signal fires, because the C array it carries is valid only for that
+    /// emission, and read back by [`Runtime::scene_buffer_active_outputs`].
+    /// Purged when the node dies (`on_scene_buffer_node_destroy`) and when a
+    /// consumer stops observing it.
+    pub(crate) scene_buffer_outputs: RefCell<HashMap<NodeId, Vec<SceneOutputId>>>,
+
+    /// Every scene output this runtime has issued a [`SceneOutputId`] for.
+    ///
+    /// Written by `record_scene_output` — reached from
+    /// [`Runtime::init_output`], [`Runtime::add_scene_output`] and the lookup
+    /// in [`Runtime::scene_output`] — and purged by each row's own destroy
+    /// listener, which wlroots runs from inside `wlr_scene_output_destroy`.
+    /// Deliberately **not** cleared per run, unlike `outputs`: a scene output
+    /// belongs to the scene rather than to a `Backend::run_all` call, and its
+    /// watch belongs to this runtime, so it stays truthful across runs. See
+    /// `scene/output.rs`'s module doc for why the id needs a listener where
+    /// every other id in this crate needs only an addon.
+    pub(crate) scene_outputs: RefCell<HashMap<SceneOutputId, SceneOutputEntry>>,
 
     /// Every fd source currently registered with the event loop, keyed by
     /// the id its declaration in `sources` carries.
@@ -491,6 +554,16 @@ pub(crate) struct LayerSurfaceEntry {
     pub(crate) raw: NonNull<sys::wlr_layer_surface_v1>,
     pub(crate) scene_tree: NonNull<sys::wlr_scene_tree>,
 
+    /// The `wlr_scene_layer_surface_v1` helper `scene_tree` belongs to.
+    ///
+    /// Kept alongside the tree rather than recovered from it: the tree is the
+    /// helper's first field, so a `container_of` cast would work today, but it
+    /// would be an unchecked layout assumption about a struct this crate does
+    /// not own for the sake of eight bytes. wlroots frees this together with
+    /// the layer surface, so it is live for exactly as long as the entry is.
+    /// [`Runtime::configure_scene_layer_surface`] is what needs it.
+    pub(crate) scene: NonNull<sys::wlr_scene_layer_surface_v1>,
+
     /// A size [`Runtime::configure_layer_surface`] recorded instead of
     /// sending, because the surface was not yet initialized when the call
     /// was made. See `layer.rs`'s own module doc for the full argument, and
@@ -510,7 +583,7 @@ pub(crate) struct LayerSurfaceEntry {
 }
 
 /// A named scene band a rect (or, in principle, anything else this crate
-/// later parents by band) can live in — the same five stacking bands
+/// later parents by band) can live in — the same six stacking bands
 /// `Graphics` creates, plus [`Band::Toplevel`] for the band every
 /// toplevel's own tree lives in.
 ///
@@ -520,8 +593,21 @@ pub(crate) struct LayerSurfaceEntry {
 /// reusing it here would either strand `Band::Toplevel` outside that
 /// vocabulary or force a fifth variant onto a type whose four variants are
 /// already frozen as of 0.20.x's layer-shell surface. `Band` is a new,
-/// separate enum instead, covering exactly the five bands
-/// [`Runtime::add_rect_in_band`] can target.
+/// separate enum instead, covering exactly the six bands
+/// [`Runtime::add_rect_in_band`] can target — [`Band::Lock`] included.
+///
+/// That Lock is targetable is deliberate and **load-bearing, not an
+/// oversight to close**. The opaque fill this crate drops over every output
+/// when a locker dies without unlocking is itself an
+/// `add_rect_in_band(Band::Lock, ..)` call, so a guard rejecting that band
+/// would break the stay-locked-on-death path — turning a locked session into
+/// an exposed desktop, which is the one outcome the lock state machine
+/// exists to prevent.
+///
+/// It is not a way past the lock either: this API is compositor-facing and
+/// no client can reach it. The boundary the lock defends is
+/// compositor-vs-client, and a compositor drawing into its own lock band is
+/// its own business.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Band {
     /// Beneath everything — `Graphics::background_band`.
@@ -597,6 +683,68 @@ pub(crate) struct BufferEntry {
     pub(crate) parent: Option<ToplevelId>,
 }
 
+/// The live run's ability to watch a scene buffer node for this runtime.
+///
+/// The five signals a `wlr_scene_buffer` emits go to a **handler**, so the
+/// listeners that carry them must belong to a
+/// [`Backend::run_all`](crate::Backend::run_all) call — that is where the
+/// `&mut S` and the delivery function live. But the *nodes* belong to the
+/// runtime, and so does the by-id API a consumer uses to ask for one to be
+/// watched. This is the join: `run_all` plants its own erased `Session`
+/// pointer and three functions instantiated at its own `S`, and
+/// [`Runtime::observe_scene_buffer`] calls through them.
+///
+/// `Copy`, so reading it out of the `Cell` leaves the `Cell` populated — the
+/// hook must survive the call that used it.
+#[derive(Clone, Copy)]
+pub(crate) struct SceneObserver {
+    /// An erased `*const Session<'_, S>`, valid for exactly as long as this
+    /// value is installed. `run_inner`'s guard is what makes that true.
+    pub(crate) session: *const (),
+    /// Links the six listeners, or does nothing if they are already linked.
+    ///
+    /// # Safety
+    ///
+    /// The caller must pass `session` verbatim and a live `wlr_scene_buffer`
+    /// whose node carries the given [`NodeId`].
+    pub(crate) watch: unsafe fn(*const (), NodeId, *mut sys::wlr_scene_buffer),
+    /// Unlinks them again. `# Safety`: `session` must be passed verbatim.
+    pub(crate) unwatch: unsafe fn(*const (), NodeId),
+    /// Whether they are linked. `# Safety`: as for `unwatch`.
+    pub(crate) is_watching: unsafe fn(*const (), NodeId) -> bool,
+}
+
+/// Where a tracked scene node came from, and therefore what may be done to it.
+///
+/// See [`crate::scene`]'s module docs for the argument; this is that
+/// three-way split as a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeOrigin {
+    /// Created through this crate's own node or rect/buffer API. Fully
+    /// mutable.
+    Owned,
+    /// The scene root or one of the six bands. Readable, and
+    /// [`Runtime::set_node_enabled`] works; nothing may destroy, restack or
+    /// reparent one.
+    Protected,
+    /// A node wlroots or another part of this crate owns, which got an id
+    /// because something observed it. Read-only through the node API.
+    Foreign,
+}
+
+/// A scene node this runtime has an id for.
+///
+/// Not `Copy`: `alive` is an [`Rc`] shared with the node's own addon payload,
+/// which clears it from wlroots' destroy hook. That flag, not this row, is the
+/// authority on whether `raw` still points at anything — the row's removal is
+/// best-effort (see [`crate::scene::NodePurge`]'s `Drop`).
+#[derive(Clone)]
+pub(crate) struct NodeEntry {
+    pub(crate) raw: NonNull<sys::wlr_scene_node>,
+    pub(crate) origin: NodeOrigin,
+    pub(crate) alive: Rc<std::cell::Cell<bool>>,
+}
+
 /// The scene graph, output layout, renderer and allocator — everything
 /// [`Runtime::init_graphics`] creates in one call and every later graphics
 /// operation reads.
@@ -667,7 +815,7 @@ pub(crate) struct Graphics {
     /// itself, as siblings of these five trees, exactly as before this
     /// field existed. A plain root rect/buffer therefore still lands above
     /// everything by default (it is created after every band, so it starts
-    /// at the end of the root's own children list, above all five bands),
+    /// at the end of the root's own children list, above all six bands),
     /// and [`Runtime::lower_rect_to_bottom`]/[`lower_buffer_to_bottom`](Runtime::lower_buffer_to_bottom)
     /// still put it beneath everything, `background_band` included, because
     /// "everything" is still just its root-level siblings — the bands
@@ -694,6 +842,47 @@ impl Graphics {
             Band::Overlay => self.overlay_band,
             Band::Lock => self.lock_band,
         }
+    }
+}
+
+/// Raises `RuntimeInner::node_borrows` for the life of a scene-node borrow or
+/// of a [`Runtime::for_each_buffer`] walk.
+///
+/// A [`SceneNode`] handle is a raw pointer with a lifetime; the lifetime stops
+/// it escaping the closure, but nothing in the type system stops that closure
+/// from calling [`Runtime::destroy_node`] on the very node it was handed. This
+/// guard is what does: while it is held, every call that can free a node
+/// refuses. `Drop` lowers the count on every path, including an unwind, so a
+/// panicking closure cannot leave a runtime permanently unable to destroy
+/// anything.
+///
+/// [`Runtime::for_each_buffer`] raises the same guard for a sharper reason than
+/// a dangling handle: wlroots walks each tree's child list with
+/// `wl_list_for_each`, not the `_safe` form, so it reads the current node's
+/// `link.next` *after* the visitor returns. Freeing or unlinking that node from
+/// inside the visitor is a use-after-free inside wlroots' own recursion, not
+/// merely a stale Rust handle.
+struct NodeBorrowGuard<'a> {
+    inner: &'a RuntimeInner,
+}
+
+impl<'a> NodeBorrowGuard<'a> {
+    fn enter(inner: &'a RuntimeInner) -> NodeBorrowGuard<'a> {
+        // Saturating, not wrapping: a count that wrapped to zero would silently
+        // re-permit destroys mid-borrow. It cannot happen — each live borrow is
+        // a stack frame — but the failure mode is bad enough to spell out.
+        inner
+            .node_borrows
+            .set(inner.node_borrows.get().saturating_add(1));
+        NodeBorrowGuard { inner }
+    }
+}
+
+impl Drop for NodeBorrowGuard<'_> {
+    fn drop(&mut self) {
+        self.inner
+            .node_borrows
+            .set(self.inner.node_borrows.get().saturating_sub(1));
     }
 }
 
@@ -750,7 +939,12 @@ impl Runtime {
                 sources: RefCell::new(Vec::new()),
                 graphics: RefCell::new(None),
                 rects: RefCell::new(HashMap::new()),
+                nodes: RefCell::new(HashMap::new()),
+                node_borrows: std::cell::Cell::new(0),
                 buffers: RefCell::new(HashMap::new()),
+                scene_observer: std::cell::Cell::new(None),
+                scene_buffer_outputs: RefCell::new(HashMap::new()),
+                scene_outputs: RefCell::new(HashMap::new()),
                 live_sources: RefCell::new(HashMap::new()),
                 pending_close: RefCell::new(Vec::new()),
                 xdg_shell: RefCell::new(None),
@@ -853,7 +1047,14 @@ impl Runtime {
         // still sees the descriptor closed synchronously, matching the
         // pre-0.20.5 behaviour for every case that isn't this one's new
         // re-entrant hazard.
-        if crate::dispatch::in_handler() {
+        //
+        // `in_delivery()`, not `in_handler()`. The latter is also raised by
+        // the scene borrow guards, which cannot be holding an fd borrow — that
+        // borrow exists only for the duration of an `fd_ready` call. Asking
+        // the broad question made `rt.with_node(id, |_| rt.remove_fd(src))`
+        // with no run on the stack queue the fd against `drain_pending_closes`,
+        // which only a run performs, so it was never closed at all.
+        if crate::dispatch::in_delivery() {
             self.inner.pending_close.borrow_mut().push(removed.fd);
         } else {
             drop(removed.fd);
@@ -1000,6 +1201,17 @@ impl Runtime {
     /// [`Error::Create`] naming whichever wlroots constructor returned null;
     /// [`Error::Operation`] for a second call, or if
     /// `wlr_renderer_init_wl_display` failed.
+    ///
+    /// # Call this before the run, not from inside it
+    ///
+    /// [`Backend::run_all`](crate::Backend::run_all) links its listeners once,
+    /// on entry, and the renderer's `lost` signal is among them — so it is
+    /// linked only if a renderer already exists at that moment. Initialising
+    /// graphics later, from inside
+    /// [`OutputHandler::new_output`](crate::OutputHandler::new_output) for
+    /// instance, produces a working renderer that nothing is watching, and
+    /// [`OutputHandler::renderer_lost`](crate::OutputHandler::renderer_lost)
+    /// is then never delivered for the rest of that run.
     pub fn init_graphics(&self, display: &Display, backend: &Backend<'_>) -> Result<()> {
         if self.inner.graphics.borrow().is_some() {
             return Err(Error::Operation("Runtime::init_graphics called twice"));
@@ -1007,7 +1219,7 @@ impl Runtime {
         // Frees `scene` (and every band already attached to it) if this
         // function returns early via `?` anywhere after the scene is
         // created. Nothing else does: `Graphics` has no `Drop`, and none of
-        // the fallible steps below (the five bands, the output layout, the
+        // the fallible steps below (the six bands, the output layout, the
         // renderer, the allocator, `wlr_renderer_init_wl_display`, the three
         // protocol globals) undoes an earlier one's work on its own way out
         // — without this, a mid-build failure would leak the scene tree and
@@ -1058,7 +1270,7 @@ impl Runtime {
             // out.
             scene_guard.0 = Some(scene);
 
-            // The five stacking bands, created in bottom-to-top order right
+            // The six stacking bands, created in bottom-to-top order right
             // after the scene itself and before anything else can be
             // inserted — see `Graphics::background_band`'s own doc for why
             // this order is what fixes the stacking order permanently.
@@ -1155,7 +1367,36 @@ impl Runtime {
             );
         }
         self.inner.pinned_display.set(display_ptr);
+        let scene = graphics.scene;
+        let bands = [
+            graphics.background_band,
+            graphics.bottom_band,
+            graphics.toplevel_band,
+            graphics.top_band,
+            graphics.overlay_band,
+            graphics.lock_band,
+        ];
         *self.inner.graphics.borrow_mut() = Some(graphics);
+        // Ids for the seven nodes a consumer can name but must not restructure:
+        // the scene root and the six bands.
+        // Attached *after* the fallible section, so `SceneGuard`'s rollback
+        // never has to unwind a half-populated node table: on that path the
+        // scene is destroyed before any id exists.
+        //
+        // SAFETY: the scene root and the six band trees were created above
+        // and are live; none carries a node payload yet (this runs once —
+        // `init_graphics` refuses a second call). `Protected` is what stops
+        // `destroy_node`/`reparent_node` reaching them.
+        unsafe {
+            self.record_node(
+                &raw mut (*scene.as_ptr()).tree.node,
+                NodeOrigin::Protected,
+                None,
+            );
+            for band in bands {
+                self.record_node(&raw mut (*band.as_ptr()).node, NodeOrigin::Protected, None);
+            }
+        }
         Ok(())
     }
 
@@ -1190,6 +1431,28 @@ impl Runtime {
             }
         };
 
+        // `wlr_scene_output_create` may be called at most once per (scene,
+        // output) pair: it plants an addon keyed by that pair, and a second
+        // call reaches `wlr_addon_init`'s
+        // `assert(0 && "Can't have two addons of the same type with the same
+        // owner")`, which Arch compiles in — so the process dies rather than
+        // returning an error.
+        //
+        // `add_scene_output` has probed for this since it was written; this
+        // path never did, and it is the one every doc and example tells a
+        // compositor to call from `new_output`. A second `new_output` for one
+        // output (a re-plug racing a slow first init, or a consumer that also
+        // calls it from its own setup) took the process down.
+        //
+        // Reported rather than silently accepted: a consumer that init'd the
+        // same output twice has a bookkeeping bug, and hiding it behind `Ok`
+        // would leave them wondering why the second output never renders.
+        // SAFETY: the handle's lifetime guarantees the output is live, and the
+        // scene is this runtime's own.
+        if !unsafe { sys::wlr_scene_get_scene_output(scene.as_ptr(), output.as_ptr()) }.is_null() {
+            return Err(Error::Operation("Runtime::init_output called twice"));
+        }
+
         // SAFETY: the handle's lifetime guarantees the output is live; the
         // renderer and allocator were created by `init_graphics` and are owned
         // by wlroots for the backend's life; the layout, scene and scene
@@ -1212,6 +1475,16 @@ impl Runtime {
                 layout_output.as_ptr(),
                 scene_output.as_ptr(),
             );
+
+            // Since 0.20.19: give the scene output an id, and start watching it
+            // for destruction, so a consumer can reach it by id
+            // (`Runtime::scene_output`) and so a stale one misses cleanly. Done
+            // last, after every fallible step: on an early return above there
+            // is no scene output to watch.
+            //
+            // SAFETY: `scene_output` is the one wlroots just created in this
+            // runtime's own scene, so it is live and nothing watches it yet.
+            self.record_scene_output(scene_output);
         }
         Ok(())
     }
@@ -1253,7 +1526,21 @@ impl Runtime {
     /// nothing new to draw and skips the commit (see `wlr_scene.h`'s
     /// `wlr_scene_output_needs_frame` doc), so an `Err` here always means the
     /// commit was attempted and wlroots said no.
+    ///
+    /// [`Error::Operation`] also while any mapping opened by
+    /// [`Buffer::begin_data_ptr_access`](crate::Buffer::begin_data_ptr_access)
+    /// is live on this thread. A commit textures whatever buffers the scene
+    /// graph holds, which this crate cannot enumerate to check one by one, and
+    /// texturing a shared-memory buffer opens wlroots' own data-pointer
+    /// bracket on it — whose entry `assert(!buffer->accessing_data_ptr)` would
+    /// abort the process if the scene happened to hold the mapped buffer.
+    /// Refusing every commit while a mapping is open is the conservative
+    /// reading of a question that cannot be asked precisely; drop the guard
+    /// before committing.
     pub fn commit_output(&self, output: &Output<'_>) -> Result<()> {
+        if crate::buffer::any_data_ptr_access_open() {
+            return Err(Error::Operation("Runtime::commit_output"));
+        }
         // Debug-only bug detector, not a safety mechanism a release build
         // relies on — see `RuntimeInner::pinned_display`'s own doc and
         // `add_rect`'s identical check.
@@ -1301,10 +1588,7 @@ impl Runtime {
             let now_dur = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default();
-            let mut now = sys::timespec {
-                tv_sec: now_dur.as_secs() as _,
-                tv_nsec: now_dur.subsec_nanos() as _,
-            };
+            let mut now = timespec_of(now_dur);
             sys::wlr_scene_output_send_frame_done(scene_output, &raw mut now);
         }
         Ok(())
@@ -1431,6 +1715,24 @@ impl Runtime {
     /// one shares it with (`wlr_scene_rect_create` versus
     /// `wlr_scene_rect_set_size`).
     pub fn add_rect(&self, width: i32, height: i32, color: [f32; 4]) -> Result<RectId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.scene_is_being_walked() {
+            return Err(Error::Reentrant("scene insertion during a walk"));
+        }
         let scene = {
             let g = self.inner.graphics.borrow();
             match g.as_ref() {
@@ -1474,6 +1776,16 @@ impl Runtime {
                 parent: RectParent::Root,
             },
         );
+        // SAFETY: `raw` is the node wlroots just created, so it is live and
+        // carries no payload of this kind yet. The payload is what drops the
+        // row above when a cascade frees the node — see `NodePurge`.
+        unsafe {
+            self.record_node(
+                &raw mut (*raw.as_ptr()).node,
+                NodeOrigin::Owned,
+                Some(LegacyId::Rect(id)),
+            );
+        }
         Ok(id)
     }
 
@@ -1504,6 +1816,24 @@ impl Runtime {
         height: i32,
         color: [f32; 4],
     ) -> Option<RectId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.scene_is_being_walked() {
+            return None;
+        }
         let entry = self.toplevel_entry(toplevel)?;
         // SAFETY: a present entry names a live tree (its destroy callback
         // removes the entry before wlroots frees it); `color` is a live
@@ -1521,6 +1851,14 @@ impl Runtime {
                 parent: RectParent::Toplevel(toplevel),
             },
         );
+        // SAFETY: as in `add_rect` — a freshly created, live node.
+        unsafe {
+            self.record_node(
+                &raw mut (*raw.as_ptr()).node,
+                NodeOrigin::Owned,
+                Some(LegacyId::Rect(id)),
+            );
+        }
         Some(id)
     }
 
@@ -1565,6 +1903,24 @@ impl Runtime {
         height: i32,
         color: [f32; 4],
     ) -> Result<RectId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.scene_is_being_walked() {
+            return Err(Error::Reentrant("scene insertion during a walk"));
+        }
         // Same reasoning as `add_rect`'s identical branch: no
         // `wlr_scene_rect_create` ran, so the payload names this Rust entry
         // point rather than a C function that was never called.
@@ -1581,7 +1937,7 @@ impl Runtime {
                 "Runtime reused across a different Display"
             );
         }
-        // SAFETY: `tree` names one of the five band trees `init_graphics`
+        // SAFETY: `tree` names one of the six band trees `init_graphics`
         // created and this runtime owns; it outlives this call. `color` is
         // a live four-float array for the duration of the call, which is
         // all `wlr_scene_rect_create` reads (it copies the value).
@@ -1596,6 +1952,14 @@ impl Runtime {
                 parent: RectParent::Band(band),
             },
         );
+        // SAFETY: as in `add_rect` — a freshly created, live node.
+        unsafe {
+            self.record_node(
+                &raw mut (*raw.as_ptr()).node,
+                NodeOrigin::Owned,
+                Some(LegacyId::Rect(id)),
+            );
+        }
         Ok(id)
     }
 
@@ -1609,7 +1973,18 @@ impl Runtime {
     /// removed (by this call or by its parent toplevel's own teardown) —
     /// double-removal misses cleanly rather than double-destroying the
     /// node.
+    ///
+    /// Also `None`, having removed nothing, while a
+    /// [`with_node`](Runtime::with_node) borrow or a
+    /// [`for_each_buffer`](Runtime::for_each_buffer) walk is live — that
+    /// borrow's handle would otherwise dangle for the rest of the closure, and
+    /// that walk would read a freed `wl_list` link. Only code inside such a
+    /// closure can observe this, so it is additive to the published 0.20.5
+    /// behaviour rather than a change to it.
     pub fn remove_rect(&self, rect: RectId) -> Option<()> {
+        if self.scene_is_being_walked() {
+            return None;
+        }
         let entry = self.inner.rects.borrow_mut().remove(&rect)?;
         // SAFETY: `entry.raw` came from `add_rect`/`add_rect_in_toplevel`/
         // `add_rect_in_band`, and the table entry naming it is only ever
@@ -1671,6 +2046,16 @@ impl Runtime {
     /// Put a rect behind everything else in the scene. `None` if this runtime
     /// never issued `rect`.
     pub fn lower_rect_to_bottom(&self, rect: RectId) -> Option<()> {
+        // Refused while a scene borrow or buffer walk is live. wlroots
+        // iterates with `wl_list_for_each`, not the `_safe` variant, so
+        // unlinking a node and reinserting it elsewhere mid-walk leaves the
+        // iteration reading `link.next` from where the node used to be — it
+        // silently stops early rather than crashing, which is worse. The
+        // destroy calls refuse for this reason; the restacks unlink just as
+        // thoroughly and did not, until this was added alongside them.
+        if self.scene_is_being_walked() {
+            return None;
+        }
         let raw = self.rect_ptr(rect)?;
         // SAFETY: as for `set_rect_position`.
         unsafe { sys::wlr_scene_node_lower_to_bottom(&raw mut (*raw.as_ptr()).node) };
@@ -1736,6 +2121,24 @@ impl Runtime {
     /// this names the Rust entry point rather than a C function), or if
     /// wlroots could not create the node.
     pub fn add_buffer(&self, width: i32, height: i32, rgba: &[u8]) -> Result<BufferId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.scene_is_being_walked() {
+            return Err(Error::Reentrant("scene insertion during a walk"));
+        }
         if !crate::buffer::validate_pixels(width, height, rgba.len()) {
             return Err(Error::Operation("pixel buffer dimensions or length"));
         }
@@ -1766,6 +2169,14 @@ impl Runtime {
             .buffers
             .borrow_mut()
             .insert(id, BufferEntry { node, parent: None });
+        // SAFETY: as in `add_rect` — a freshly created, live node.
+        unsafe {
+            self.record_node(
+                &raw mut (*node.as_ptr()).node,
+                NodeOrigin::Owned,
+                Some(LegacyId::Buffer(id)),
+            );
+        }
         Ok(id)
     }
 
@@ -1792,6 +2203,24 @@ impl Runtime {
         height: i32,
         rgba: &[u8],
     ) -> Option<BufferId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.scene_is_being_walked() {
+            return None;
+        }
         // Resolve `toplevel` before validating pixels: a stale/unknown id is
         // the routine, expected `None` this method's own doc promises, but a
         // caller passing bad dimensions or a mismatched `rgba` length against
@@ -1826,6 +2255,14 @@ impl Runtime {
                 parent: Some(toplevel),
             },
         );
+        // SAFETY: as in `add_rect` — a freshly created, live node.
+        unsafe {
+            self.record_node(
+                &raw mut (*node.as_ptr()).node,
+                NodeOrigin::Owned,
+                Some(LegacyId::Buffer(id)),
+            );
+        }
         Some(id)
     }
 
@@ -1922,6 +2359,16 @@ impl Runtime {
     /// Put a buffer node behind everything else in the scene. `None` if
     /// this runtime never issued `buffer`.
     pub fn lower_buffer_to_bottom(&self, buffer: BufferId) -> Option<()> {
+        // Refused while a scene borrow or buffer walk is live. wlroots
+        // iterates with `wl_list_for_each`, not the `_safe` variant, so
+        // unlinking a node and reinserting it elsewhere mid-walk leaves the
+        // iteration reading `link.next` from where the node used to be — it
+        // silently stops early rather than crashing, which is worse. The
+        // destroy calls refuse for this reason; the restacks unlink just as
+        // thoroughly and did not, until this was added alongside them.
+        if self.scene_is_being_walked() {
+            return None;
+        }
         let node = self.buffer_ptr(buffer)?;
         // SAFETY: as for `update_buffer`.
         unsafe { sys::wlr_scene_node_lower_to_bottom(&raw mut (*node.as_ptr()).node) };
@@ -1936,7 +2383,15 @@ impl Runtime {
     /// removed (by this call or by its parent toplevel's own teardown) —
     /// double-removal misses cleanly rather than double-destroying the
     /// node.
+    ///
+    /// Also `None`, having removed nothing, while a
+    /// [`with_node`](Runtime::with_node) borrow or a
+    /// [`for_each_buffer`](Runtime::for_each_buffer) walk is live — see
+    /// [`remove_rect`](Runtime::remove_rect)'s own note.
     pub fn remove_buffer(&self, buffer: BufferId) -> Option<()> {
+        if self.scene_is_being_walked() {
+            return None;
+        }
         let entry = self.inner.buffers.borrow_mut().remove(&buffer)?;
         // SAFETY: `entry.node` came from `add_buffer`/`add_buffer_in_toplevel`
         // and the table entry naming it is only ever removed once — by this
@@ -1955,6 +2410,2113 @@ impl Runtime {
     /// signal, which can take this same `RefCell` mutably.
     fn buffer_ptr(&self, id: BufferId) -> Option<NonNull<sys::wlr_scene_buffer>> {
         self.inner.buffers.borrow().get(&id).map(|e| e.node)
+    }
+
+    // ---------------------------------------------------------------------
+    // Scene nodes (0.20.19)
+    //
+    // Every id in this section is addon-backed: the node carries a payload
+    // whose `Drop` wlroots runs when it frees the node, including for every
+    // node of a recursive destroy cascade. That is what makes a stale
+    // `NodeId` miss cleanly rather than name freed memory, and it is why none
+    // of these methods needs the parent tracking `RectEntry` still carries
+    // for the frozen 0.20.1 rect API.
+    // ---------------------------------------------------------------------
+
+    /// Attach a fresh [`NodeId`] to `node` and record it.
+    ///
+    /// `None` only for a null `node`, which is how wlroots reports a failed
+    /// constructor.
+    ///
+    /// # Safety
+    ///
+    /// A non-null `node` must point at a live `wlr_scene_node` that does not
+    /// already carry one of this crate's node payloads — `wlr_addon_init`
+    /// `assert()`s on a duplicate and aborts (see `addon.rs`).
+    unsafe fn record_node(
+        &self,
+        node: *mut sys::wlr_scene_node,
+        origin: NodeOrigin,
+        legacy: Option<LegacyId>,
+    ) -> Option<NodeId> {
+        let raw = NonNull::new(node)?;
+        // SAFETY: forwarded from this function's own contract.
+        let (id, alive) = unsafe { attach_node_id(node, &self.inner, legacy) };
+        self.inner
+            .nodes
+            .borrow_mut()
+            .insert(id, NodeEntry { raw, origin, alive });
+        Some(id)
+    }
+
+    /// The id attached to `node`, minting one if it has none.
+    ///
+    /// Idempotent, and that is a requirement rather than an optimisation:
+    /// [`node_at`](Runtime::node_at) and the children walk reach nodes that
+    /// may already be tracked, and a second `wlr_addon_init` under the same
+    /// `(owner, impl)` pair aborts the process.
+    ///
+    /// # Safety
+    ///
+    /// `node` must point at a live `wlr_scene_node`.
+    unsafe fn ensure_node_id(
+        &self,
+        node: *mut sys::wlr_scene_node,
+        origin: NodeOrigin,
+    ) -> Option<NodeId> {
+        // SAFETY: forwarded.
+        if let Some(id) = unsafe { find_node_id(node) } {
+            return Some(id);
+        }
+        // SAFETY: forwarded; the lookup above established that `node` carries
+        // no payload of this kind yet.
+        unsafe { self.record_node(node, origin, None) }
+    }
+
+    /// The row `id` names, or `None` if the node is gone.
+    ///
+    /// The liveness flag, not the row's presence, is the authority: the row
+    /// removal in the destroy hook is best-effort, the flag is not (see
+    /// `NodePurge`'s own `Drop`).
+    fn node_entry(&self, id: NodeId) -> Option<NodeEntry> {
+        let entry = self.inner.nodes.borrow().get(&id).cloned()?;
+        entry.alive.get().then_some(entry)
+    }
+
+    /// `id`'s node, whatever it belongs to. Reads only; see the
+    /// [`scene`](crate::scene) module docs for what that excludes.
+    fn node_ptr(&self, id: NodeId) -> Option<NonNull<sys::wlr_scene_node>> {
+        Some(self.node_entry(id)?.raw)
+    }
+
+    /// `id`'s node, if this crate created it on a consumer's instruction.
+    ///
+    /// The gate on every *structural* change. Restacking or destroying a node
+    /// wlroots owns — a toplevel's tree, a layer surface's tree, a drag icon —
+    /// would desynchronise the placement bookkeeping
+    /// [`raise_toplevel`](Runtime::raise_toplevel) and
+    /// `reparent_layer_surface_if_changed` maintain, and destroying a band or
+    /// the scene root would invalidate half this crate's tables at once.
+    fn owned_node_ptr(&self, id: NodeId) -> Option<NonNull<sys::wlr_scene_node>> {
+        let entry = self.node_entry(id)?;
+        if self.is_locked_lock_band_descendant(entry.raw) {
+            return None;
+        }
+        (entry.origin == NodeOrigin::Owned).then_some(entry.raw)
+    }
+
+    /// Whether the scene graph must not be restructured right now.
+    ///
+    /// Two independent reasons, and every gate needs both — which is why they
+    /// are asked in one place. This test was hand-copied into twenty-one
+    /// methods, each with its own comment, and the copies were where the gaps
+    /// lived: the ones that unlink a node had it, the ones that insert one did
+    /// not, and neither kind knew about foreign frames at all.
+    ///
+    /// A **live handle borrow** (`node_borrows`): a closure is holding a
+    /// `SceneNode<'_>` or a sibling, and destroying the node it names leaves it
+    /// dangling.
+    ///
+    /// A **foreign frame** ([`crate::dispatch::in_foreign_frame`]): wlroots is
+    /// running our code from inside one of its own calls — a `for_each_buffer`
+    /// visitor, a scene-output commit, a timeline waiter — and its list walks
+    /// use `wl_list_for_each`, not the `_safe` form. Its cursor holds a raw
+    /// `next`, so unlinking is a use-after-free inside its recursion and
+    /// inserting silently rewires the tail it is about to reach.
+    fn scene_is_being_walked(&self) -> bool {
+        self.inner.node_borrows.get() != 0 || crate::dispatch::in_foreign_frame()
+    }
+
+    /// Whether `raw` is the [`Band::Lock`] band or anything beneath it, while
+    /// a lock is actually held.
+    ///
+    /// The band itself was never the interesting target. What hides the
+    /// desktop is the opaque black fill *inside* it, and that fill is created
+    /// through `add_rect_in_band` like any other rect, so it is
+    /// `NodeOrigin::Owned` and fully mutable — and it is reachable from safe
+    /// code in two public calls: `band_node(Band::Lock)` then `node_children`.
+    /// Hiding it, destroying it, or walking it off-screen uncovers a live
+    /// desktop while `is_session_locked()` still reports `true`, which is
+    /// verbatim what refusing on the band alone was supposed to prevent. Lock
+    /// surfaces live under the same band and want the same protection.
+    ///
+    /// Walks wlroots' own `parent` chain rather than this crate's tables,
+    /// because that chain is what actually decides what draws over what — a
+    /// node reparented into the band by any route inherits the rule.
+    ///
+    /// Guards only the `NodeId` API, deliberately. The crate installs and
+    /// repositions the fill through `RectId` (`set_rect_size`,
+    /// `set_rect_position`, `remove_rect`), which resolves through `rect_ptr`
+    /// on a separate path, so `install_lock_fill`'s takeover branch keeps
+    /// working while locked — and a consumer cannot reach that path, because
+    /// the fill's `RectId` is never handed out.
+    fn is_locked_lock_band_descendant(&self, raw: NonNull<sys::wlr_scene_node>) -> bool {
+        if !self.is_session_locked() {
+            return false;
+        }
+        let Some(band) = self.band_ptr(Band::Lock) else {
+            return false;
+        };
+        // SAFETY: `band_ptr` returns this runtime's own scene tree, live for as
+        // long as its graphics are; taking the address of its embedded `node`
+        // reads nothing.
+        let band_node: *mut sys::wlr_scene_node = unsafe { &raw mut (*band.as_ptr()).node };
+        let mut cursor: *mut sys::wlr_scene_node = raw.as_ptr();
+        loop {
+            if std::ptr::eq(cursor, band_node) {
+                return true;
+            }
+            // SAFETY: `cursor` is a live node — the caller resolved it, and each
+            // step moves to its parent tree, which outlives its children.
+            let parent = unsafe { (*cursor).parent };
+            if parent.is_null() {
+                return false;
+            }
+            // SAFETY: `parent` is a live `wlr_scene_tree` whose `node` is
+            // embedded by value.
+            cursor = unsafe { &raw mut (*parent).node };
+        }
+    }
+
+    /// `id`'s node, if moving or restyling it is allowed — nodes this crate
+    /// created, and only those.
+    ///
+    /// Excludes `Protected` because a band tree's origin is `(0, 0)` by
+    /// construction and [`add_rect_in_band`](Runtime::add_rect_in_band)'s
+    /// documented coordinate space depends on it staying there.
+    ///
+    /// Excludes `Foreign` because those nodes belong to wlroots or to another
+    /// part of this crate — a toplevel's tree, a layer surface's tree, a
+    /// client's surface node — and this crate keeps placement bookkeeping for
+    /// them that a direct move would silently invalidate. `scene`'s module
+    /// doc has always promised that "every mutator on a protected or foreign
+    /// node returns `None`"; this used to test only for `Protected`, so the
+    /// promise held for half the nodes it named and
+    /// [`set_node_position`](Runtime::set_node_position) could walk a
+    /// toplevel's own tree out from under
+    /// [`set_toplevel_position`](Runtime::set_toplevel_position) and
+    /// [`raise_toplevel`](Runtime::raise_toplevel). Restack those through the
+    /// toplevel and layer APIs, which update the bookkeeping as they go.
+    fn movable_node_ptr(&self, id: NodeId) -> Option<NonNull<sys::wlr_scene_node>> {
+        let entry = self.node_entry(id)?;
+        if self.is_locked_lock_band_descendant(entry.raw) {
+            return None;
+        }
+        (entry.origin == NodeOrigin::Owned).then_some(entry.raw)
+    }
+
+    /// `id`'s node as a tree, or `None` if it is not one.
+    fn node_tree_ptr(&self, id: NodeId) -> Option<NonNull<sys::wlr_scene_tree>> {
+        let raw = self.node_ptr(id)?;
+        // SAFETY: a resolvable id names a live node.
+        if NodeKind::from_raw(unsafe { (*raw.as_ptr()).type_ }) != Some(NodeKind::Tree) {
+            return None;
+        }
+        // SAFETY: the tag says this node is a tree, which is
+        // `wlr_scene_tree_from_node`'s whole precondition.
+        NonNull::new(unsafe { sys::wlr_scene_tree_from_node(raw.as_ptr()) })
+    }
+
+    /// `id`'s node as a rect, if it is one and may be restyled.
+    fn movable_rect_ptr(&self, id: NodeId) -> Option<NonNull<sys::wlr_scene_rect>> {
+        let raw = self.movable_node_ptr(id)?;
+        // SAFETY: a resolvable id names a live node.
+        if NodeKind::from_raw(unsafe { (*raw.as_ptr()).type_ }) != Some(NodeKind::Rect) {
+            return None;
+        }
+        // SAFETY: the tag says this node is a rect.
+        NonNull::new(unsafe { sys::wlr_scene_rect_from_node(raw.as_ptr()) })
+    }
+
+    /// `id`'s node as a buffer node, if it is one and may be restyled.
+    fn movable_scene_buffer_ptr(&self, id: NodeId) -> Option<NonNull<sys::wlr_scene_buffer>> {
+        let raw = self.movable_node_ptr(id)?;
+        // SAFETY: a resolvable id names a live node.
+        if NodeKind::from_raw(unsafe { (*raw.as_ptr()).type_ }) != Some(NodeKind::Buffer) {
+            return None;
+        }
+        // SAFETY: the tag says this node is a buffer node.
+        NonNull::new(unsafe { sys::wlr_scene_buffer_from_node(raw.as_ptr()) })
+    }
+
+    /// The scene root's id. `None` before
+    /// [`init_graphics`](Runtime::init_graphics) has run.
+    ///
+    /// Readable, and [`set_node_enabled`](Runtime::set_node_enabled) works on
+    /// it; nothing may destroy, restack or reparent it.
+    pub fn scene_root_node(&self) -> Option<NodeId> {
+        let scene = self.scene_ptr()?;
+        // SAFETY: the scene is this runtime's own and lives for the process.
+        unsafe { find_node_id(&raw const (*scene.as_ptr()).tree.node) }
+    }
+
+    /// `band`'s tree, as a node id. `None` before
+    /// [`init_graphics`](Runtime::init_graphics) has run.
+    ///
+    /// This is the parent to hand
+    /// [`create_tree_under`](Runtime::create_tree_under) or
+    /// [`create_rect`](Runtime::create_rect) when the new node should stack
+    /// *with* a band rather than float above every one of them — see
+    /// [`add_rect`](Runtime::add_rect)'s own doc for that trap.
+    pub fn band_node(&self, band: Band) -> Option<NodeId> {
+        let tree = self.band_ptr(band)?;
+        // SAFETY: a band tree is this runtime's own and lives for the process.
+        unsafe { find_node_id(&raw const (*tree.as_ptr()).node) }
+    }
+
+    /// The node id of a rect made with the 0.20.1 API.
+    ///
+    /// [`RectId`]'s representation is frozen and is not a node id, but the
+    /// node underneath one is tracked like any other — this is the bridge, so
+    /// a rect from [`add_rect`](Runtime::add_rect) can be restacked and
+    /// reparented through the node API. `None` for an unknown or stale
+    /// `rect`.
+    pub fn rect_node(&self, rect: RectId) -> Option<NodeId> {
+        let raw = self.rect_ptr(rect)?;
+        // SAFETY: `rect_ptr` resolving means the node has not been destroyed —
+        // the same argument `set_rect_position`'s own comment makes.
+        unsafe { find_node_id(&raw const (*raw.as_ptr()).node) }
+    }
+
+    /// The node id of a pixel buffer made with the 0.20.3 API.
+    ///
+    /// The [`BufferId`] half of [`rect_node`](Runtime::rect_node); see that
+    /// method's doc. `None` for an unknown or stale `buffer`.
+    pub fn buffer_node(&self, buffer: BufferId) -> Option<NodeId> {
+        let raw = self.buffer_ptr(buffer)?;
+        // SAFETY: `buffer_ptr` resolving means the node has not been destroyed.
+        unsafe { find_node_id(&raw const (*raw.as_ptr()).node) }
+    }
+
+    /// Create an empty scene tree as a direct child of `band`.
+    ///
+    /// The new tree is that band's topmost child until something says
+    /// otherwise: wlroots appends every new node at the end of its parent's
+    /// child list.
+    ///
+    /// `None` before [`init_graphics`](Runtime::init_graphics) has run, or if
+    /// wlroots could not create the tree.
+    pub fn create_tree_in_band(&self, band: Band) -> Option<NodeId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        let parent = self.band_ptr(band)?;
+        // SAFETY: `parent` is one of the six band trees `init_graphics`
+        // created and this runtime owns; it outlives the call.
+        let tree = unsafe { sys::wlr_scene_tree_create(parent.as_ptr()) };
+        let tree = NonNull::new(tree)?;
+        // SAFETY: `tree` is the tree wlroots just created, so nothing has had
+        // the chance to attach a payload of this kind to it.
+        unsafe { self.record_node(&raw mut (*tree.as_ptr()).node, NodeOrigin::Owned, None) }
+    }
+
+    /// Create an empty scene tree as a direct child of `parent`.
+    ///
+    /// `None` if `parent` is unknown, stale, or not a tree — a rect and a
+    /// buffer node have no children, and asking is not an error.
+    pub fn create_tree_under(&self, parent: NodeId) -> Option<NodeId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        let parent = self.node_tree_ptr(parent)?;
+        // SAFETY: a resolvable id names a live tree.
+        let tree = unsafe { sys::wlr_scene_tree_create(parent.as_ptr()) };
+        let tree = NonNull::new(tree)?;
+        // SAFETY: as in `create_tree_in_band`.
+        unsafe { self.record_node(&raw mut (*tree.as_ptr()).node, NodeOrigin::Owned, None) }
+    }
+
+    /// Destroy `node` and, recursively, every descendant.
+    ///
+    /// wlroots has no "orphan the children" mode; the cascade is the only
+    /// behaviour. Every descendant's id misses cleanly afterwards — each node
+    /// carries the addon payload whose destructor drops its row, and wlroots
+    /// runs those for the whole cascade.
+    ///
+    /// `None`, having destroyed nothing, when:
+    ///
+    /// * `node` is unknown or already destroyed — a double destroy misses
+    ///   cleanly rather than double-freeing;
+    /// * `node` is the scene root or one of the six bands;
+    /// * `node` is one wlroots owns (a toplevel's tree, a layer surface's
+    ///   tree, a drag icon) — tear those down through the object that owns
+    ///   them;
+    /// * a [`with_node`](Runtime::with_node) borrow is live, which would leave
+    ///   the handle that borrow produced dangling;
+    /// * a [`for_each_buffer`](Runtime::for_each_buffer) walk is live, which
+    ///   would leave wlroots' own `wl_list_for_each` reading a freed link.
+    pub fn destroy_node(&self, node: NodeId) -> Option<()> {
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        let raw = self.owned_node_ptr(node)?;
+        // SAFETY: a resolvable id names a node wlroots has not freed — its
+        // addon payload would have cleared the liveness flag otherwise — and
+        // this crate created it, so nothing else destroys it in parallel. The
+        // rows for this node and every descendant are dropped from the inside,
+        // by those payloads' own destructors, during this call.
+        unsafe { sys::wlr_scene_node_destroy(raw.as_ptr()) };
+        Some(())
+    }
+
+    /// Show or hide `node` and, implicitly, everything under it.
+    ///
+    /// Disabling does not change any descendant's own flag; wlroots composes
+    /// them at draw time, which is why re-enabling restores exactly what the
+    /// subtree looked like. `None` for an unknown or stale id.
+    ///
+    /// Also `None` for disabling [`Band::Lock`] while the session is locked.
+    /// That band is what a lock is *made of* — the opaque fill and every lock
+    /// surface live in it — so hiding it uncovers the desktop underneath while
+    /// [`is_session_locked`](Runtime::is_session_locked) still reports `true`
+    /// and every other part of the crate still behaves as though locked. The
+    /// screen shows a session the compositor believes is locked. Input stays
+    /// isolated, so this was only ever visual, which is precisely the whole
+    /// point of a lock screen.
+    ///
+    /// Re-*enabling* it is always allowed, and so is disabling it when no lock
+    /// is held — an unlocked Lock band is empty, and refusing there would make
+    /// the band uniquely unmanageable for no benefit.
+    pub fn set_node_enabled(&self, node: NodeId, enabled: bool) -> Option<()> {
+        let raw = self.node_ptr(node)?;
+        if !enabled && self.is_locked_lock_band_descendant(raw) {
+            return None;
+        }
+        // SAFETY: a resolvable id names a live node.
+        unsafe { sys::wlr_scene_node_set_enabled(raw.as_ptr(), enabled) };
+        Some(())
+    }
+
+    /// Move `node` to `(x, y)` **relative to its parent**.
+    ///
+    /// `None` for an unknown or stale id, and for the scene root and the five
+    /// bands: their origin is `(0, 0)` by construction and
+    /// [`add_rect_in_band`](Runtime::add_rect_in_band)'s documented coordinate
+    /// space depends on it.
+    pub fn set_node_position(&self, node: NodeId, x: i32, y: i32) -> Option<()> {
+        let raw = self.movable_node_ptr(node)?;
+        // SAFETY: a resolvable id names a live node.
+        unsafe { sys::wlr_scene_node_set_position(raw.as_ptr(), x, y) };
+        Some(())
+    }
+
+    /// Put `node` directly above `sibling` in their shared parent.
+    ///
+    /// `None` — with nothing moved — when either id is unknown or stale, when
+    /// they name the same node, when they do not share a parent, or when
+    /// `node` is not one this crate created for the consumer.
+    /// `wlr_scene_node_place_above` **asserts** the first three, and Arch
+    /// ships wlroots with assertions enabled, so an unchecked call would be a
+    /// process abort rather than a recoverable error.
+    ///
+    /// `sibling` may be any node, including a toplevel's own tree: putting a
+    /// rect directly above one particular window inside the toplevel band is
+    /// exactly what this is for.
+    pub fn place_node_above(&self, node: NodeId, sibling: NodeId) -> Option<()> {
+        self.place_node(node, sibling, true)
+    }
+
+    /// Put `node` directly below `sibling` in their shared parent. The mirror
+    /// of [`place_node_above`](Runtime::place_node_above), with the same
+    /// refusals for the same reasons.
+    pub fn place_node_below(&self, node: NodeId, sibling: NodeId) -> Option<()> {
+        self.place_node(node, sibling, false)
+    }
+
+    /// The shared body of [`place_node_above`](Runtime::place_node_above) and
+    /// [`place_node_below`](Runtime::place_node_below): one copy of the three
+    /// assert-avoiding checks, so they cannot drift apart.
+    fn place_node(&self, node: NodeId, sibling: NodeId, above: bool) -> Option<()> {
+        // Refused while a scene borrow or buffer walk is live. wlroots
+        // iterates with `wl_list_for_each`, not the `_safe` variant, so
+        // unlinking a node and reinserting it elsewhere mid-walk leaves the
+        // iteration reading `link.next` from where the node used to be — it
+        // silently stops early rather than crashing, which is worse. The
+        // destroy calls refuse for this reason; the restacks unlink just as
+        // thoroughly and did not, until this was added alongside them.
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        if node == sibling {
+            return None;
+        }
+        let raw = self.owned_node_ptr(node)?;
+        let other = self.node_ptr(sibling)?;
+        if raw == other {
+            return None;
+        }
+        // SAFETY: both ids resolve, so both name live nodes; this reads their
+        // `parent` fields and nothing else.
+        let shared = unsafe { (*raw.as_ptr()).parent == (*other.as_ptr()).parent };
+        if !shared {
+            return None;
+        }
+        // SAFETY: the checks above are exactly `wlr_scene_node_place_*`'s own
+        // asserts — distinct nodes, same parent — and both nodes are live.
+        unsafe {
+            if above {
+                sys::wlr_scene_node_place_above(raw.as_ptr(), other.as_ptr());
+            } else {
+                sys::wlr_scene_node_place_below(raw.as_ptr(), other.as_ptr());
+            }
+        }
+        Some(())
+    }
+
+    /// Make `node` the topmost of its siblings.
+    ///
+    /// Siblings only: this cannot lift a node out of the band it lives in,
+    /// which is what makes this crate's band ordering permanent (see
+    /// `Graphics`' own doc). `None` for an unknown or stale id, or one this
+    /// crate did not create for the consumer.
+    pub fn raise_node_to_top(&self, node: NodeId) -> Option<()> {
+        // Refused while a scene borrow or buffer walk is live. wlroots
+        // iterates with `wl_list_for_each`, not the `_safe` variant, so
+        // unlinking a node and reinserting it elsewhere mid-walk leaves the
+        // iteration reading `link.next` from where the node used to be — it
+        // silently stops early rather than crashing, which is worse. The
+        // destroy calls refuse for this reason; the restacks unlink just as
+        // thoroughly and did not, until this was added alongside them.
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        let raw = self.owned_node_ptr(node)?;
+        // SAFETY: a resolvable id names a live node.
+        unsafe { sys::wlr_scene_node_raise_to_top(raw.as_ptr()) };
+        Some(())
+    }
+
+    /// Make `node` the bottommost of its siblings. The mirror of
+    /// [`raise_node_to_top`](Runtime::raise_node_to_top).
+    pub fn lower_node_to_bottom(&self, node: NodeId) -> Option<()> {
+        // Refused while a scene borrow or buffer walk is live. wlroots
+        // iterates with `wl_list_for_each`, not the `_safe` variant, so
+        // unlinking a node and reinserting it elsewhere mid-walk leaves the
+        // iteration reading `link.next` from where the node used to be — it
+        // silently stops early rather than crashing, which is worse. The
+        // destroy calls refuse for this reason; the restacks unlink just as
+        // thoroughly and did not, until this was added alongside them.
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        let raw = self.owned_node_ptr(node)?;
+        // SAFETY: a resolvable id names a live node.
+        unsafe { sys::wlr_scene_node_lower_to_bottom(raw.as_ptr()) };
+        Some(())
+    }
+
+    /// Move `node` under `new_parent`, keeping its own position.
+    ///
+    /// `None` — with nothing moved — when either id is unknown or stale, when
+    /// `new_parent` is not a tree, when `node` is not one this crate created
+    /// for the consumer, when a [`with_node`](Runtime::with_node) borrow or a
+    /// [`for_each_buffer`](Runtime::for_each_buffer) walk is live, or when the
+    /// move would make a cycle (`new_parent` is `node` itself or one of its
+    /// descendants). wlroots asserts the cycle case, and an assert here is a
+    /// process abort; a reparent mid-walk would unlink the node out of the very
+    /// `wl_list` wlroots is iterating.
+    ///
+    /// Reparenting changes which destroy cascade owns the node, so the parent
+    /// tracking the frozen [`RectId`]/[`BufferId`] tables still carry is
+    /// recomputed for every row afterwards. Without that, a rect moved out of
+    /// a toplevel's tree would still be purged when that toplevel died, and
+    /// one moved *into* it would not be.
+    pub fn reparent_node(&self, node: NodeId, new_parent: NodeId) -> Option<()> {
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        if node == new_parent {
+            return None;
+        }
+        let raw = self.owned_node_ptr(node)?;
+        let parent = self.node_tree_ptr(new_parent)?;
+        // SAFETY: both ids resolve, so both name live nodes; this walks
+        // `parent` pointers, every one of which is a live tree or null.
+        let cycles = unsafe {
+            let mut cursor: *mut sys::wlr_scene_tree = parent.as_ptr();
+            let mut hit = false;
+            while !cursor.is_null() {
+                if std::ptr::eq(&raw const (*cursor).node, raw.as_ptr()) {
+                    hit = true;
+                    break;
+                }
+                cursor = (*cursor).node.parent;
+            }
+            hit
+        };
+        if cycles {
+            return None;
+        }
+        // SAFETY: `raw` and `parent` are live, and the walk above ruled out
+        // exactly the cycle `wlr_scene_node_reparent` asserts against.
+        unsafe { sys::wlr_scene_node_reparent(raw.as_ptr(), parent.as_ptr()) };
+        self.reclassify_legacy_parents();
+        Some(())
+    }
+
+    /// Recompute the parent tracking of every [`RectId`]/[`BufferId`] row.
+    ///
+    /// Those two id types predate [`NodeId`] and their tables purge by
+    /// parentage rather than by addon, so a reparent that moved a rect (or an
+    /// ancestor of one) between a toplevel's tree and a band leaves the
+    /// recorded parent lying. Recomputing all of them is O(rows × depth) with
+    /// a handful of rows and no FFI, which is cheaper than tracking exactly
+    /// which subtree a reparent moved — and it cannot be subtly wrong.
+    ///
+    /// Deliberately walks each node's own ancestor chain rather than trusting
+    /// what was recorded: that is the property being restored.
+    fn reclassify_legacy_parents(&self) {
+        // Copy the pointers out before classifying: `classify_parent` borrows
+        // `tree_to_toplevel` and `graphics`, and no borrow of `rects`/
+        // `buffers` may be held while another of this runtime's tables is
+        // read.
+        let rects: Vec<(RectId, NonNull<sys::wlr_scene_rect>)> = self
+            .inner
+            .rects
+            .borrow()
+            .iter()
+            .map(|(id, entry)| (*id, entry.raw))
+            .collect();
+        let buffers: Vec<(BufferId, NonNull<sys::wlr_scene_buffer>)> = self
+            .inner
+            .buffers
+            .borrow()
+            .iter()
+            .map(|(id, entry)| (*id, entry.node))
+            .collect();
+
+        let mut rect_parents = Vec::with_capacity(rects.len());
+        for (id, raw) in rects {
+            // SAFETY: a row in `rects` names a node wlroots has not destroyed
+            // (see `set_rect_position`'s own comment), so its `parent` chain
+            // is walkable.
+            let parent = unsafe { self.classify_parent((*raw.as_ptr()).node.parent) };
+            rect_parents.push((id, parent));
+        }
+        let mut buffer_parents = Vec::with_capacity(buffers.len());
+        for (id, raw) in buffers {
+            // SAFETY: as above, for `buffers`.
+            let parent = unsafe { self.classify_parent((*raw.as_ptr()).node.parent) };
+            buffer_parents.push((
+                id,
+                match parent {
+                    RectParent::Toplevel(toplevel) => Some(toplevel),
+                    RectParent::Root | RectParent::Band(_) => None,
+                },
+            ));
+        }
+
+        let mut table = self.inner.rects.borrow_mut();
+        for (id, parent) in rect_parents {
+            if let Some(entry) = table.get_mut(&id) {
+                entry.parent = parent;
+            }
+        }
+        drop(table);
+        let mut table = self.inner.buffers.borrow_mut();
+        for (id, parent) in buffer_parents {
+            if let Some(entry) = table.get_mut(&id) {
+                entry.parent = parent;
+            }
+        }
+    }
+
+    /// Which purge class a node parented under `tree` belongs to.
+    ///
+    /// Walks upward and takes the first answer: a toplevel's tree beats a
+    /// band, because a node inside a toplevel dies with that toplevel even
+    /// though the band it sits in outlives it.
+    ///
+    /// # Safety
+    ///
+    /// `tree` must be null or point at a live `wlr_scene_tree` whose ancestor
+    /// chain is walkable.
+    unsafe fn classify_parent(&self, tree: *mut sys::wlr_scene_tree) -> RectParent {
+        let bands: [(Band, NonNull<sys::wlr_scene_tree>); 6] = {
+            let g = self.inner.graphics.borrow();
+            match g.as_ref() {
+                Some(g) => [
+                    (Band::Background, g.background_band),
+                    (Band::Bottom, g.bottom_band),
+                    (Band::Toplevel, g.toplevel_band),
+                    (Band::Top, g.top_band),
+                    (Band::Overlay, g.overlay_band),
+                    (Band::Lock, g.lock_band),
+                ],
+                // No graphics means no bands and no toplevels either, so every
+                // row can only be a root one.
+                None => return RectParent::Root,
+            }
+        };
+
+        let mut cursor = tree;
+        while !cursor.is_null() {
+            let found = self
+                .inner
+                .tree_to_toplevel
+                .borrow()
+                .get(&(cursor as usize))
+                .copied();
+            if let Some(toplevel) = found {
+                return RectParent::Toplevel(toplevel);
+            }
+            if let Some((band, _)) = bands.iter().find(|(_, tree)| tree.as_ptr() == cursor) {
+                return RectParent::Band(*band);
+            }
+            // SAFETY: the caller guarantees the chain is walkable; every
+            // `parent` in a scene is a live tree or null at the root.
+            cursor = unsafe { (*cursor).node.parent };
+        }
+        RectParent::Root
+    }
+
+    /// `node`'s layout-local coordinates.
+    ///
+    /// `None` when the id is unknown or stale, **and** when the node or any
+    /// ancestor is disabled — wlroots reports the latter as a `false` return
+    /// rather than a coordinate, and flattening the two into `(0, 0)` would
+    /// lose exactly the distinction a caller checking visibility needs.
+    pub fn node_coords(&self, node: NodeId) -> Option<(i32, i32)> {
+        let raw = self.node_ptr(node)?;
+        let mut lx = 0;
+        let mut ly = 0;
+        // SAFETY: a resolvable id names a live node; both out-parameters are
+        // live stack locals.
+        let found = unsafe { sys::wlr_scene_node_coords(raw.as_ptr(), &raw mut lx, &raw mut ly) };
+        found.then_some((lx, ly))
+    }
+
+    /// `node`'s position relative to its parent. `None` for an unknown or
+    /// stale id.
+    pub fn node_position(&self, node: NodeId) -> Option<(i32, i32)> {
+        let raw = self.node_ptr(node)?;
+        // SAFETY: a resolvable id names a live node.
+        Some(unsafe { ((*raw.as_ptr()).x, (*raw.as_ptr()).y) })
+    }
+
+    /// Whether `node` is enabled in itself — not whether it is visible, for
+    /// which see [`node_coords`](Runtime::node_coords). `None` for an unknown
+    /// or stale id.
+    pub fn node_enabled(&self, node: NodeId) -> Option<bool> {
+        let raw = self.node_ptr(node)?;
+        // SAFETY: a resolvable id names a live node.
+        Some(unsafe { (*raw.as_ptr()).enabled })
+    }
+
+    /// What `node` is. `None` for an unknown or stale id, or for a node type
+    /// this build does not know.
+    pub fn node_kind(&self, node: NodeId) -> Option<NodeKind> {
+        let raw = self.node_ptr(node)?;
+        // SAFETY: a resolvable id names a live node.
+        NodeKind::from_raw(unsafe { (*raw.as_ptr()).type_ })
+    }
+
+    /// The id of `node`'s parent tree.
+    ///
+    /// `None` for an unknown or stale id, and at the scene root, which has no
+    /// parent. The parent is given an id if it did not have one.
+    pub fn node_parent(&self, node: NodeId) -> Option<NodeId> {
+        let raw = self.node_ptr(node)?;
+        // SAFETY: a resolvable id names a live node, and its `parent` is a
+        // live tree or null at the root.
+        unsafe {
+            let parent = (*raw.as_ptr()).parent;
+            if parent.is_null() {
+                return None;
+            }
+            self.ensure_node_id(&raw mut (*parent).node, NodeOrigin::Foreign)
+        }
+    }
+
+    /// `node`'s children, bottom to top.
+    ///
+    /// Sibling order **is** stacking order — wlroots appends each new child at
+    /// the end — so the last element is the topmost. Every child gets an id if
+    /// it did not have one, so a toplevel's tree living in a band shows up
+    /// here as a read-only foreign node rather than being silently skipped.
+    ///
+    /// `None` when the id is unknown, stale, or not a tree.
+    pub fn node_children(&self, node: NodeId) -> Option<Vec<NodeId>> {
+        let tree = self.node_tree_ptr(node)?;
+        // Collect the raw children before minting any id: `ensure_node_id`
+        // calls into wlroots, and `wl_list_iter`'s contract forbids disturbing
+        // the list ahead of its cursor while one is outstanding.
+        let mut raws = Vec::new();
+        // SAFETY: a resolvable id names a live tree, so `children` is an
+        // initialised list head whose entries are live `wlr_scene_node`s, and
+        // nothing in this loop modifies the list.
+        unsafe {
+            for child in sys::wl_list_iter::<sys::wlr_scene_node>::new(
+                &raw mut (*tree.as_ptr()).children,
+                std::mem::offset_of!(sys::wlr_scene_node, link),
+            ) {
+                raws.push(child);
+            }
+        }
+        let mut out = Vec::with_capacity(raws.len());
+        for child in raws {
+            // SAFETY: `child` was just read out of a live tree's child list,
+            // and nothing since could have freed it — no wlroots call emitting
+            // a signal has run, and `ensure_node_id` only touches addon sets.
+            if let Some(id) = unsafe { self.ensure_node_id(child, NodeOrigin::Foreign) } {
+                out.push(id);
+            }
+        }
+        Some(out)
+    }
+
+    /// The topmost node at layout coordinates `(x, y)`, with the coordinates
+    /// relative to that node.
+    ///
+    /// Surface nodes respect their input region, so this answers "what would
+    /// receive a click here" rather than "what is painted here". The struck
+    /// node gets an id if it did not have one, which is how a client's own
+    /// surface node — one this crate never created — becomes nameable.
+    ///
+    /// `None` when nothing is there, or before
+    /// [`init_graphics`](Runtime::init_graphics) has run.
+    ///
+    /// This is **not** the query to forward input with:
+    /// [`toplevel_at`](Runtime::toplevel_at) is, because a hit on a popup's
+    /// surface node reports that node rather than the window it belongs to.
+    pub fn node_at(&self, x: f64, y: f64) -> Option<(NodeId, f64, f64)> {
+        let scene = self.scene_ptr()?;
+        let mut nx = 0.0;
+        let mut ny = 0.0;
+        // SAFETY: the scene is this runtime's own and outlives the call; both
+        // out-parameters are live stack locals.
+        let node = unsafe {
+            sys::wlr_scene_node_at(
+                &raw mut (*scene.as_ptr()).tree.node,
+                x,
+                y,
+                &raw mut nx,
+                &raw mut ny,
+            )
+        };
+        if node.is_null() {
+            return None;
+        }
+        // SAFETY: wlroots returned a node belonging to this scene, so it is
+        // live.
+        let id = unsafe { self.ensure_node_id(node, NodeOrigin::Foreign) }?;
+        Some((id, nx, ny))
+    }
+
+    /// Visit every buffer node in `node`'s subtree, in render order.
+    ///
+    /// Root to leaves, which is back to front. `f` receives each buffer node's
+    /// id and its layout-local position.
+    ///
+    /// `None` for an unknown or stale id.
+    ///
+    /// While the walk is running nothing may free or move a node underneath it:
+    /// [`destroy_node`](Runtime::destroy_node),
+    /// [`reparent_node`](Runtime::reparent_node),
+    /// [`remove_rect`](Runtime::remove_rect) and
+    /// [`remove_buffer`](Runtime::remove_buffer) all return `None` without
+    /// acting when called from inside `f`, on this runtime or on any clone of
+    /// it — the same guard [`with_node`](Runtime::with_node) raises, and for a
+    /// sharper reason. wlroots walks each tree's child list with
+    /// `wl_list_for_each`, **not** the `_safe` form: it reads the current
+    /// node's `link.next` *after* `f` returns, so destroying the node `f` was
+    /// just handed (or any ancestor of it, which frees the list heads the walk
+    /// is standing in) is a use-after-free inside wlroots' own recursion.
+    ///
+    /// **Creating** a node is refused for the same reason, which this doc used
+    /// to say the opposite of. Appending to the tree the cursor is standing in
+    /// rewires the `next` it is about to read, so the walk never reaches the
+    /// end: `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+    /// allocates without bound from entirely safe code. It was true that a
+    /// tree the walk has *not reached* is harmless — but nothing here can tell
+    /// the caller which trees those are, so the permission could not be acted
+    /// on safely and is withdrawn.
+    ///
+    /// # Panics
+    ///
+    /// A panic escaping `f` is caught, the remaining nodes are skipped, and
+    /// the panic is resumed once wlroots' own iteration has returned — an
+    /// unwind straight out of the `extern "C"` frame wlroots calls `f` from
+    /// would abort the process instead.
+    pub fn for_each_buffer(&self, node: NodeId, f: impl FnMut(NodeId, i32, i32)) -> Option<()> {
+        let raw = self.node_ptr(node)?;
+        self.buffer_walk(f, |iterator, user_data| {
+            // SAFETY: a resolvable id names a live node; the iterator has
+            // `wlr_scene_buffer_iterator_func_t`'s signature and `user_data`
+            // outlives the call, both guaranteed by `buffer_walk`.
+            unsafe { sys::wlr_scene_node_for_each_buffer(raw.as_ptr(), iterator, user_data) };
+        });
+        Some(())
+    }
+
+    /// The body [`for_each_buffer`](Runtime::for_each_buffer) and
+    /// [`scene_output_for_each_buffer`](Runtime::scene_output_for_each_buffer)
+    /// share: one visitor trampoline, one borrow guard, one panic hand-off.
+    ///
+    /// `run` performs the wlroots call, handed the C iterator and the erased
+    /// context to pass through. It must not do anything else with either.
+    fn buffer_walk(
+        &self,
+        f: impl FnMut(NodeId, i32, i32),
+        run: impl FnOnce(sys::wlr_scene_buffer_iterator_func_t, *mut std::ffi::c_void),
+    ) {
+        struct Ctx<'a> {
+            runtime: &'a Runtime,
+            f: &'a mut dyn FnMut(NodeId, i32, i32),
+            panic: Option<Box<dyn std::any::Any + Send + 'static>>,
+        }
+
+        unsafe extern "C" fn visit(
+            buffer: *mut sys::wlr_scene_buffer,
+            sx: std::os::raw::c_int,
+            sy: std::os::raw::c_int,
+            user_data: *mut std::ffi::c_void,
+        ) {
+            // SAFETY: `user_data` is the `&mut Ctx` handed to
+            // `wlr_scene_node_for_each_buffer` below, which wlroots calls this
+            // from synchronously, so the borrow is live and unaliased.
+            // `buffer` is a live node of the subtree being walked.
+            unsafe {
+                let ctx = &mut *user_data.cast::<Ctx<'_>>();
+                if ctx.panic.is_some() {
+                    return;
+                }
+                let Some(id) = ctx
+                    .runtime
+                    .ensure_node_id(&raw mut (*buffer).node, NodeOrigin::Foreign)
+                else {
+                    return;
+                };
+                // The closure is a consumer's, so it may panic, and this frame
+                // is `extern "C"`, where an unwind aborts. Catch here and
+                // resume after wlroots has finished walking.
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (ctx.f)(id, sx, sy)))
+                {
+                    Ok(()) => {}
+                    Err(payload) => ctx.panic = Some(payload),
+                }
+            }
+        }
+
+        let mut f = f;
+        let mut ctx = Ctx {
+            runtime: self,
+            f: &mut f,
+            panic: None,
+        };
+        // Named through the C typedef rather than passed inline: that is what
+        // makes the compiler check `visit`'s signature against wlroots' own
+        // `wlr_scene_buffer_iterator_func_t` instead of against whatever
+        // `wlr_scene_node_for_each_buffer`'s parameter happens to be spelled
+        // as today.
+        let iterator: sys::wlr_scene_buffer_iterator_func_t = Some(visit);
+        // Raised for the whole walk, and lowered by `Drop` even if `f` panicked
+        // (the panic is caught above and resumed below, so the guard falls with
+        // this frame either way). wlroots iterates with `wl_list_for_each`, so
+        // a node freed or unlinked by `f` leaves the walk reading `link.next`
+        // out of reclaimed memory — see the callers' own docs.
+        let _guard = NodeBorrowGuard::enter(&self.inner);
+        // The borrow guard only makes *this crate's* by-id destroys refuse. It
+        // says nothing to wlroots, which frees nodes on its own schedule the
+        // moment the event loop runs — and the closure can drive that loop, by
+        // holding a `&Display` or an `&EventLoop`. A client unmapping its
+        // window mid-closure would then free the subtree under a live handle.
+        // `ForeignFrame` sets the same flag a real handler delivery does, so
+        // `EventLoop::dispatch` refuses for the life of the borrow and that
+        // window cannot open.
+        let _frame = crate::dispatch::ForeignFrame::enter();
+        run(iterator, (&raw mut ctx).cast::<std::ffi::c_void>());
+        if let Some(payload) = ctx.panic {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    /// Borrow `node` as a [`SceneNode`] handle for the duration of `f`.
+    ///
+    /// The handle cannot escape `f` — that is what its lifetime is for — and
+    /// while it is live nothing may free the node underneath it:
+    /// [`destroy_node`](Runtime::destroy_node),
+    /// [`reparent_node`](Runtime::reparent_node),
+    /// [`remove_rect`](Runtime::remove_rect) and
+    /// [`remove_buffer`](Runtime::remove_buffer) all return `None` without
+    /// acting when called from inside `f`, on this runtime or on any clone of
+    /// it. Nesting borrows is fine; they are read-only.
+    ///
+    /// Those refusals are only half of it, because they bind this crate and
+    /// wlroots frees nodes on its own schedule. The other half is that
+    /// [`EventLoop::dispatch`](crate::EventLoop::dispatch) also refuses for
+    /// the life of the borrow: without that, a closure holding a `&Display`
+    /// could drive the loop, a client could unmap its window, and wlroots
+    /// would free the subtree under a handle that is still live — with no
+    /// `unsafe` written anywhere.
+    ///
+    /// `None`, without calling `f`, for an unknown or stale id.
+    pub fn with_node<R>(&self, node: NodeId, f: impl FnOnce(&SceneNode<'_>) -> R) -> Option<R> {
+        let raw = self.node_ptr(node)?;
+        // Raised before the handle is minted and lowered by `Drop`, so a panic
+        // escaping `f` cannot leave the runtime permanently refusing destroys.
+        let _guard = NodeBorrowGuard::enter(&self.inner);
+        // The borrow guard only makes *this crate's* by-id destroys refuse. It
+        // says nothing to wlroots, which frees nodes on its own schedule the
+        // moment the event loop runs — and the closure can drive that loop, by
+        // holding a `&Display` or an `&EventLoop`. A client unmapping its
+        // window mid-closure would then free the subtree under a live handle.
+        // `ForeignFrame` sets the same flag a real handler delivery does, so
+        // `EventLoop::dispatch` refuses for the life of the borrow and that
+        // window cannot open.
+        let _frame = crate::dispatch::ForeignFrame::enter();
+        // SAFETY: a resolvable id names a live node, and the guard above is
+        // what keeps it live for the whole of `f` — every call that could free
+        // it refuses while the guard is held.
+        let handle = unsafe { SceneNode::from_raw_with_id(raw.as_ptr(), node) };
+        Some(f(&handle))
+    }
+
+    /// Borrow `node` as a [`SceneTree`] handle, if it is a tree.
+    ///
+    /// The [`with_node`](Runtime::with_node) contract applies verbatim,
+    /// including the destroy refusals while the borrow is live. `None`,
+    /// without calling `f`, when the id is unknown, stale, or not a tree.
+    pub fn with_tree<R>(&self, node: NodeId, f: impl FnOnce(&SceneTree<'_>) -> R) -> Option<R> {
+        let raw = self.node_tree_ptr(node)?;
+        let _guard = NodeBorrowGuard::enter(&self.inner);
+        // The borrow guard only makes *this crate's* by-id destroys refuse. It
+        // says nothing to wlroots, which frees nodes on its own schedule the
+        // moment the event loop runs — and the closure can drive that loop, by
+        // holding a `&Display` or an `&EventLoop`. A client unmapping its
+        // window mid-closure would then free the subtree under a live handle.
+        // `ForeignFrame` sets the same flag a real handler delivery does, so
+        // `EventLoop::dispatch` refuses for the life of the borrow and that
+        // window cannot open.
+        let _frame = crate::dispatch::ForeignFrame::enter();
+        // SAFETY: as in `with_node`; `node_tree_ptr` additionally checked the
+        // node's tag, which is `wlr_scene_tree_from_node`'s precondition.
+        let handle = unsafe { SceneTree::from_raw_with_id(raw.as_ptr(), node) };
+        Some(f(&handle))
+    }
+
+    /// Borrow `node` as a [`SceneRect`] handle, if it is a rect.
+    ///
+    /// The [`with_node`](Runtime::with_node) contract applies verbatim.
+    pub fn with_rect<R>(&self, node: NodeId, f: impl FnOnce(&SceneRect<'_>) -> R) -> Option<R> {
+        let raw = self.node_ptr(node)?;
+        // SAFETY: a resolvable id names a live node.
+        if NodeKind::from_raw(unsafe { (*raw.as_ptr()).type_ }) != Some(NodeKind::Rect) {
+            return None;
+        }
+        let _guard = NodeBorrowGuard::enter(&self.inner);
+        // The borrow guard only makes *this crate's* by-id destroys refuse. It
+        // says nothing to wlroots, which frees nodes on its own schedule the
+        // moment the event loop runs — and the closure can drive that loop, by
+        // holding a `&Display` or an `&EventLoop`. A client unmapping its
+        // window mid-closure would then free the subtree under a live handle.
+        // `ForeignFrame` sets the same flag a real handler delivery does, so
+        // `EventLoop::dispatch` refuses for the life of the borrow and that
+        // window cannot open.
+        let _frame = crate::dispatch::ForeignFrame::enter();
+        // SAFETY: as in `with_node`, plus the tag check just above, which is
+        // `wlr_scene_rect_from_node`'s precondition.
+        let handle = unsafe {
+            SceneRect::from_raw_with_id(sys::wlr_scene_rect_from_node(raw.as_ptr()), node)
+        };
+        Some(f(&handle))
+    }
+
+    /// Borrow `node` as a [`SceneBuffer`] handle, if it is a buffer node.
+    ///
+    /// The [`with_node`](Runtime::with_node) contract applies verbatim.
+    pub fn with_scene_buffer<R>(
+        &self,
+        node: NodeId,
+        f: impl FnOnce(&SceneBuffer<'_>) -> R,
+    ) -> Option<R> {
+        let raw = self.node_ptr(node)?;
+        // SAFETY: a resolvable id names a live node.
+        if NodeKind::from_raw(unsafe { (*raw.as_ptr()).type_ }) != Some(NodeKind::Buffer) {
+            return None;
+        }
+        let _guard = NodeBorrowGuard::enter(&self.inner);
+        // The borrow guard only makes *this crate's* by-id destroys refuse. It
+        // says nothing to wlroots, which frees nodes on its own schedule the
+        // moment the event loop runs — and the closure can drive that loop, by
+        // holding a `&Display` or an `&EventLoop`. A client unmapping its
+        // window mid-closure would then free the subtree under a live handle.
+        // `ForeignFrame` sets the same flag a real handler delivery does, so
+        // `EventLoop::dispatch` refuses for the life of the borrow and that
+        // window cannot open.
+        let _frame = crate::dispatch::ForeignFrame::enter();
+        // SAFETY: as in `with_node`, plus the tag check just above.
+        let handle = unsafe {
+            SceneBuffer::from_raw_with_id(sys::wlr_scene_buffer_from_node(raw.as_ptr()), node)
+        };
+        Some(f(&handle))
+    }
+
+    /// Create a solid-colour rect under `parent`, in the **premultiplied**
+    /// RGBA [`add_rect`](Runtime::add_rect) takes.
+    ///
+    /// Unlike [`add_rect`](Runtime::add_rect), a negative dimension is refused
+    /// rather than handed to wlroots, which asserts on one. That asymmetry is
+    /// deliberate: `add_rect`'s signature was published in 0.20.1 without the
+    /// guard and cannot gain one within this wlroots minor (see
+    /// [`set_rect_size`](Runtime::set_rect_size)'s own doc); this method is new
+    /// and starts out right.
+    ///
+    /// `None` if `parent` is unknown, stale or not a tree, if either dimension
+    /// is negative, or if wlroots could not create the node.
+    pub fn create_rect(
+        &self,
+        parent: NodeId,
+        width: i32,
+        height: i32,
+        color: [f32; 4],
+    ) -> Option<NodeId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        if width < 0 || height < 0 {
+            return None;
+        }
+        let tree = self.node_tree_ptr(parent)?;
+        // SAFETY: a resolvable id names a live tree; `color` is a live
+        // four-float array for the call, which wlroots copies.
+        let rect =
+            unsafe { sys::wlr_scene_rect_create(tree.as_ptr(), width, height, color.as_ptr()) };
+        let rect = NonNull::new(rect)?;
+        // SAFETY: `rect` is the node wlroots just created, so nothing has had
+        // the chance to attach a payload of this kind to it.
+        unsafe { self.record_node(&raw mut (*rect.as_ptr()).node, NodeOrigin::Owned, None) }
+    }
+
+    /// Resize a rect node.
+    ///
+    /// `None` if the id is unknown, stale, not a rect, names a band or the
+    /// scene root, or either dimension is negative —
+    /// `wlr_scene_rect_set_size` asserts non-negative and an assert is a
+    /// process abort.
+    pub fn set_node_rect_size(&self, node: NodeId, width: i32, height: i32) -> Option<()> {
+        if width < 0 || height < 0 {
+            return None;
+        }
+        let raw = self.movable_rect_ptr(node)?;
+        // SAFETY: a resolvable id of the right tag names a live rect, and the
+        // dimensions were checked against wlroots' own assert just above.
+        unsafe { sys::wlr_scene_rect_set_size(raw.as_ptr(), width, height) };
+        Some(())
+    }
+
+    /// Recolour a rect node, in the same premultiplied RGBA
+    /// [`add_rect`](Runtime::add_rect) takes. `None` if the id is unknown,
+    /// stale, not a rect, or not a node this crate created for you — every
+    /// rect node in the scene is one this crate made, so the last case only
+    /// arises for an id naming something else.
+    pub fn set_node_rect_color(&self, node: NodeId, color: [f32; 4]) -> Option<()> {
+        let raw = self.movable_rect_ptr(node)?;
+        // SAFETY: as for `set_node_rect_size`; `color` is live for the call
+        // and wlroots copies it rather than retaining the pointer.
+        unsafe { sys::wlr_scene_rect_set_color(raw.as_ptr(), color.as_ptr()) };
+        Some(())
+    }
+
+    /// Create a buffer node under `parent`, optionally showing `buffer`.
+    ///
+    /// A node with no buffer is legal and useful: it draws nothing until
+    /// [`set_scene_buffer`](Runtime::set_scene_buffer) gives it pixels.
+    ///
+    /// The buffer is **borrowed**. wlroots takes its own lock on it and this
+    /// call does not release the caller's reference, unlike
+    /// [`add_buffer`](Runtime::add_buffer), which owns the pixels it uploads —
+    /// see `buffer.rs`'s "Refcount story" for what the two references mean.
+    ///
+    /// `None` if `parent` is unknown, stale or not a tree, or if wlroots could
+    /// not create the node.
+    pub fn create_scene_buffer(
+        &self,
+        parent: NodeId,
+        buffer: Option<&Buffer<'_>>,
+    ) -> Option<NodeId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        let tree = self.node_tree_ptr(parent)?;
+        let buf = buffer.map_or(std::ptr::null_mut(), |b| b.as_ptr());
+        // SAFETY: a resolvable id names a live tree; `buf` is null or a live
+        // buffer the caller's own reference keeps alive across this call, and
+        // wlroots takes its own lock on it.
+        let node = unsafe { sys::wlr_scene_buffer_create(tree.as_ptr(), buf) };
+        let node = NonNull::new(node)?;
+        // SAFETY: `node` is the node wlroots just created.
+        unsafe { self.record_node(&raw mut (*node.as_ptr()).node, NodeOrigin::Owned, None) }
+    }
+
+    /// Replace what a buffer node shows.
+    ///
+    /// `buffer` is borrowed, exactly as in
+    /// [`create_scene_buffer`](Runtime::create_scene_buffer); `None` clears
+    /// the node. `options` carries the damage hint and the explicit-sync wait
+    /// point.
+    ///
+    /// `None` if the id is unknown, stale or not a buffer node, or if `buffer`
+    /// is `None` while `options` carries a damage region —
+    /// `wlr_scene_buffer_set_buffer_with_options` asserts
+    /// `buffer || !options->damage`, and an assert is a process abort. A damage
+    /// region is in buffer-local coordinates, so with no buffer there is
+    /// nothing to scale it by; clearing a node and damaging it are separate
+    /// requests.
+    ///
+    /// Also `None` for a node this crate did not create for you — a client's
+    /// own surface node from [`node_at`](Runtime::node_at), say. Unlike the
+    /// appearance setters, replacing the *buffer* of a node wlroots is filling
+    /// from a surface is not a change to how it looks, it is taking the
+    /// content away from wlroots, which refills it on the client's next
+    /// commit.
+    pub fn set_scene_buffer(
+        &self,
+        node: NodeId,
+        buffer: Option<&Buffer<'_>>,
+        options: &SceneBufferOptions<'_>,
+    ) -> Option<()> {
+        if buffer.is_none() && options.has_damage() {
+            return None;
+        }
+        let raw = self.movable_scene_buffer_ptr(node)?;
+        let buf = buffer.map_or(std::ptr::null_mut(), |b| b.as_ptr());
+        let opts = options.as_c();
+        // SAFETY: a resolvable id of the right tag names a live buffer node;
+        // `buf` is null or a live buffer; `opts` borrows the region and the
+        // timeline from `options`, both of which outlive this call.
+        unsafe {
+            sys::wlr_scene_buffer_set_buffer_with_options(raw.as_ptr(), buf, &raw const opts)
+        };
+        Some(())
+    }
+
+    /// Declare which part of a buffer node is fully opaque.
+    ///
+    /// An optimisation hint: wlroots may skip drawing whatever is behind it.
+    /// `None` clears the hint. Over-declaring leaves stale pixels on screen
+    /// rather than producing an error, so this is a promise, not a request.
+    ///
+    /// Returns `None` if the id is unknown, stale or not a buffer node.
+    pub fn set_scene_buffer_opaque_region(
+        &self,
+        node: NodeId,
+        region: Option<&Region>,
+    ) -> Option<()> {
+        // Refused while a node borrow is live, unlike its sibling appearance
+        // setters, because this one *frees memory a live handle can be
+        // pointing into*. `SceneBuffer::opaque_region` hands out a
+        // `RegionRef` borrowed from the node's embedded `pixman_region32`,
+        // and `wlr_scene_buffer_set_opaque_region` copies over it —
+        // `pixman_region32_copy` frees the old box array, so a `RegionRef`
+        // iterator taken earlier in the same closure reads freed memory.
+        //
+        // `NodeBorrowGuard` keeps the *node* alive and says nothing about
+        // that: the node is fine, its region's heap block is not. Every other
+        // appearance setter writes a scalar into the node and is safe to leave
+        // open.
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        let raw = self.restylable_scene_buffer_ptr(node)?;
+        let ptr = region.map_or(std::ptr::null(), |r| r.as_ptr());
+        // SAFETY: a resolvable id of the right tag names a live buffer node;
+        // `ptr` is null or a live region wlroots copies out of.
+        unsafe { sys::wlr_scene_buffer_set_opaque_region(raw.as_ptr(), ptr) };
+        Some(())
+    }
+
+    /// Crop a buffer node to `source`, in buffer-local coordinates. `None`
+    /// samples the whole buffer, which is the default.
+    ///
+    /// Returns `None` if the id is unknown, stale or not a buffer node, or if
+    /// any of `source`'s four fields is negative or `NaN`.
+    /// `wlr_scene_buffer_set_source_box` asserts all four are `>= 0`, and the
+    /// comparison it compiles to (`comisd`/`jb`) fails on an unordered operand
+    /// too, so a `NaN` aborts exactly as `-1.0` does.
+    pub fn set_scene_buffer_source_box(&self, node: NodeId, source: Option<FBox>) -> Option<()> {
+        if let Some(b) = source {
+            // `v >= 0.0` rather than `!(v < 0.0)`: `NaN` fails every comparison,
+            // so this refuses it, which is what the C does too.
+            if ![b.x, b.y, b.width, b.height].iter().all(|v| *v >= 0.0) {
+                return None;
+            }
+        }
+        let raw = self.restylable_scene_buffer_ptr(node)?;
+        let ptr = source.as_ref().map_or(std::ptr::null(), FBox::as_c);
+        // SAFETY: a resolvable id of the right tag names a live buffer node;
+        // `ptr` is null or points at `source`, a live local for this call,
+        // which wlroots copies out of.
+        unsafe { sys::wlr_scene_buffer_set_source_box(raw.as_ptr(), ptr) };
+        Some(())
+    }
+
+    /// Scale a buffer node's on-screen size independently of its pixel size.
+    ///
+    /// Zero means "use the buffer's own size", which is wlroots' documented
+    /// default rather than an error. A negative dimension is refused:
+    /// `wlr_scene_buffer_set_dest_size` asserts non-negative.
+    ///
+    /// `None` if the id is unknown, stale or not a buffer node.
+    pub fn set_scene_buffer_dest_size(&self, node: NodeId, width: i32, height: i32) -> Option<()> {
+        if width < 0 || height < 0 {
+            return None;
+        }
+        let raw = self.restylable_scene_buffer_ptr(node)?;
+        // SAFETY: a resolvable id of the right tag names a live buffer node,
+        // and the dimensions were checked against wlroots' assert above.
+        unsafe { sys::wlr_scene_buffer_set_dest_size(raw.as_ptr(), width, height) };
+        Some(())
+    }
+
+    /// Apply a transform to a buffer node's contents. `None` if the id is
+    /// unknown, stale or not a buffer node.
+    pub fn set_scene_buffer_transform(&self, node: NodeId, transform: Transform) -> Option<()> {
+        let raw = self.restylable_scene_buffer_ptr(node)?;
+        // SAFETY: a resolvable id of the right tag names a live buffer node.
+        unsafe { sys::wlr_scene_buffer_set_transform(raw.as_ptr(), transform.into()) };
+        Some(())
+    }
+
+    /// Set a buffer node's opacity multiplier.
+    ///
+    /// `None` if the id is unknown, stale or not a buffer node, or if
+    /// `opacity` is outside `0.0..=1.0` — including `NaN`, which no comparison
+    /// accepts. wlroots does not range-check, and an out-of-range multiplier
+    /// renders as a silently wrong image rather than as an error.
+    pub fn set_scene_buffer_opacity(&self, node: NodeId, opacity: f32) -> Option<()> {
+        if !(0.0..=1.0).contains(&opacity) {
+            return None;
+        }
+        let raw = self.restylable_scene_buffer_ptr(node)?;
+        // SAFETY: a resolvable id of the right tag names a live buffer node.
+        unsafe { sys::wlr_scene_buffer_set_opacity(raw.as_ptr(), opacity) };
+        Some(())
+    }
+
+    /// Choose how a buffer node is sampled when scaled. `None` if the id is
+    /// unknown, stale or not a buffer node.
+    pub fn set_scene_buffer_filter(&self, node: NodeId, filter: FilterMode) -> Option<()> {
+        let raw = self.restylable_scene_buffer_ptr(node)?;
+        // SAFETY: a resolvable id of the right tag names a live buffer node.
+        unsafe { sys::wlr_scene_buffer_set_filter_mode(raw.as_ptr(), filter.into()) };
+        Some(())
+    }
+
+    /// Declare a buffer node's electro-optical transfer function. `None` if
+    /// the id is unknown, stale or not a buffer node.
+    pub fn set_scene_buffer_transfer_function(
+        &self,
+        node: NodeId,
+        transfer_function: TransferFunction,
+    ) -> Option<()> {
+        let raw = self.restylable_scene_buffer_ptr(node)?;
+        // SAFETY: a resolvable id of the right tag names a live buffer node.
+        unsafe {
+            sys::wlr_scene_buffer_set_transfer_function(raw.as_ptr(), transfer_function.into());
+        }
+        Some(())
+    }
+
+    /// Declare a buffer node's colour primaries.
+    ///
+    /// Takes a *named* colour volume rather than a
+    /// [`ColorPrimaries`](crate::ColorPrimaries): the C setter's parameter is
+    /// `enum wlr_color_named_primaries`, not the full chromaticity struct.
+    ///
+    /// `None` if the id is unknown, stale or not a buffer node.
+    pub fn set_scene_buffer_primaries(
+        &self,
+        node: NodeId,
+        primaries: NamedPrimaries,
+    ) -> Option<()> {
+        let raw = self.restylable_scene_buffer_ptr(node)?;
+        // SAFETY: a resolvable id of the right tag names a live buffer node.
+        unsafe { sys::wlr_scene_buffer_set_primaries(raw.as_ptr(), primaries.into()) };
+        Some(())
+    }
+
+    /// Declare the matrix coefficients a buffer node's YCbCr encoding uses.
+    /// `None` if the id is unknown, stale or not a buffer node.
+    pub fn set_scene_buffer_color_encoding(
+        &self,
+        node: NodeId,
+        encoding: ColorEncoding,
+    ) -> Option<()> {
+        let raw = self.restylable_scene_buffer_ptr(node)?;
+        // SAFETY: a resolvable id of the right tag names a live buffer node.
+        unsafe { sys::wlr_scene_buffer_set_color_encoding(raw.as_ptr(), encoding.into()) };
+        Some(())
+    }
+
+    /// Declare whether a buffer node's encoding uses the full or the limited
+    /// value range. `None` if the id is unknown, stale or not a buffer node.
+    pub fn set_scene_buffer_color_range(&self, node: NodeId, range: ColorRange) -> Option<()> {
+        let raw = self.restylable_scene_buffer_ptr(node)?;
+        // SAFETY: a resolvable id of the right tag names a live buffer node.
+        unsafe { sys::wlr_scene_buffer_set_color_range(raw.as_ptr(), range.into()) };
+        Some(())
+    }
+
+    // ---------------------------------------------------------------------
+    // Scene-buffer observation (0.20.19)
+    // ---------------------------------------------------------------------
+
+    /// Install the live run's observer hook. Called only by `run_inner`.
+    pub(crate) fn set_scene_observer(&self, observer: SceneObserver) {
+        self.inner.scene_observer.set(Some(observer));
+    }
+
+    /// Clear it again, which `run_inner`'s guard does on every exit path.
+    pub(crate) fn clear_scene_observer(&self) {
+        self.inner.scene_observer.set(None);
+        // The snapshots go with it: they name scene outputs by id, which stay
+        // valid, but nothing can refresh them once the listeners are gone, and
+        // a stale set answered after the run had ended would be worse than a
+        // miss.
+        self.inner.scene_buffer_outputs.borrow_mut().clear();
+    }
+
+    /// `id`'s node as a buffer node, if changing how it *looks* is allowed.
+    ///
+    /// Accepts a foreign node, unlike
+    /// [`movable_scene_buffer_ptr`](Runtime::movable_scene_buffer_ptr). The
+    /// Owned-only rule exists for one reason — this crate keeps placement
+    /// bookkeeping for the nodes it hands out ids to, and a direct move would
+    /// invalidate it behind `set_toplevel_position` and `raise_toplevel`'s
+    /// backs. None of the appearance setters touch that bookkeeping: opacity,
+    /// filter, transform, the colour metadata, the source box, the
+    /// destination size and the opaque region change what a node looks like,
+    /// not where it sits or what it sits above.
+    ///
+    /// Applying the placement rule to them made the single most ordinary
+    /// compositor operation — fading a client's window, from the `NodeId`
+    /// `node_at` just returned — come back `None` with no diagnostic, and
+    /// contradicted each of those methods' own documented `None` cases
+    /// ("unknown, stale, or not a buffer node").
+    ///
+    /// Note that wlroots itself sets several of these on a
+    /// `wlr_scene_surface`'s buffer node on every surface commit, so a value
+    /// written to a client's node may not survive the client's next frame.
+    /// That is wlroots' behaviour showing through, not a refusal, and the
+    /// caller can see it.
+    ///
+    /// `set_scene_buffer_buffer_with_options` deliberately does **not** use
+    /// this: replacing the buffer of a node wlroots is filling from a surface
+    /// is not an appearance change, it is fighting wlroots for ownership of
+    /// the content.
+    fn restylable_scene_buffer_ptr(&self, id: NodeId) -> Option<NonNull<sys::wlr_scene_buffer>> {
+        self.scene_buffer_ptr(id)
+    }
+
+    /// `id`'s node as a buffer node, whoever owns it.
+    ///
+    /// Unlike [`movable_scene_buffer_ptr`](Runtime::movable_scene_buffer_ptr)
+    /// this accepts a foreign node: observing a client's own surface node is
+    /// the main thing anyone wants to do with these signals, and observation
+    /// mutates nothing.
+    fn scene_buffer_ptr(&self, id: NodeId) -> Option<NonNull<sys::wlr_scene_buffer>> {
+        let raw = self.node_ptr(id)?;
+        // SAFETY: a resolvable id names a live node.
+        if NodeKind::from_raw(unsafe { (*raw.as_ptr()).type_ }) != Some(NodeKind::Buffer) {
+            return None;
+        }
+        // SAFETY: the tag says this node is a buffer node.
+        NonNull::new(unsafe { sys::wlr_scene_buffer_from_node(raw.as_ptr()) })
+    }
+
+    /// Start delivering `node`'s scene-buffer signals to the handler.
+    ///
+    /// Until this is called for a given node, none of the five
+    /// [`OutputHandler`](crate::OutputHandler) scene-buffer methods fire for
+    /// it. That is opt-in on purpose: these signals are per node, a scene holds
+    /// as many buffer nodes as there are mapped surfaces, and linking six
+    /// listeners into every one of them to deliver events nobody asked for
+    /// would be a cost with no buyer.
+    ///
+    /// `node` may be any buffer node, including a client's own surface node
+    /// found with [`node_at`](Runtime::node_at) — observation mutates nothing.
+    /// Calling this twice for the same node is harmless and links nothing the
+    /// second time, so a handler may call it unconditionally.
+    ///
+    /// The listeners belong to the [`Backend::run_all`](crate::Backend::run_all)
+    /// call that was running when this was called, and are unlinked when it
+    /// returns; a later run does not re-establish them.
+    ///
+    /// `None`, having linked nothing, when the id is unknown, stale or not a
+    /// buffer node, or when **no `run_all` call is running** — there is no
+    /// handler to deliver to, and no session to own the listeners.
+    /// [`Backend::run`](crate::Backend::run) does not count: its handler bound
+    /// is [`OutputHandler`](crate::OutputHandler) alone, and it installs no
+    /// observer.
+    pub fn observe_scene_buffer(&self, node: NodeId) -> Option<()> {
+        let raw = self.scene_buffer_ptr(node)?;
+        let observer = self.inner.scene_observer.get()?;
+        // SAFETY: `session` and `watch` are the pair `run_inner` installed
+        // together, so the erased pointer is the `Session` `watch` was
+        // instantiated for and is live for as long as the hook is installed —
+        // which is this call. `raw` is a live buffer node carrying `node` as
+        // its id, which is what `scene_buffer_ptr` just established.
+        unsafe { (observer.watch)(observer.session, node, raw.as_ptr()) };
+        Some(())
+    }
+
+    /// Stop delivering `node`'s scene-buffer signals.
+    ///
+    /// `None` when no run is running or the node was not being observed. A node
+    /// that is destroyed stops being observed on its own — the listeners are
+    /// unlinked from inside its destroy emission — so this is for a compositor
+    /// that has simply stopped caring.
+    pub fn unobserve_scene_buffer(&self, node: NodeId) -> Option<()> {
+        let observer = self.inner.scene_observer.get()?;
+        // SAFETY: as in `observe_scene_buffer`.
+        let watched = unsafe { (observer.is_watching)(observer.session, node) };
+        if !watched {
+            return None;
+        }
+        // SAFETY: as above.
+        unsafe { (observer.unwatch)(observer.session, node) };
+        self.forget_scene_buffer_outputs(node);
+        Some(())
+    }
+
+    /// Whether `node`'s scene-buffer signals are being delivered.
+    pub fn scene_buffer_observed(&self, node: NodeId) -> bool {
+        let Some(observer) = self.inner.scene_observer.get() else {
+            return false;
+        };
+        // SAFETY: as in `observe_scene_buffer`.
+        unsafe { (observer.is_watching)(observer.session, node) }
+    }
+
+    /// The scene outputs `node` is currently displayed on.
+    ///
+    /// The payload
+    /// [`OutputHandler::scene_buffer_outputs_update`](crate::OutputHandler::scene_buffer_outputs_update)
+    /// does not carry, because wlroots hands that signal an array valid only
+    /// for its own emission and this crate's events carry ids and scalars so a
+    /// deferred one cannot name freed memory. The array is snapshotted when the
+    /// signal fires, and this reads that snapshot back.
+    ///
+    /// So the honest description of what this returns is **the most recent set
+    /// wlroots reported**, which for a handler called synchronously is the
+    /// current one, and for a deferred delivery may be a later one than the
+    /// event that woke it named. A set that has been superseded is the only
+    /// thing a deferred event could honestly report; the alternative is a
+    /// snapshot of a state that no longer holds.
+    ///
+    /// `None` when nothing has been reported for `node` — it is not observed,
+    /// no update has fired yet, or the run that was observing it has ended. An
+    /// empty `Vec` is different, and means the node is displayed nowhere.
+    /// `None` also when the last emission named a scene output this crate
+    /// could not resolve — briefly true at hotplug, because wlroots updates a
+    /// node's output set from inside `wlr_scene_output_create`, before this
+    /// crate has given the new output an id. A shortened list is not a smaller
+    /// truth: it is the same shape as a correct answer with a monitor missing
+    /// from it, so the snapshot is dropped instead and the next emission
+    /// refreshes it.
+    pub fn scene_buffer_active_outputs(&self, node: NodeId) -> Option<Vec<SceneOutputId>> {
+        self.inner.scene_buffer_outputs.borrow().get(&node).cloned()
+    }
+
+    /// Record what an `outputs_update` emission reported. Called from
+    /// `backend.rs` at emission time.
+    pub(crate) fn record_scene_buffer_outputs(&self, node: NodeId, active: Vec<SceneOutputId>) {
+        // `try_borrow_mut`: this is reached from an `extern "C"` frame, where a
+        // panic is an abort. No borrow of this table is ever held across a call
+        // into wlroots, so it cannot fail; if it ever did, the snapshot is
+        // simply not refreshed.
+        if let Ok(mut table) = self.inner.scene_buffer_outputs.try_borrow_mut() {
+            table.insert(node, active);
+        }
+    }
+
+    /// Drop `node`'s snapshot. Called when it is destroyed or unobserved.
+    pub(crate) fn forget_scene_buffer_outputs(&self, node: NodeId) {
+        // `try_borrow_mut` for the reason `record_scene_buffer_outputs` gives:
+        // one caller is a destroy callback under an `extern "C"` frame.
+        if let Ok(mut table) = self.inner.scene_buffer_outputs.try_borrow_mut() {
+            table.remove(&node);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Scene outputs (0.20.19)
+    //
+    // A scene output is the viewport that turns the scene into pixels on one
+    // `wlr_output`. Unlike everything above, its id is backed by a destroy
+    // listener rather than by an addon — `wlr_scene_output` has no addon set
+    // for one to live in — and it therefore survives the `Backend::run_all`
+    // call that created it, because the listener does. See `scene/output.rs`.
+    // ---------------------------------------------------------------------
+
+    /// `id`'s scene output, or `None` if it has been destroyed.
+    ///
+    /// The liveness flag, not the row's presence, is the authority: the row
+    /// removal in the destroy callback is best-effort, the flag is not.
+    fn scene_output_ptr(&self, id: SceneOutputId) -> Option<NonNull<sys::wlr_scene_output>> {
+        let table = self.inner.scene_outputs.borrow();
+        let entry = table.get(&id)?;
+        entry.alive.get().then_some(entry.raw)
+    }
+
+    /// The id this runtime already has for `raw`, if any.
+    ///
+    /// A linear scan, deliberately: a compositor has as many scene outputs as
+    /// it has monitors, and a reverse table keyed by pointer would be a second
+    /// thing for the destroy callback to keep in step for no measurable gain.
+    pub(crate) fn scene_output_id_of(
+        &self,
+        raw: NonNull<sys::wlr_scene_output>,
+    ) -> Option<SceneOutputId> {
+        self.inner
+            .scene_outputs
+            .borrow()
+            .iter()
+            .find(|(_, entry)| entry.raw == raw && entry.alive.get())
+            .map(|(id, _)| *id)
+    }
+
+    /// Give `raw` an id and start watching it for destruction.
+    ///
+    /// Idempotent: a scene output this runtime already knows keeps the id it
+    /// has, which matters because a second watch would purge the row twice.
+    ///
+    /// # Safety
+    ///
+    /// `raw` must point at a live `wlr_scene_output` belonging to this
+    /// runtime's scene.
+    pub(crate) unsafe fn record_scene_output(
+        &self,
+        raw: NonNull<sys::wlr_scene_output>,
+    ) -> SceneOutputId {
+        if let Some(id) = self.scene_output_id_of(raw) {
+            return id;
+        }
+        let id = SceneOutputId(next_id());
+        // SAFETY: forwarded from this function's own contract, plus the lookup
+        // above, which established this runtime does not already watch `raw`.
+        let entry = unsafe { crate::scene::output::watch(raw, &self.inner, id) };
+        self.inner.scene_outputs.borrow_mut().insert(id, entry);
+        id
+    }
+
+    /// The scene output showing this runtime's scene on `output`.
+    ///
+    /// `None` before [`init_graphics`](Runtime::init_graphics) has run, for an
+    /// unknown or stale [`OutputId`], and for an output that has never been
+    /// added to the scene — [`init_output`](Runtime::init_output) is what adds
+    /// one, and [`add_scene_output`](Runtime::add_scene_output) is the way to
+    /// add an output that should not go in the layout.
+    ///
+    /// An output added to the scene by this crate already has an id; one added
+    /// through the raw pointers gets one here.
+    pub fn scene_output(&self, output: OutputId) -> Option<SceneOutputId> {
+        let raw = self.output_ptr(output)?;
+        let scene = self.scene_ptr()?;
+        // SAFETY: a present `outputs` entry names a live output (removed by
+        // `forget_output` before wlroots frees it), and the scene is this
+        // runtime's own. `wlr_scene_get_scene_output` returns null for an
+        // output the scene does not have, which is checked.
+        let so = unsafe { sys::wlr_scene_get_scene_output(scene.as_ptr(), raw.as_ptr()) };
+        let so = NonNull::new(so)?;
+        // SAFETY: wlroots returned a scene output of this runtime's own scene,
+        // so it is live.
+        Some(unsafe { self.record_scene_output(so) })
+    }
+
+    /// Add `output` to the scene without putting it in the output layout.
+    ///
+    /// [`init_output`](Runtime::init_output) is what a compositor normally
+    /// calls — it initialises the renderer, places the output in the layout and
+    /// adds it here, all of which an output that should actually be displayed
+    /// needs. This is the narrower call for an output whose position the
+    /// consumer intends to drive themselves with
+    /// [`set_scene_output_position`](Runtime::set_scene_output_position).
+    ///
+    /// `None`, having added nothing, before
+    /// [`init_graphics`](Runtime::init_graphics) has run, for an unknown or
+    /// stale id, **or when the output is already in the scene** —
+    /// `wlr_scene_output_create`'s own documentation is that an output can be
+    /// added only once, and wlroots asserts it, which on this distribution's
+    /// build is a process abort rather than an error. Use
+    /// [`scene_output`](Runtime::scene_output) to ask for the existing one.
+    pub fn add_scene_output(&self, output: OutputId) -> Option<SceneOutputId> {
+        let raw = self.output_ptr(output)?;
+        let scene = self.scene_ptr()?;
+        // SAFETY: as in `scene_output`.
+        let existing = unsafe { sys::wlr_scene_get_scene_output(scene.as_ptr(), raw.as_ptr()) };
+        if !existing.is_null() {
+            return None;
+        }
+        // SAFETY: as above; the check just made is `wlr_scene_output_create`'s
+        // own "only once" precondition.
+        let so = unsafe { sys::wlr_scene_output_create(scene.as_ptr(), raw.as_ptr()) };
+        let so = NonNull::new(so)?;
+        // SAFETY: wlroots just created this scene output in this runtime's
+        // scene, so it is live and unwatched.
+        Some(unsafe { self.record_scene_output(so) })
+    }
+
+    /// Destroy a scene output, so the scene stops rendering to that output.
+    ///
+    /// The `wlr_output` itself is untouched — this removes the viewport, not
+    /// the monitor. Every [`SceneOutputId`] naming it misses cleanly
+    /// afterwards, including this one.
+    ///
+    /// `None`, having destroyed nothing, for an unknown or already-destroyed
+    /// id — a double destroy misses rather than double-freeing.
+    pub fn destroy_scene_output(&self, scene_output: SceneOutputId) -> Option<()> {
+        // Refused while any scene-node or scene-output borrow is live, for the
+        // reason `remove_rect` documents: the handle held by the closure that
+        // is calling us would dangle for the rest of that closure, and a
+        // `scene_output_for_each_buffer` walk would read a freed list link.
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        let raw = self.scene_output_ptr(scene_output)?;
+        // SAFETY: a resolvable id names a scene output wlroots has not freed —
+        // its destroy listener would have cleared the liveness flag otherwise.
+        // The row is dropped from the inside, by that listener, during this
+        // call, which is also what unlinks the listener itself.
+        unsafe { sys::wlr_scene_output_destroy(raw.as_ptr()) };
+        Some(())
+    }
+
+    /// Place a scene output's viewport at `(lx, ly)` in layout coordinates.
+    ///
+    /// For an output [`init_output`](Runtime::init_output) placed, the scene
+    /// output layout already keeps this in step with the output layout, and
+    /// [`set_output_position`](Runtime::set_output_position) is the call that
+    /// moves both together. This is the lower-level one, for an output added
+    /// with [`add_scene_output`](Runtime::add_scene_output).
+    ///
+    /// `None` for an unknown or destroyed id.
+    pub fn set_scene_output_position(
+        &self,
+        scene_output: SceneOutputId,
+        lx: i32,
+        ly: i32,
+    ) -> Option<()> {
+        let raw = self.scene_output_ptr(scene_output)?;
+        // SAFETY: a resolvable id names a live scene output.
+        unsafe { sys::wlr_scene_output_set_position(raw.as_ptr(), lx, ly) };
+        Some(())
+    }
+
+    /// A scene output's viewport position in layout coordinates. `None` for an
+    /// unknown or destroyed id.
+    pub fn scene_output_position(&self, scene_output: SceneOutputId) -> Option<(i32, i32)> {
+        let raw = self.scene_output_ptr(scene_output)?;
+        // SAFETY: a resolvable id names a live scene output.
+        Some(unsafe { ((*raw.as_ptr()).x, (*raw.as_ptr()).y) })
+    }
+
+    /// Whether the scene has anything new to draw on this output.
+    ///
+    /// `false` means [`commit_scene_output`](Runtime::commit_scene_output)
+    /// would skip, and a compositor pacing itself off frame events can skip
+    /// too. `None` for an unknown or destroyed id.
+    pub fn scene_output_needs_frame(&self, scene_output: SceneOutputId) -> Option<bool> {
+        let raw = self.scene_output_ptr(scene_output)?;
+        // SAFETY: a resolvable id names a live scene output.
+        Some(unsafe { sys::wlr_scene_output_needs_frame(raw.as_ptr()) })
+    }
+
+    /// Render and present this scene output, with options.
+    ///
+    /// The lower-level half of [`commit_output`](Runtime::commit_output):
+    /// that one is the whole body of a `frame` handler (commit, then
+    /// frame-done), while this one commits and nothing else, and takes the
+    /// timer, colour transform and swapchain
+    /// [`SceneOutputStateOptions`](crate::SceneOutputStateOptions) carries.
+    ///
+    /// `Ok(true)` means a frame was rendered and presented. `Ok(false)` means
+    /// wlroots legitimately skipped, because nothing had changed since the last
+    /// one — not a failure, and the case a compositor rendering on a timer will
+    /// see most often. The distinction is not in the C return value, which is
+    /// `true` for both; it comes from asking
+    /// [`scene_output_needs_frame`](Runtime::scene_output_needs_frame)
+    /// immediately before, which is exactly the test
+    /// `wlr_scene_output_commit` makes for itself (verified by disassembling
+    /// `libwlroots-0.20.so`: the commit's first act is that call, returning
+    /// `true` at once when it is false).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Destroyed`] for an unknown or destroyed id.
+    /// [`Error::Operation`] if wlroots rejected the commit — a genuine failure,
+    /// which for these options usually means a swapchain whose dimensions do
+    /// not match the output, or a colour transform on an output that already
+    /// has an image description. It is also what a commit attempted while any
+    /// mapping opened by
+    /// [`Buffer::begin_data_ptr_access`](crate::Buffer::begin_data_ptr_access)
+    /// is live on this thread returns, for the reason
+    /// [`commit_output`](Runtime::commit_output) gives.
+    pub fn commit_scene_output(
+        &self,
+        scene_output: SceneOutputId,
+        options: &SceneOutputStateOptions<'_>,
+    ) -> Result<bool> {
+        if crate::buffer::any_data_ptr_access_open() {
+            return Err(Error::Operation("Runtime::commit_scene_output"));
+        }
+        let Some(raw) = self.scene_output_ptr(scene_output) else {
+            return Err(Error::Destroyed("wlr_scene_output"));
+        };
+        let opts = options.as_c();
+        // SAFETY: a resolvable id names a live scene output; `opts` borrows the
+        // timer, transform and swapchain from `options`, all of which outlive
+        // this call.
+        unsafe {
+            let needed = sys::wlr_scene_output_needs_frame(raw.as_ptr());
+            if !sys::wlr_scene_output_commit(raw.as_ptr(), &raw const opts) {
+                return Err(Error::Operation("wlr_scene_output_commit"));
+            }
+            Ok(needed)
+        }
+    }
+
+    /// Tell every surface this scene output rendered that it may draw again.
+    ///
+    /// `when` is the presentation timestamp handed to the clients, as a
+    /// duration since whatever epoch the compositor's clock uses.
+    /// [`commit_output`](Runtime::commit_output) does this itself with the
+    /// current time; this is the call for a compositor driving the two halves
+    /// separately. `None` for an unknown or destroyed id.
+    pub fn send_scene_output_frame_done(
+        &self,
+        scene_output: SceneOutputId,
+        when: std::time::Duration,
+    ) -> Option<()> {
+        let raw = self.scene_output_ptr(scene_output)?;
+        let mut now = timespec_of(when);
+        // SAFETY: a resolvable id names a live scene output, and `now` is a
+        // live local for the call.
+        unsafe { sys::wlr_scene_output_send_frame_done(raw.as_ptr(), &raw mut now) };
+        Some(())
+    }
+
+    /// Visit every buffer node **visible on this output**, in render order.
+    ///
+    /// The scene-output half of
+    /// [`for_each_buffer`](Runtime::for_each_buffer): same root-to-leaves
+    /// order, same layout-local positions, and the same rule that nothing may
+    /// free or move a node from inside `f` — every call that could refuses
+    /// while the walk is running. The difference is the filter: this visits
+    /// what is actually on screen for this output, so a node scrolled off it,
+    /// or on another monitor, is not visited.
+    ///
+    /// `None` for an unknown or destroyed id.
+    ///
+    /// # Panics
+    ///
+    /// As for [`for_each_buffer`](Runtime::for_each_buffer): a panic escaping
+    /// `f` is caught, the remaining nodes are skipped, and it is resumed once
+    /// wlroots' own iteration has returned.
+    pub fn scene_output_for_each_buffer(
+        &self,
+        scene_output: SceneOutputId,
+        f: impl FnMut(NodeId, i32, i32),
+    ) -> Option<()> {
+        let raw = self.scene_output_ptr(scene_output)?;
+        self.buffer_walk(f, |iterator, user_data| {
+            // SAFETY: a resolvable id names a live scene output; the iterator
+            // has `wlr_scene_buffer_iterator_func_t`'s signature and
+            // `user_data` outlives the call, both guaranteed by `buffer_walk`.
+            unsafe { sys::wlr_scene_output_for_each_buffer(raw.as_ptr(), iterator, user_data) };
+        });
+        Some(())
+    }
+
+    /// Borrow a scene output as a [`SceneOutput`] handle for the duration of
+    /// `f`.
+    ///
+    /// The handle cannot escape `f`, and neither can the
+    /// [`DamageRingRef`](crate::DamageRingRef) reached through it — which is
+    /// the point: that ring is embedded in the scene output and dies with it.
+    ///
+    /// `None`, without calling `f`, for an unknown or destroyed id.
+    pub fn with_scene_output<R>(
+        &self,
+        scene_output: SceneOutputId,
+        f: impl FnOnce(&SceneOutput<'_>) -> R,
+    ) -> Option<R> {
+        let raw = self.scene_output_ptr(scene_output)?;
+        // Raised before the handle is minted and lowered by `Drop`, so a panic
+        // escaping `f` cannot leave the runtime permanently refusing destroys.
+        let _guard = NodeBorrowGuard::enter(&self.inner);
+        // The borrow guard only makes *this crate's* by-id destroys refuse. It
+        // says nothing to wlroots, which frees nodes on its own schedule the
+        // moment the event loop runs — and the closure can drive that loop, by
+        // holding a `&Display` or an `&EventLoop`. A client unmapping its
+        // window mid-closure would then free the subtree under a live handle.
+        // `ForeignFrame` sets the same flag a real handler delivery does, so
+        // `EventLoop::dispatch` refuses for the life of the borrow and that
+        // window cannot open.
+        let _frame = crate::dispatch::ForeignFrame::enter();
+        // SAFETY: a resolvable id names a live scene output, and the guard
+        // above is what keeps it live for the whole of `f`.
+        //
+        // Reasoning about what `SceneOutput`'s own methods can do is not
+        // enough, and was the bug here: `f` captures the `Runtime` it was
+        // called on, so it can call `destroy_scene_output` directly — the
+        // hazard arrives through the closure's captures, not through the
+        // handle. `destroy_scene_output` consults this guard for that reason.
+        let handle = unsafe { SceneOutput::from_raw_with_id(raw.as_ptr(), scene_output) };
+        Some(f(&handle))
+    }
+
+    // ---------------------------------------------------------------------
+    // Scene surfaces and the helpers built on them (0.20.19)
+    // ---------------------------------------------------------------------
+
+    /// Borrow `node` as a [`SceneSurface`] handle, if it is a buffer node whose
+    /// pixels come from a client surface.
+    ///
+    /// The [`with_node`](Runtime::with_node) contract applies verbatim,
+    /// including the destroy refusals while the borrow is live. `None`,
+    /// without calling `f`, when the id is unknown, stale, not a buffer node,
+    /// or a buffer node this crate uploaded pixels into rather than a client's.
+    ///
+    /// This is how a hit test becomes a surface: feed it the [`NodeId`]
+    /// [`node_at`](Runtime::node_at) returned. `wlr_scene_surface_try_from_buffer`
+    /// answers with null rather than misbehaving on a node that is not one, so
+    /// asking is always safe.
+    pub fn with_scene_surface<R>(
+        &self,
+        node: NodeId,
+        f: impl FnOnce(&SceneSurface<'_>) -> R,
+    ) -> Option<R> {
+        let raw = self.scene_surface_ptr(node)?;
+        let _guard = NodeBorrowGuard::enter(&self.inner);
+        // The borrow guard only makes *this crate's* by-id destroys refuse. It
+        // says nothing to wlroots, which frees nodes on its own schedule the
+        // moment the event loop runs — and the closure can drive that loop, by
+        // holding a `&Display` or an `&EventLoop`. A client unmapping its
+        // window mid-closure would then free the subtree under a live handle.
+        // `ForeignFrame` sets the same flag a real handler delivery does, so
+        // `EventLoop::dispatch` refuses for the life of the borrow and that
+        // window cannot open.
+        let _frame = crate::dispatch::ForeignFrame::enter();
+        // SAFETY: `scene_surface_ptr` resolved the node and asked wlroots
+        // whether it is surface-backed, so `raw` is a live `wlr_scene_surface`;
+        // the guard is what keeps its buffer node alive for the whole of `f`.
+        let handle = unsafe { SceneSurface::from_raw_with_node(raw.as_ptr(), node) };
+        Some(f(&handle))
+    }
+
+    /// `node`'s scene surface, if it has one.
+    ///
+    /// The shared resolution step: tag-check the node, downcast it to a buffer
+    /// node, then ask wlroots whether that buffer is surface-backed.
+    fn scene_surface_ptr(&self, node: NodeId) -> Option<NonNull<sys::wlr_scene_surface>> {
+        let raw = self.node_ptr(node)?;
+        // SAFETY: a resolvable id names a live node.
+        if NodeKind::from_raw(unsafe { (*raw.as_ptr()).type_ }) != Some(NodeKind::Buffer) {
+            return None;
+        }
+        // SAFETY: the tag check above is `wlr_scene_buffer_from_node`'s whole
+        // precondition, and `wlr_scene_surface_try_from_buffer` reports "not a
+        // surface" as null rather than as undefined behaviour.
+        unsafe {
+            let buffer = sys::wlr_scene_buffer_from_node(raw.as_ptr());
+            NonNull::new(sys::wlr_scene_surface_try_from_buffer(buffer))
+        }
+    }
+
+    /// Tell one surface it may draw again, if it is visible.
+    ///
+    /// [`send_scene_output_frame_done`](Runtime::send_scene_output_frame_done)
+    /// is the usual call — it covers every surface an output rendered. This one
+    /// is for a compositor answering a single surface, and wlroots skips it
+    /// silently when that surface is not actually on screen.
+    ///
+    /// `None` when the id is unknown, stale, or not a surface-backed buffer
+    /// node.
+    pub fn send_scene_surface_frame_done(
+        &self,
+        node: NodeId,
+        when: std::time::Duration,
+    ) -> Option<()> {
+        let raw = self.scene_surface_ptr(node)?;
+        let now = timespec_of(when);
+        // SAFETY: a resolvable surface-backed node names a live scene surface,
+        // and `now` is a live local wlroots reads out of.
+        unsafe { sys::wlr_scene_surface_send_frame_done(raw.as_ptr(), &raw const now) };
+        Some(())
+    }
+
+    /// Fire one buffer node's own `frame_done` signal.
+    ///
+    /// The signal a consumer watching a scene buffer
+    /// ([`observe_scene_buffer`](Runtime::observe_scene_buffer)) receives as
+    /// [`OutputHandler::scene_buffer_frame_done`](crate::OutputHandler::scene_buffer_frame_done).
+    /// Unlike [`send_scene_surface_frame_done`](Runtime::send_scene_surface_frame_done)
+    /// this sends the client nothing — it is the scene's own notification, for
+    /// a buffer node whose pixels a compositor produces itself.
+    ///
+    /// `None` when either id is unknown or stale, or when `node` is not a
+    /// buffer node.
+    pub fn send_scene_buffer_frame_done(
+        &self,
+        node: NodeId,
+        scene_output: SceneOutputId,
+        when: std::time::Duration,
+    ) -> Option<()> {
+        let raw = self.restylable_scene_buffer_ptr(node)?;
+        let output = self.scene_output_ptr(scene_output)?;
+        let mut event = sys::wlr_scene_frame_done_event {
+            output: output.as_ptr(),
+            when: timespec_of(when),
+        };
+        // SAFETY: both ids resolve, so both name live objects, and `event` is a
+        // live local wlroots reads out of and passes to its listeners.
+        unsafe { sys::wlr_scene_buffer_send_frame_done(raw.as_ptr(), &raw mut event) };
+        Some(())
+    }
+
+    /// Crop every subsurface tree beneath `node` to `clip`.
+    ///
+    /// The clip is in the coordinate space of the **root surface** of each
+    /// subsurface tree, not of `node`, and `None` (or an empty box) disables
+    /// clipping. This is what makes a window that is larger than the space a
+    /// compositor wants to give it render cropped rather than overflowing —
+    /// the scene applies it to the client's subsurfaces as well as to its main
+    /// surface, which hand-positioning each node cannot do.
+    ///
+    /// `None` for an unknown or stale id. A node with no subsurface tree under
+    /// it is not an error: the call simply has nothing to clip.
+    pub fn set_subsurface_tree_clip(&self, node: NodeId, clip: Option<Box2D>) -> Option<()> {
+        let raw = self.node_ptr(node)?;
+        let ptr = clip.as_ref().map_or(std::ptr::null(), Box2D::as_c);
+        // SAFETY: a resolvable id names a live node; `ptr` is null or points at
+        // `clip`, a live local whose layout is pinned to `wlr_box`, which
+        // wlroots copies out of.
+        unsafe { sys::wlr_scene_subsurface_tree_set_clip(raw.as_ptr(), ptr) };
+        Some(())
+    }
+
+    /// Position and configure a layer surface from its own anchoring state, and
+    /// subtract what it claims from `usable`.
+    ///
+    /// This is wlroots' own layer-shell arithmetic, which
+    /// [`configure_layer_surface`](Runtime::configure_layer_surface) (a raw
+    /// "tell the client this size") deliberately does not do: it reads the
+    /// surface's anchors, margins and exclusive zone, moves its scene node,
+    /// sends the configure, and **mutates `usable` in place** so the next layer
+    /// surface sees what is left. Thread one `usable` through every layer
+    /// surface of an output, in order, starting from the output's own box:
+    ///
+    /// ```ignore
+    /// let full = Box2D::new(0, 0, width, height);
+    /// let mut usable = full;
+    /// for id in my_layer_surfaces_in_order {
+    ///     runtime.configure_scene_layer_surface(id, full, &mut usable);
+    /// }
+    /// ```
+    ///
+    /// `None`, having configured nothing and left `usable` untouched, when the
+    /// id is unknown or stale, or when the surface is **not yet initialized** —
+    /// wlroots' `wlr_layer_surface_v1_configure`, which this reaches, asserts
+    /// `initialized`, and this distribution's build of wlroots turns that into
+    /// a process abort. Unlike
+    /// [`configure_layer_surface`](Runtime::configure_layer_surface) there is
+    /// nothing to stage for later here: the call also moves the scene node and
+    /// rewrites `usable`, neither of which can be replayed at the surface's
+    /// next commit without the caller's boxes. Call this from
+    /// [`ToplevelHandler::layer_surface_commit`](crate::ToplevelHandler::layer_surface_commit),
+    /// which runs after that first commit, rather than from
+    /// `new_layer_surface`.
+    pub fn configure_scene_layer_surface(
+        &self,
+        id: LayerSurfaceId,
+        full: Box2D,
+        usable: &mut Box2D,
+    ) -> Option<()> {
+        let (raw, scene) = {
+            let table = self.inner.layer_surfaces.borrow();
+            let entry = table.get(&id)?;
+            (entry.raw, entry.scene)
+        };
+        // SAFETY: an entry is removed by `on_layer_surface_destroy` before
+        // wlroots frees the layer surface, so a present entry names a live one.
+        if !unsafe { (*raw.as_ptr()).initialized } {
+            return None;
+        }
+        // SAFETY: as above for `scene`, which wlroots frees together with the
+        // layer surface. `full` is read and `usable` is written through, both
+        // live locals of the caller's whose layout is pinned to `wlr_box`, and
+        // the `initialized` check above is the assert this call would otherwise
+        // abort on.
+        unsafe {
+            sys::wlr_scene_layer_surface_v1_configure(
+                scene.as_ptr(),
+                full.as_c(),
+                (&raw mut *usable).cast::<sys::wlr_box>(),
+            );
+        }
+        Some(())
     }
 
     /// Advertise `xdg_wm_base` at `version`.
@@ -2664,8 +5226,36 @@ impl Runtime {
     /// genuine unlock — a locker dying keeps the session locked, so its fill
     /// must remain to cover the now-uncovered outputs.
     fn remove_lock_fill(&self) {
-        if let Some(id) = self.inner.session_lock_fill.take() {
-            self.remove_rect(id);
+        // Take the id only once the destroy has actually happened.
+        //
+        // `remove_rect` refuses while a node borrow is live, and the fill is
+        // the opaque black rect that hides the desktop under a lock. Taking
+        // first meant that on the refused path the rect survived with its id
+        // gone: the session unlocks, the screen stays black, and there is no
+        // longer an id to remove it by. Unrecoverable from safe code, from a
+        // path with no error to report.
+        let Some(id) = self.inner.session_lock_fill.get() else {
+            return;
+        };
+        if self.remove_rect(id).is_some() {
+            self.inner.session_lock_fill.set(None);
+            return;
+        }
+        // `remove_rect` missed, and the two reasons need opposite answers.
+        //
+        // A live node borrow refused it: the rect is still there, so keep the
+        // id — a later unlock retries and the fill is still removable.
+        //
+        // The row is already gone (a cascade destroyed it, or the node API
+        // did): there is nothing left to destroy, and holding the id is
+        // actively harmful. `install_lock_fill` early-returns on a `Some`
+        // fill and repositions it, so a latched dead id makes every
+        // *subsequent* lock install no fill at all — the session locks with
+        // nothing covering the outputs the locker has not painted. Unconditional
+        // `take()` self-healed this for free; recovering the refusal case cost
+        // it, so it is restored explicitly here.
+        if !self.inner.rects.borrow().contains_key(&id) {
+            self.inner.session_lock_fill.set(None);
         }
     }
 
@@ -2852,6 +5442,50 @@ impl Runtime {
         self.inner.graphics.borrow().as_ref().map(|g| g.scene)
     }
 
+    /// The renderer [`init_graphics`](Runtime::init_graphics) created, as a
+    /// **non-owning** view.
+    ///
+    /// `None` before `init_graphics` has run.
+    ///
+    /// Borrowed rather than owned, and that is the whole point of the separate
+    /// type: this renderer is deliberately never destroyed (see `Graphics`' own
+    /// doc for why, and what a future `Drop` would have to do), so handing out
+    /// a [`Renderer`](crate::Renderer) — which destroys what it holds — would
+    /// make a double free one `drop` away. A renderer this crate's consumer
+    /// owns comes from [`Renderer::autocreate`](crate::Renderer::autocreate)
+    /// instead.
+    ///
+    /// The `&self` borrow is what bounds the view: it cannot outlive the
+    /// `Runtime` handle it was taken from, and every clone of that handle names
+    /// the same graphics.
+    pub fn renderer_ref(&self) -> Option<RendererRef<'_>> {
+        let raw = self.inner.graphics.borrow().as_ref().map(|g| g.renderer)?;
+        // SAFETY: `init_graphics` created this renderer and nothing destroys it
+        // — `Graphics` has no `Drop`, and wlroots never destroys a renderer it
+        // did not create — so it is live for the whole process, which outlives
+        // this borrow. The view cannot free it.
+        Some(unsafe { RendererRef::from_raw(raw.as_ptr()) })
+    }
+
+    /// The allocator [`init_graphics`](Runtime::init_graphics) created, as a
+    /// **non-owning** view. `None` before `init_graphics` has run.
+    ///
+    /// Borrowed for the same reason [`renderer_ref`](Runtime::renderer_ref) is.
+    pub fn allocator_ref(&self) -> Option<AllocatorRef<'_>> {
+        let raw = self.inner.graphics.borrow().as_ref().map(|g| g.allocator)?;
+        // SAFETY: as in `renderer_ref`; the allocator is created once by
+        // `init_graphics` and never destroyed.
+        Some(unsafe { AllocatorRef::from_raw(raw.as_ptr()) })
+    }
+
+    /// The renderer's `events.lost` signal, for `backend.rs`'s per-run
+    /// listener. `None` before [`init_graphics`](Runtime::init_graphics) has
+    /// run — in which case there is no renderer to watch and no listener is
+    /// registered, exactly as for the optional globals.
+    pub(crate) fn renderer_ptr(&self) -> Option<NonNull<sys::wlr_renderer>> {
+        self.inner.graphics.borrow().as_ref().map(|g| g.renderer)
+    }
+
     /// The scene tree every toplevel's own tree is parented into — see
     /// `Graphics::background_band`'s own doc for the full argument.
     /// `None` before [`init_graphics`](Runtime::init_graphics) has run.
@@ -2877,7 +5511,7 @@ impl Runtime {
         })
     }
 
-    /// The scene tree `band` names — any of the five bands, including
+    /// The scene tree `band` names — any of the six bands, including
     /// [`Band::Toplevel`], which [`layer_band_ptr`](Runtime::layer_band_ptr)
     /// cannot express since [`Layer`] has no toplevel variant. `None`
     /// before [`init_graphics`](Runtime::init_graphics) has run.
@@ -3307,6 +5941,16 @@ impl Runtime {
     /// see [`Layer`](crate::Layer)'s doc for why `raise_layer_surface` does
     /// not exist and is not needed.
     pub fn raise_toplevel(&self, id: ToplevelId) -> Option<()> {
+        // Refused while a scene borrow or buffer walk is live. wlroots
+        // iterates with `wl_list_for_each`, not the `_safe` variant, so
+        // unlinking a node and reinserting it elsewhere mid-walk leaves the
+        // iteration reading `link.next` from where the node used to be — it
+        // silently stops early rather than crashing, which is worse. The
+        // destroy calls refuse for this reason; the restacks unlink just as
+        // thoroughly and did not, until this was added alongside them.
+        if self.scene_is_being_walked() {
+            return None;
+        }
         let entry = self.toplevel_entry(id)?;
         // SAFETY: as above.
         unsafe { sys::wlr_scene_node_raise_to_top(&raw mut (*entry.tree.as_ptr()).node) };
@@ -3539,6 +6183,7 @@ impl Runtime {
         id: LayerSurfaceId,
         raw: NonNull<sys::wlr_layer_surface_v1>,
         scene_tree: NonNull<sys::wlr_scene_tree>,
+        scene: NonNull<sys::wlr_scene_layer_surface_v1>,
         band: Layer,
     ) {
         self.inner.layer_surfaces.borrow_mut().insert(
@@ -3546,6 +6191,7 @@ impl Runtime {
             LayerSurfaceEntry {
                 raw,
                 scene_tree,
+                scene,
                 staged_configure: std::cell::Cell::new(None),
                 band: std::cell::Cell::new(band),
             },
@@ -3625,7 +6271,7 @@ impl Runtime {
         };
         // SAFETY: `tree` came from a live `LayerSurfaceEntry` (the table
         // lookup above just resolved it), so it names a scene node this
-        // runtime's own scene still owns; `band` is one of the five band
+        // runtime's own scene still owns; `band` is one of the six band
         // trees created once in `init_graphics` and never destroyed while
         // this runtime is.
         unsafe { sys::wlr_scene_node_reparent(&raw mut (*tree.as_ptr()).node, band.as_ptr()) };
@@ -5275,6 +7921,7 @@ mod tests {
             id,
             NonNull::<sys::wlr_layer_surface_v1>::dangling(),
             tree,
+            NonNull::<sys::wlr_scene_layer_surface_v1>::dangling(),
             Layer::Background,
         );
 
@@ -5505,6 +8152,7 @@ mod tests {
             id,
             raw,
             NonNull::<sys::wlr_scene_tree>::dangling(),
+            NonNull::<sys::wlr_scene_layer_surface_v1>::dangling(),
             Layer::Background,
         );
 
@@ -5573,12 +8221,14 @@ mod tests {
             ls_a,
             NonNull::from(&mut ls_on_a),
             NonNull::<sys::wlr_scene_tree>::dangling(),
+            NonNull::<sys::wlr_scene_layer_surface_v1>::dangling(),
             Layer::Background,
         );
         rt.record_layer_surface(
             ls_b,
             NonNull::from(&mut ls_on_b),
             NonNull::<sys::wlr_scene_tree>::dangling(),
+            NonNull::<sys::wlr_scene_layer_surface_v1>::dangling(),
             Layer::Top,
         );
 
@@ -5661,5 +8311,467 @@ mod tests {
         let rt = headless_runtime();
         rt.reposition_drag_icon(5, 5);
         assert_eq!(rt.drag_icon_position(), None);
+    }
+
+    /// The claim the whole node-id scheme rests on, checked against wlroots
+    /// rather than assumed: destroying a tree runs the addon destructor of
+    /// **every** node beneath it, not only of the node named.
+    ///
+    /// If that were ever untrue, a descendant's row would survive its node and
+    /// the next `set_node_position` on it would write through a freed pointer.
+    ///
+    /// The witness is per-thread (see `scene::NODE_DESTROY_COUNT`), so this
+    /// delta measures this cascade and not whatever another test running beside
+    /// it happened to destroy.
+    #[test]
+    fn destroying_a_tree_runs_every_descendants_addon_destructor() {
+        let rt = headless_runtime();
+        let band = rt.band_node(Band::Overlay).expect("overlay band");
+        let top = rt.create_tree_in_band(Band::Overlay).expect("top tree");
+        let middle = rt.create_tree_under(top).expect("middle tree");
+        let leaf = rt
+            .create_rect(middle, 4, 4, [1.0, 0.0, 0.0, 1.0])
+            .expect("leaf");
+
+        let before = crate::scene::node_destroy_count();
+        assert_eq!(rt.destroy_node(top), Some(()));
+        assert_eq!(
+            crate::scene::node_destroy_count() - before,
+            3,
+            "the cascade must free the payload of the tree, its child tree \
+             and the rect — not only the node destroy_node was handed"
+        );
+
+        for stale in [top, middle, leaf] {
+            assert_eq!(rt.node_kind(stale), None, "every descendant id is stale");
+            assert_eq!(rt.set_node_position(stale, 1, 1), None);
+            assert_eq!(rt.destroy_node(stale), None, "and misses, not double-frees");
+        }
+        assert!(
+            rt.node_children(band).expect("band is a tree").is_empty(),
+            "the band is empty again"
+        );
+    }
+
+    /// The bridge in the other direction: a rect from the frozen 0.20.1 API
+    /// carries a node id, and destroying it through the node API purges the
+    /// `RectId` row too — which is what stops `remove_rect` afterwards from
+    /// calling `wlr_scene_node_destroy` on memory wlroots already reclaimed.
+    #[test]
+    fn destroying_a_legacy_rect_by_node_id_purges_its_rect_row() {
+        let rt = headless_runtime();
+        let rect = rt
+            .add_rect_in_band(Band::Top, 8, 8, [0.0, 0.0, 1.0, 1.0])
+            .expect("rect");
+        let node = rt.rect_node(rect).expect("a legacy rect has a node id");
+
+        assert_eq!(rt.destroy_node(node), Some(()));
+
+        assert!(
+            !rt.inner.rects.borrow().contains_key(&rect),
+            "the addon destructor must drop the RectId row as well"
+        );
+        assert_eq!(rt.remove_rect(rect), None, "and remove_rect now misses");
+        assert_eq!(rt.node_kind(node), None);
+    }
+
+    /// Nothing under a held lock is mutable through the `NodeId` API, not
+    /// just the band itself.
+    ///
+    /// Refusing on the band alone missed the only node that matters: the
+    /// opaque black fill *inside* it, created through `add_rect_in_band` like
+    /// any other rect and so `Owned` and fully mutable. Two public calls reach
+    /// it — `band_node(Band::Lock)` then `node_children` — after which
+    /// hiding, destroying or walking it off-screen uncovers a live desktop
+    /// under a session the compositor still reports as locked.
+    #[test]
+    fn nothing_under_a_held_lock_is_mutable_through_the_node_api() {
+        let rt = headless_runtime();
+        // Built exactly as `install_lock_fill` builds it — an opaque black
+        // rect appended to the lock band — without needing an output layout,
+        // which a unit-test runtime has none of. The origin is what matters
+        // here, and `add_rect_in_band` is the same call it makes.
+        let fill_rect = rt
+            .add_rect_in_band(Band::Lock, 8, 8, [0.0, 0.0, 0.0, 1.0])
+            .expect("fill");
+        rt.inner.session_lock_fill.set(Some(fill_rect));
+        let band = rt.band_node(Band::Lock).expect("lock band");
+        let fill = *rt
+            .node_children(band)
+            .expect("band children")
+            .first()
+            .expect("the fill is a child of the lock band");
+
+        // Unlocked, the fill is an ordinary owned rect.
+        assert_eq!(rt.set_node_enabled(fill, false), Some(()));
+        assert_eq!(rt.set_node_enabled(fill, true), Some(()));
+
+        rt.inner.session_locked.set(true);
+        assert_eq!(
+            rt.set_node_enabled(fill, false),
+            None,
+            "hiding the fill uncovers the desktop just as hiding the band does"
+        );
+        assert_eq!(
+            rt.set_node_position(fill, 99_999, 99_999),
+            None,
+            "walking it off-screen is the same uncovering by another route"
+        );
+        assert_eq!(
+            rt.destroy_node(fill),
+            None,
+            "and destroying it outright certainly is"
+        );
+        // The band itself is still covered by the same rule.
+        assert_eq!(rt.set_node_enabled(band, false), None);
+
+        // A node outside the lock band is untouched by any of this.
+        let elsewhere = rt
+            .add_rect_in_band(Band::Top, 4, 4, [1.0, 0.0, 0.0, 1.0])
+            .expect("rect");
+        let elsewhere = rt.rect_node(elsewhere).expect("node id");
+        assert_eq!(rt.set_node_enabled(elsewhere, false), Some(()));
+        assert_eq!(rt.set_node_position(elsewhere, 5, 5), Some(()));
+
+        rt.inner.session_locked.set(false);
+        // And once unlocked the fill is ordinary again — the refusal is scoped
+        // to the lock, not a permanent quarantine.
+        assert_eq!(rt.set_node_enabled(fill, false), Some(()));
+    }
+
+    /// A lock fill whose row died elsewhere must not latch its id forever.
+    ///
+    /// `remove_lock_fill` used an unconditional `take()`, which self-healed
+    /// for free. Keeping the id across a borrow-refused destroy cost that, and
+    /// a latched dead id is worse than the bug it fixed: `install_lock_fill`
+    /// early-returns on a `Some` fill and repositions it, so every *later*
+    /// lock installs no fill at all and the session locks with nothing
+    /// covering the outputs the locker has not painted.
+    #[test]
+    fn a_lock_fill_whose_row_died_elsewhere_is_reinstalled_not_latched() {
+        let rt = headless_runtime();
+        let first = rt
+            .add_rect_in_band(Band::Lock, 8, 8, [0.0, 0.0, 0.0, 1.0])
+            .expect("fill");
+        rt.inner.session_lock_fill.set(Some(first));
+
+        // Kill the row the way a cascade would, behind the Cell's back.
+        assert_eq!(rt.remove_rect(first), Some(()));
+        assert!(
+            rt.inner.session_lock_fill.get().is_some(),
+            "the Cell still names the dead rect — this is the state to recover from"
+        );
+
+        rt.remove_lock_fill();
+        assert_eq!(
+            rt.inner.session_lock_fill.get(),
+            None,
+            "a fill that no longer exists must stop being named, or \
+             install_lock_fill's early return makes every later lock bare"
+        );
+
+        // The refusal case still keeps its id, which is what the conditional
+        // clear was introduced for and must not regress.
+        let live = rt
+            .add_rect_in_band(Band::Lock, 8, 8, [0.0, 0.0, 0.0, 1.0])
+            .expect("fill");
+        rt.inner.session_lock_fill.set(Some(live));
+        let node = rt.rect_node(live).expect("node id");
+        rt.with_node(node, |_| {
+            rt.remove_lock_fill();
+        })
+        .expect("borrowable");
+        assert_eq!(
+            rt.inner.session_lock_fill.get(),
+            Some(live),
+            "a destroy refused by a live borrow must keep the id to retry with"
+        );
+    }
+
+    /// A foreign frame refuses scene restructuring on its own, with no
+    /// `NodeBorrowGuard` beside it.
+    ///
+    /// Seven of the eight sites that enter a `ForeignFrame` pair it with a
+    /// `NodeBorrowGuard`, and that pairing was what actually refused destroys
+    /// — the frame itself refused only the event loop. `render::sync`'s
+    /// timeline waiter is the eighth and has no runtime to raise a guard on,
+    /// so a callback there could commit a scene output and, because no
+    /// dispatcher is in dispatch, have `output_sample` delivered synchronously
+    /// into a handler that destroys a node mid-commit. wlroots asserts on
+    /// that, which on Arch is a dead process.
+    ///
+    /// Tested directly rather than through the timeline: that path needs a DRM
+    /// node, so it self-skips on a GPU-less runner and would prove nothing
+    /// there. The property is the frame, not the caller.
+    #[test]
+    fn a_foreign_frame_alone_refuses_scene_restructuring() {
+        let rt = headless_runtime();
+        let band = rt.band_node(Band::Overlay).expect("band");
+        let doomed = rt.create_tree_under(band).expect("tree");
+
+        assert!(
+            !rt.scene_is_being_walked(),
+            "nothing is walking the scene yet"
+        );
+
+        {
+            // Exactly what sync.rs's waiter enters, and nothing else.
+            let _frame = crate::dispatch::ForeignFrame::enter();
+            assert!(rt.scene_is_being_walked());
+            assert_eq!(
+                rt.destroy_node(doomed),
+                None,
+                "wlroots may be mid-wl_list_for_each; unlinking is a UAF in its recursion"
+            );
+            assert_eq!(
+                rt.create_tree_under(band).map(|_| ()),
+                None,
+                "and inserting rewires the tail its cursor is about to read"
+            );
+            // Restacking relinks, so it is refused for the same reason.
+            let sibling = rt.band_node(Band::Top).expect("band");
+            assert_eq!(rt.reparent_node(doomed, sibling), None);
+
+            // Position is *not* refused, and should not be:
+            // `wlr_scene_node_set_position` writes x/y into the node and
+            // touches no list, so it cannot disturb a cursor. The rule is
+            // about relinking, not about mutation in general.
+            assert_eq!(rt.set_node_position(doomed, 1, 1), Some(()));
+        }
+
+        // The frame is a scope, not a latch.
+        assert!(!rt.scene_is_being_walked());
+        assert_eq!(rt.destroy_node(doomed), Some(()));
+    }
+
+    /// The Lock band cannot be hidden while a lock is held.
+    ///
+    /// It is what a lock is made of — the opaque fill and every lock surface
+    /// live in it — so disabling it uncovered the desktop while
+    /// `is_session_locked()` still said `true` and the rest of the crate went
+    /// on behaving as locked. A screen showing a session the compositor
+    /// believes is locked. `set_node_enabled` accepts protected nodes by
+    /// design (the module doc says so), which is exactly why this one band
+    /// needs the explicit refusal.
+    #[test]
+    fn the_lock_band_cannot_be_hidden_while_the_session_is_locked() {
+        let rt = headless_runtime();
+        let band = rt.band_node(Band::Lock).expect("lock band");
+
+        // Unlocked, the band is ordinary: an empty band nothing is relying on.
+        assert_eq!(rt.set_node_enabled(band, false), Some(()));
+        assert_eq!(rt.set_node_enabled(band, true), Some(()));
+
+        rt.inner.session_locked.set(true);
+        assert_eq!(
+            rt.set_node_enabled(band, false),
+            None,
+            "hiding the lock band while locked uncovers the desktop"
+        );
+        // Re-enabling is always allowed — it can only ever make the lock more
+        // complete, never less.
+        assert_eq!(rt.set_node_enabled(band, true), Some(()));
+
+        // Only this band. Every other band stays hideable under a lock.
+        for other in [Band::Background, Band::Bottom, Band::Top, Band::Overlay] {
+            let node = rt.band_node(other).expect("band");
+            assert_eq!(
+                rt.set_node_enabled(node, false),
+                Some(()),
+                "{other:?} is not the lock band"
+            );
+            assert_eq!(rt.set_node_enabled(node, true), Some(()));
+        }
+        rt.inner.session_locked.set(false);
+    }
+
+    /// Appearance setters reach a foreign node; placement ones still do not.
+    ///
+    /// The Owned-only rule exists for this crate's placement bookkeeping,
+    /// which `set_toplevel_position` and `raise_toplevel` maintain. Applying
+    /// it to the appearance setters made fading a client's window — from the
+    /// very `NodeId` `node_at` hands back — return `None` with no diagnostic,
+    /// and contradicted each of those methods' own documented `None` cases.
+    #[test]
+    fn appearance_setters_reach_a_foreign_node_but_placement_does_not() {
+        let rt = headless_runtime();
+        let band = rt.band_node(Band::Overlay).expect("band");
+        let owned = rt.create_scene_buffer(band, None).expect("buffer node");
+
+        // Re-observing an owned node through the child walk yields the same
+        // id, so to get a genuinely foreign one this forces the origin
+        // directly — the same state `node_at` on a client surface produces.
+        rt.inner
+            .nodes
+            .borrow_mut()
+            .get_mut(&owned)
+            .expect("row")
+            .origin = NodeOrigin::Foreign;
+
+        assert_eq!(
+            rt.set_scene_buffer_opacity(owned, 0.5),
+            Some(()),
+            "fading a client's window is the ordinary case"
+        );
+        assert_eq!(
+            rt.set_scene_buffer_filter(owned, FilterMode::Nearest),
+            Some(())
+        );
+        assert_eq!(
+            rt.set_scene_buffer_transform(owned, Transform::R90),
+            Some(())
+        );
+        assert_eq!(rt.set_scene_buffer_dest_size(owned, 8, 8), Some(()));
+
+        assert_eq!(
+            rt.set_node_position(owned, 1, 1),
+            None,
+            "placement still goes through the toplevel and layer APIs"
+        );
+    }
+
+    /// The reverse pairing: the published `remove_rect` path must leave no
+    /// node row behind either, or `node_children` would keep reporting a node
+    /// wlroots has freed.
+    #[test]
+    fn remove_rect_purges_the_node_row() {
+        let rt = headless_runtime();
+        let rect = rt
+            .add_rect_in_band(Band::Top, 8, 8, [0.0, 1.0, 0.0, 1.0])
+            .expect("rect");
+        let node = rt.rect_node(rect).expect("node id");
+        assert_eq!(rt.remove_rect(rect), Some(()));
+        assert_eq!(rt.node_kind(node), None);
+        assert_eq!(rt.node_parent(node), None);
+    }
+
+    /// A rect moved out of a toplevel's tree must stop being purged with that
+    /// toplevel, and one moved in must start — the parent tracking the frozen
+    /// `RectId` table still carries is recomputed by `reparent_node`, and this
+    /// is the property that recomputation exists for.
+    #[test]
+    fn reparenting_a_legacy_rect_moves_it_between_purge_classes() {
+        let rt = headless_runtime();
+        let toplevel_band = rt.toplevel_band_ptr().expect("toplevel band");
+        // SAFETY: `toplevel_band` is a live tree owned by `rt`'s own scene.
+        let tree =
+            NonNull::new(unsafe { sys::wlr_scene_tree_create(toplevel_band.as_ptr()) }).unwrap();
+        let toplevel = ToplevelId(next_id());
+        rt.record_toplevel(toplevel, NonNull::<sys::wlr_xdg_toplevel>::dangling(), tree);
+
+        let rect = rt
+            .add_rect_in_band(Band::Toplevel, 4, 4, [1.0, 1.0, 1.0, 1.0])
+            .expect("rect");
+        let node = rt.rect_node(rect).expect("node id");
+        assert_eq!(
+            rt.inner.rects.borrow()[&rect].parent,
+            RectParent::Band(Band::Toplevel)
+        );
+
+        // SAFETY: `tree` is the live tree recorded just above.
+        let into =
+            unsafe { rt.ensure_node_id(&raw mut (*tree.as_ptr()).node, NodeOrigin::Foreign) }
+                .expect("the toplevel's tree gets an id on demand");
+        assert_eq!(rt.reparent_node(node, into), Some(()));
+        assert_eq!(
+            rt.inner.rects.borrow()[&rect].parent,
+            RectParent::Toplevel(toplevel),
+            "a rect moved into a toplevel's tree must now die with it"
+        );
+
+        // And back out again.
+        let band = rt.band_node(Band::Toplevel).expect("band id");
+        assert_eq!(rt.reparent_node(node, band), Some(()));
+        assert_eq!(
+            rt.inner.rects.borrow()[&rect].parent,
+            RectParent::Band(Band::Toplevel),
+            "and one moved back out must stop dying with it"
+        );
+        assert_eq!(rt.remove_rect(rect), Some(()));
+    }
+
+    /// Restacking is refused mid-walk, like destroying already was.
+    ///
+    /// `for_each_buffer`'s doc forbids freeing *or moving* a node during the
+    /// walk, but only the destroys enforced it. wlroots iterates with
+    /// `wl_list_for_each` rather than the `_safe` variant, so a node unlinked
+    /// and reinserted elsewhere leaves the walk following `link.next` into
+    /// where it used to be — the iteration stops early and silently, which is
+    /// the failure mode that does not announce itself.
+    #[test]
+    fn restacking_during_a_buffer_walk_is_refused() {
+        let rt = headless_runtime();
+        let a = rt
+            .add_rect_in_band(Band::Overlay, 4, 4, [1.0, 0.0, 0.0, 1.0])
+            .expect("rect a");
+        let b = rt
+            .add_rect_in_band(Band::Overlay, 4, 4, [0.0, 1.0, 0.0, 1.0])
+            .expect("rect b");
+        let node_a = rt.rect_node(a).expect("node a");
+        let node_b = rt.rect_node(b).expect("node b");
+        // A rect is not a buffer node, so a walk over rects alone visits
+        // nothing and the assertion below would hold vacuously. Give the walk
+        // something to actually visit.
+        let pixels = vec![0xffu8; 4 * 4 * 4];
+        let buffer = rt.add_buffer(4, 4, &pixels).expect("pixel buffer");
+
+        let mut refusals = Vec::new();
+        let root = rt.scene_root_node().expect("scene root");
+        rt.for_each_buffer(root, |_, _, _| {
+            refusals.push(rt.raise_node_to_top(node_a));
+            refusals.push(rt.lower_node_to_bottom(node_a));
+            refusals.push(rt.place_node_above(node_a, node_b));
+            refusals.push(rt.lower_rect_to_bottom(a));
+        })
+        .expect("the scene root is walkable");
+
+        assert!(
+            !refusals.is_empty(),
+            "the walk must have visited the buffer node, or this proves nothing"
+        );
+        assert!(
+            refusals.iter().all(|r| r.is_none()),
+            "no restack may succeed inside a walk: {refusals:?}"
+        );
+
+        // Outside the walk they work again, so the refusal is scoped.
+        assert_eq!(rt.raise_node_to_top(node_a), Some(()));
+        assert_eq!(rt.lower_rect_to_bottom(a), Some(()));
+        assert_eq!(rt.remove_buffer(buffer), Some(()));
+    }
+
+    /// A foreign node refuses the mutators, as `scene`'s module doc promises.
+    ///
+    /// It promised it for protected *and* foreign nodes, but the check tested
+    /// only for protected — so this half was documented and not enforced, and
+    /// `set_node_position` could move a toplevel's own tree while
+    /// `set_toplevel_position` and `raise_toplevel` went on believing they
+    /// knew where it was.
+    ///
+    /// `set_node_enabled` is deliberately still allowed: its own doc grants it
+    /// on every origin, and hiding a node breaks no bookkeeping.
+    #[test]
+    fn a_foreign_node_refuses_the_mutators_but_still_hides() {
+        let rt = headless_runtime();
+        let band = rt.band_ptr(Band::Toplevel).expect("band");
+        // SAFETY: the band tree is this runtime's own and lives for the process.
+        let tree = unsafe { sys::wlr_scene_tree_create(band.as_ptr()) };
+        let tree = NonNull::new(tree).expect("tree");
+
+        // SAFETY: `tree` was just created and is live.
+        let foreign =
+            unsafe { rt.ensure_node_id(&raw mut (*tree.as_ptr()).node, NodeOrigin::Foreign) }
+                .expect("a foreign node gets an id on demand");
+
+        assert_eq!(
+            rt.set_node_position(foreign, 5, 5),
+            None,
+            "moving a node this crate does not own must be refused"
+        );
+        assert_eq!(
+            rt.set_node_enabled(foreign, false),
+            Some(()),
+            "but hiding it is allowed on every origin"
+        );
     }
 }
