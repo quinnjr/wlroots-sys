@@ -265,6 +265,15 @@ pub trait OutputHandler {
     /// committed each head and applied its layout position by the time this
     /// runs; the handler's job is its own bookkeeping, exactly as
     /// `session_lock_changed`'s is.
+    ///
+    /// **The crate deliberately does not re-broadcast the new layout to the
+    /// other bound `zwlr_output_manager_v1` clients from here** — that would
+    /// force a serial bump before the compositor has settled (and persisted)
+    /// its geometry. Your implementation MUST call
+    /// [`Runtime::update_output_manager_state`](crate::Runtime::update_output_manager_state)
+    /// once it has re-derived and persisted the layout, so every other bound
+    /// manager sees the fresh head state and a bumped serial. Skipping it
+    /// leaves those clients with a stale view until the next output change.
     fn output_configuration_applied(&mut self, heads: Vec<AppliedHead>) {
         let _ = heads;
     }

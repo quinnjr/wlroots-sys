@@ -294,6 +294,23 @@ fn creating_the_session_lock_manager_twice_is_refused() {
     );
 }
 
+/// A second `zwlr_output_manager_v1` global would make the compositor advertise
+/// two, so the crate refuses the double-create — mirroring every other manager
+/// global here.
+#[test]
+fn creating_the_output_manager_twice_is_refused() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.create_output_manager(&display).expect("first");
+    assert!(
+        matches!(
+            runtime.create_output_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second output-manager global would make the compositor advertise two"
+    );
+}
+
 /// A fresh runtime is not locked, and creating the manager global alone does
 /// not lock it — a lock is only entered when a client actually takes one
 /// (proven end-to-end by the icedtea harness tests). This pins the initial

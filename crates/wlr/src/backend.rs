@@ -3337,6 +3337,37 @@ unsafe extern "C" fn on_output_manager_test<S: Handlers>(
     unsafe { handle_output_configuration::<S>(l, data, false) };
 }
 
+/// Build a fresh `wlr_output_state` from a head, run either a `test` or a
+/// `commit` of that state against the head's output, finish the state on EVERY
+/// path, and report whether the operation succeeded (a null output is a
+/// failure). This is the per-head scaffold `Output::commit` uses — MaybeUninit
+/// → `wlr_output_state_init` → head-state apply → test/commit →
+/// `wlr_output_state_finish`.
+///
+/// # Safety
+///
+/// `head` must be a live `wlr_output_head_v1`; its `state.output`, when
+/// non-null, must be a live `wlr_output`.
+unsafe fn run_head_state(head: *mut sys::wlr_output_head_v1, commit: bool) -> bool {
+    unsafe {
+        let output = (*head).state.output;
+        if output.is_null() {
+            return false;
+        }
+        let mut st = std::mem::MaybeUninit::<sys::wlr_output_state>::uninit();
+        sys::wlr_output_state_init(st.as_mut_ptr());
+        let mut st = st.assume_init();
+        sys::wlr_output_head_v1_state_apply(&raw const (*head).state, &raw mut st);
+        let ok = if commit {
+            sys::wlr_output_commit_state(output, &raw const st)
+        } else {
+            sys::wlr_output_test_state(output, &raw const st)
+        };
+        sys::wlr_output_state_finish(&raw mut st);
+        ok
+    }
+}
+
 /// The shared body of the `apply`/`test` handlers.
 ///
 /// `apply` selects between committing (`true`) and only testing (`false`) each
@@ -3383,57 +3414,62 @@ unsafe fn handle_output_configuration<S: Handlers>(
         // every head committed. No borrowed pointer is retained.
         let mut applied: Vec<AppliedHead> = Vec::new();
 
-        for head in heads {
-            let output = (*head).state.output;
-            if output.is_null() {
-                all_ok = false;
-                continue;
+        if apply {
+            // Two-phase apply so a partial success can never leave some outputs
+            // reconfigured while the client is told `failed`: TEST every head
+            // first, and only if EVERY test passes do we commit. On any test
+            // failure nothing is committed and the reply is `failed`.
+            for &head in &heads {
+                if !run_head_state(head, false) {
+                    all_ok = false;
+                    break;
+                }
             }
 
-            // Build a fresh `wlr_output_state`: MaybeUninit → init → head-state
-            // apply → commit/test → finish on EVERY path, the scaffold
-            // `Output::commit` uses.
-            let mut st = std::mem::MaybeUninit::<sys::wlr_output_state>::uninit();
-            sys::wlr_output_state_init(st.as_mut_ptr());
-            let mut st = st.assume_init();
-            sys::wlr_output_head_v1_state_apply(&raw const (*head).state, &raw mut st);
+            if all_ok {
+                for &head in &heads {
+                    // Each head tested OK above; committing the identical state
+                    // is expected to succeed. If one still fails, record it —
+                    // the reply below becomes `failed`.
+                    if !run_head_state(head, true) {
+                        all_ok = false;
+                        continue;
+                    }
 
-            let ok = if apply {
-                sys::wlr_output_commit_state(output, &raw const st)
-            } else {
-                sys::wlr_output_test_state(output, &raw const st)
-            };
-            sys::wlr_output_state_finish(&raw mut st);
+                    // `state_apply` does not place the output — do it manually
+                    // from the head's requested position, resolving the
+                    // output's id through its addon set (attached when wlroots
+                    // announced it).
+                    let output = (*head).state.output;
+                    let x = (*head).state.x;
+                    let y = (*head).state.y;
+                    let id = OutputId(ensure_id_raw(&raw mut (*output).addons));
+                    runtime.set_output_position(id, x, y);
 
-            if !ok {
-                all_ok = false;
-                continue;
+                    // Read the resulting state back off the committed output.
+                    // Owned copies only — the `name` string is cloned, nothing
+                    // borrows the config or the output past this scope.
+                    let name = Output::<'_>::from_raw(output).name();
+                    applied.push(AppliedHead {
+                        name,
+                        enabled: (*output).enabled,
+                        width: (*output).width,
+                        height: (*output).height,
+                        refresh_mhz: (*output).refresh,
+                        x,
+                        y,
+                        scale: (*output).scale,
+                        transform: Transform::try_from((*output).transform)
+                            .unwrap_or(Transform::Normal),
+                    });
+                }
             }
-
-            if apply {
-                // `state_apply` does not place the output — do it manually from
-                // the head's requested position, resolving the output's id
-                // through its addon set (attached when wlroots announced it).
-                let x = (*head).state.x;
-                let y = (*head).state.y;
-                let id = OutputId(ensure_id_raw(&raw mut (*output).addons));
-                runtime.set_output_position(id, x, y);
-
-                // Read the resulting state back off the committed output. Owned
-                // copies only — the `name` string is cloned, nothing borrows
-                // the config or the output past this scope.
-                let name = Output::<'_>::from_raw(output).name();
-                applied.push(AppliedHead {
-                    name,
-                    enabled: (*output).enabled,
-                    width: (*output).width,
-                    height: (*output).height,
-                    refresh_mhz: (*output).refresh,
-                    x,
-                    y,
-                    scale: (*output).scale,
-                    transform: Transform::try_from((*output).transform).unwrap_or(Transform::Normal),
-                });
+        } else {
+            // Pure test: check every head, changing nothing.
+            for &head in &heads {
+                if !run_head_state(head, false) {
+                    all_ok = false;
+                }
             }
         }
 
