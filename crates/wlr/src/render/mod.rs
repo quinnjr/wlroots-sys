@@ -26,7 +26,7 @@
 //! | [`LockedBuffer`] | `wlr_buffer_unlock` (**consumer**) | — |
 //! | [`Swapchain`] | `wlr_swapchain_destroy` | — |
 //! | [`ColorTransform`] | `wlr_color_transform_unref` (**refcounted**) | — |
-//! | [`SyncTimeline`] | `wlr_drm_syncobj_timeline_unref` (**refcounted**) | its waiters |
+//! | [`SyncTimeline`] | `wlr_drm_syncobj_timeline_unref` (**refcounted**) | — |
 //! | [`SyncWaiter`] | `wlr_drm_syncobj_timeline_waiter_finish` | — |
 //! | [`Egl`] | nothing — see below | — |
 //!
@@ -62,8 +62,9 @@
 //! [`Runtime::init_graphics`](crate::Runtime::init_graphics) creates a renderer
 //! and an allocator of its own and deliberately never frees them (see
 //! `Graphics`' own docs). Those are reachable as [`RendererRef`] and
-//! [`AllocatorRef`] — the same read-only and texture-creating surface, with no
-//! `Drop` and no way to acquire one. A [`Renderer`] built here is a separate
+//! [`AllocatorRef`] — the same read-only query surface, with no `Drop` and no
+//! way to acquire one. Read-only in the strict sense: `RendererRef` has no
+//! `texture_from_*` at all, which this once claimed it did. A [`Renderer`] built here is a separate
 //! object that this crate does destroy. Mixing the two up would be a double
 //! free, so they are different types rather than a flag.
 //!

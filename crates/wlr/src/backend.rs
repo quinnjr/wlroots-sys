@@ -3528,16 +3528,40 @@ unsafe extern "C" fn on_scene_buffer_outputs_update<S: Handlers>(
             return;
         }
 
+        // An entry this crate cannot resolve makes the whole snapshot unusable,
+        // not shorter.
+        //
+        // Recording the survivors wrote a *truncated* list as the authoritative
+        // answer, and `scene_buffer_active_outputs` returns it as `Some` —
+        // indistinguishable from a correct one, so a compositor deciding which
+        // outputs to throttle to, or when to send frame callbacks, silently
+        // acts on a monitor list missing a monitor.
+        //
+        // It is reachable exactly at hotplug, which is when it matters most:
+        // `wlr_scene_output_create` runs `scene_output_update_geometry` (and so
+        // `update_node_update_outputs`) *before* this crate's
+        // `record_scene_output` has given the new output an id, so the new
+        // output is in this array with no id yet.
+        //
+        // Dropping the snapshot makes the query answer `None` — "not known
+        // right now" — which is a state the API already has and a caller can
+        // act on. The next emission, after the id exists, refreshes it.
         let mut active = Vec::new();
+        let mut complete = true;
         if !(*event).active.is_null() {
             for i in 0..(*event).size {
                 let raw = *(*event).active.add(i);
-                if let Some(id) = scene_output_id_of(session, raw) {
-                    active.push(id);
+                match scene_output_id_of(session, raw) {
+                    Some(id) => active.push(id),
+                    None => complete = false,
                 }
             }
         }
-        (*session).runtime.record_scene_buffer_outputs(node, active);
+        if complete {
+            (*session).runtime.record_scene_buffer_outputs(node, active);
+        } else {
+            (*session).runtime.forget_scene_buffer_outputs(node);
+        }
 
         let deliver = (*session).deliver;
         (*session)

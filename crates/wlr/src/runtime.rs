@@ -2049,8 +2049,8 @@ impl Runtime {
         // unlinking a node and reinserting it elsewhere mid-walk leaves the
         // iteration reading `link.next` from where the node used to be — it
         // silently stops early rather than crashing, which is worse. The
-        // destroy calls have refused for this reason since 0.20.5; the
-        // restacks unlink just as thoroughly and did not.
+        // destroy calls refuse for this reason; the restacks unlink just as
+        // thoroughly and did not, until this was added alongside them.
         if self.scene_is_being_walked() {
             return None;
         }
@@ -2362,8 +2362,8 @@ impl Runtime {
         // unlinking a node and reinserting it elsewhere mid-walk leaves the
         // iteration reading `link.next` from where the node used to be — it
         // silently stops early rather than crashing, which is worse. The
-        // destroy calls have refused for this reason since 0.20.5; the
-        // restacks unlink just as thoroughly and did not.
+        // destroy calls refuse for this reason; the restacks unlink just as
+        // thoroughly and did not, until this was added alongside them.
         if self.scene_is_being_walked() {
             return None;
         }
@@ -2860,8 +2860,8 @@ impl Runtime {
         // unlinking a node and reinserting it elsewhere mid-walk leaves the
         // iteration reading `link.next` from where the node used to be — it
         // silently stops early rather than crashing, which is worse. The
-        // destroy calls have refused for this reason since 0.20.5; the
-        // restacks unlink just as thoroughly and did not.
+        // destroy calls refuse for this reason; the restacks unlink just as
+        // thoroughly and did not, until this was added alongside them.
         if self.scene_is_being_walked() {
             return None;
         }
@@ -2903,8 +2903,8 @@ impl Runtime {
         // unlinking a node and reinserting it elsewhere mid-walk leaves the
         // iteration reading `link.next` from where the node used to be — it
         // silently stops early rather than crashing, which is worse. The
-        // destroy calls have refused for this reason since 0.20.5; the
-        // restacks unlink just as thoroughly and did not.
+        // destroy calls refuse for this reason; the restacks unlink just as
+        // thoroughly and did not, until this was added alongside them.
         if self.scene_is_being_walked() {
             return None;
         }
@@ -2922,8 +2922,8 @@ impl Runtime {
         // unlinking a node and reinserting it elsewhere mid-walk leaves the
         // iteration reading `link.next` from where the node used to be — it
         // silently stops early rather than crashing, which is worse. The
-        // destroy calls have refused for this reason since 0.20.5; the
-        // restacks unlink just as thoroughly and did not.
+        // destroy calls refuse for this reason; the restacks unlink just as
+        // thoroughly and did not, until this was added alongside them.
         if self.scene_is_being_walked() {
             return None;
         }
@@ -3549,7 +3549,9 @@ impl Runtime {
 
     /// Recolour a rect node, in the same premultiplied RGBA
     /// [`add_rect`](Runtime::add_rect) takes. `None` if the id is unknown,
-    /// stale or not a rect.
+    /// stale, not a rect, or not a node this crate created for you — every
+    /// rect node in the scene is one this crate made, so the last case only
+    /// arises for an id naming something else.
     pub fn set_node_rect_color(&self, node: NodeId, color: [f32; 4]) -> Option<()> {
         let raw = self.movable_rect_ptr(node)?;
         // SAFETY: as for `set_node_rect_size`; `color` is live for the call
@@ -3618,6 +3620,13 @@ impl Runtime {
     /// region is in buffer-local coordinates, so with no buffer there is
     /// nothing to scale it by; clearing a node and damaging it are separate
     /// requests.
+    ///
+    /// Also `None` for a node this crate did not create for you — a client's
+    /// own surface node from [`node_at`](Runtime::node_at), say. Unlike the
+    /// appearance setters, replacing the *buffer* of a node wlroots is filling
+    /// from a surface is not a change to how it looks, it is taking the
+    /// content away from wlroots, which refills it on the client's next
+    /// commit.
     pub fn set_scene_buffer(
         &self,
         node: NodeId,
@@ -3956,6 +3965,13 @@ impl Runtime {
     /// `None` when nothing has been reported for `node` — it is not observed,
     /// no update has fired yet, or the run that was observing it has ended. An
     /// empty `Vec` is different, and means the node is displayed nowhere.
+    /// `None` also when the last emission named a scene output this crate
+    /// could not resolve — briefly true at hotplug, because wlroots updates a
+    /// node's output set from inside `wlr_scene_output_create`, before this
+    /// crate has given the new output an id. A shortened list is not a smaller
+    /// truth: it is the same shape as a correct answer with a monitor missing
+    /// from it, so the snapshot is dropped instead and the next emission
+    /// refreshes it.
     pub fn scene_buffer_active_outputs(&self, node: NodeId) -> Option<Vec<SceneOutputId>> {
         self.inner.scene_buffer_outputs.borrow().get(&node).cloned()
     }
@@ -5927,8 +5943,8 @@ impl Runtime {
         // unlinking a node and reinserting it elsewhere mid-walk leaves the
         // iteration reading `link.next` from where the node used to be — it
         // silently stops early rather than crashing, which is worse. The
-        // destroy calls have refused for this reason since 0.20.5; the
-        // restacks unlink just as thoroughly and did not.
+        // destroy calls refuse for this reason; the restacks unlink just as
+        // thoroughly and did not, until this was added alongside them.
         if self.scene_is_being_walked() {
             return None;
         }

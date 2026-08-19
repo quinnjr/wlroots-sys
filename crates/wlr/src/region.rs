@@ -208,10 +208,19 @@ mod read {
 /// An owned set of rectangles.
 ///
 /// Boxed rather than held inline: a `Region` is handed to C as a pointer, and
-/// several of those pointers (a render pass's clip, most of all) are stored by
-/// wlroots for longer than the statement that produced them. A `Box` makes the
-/// address stable across every move of the `Region` value itself, so that
-/// cannot become a dangling-pointer bug that happens to work.
+/// a stable address means moving the `Region` value cannot turn one of those
+/// into a dangling-pointer bug that happens to work.
+///
+/// This used to name a render pass's clip as the example, and that was wrong
+/// in the one direction that matters — it claimed wlroots keeps the pointer
+/// past the producing statement, when the Vulkan backend
+/// `pixman_region32_copy`s the clip on the way in and refs the timeline
+/// (`vulkan/pass.c`). `RenderPass`'s own SAFETY comment says so, and
+/// `examples/render_pass.rs` relies on it by dropping its clip before submit.
+/// A reader who trusted this comment over that one would have concluded the
+/// example was broken. The `Box` is still right — a stable address costs
+/// nothing and the property is easy to lose — it just is not load-bearing for
+/// the reason stated here.
 ///
 /// `!Send` and `!Sync`, like everything in this crate that owns a C allocation.
 pub struct Region {

@@ -108,6 +108,18 @@ pub trait OutputHandler {
     /// ([`Renderer::autocreate`](crate::Renderer::autocreate)) this is not
     /// delivered — ask [`Renderer::is_lost`](crate::Renderer::is_lost) instead.
     ///
+    /// **Only [`Backend::run_all`](crate::Backend::run_all) delivers this.**
+    /// [`Backend::run`](crate::Backend::run) requires this same trait — so an
+    /// implementation written against it compiles, and reads as though it were
+    /// wired up — but `run` builds its own empty
+    /// [`Runtime`](crate::Runtime) that never has graphics, so there is no
+    /// renderer to watch and this is never called. A consumer using `run` and
+    /// treating this as their GPU-reset recovery path has no recovery path at
+    /// all: on a reset the compositor keeps drawing into a renderer that fails
+    /// every call, with no notification and no error. Use `run_all` if you need
+    /// it, or poll [`Renderer::is_lost`](crate::Renderer::is_lost) on a
+    /// renderer you own.
+    ///
     /// **Call [`Runtime::init_graphics`](crate::Runtime::init_graphics) before
     /// [`Backend::run_all`](crate::Backend::run_all), not from inside a
     /// handler.** The listener behind this method is linked once, when the run
