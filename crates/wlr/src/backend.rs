@@ -535,6 +535,20 @@ struct Session<'r, S> {
     /// `on_session_lock_surface_destroy`, mirroring `drags`.
     lock_surfaces: RefCell<HashMap<usize, LockSurfaceListeners>>,
 
+    /// This run's `set_region`/`destroy` listeners on every live
+    /// `wlr_pointer_constraint_v1`, keyed by the `destroy` listener's own
+    /// address (as `usize`). wlroots does emit the constraint's `destroy`
+    /// signal with the constraint itself as `data` (unlike the null-`data`
+    /// session-lock/lock-surface signals and the surface-`data` idle-inhibitor
+    /// one), but this map keys on the firing listener regardless — the same
+    /// discipline every other destroy-keyed table here uses, so identity never
+    /// depends on what a given signal happens to pass. `on_pointer_constraint_destroy`
+    /// removes one specific constraint's entry synchronously the moment that
+    /// constraint is destroyed, dropping the two-listener bundle (and unlinking
+    /// it) together, and clears [`RuntimeInner::active_constraint`] if the
+    /// entry it removed was the active one.
+    pointer_constraints: RefCell<HashMap<usize, PointerConstraintListeners>>,
+
     /// Whether the most recently delivered [`Event::Key`] was consumed by the
     /// handler. `on_key` cannot get a return value back through
     /// `Dispatcher::emit` directly — an `extern "C"` callback has no way to
@@ -620,6 +634,24 @@ struct SessionLockListeners {
 /// `commit` (which drives the send-`locked` decision) and the lock surface's
 /// own `destroy` (which drops its scene tree from the runtime before wlroots
 /// frees it). Field order is not load-bearing, as for [`ToplevelListeners`].
+/// One live `wlr_pointer_constraint_v1`'s listeners: its own `set_region` and
+/// `destroy`. Field order is not load-bearing, as for [`ToplevelListeners`] —
+/// both must drop, and so unlink, as part of removing the entry, which happens
+/// while the constraint is still alive (its own `destroy` emission removes it,
+/// after `wl_signal_emit_mutable` has advanced past the firing listener).
+struct PointerConstraintListeners {
+    _set_region: Registration,
+    _destroy: Registration,
+    /// The constraint this entry's listeners are linked on, as a raw pointer,
+    /// so `on_pointer_constraint_destroy` can tell whether the constraint it is
+    /// tearing down is the one recorded in
+    /// [`RuntimeInner::active_constraint`](crate::runtime::RuntimeInner) and
+    /// clear it. Captured at link time rather than read from the destroy
+    /// signal's `data`, keeping identity independent of the signal — the same
+    /// reason `LockSurfaceListeners` captures its `output`.
+    constraint: NonNull<sys::wlr_pointer_constraint_v1>,
+}
+
 struct LockSurfaceListeners {
     _commit: Registration,
     _destroy: Registration,
@@ -1060,6 +1092,7 @@ impl<'d> Backend<'d> {
             idle_inhibitors: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
+            pointer_constraints: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime,
             deliver: hooks.deliver,
@@ -1461,6 +1494,23 @@ impl<'d> Backend<'d> {
                 Registration::link_bare(
                     &raw mut (*manager.as_ptr()).events.new_lock,
                     on_new_session_lock::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
+        if let Some(manager) = runtime.pointer_constraints_manager_ptr() {
+            // SAFETY: `create_pointer_constraints_manager` returned a non-null
+            // manager owned by the display, which this call requires to outlive
+            // it, exactly as for the xdg shell above — null liveness is correct.
+            // This is the `new_constraint` signal wlroots raises when a client
+            // confines or locks the pointer to a surface region;
+            // `on_new_pointer_constraint` records the constraint's lifecycle.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.new_constraint,
+                    on_new_pointer_constraint::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     std::ptr::null(),
                 )
@@ -2350,6 +2400,150 @@ unsafe extern "C" fn on_idle_inhibitor_destroy<S: Handlers>(
         runtime.refresh_idle_inhibited();
         let key = l as usize;
         let removed = (*session).idle_inhibitors.borrow_mut().remove(&key);
+        drop(removed);
+    }
+}
+
+/// A client bound `zwp_pointer_constraints_v1` and requested a constraint
+/// (confine or lock) on one of its surfaces. Links this run's `set_region` and
+/// `destroy` listeners on the constraint's own signals and records them in
+/// `Session::pointer_constraints`, keyed by the `destroy` listener's own
+/// address — the same keying discipline every other destroy-tracked table here
+/// uses, so identity never depends on what the destroy signal happens to pass
+/// as `data` (it passes the constraint, but this code does not rely on that).
+///
+/// This is lifecycle + observability only: it does **not** activate the
+/// constraint. Which constraint becomes the active one — and the motion
+/// suppression/clamp it then drives — is the enforcement path's job, landing in
+/// a follow-up task; a freshly created constraint stays inactive here and that
+/// path picks it up on the next focus resolution.
+unsafe extern "C" fn on_new_pointer_constraint<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_pointer_constraints_v1.events.new_constraint`, whose `session` is
+    // the `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_pointer_constraint_v1`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(constraint) = NonNull::new(data.cast::<sys::wlr_pointer_constraint_v1>()) else {
+            return;
+        };
+
+        // Linked on the constraint's own `set_region`/`destroy`. No `alive`
+        // backstop, as for the idle inhibitor this mirrors: the constraint
+        // cannot be freed by anything other than the destroy this very listener
+        // watches, so there is no "owner died first" case to guard against.
+        let set_region = Registration::link_bare(
+            &raw mut (*constraint.as_ptr()).events.set_region,
+            on_pointer_constraint_set_region::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        let destroy = Registration::link_bare(
+            &raw mut (*constraint.as_ptr()).events.destroy,
+            on_pointer_constraint_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        // Key by the destroy listener's own address: the destroy handler
+        // recovers the same key from the `l` it is handed, never from the
+        // signal `data`.
+        let key = destroy.listener_addr();
+        (*session).pointer_constraints.borrow_mut().insert(
+            key,
+            PointerConstraintListeners {
+                _set_region: set_region,
+                _destroy: destroy,
+                constraint,
+            },
+        );
+    }
+}
+
+/// A constraint's region changed. wlroots keeps `constraint->region` current,
+/// so there is nothing to store — but if the *active* constraint's region just
+/// moved off the cursor, the confine invariant (cursor inside the region) is
+/// broken, and every future motion's `wlr_region_confine` would return `false`
+/// and wedge the pointer. A client can trigger exactly that. So when the
+/// constraint whose region changed is the active one, re-anchor the cursor back
+/// into the region immediately, restoring the invariant the moment it could
+/// break.
+///
+/// The constraint is identified from the firing listener `l` — matched against
+/// each entry's own `set_region` `Registration` — never from the signal `data`,
+/// the same discipline the destroy handler uses.
+unsafe extern "C" fn on_pointer_constraint_set_region<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_pointer_constraint` into a live constraint's
+    // `events.set_region`; the constraint is live for this emission.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+
+        // Which constraint fired? Match `l` against each entry's `set_region`
+        // listener address (the map is keyed by the *destroy* listener, so a
+        // scan is needed here).
+        let key = l as usize;
+        let constraint = {
+            let map = (*session).pointer_constraints.borrow();
+            map.values()
+                .find(|entry| entry._set_region.listener_addr() == key)
+                .map(|entry| entry.constraint)
+        };
+
+        let Some(constraint) = constraint else {
+            return;
+        };
+        if runtime.active_constraint() != Some(constraint) {
+            return;
+        }
+
+        // Restore the confine invariant. If the cursor moved, re-notify the
+        // surface under its new position so pointer focus stays correct.
+        if let Some((x, y)) = runtime.reanchor_cursor_into_region(constraint)
+            && let Some(seat) = runtime.seat_ptr()
+        {
+            enter_surface_under_cursor(session, seat.as_ptr(), x, y, 0);
+        }
+    }
+}
+
+/// The pointer constraint is about to be freed. Removes this constraint's entry
+/// from `Session::pointer_constraints` — keyed by the firing listener's own
+/// address (`l`), NOT the signal `data` — which drops and so unlinks its two
+/// listeners together, sound for the same reason `on_idle_inhibitor_destroy`
+/// unlinking itself is: `wl_signal_emit_mutable` has already advanced its
+/// cursor past this listener before the callback runs. If the constraint being
+/// destroyed is the one recorded in
+/// [`RuntimeInner::active_constraint`](crate::runtime::RuntimeInner), clears it
+/// so enforcement stops — comparing against the constraint captured in the
+/// removed entry, never against the destroy signal's `data`.
+unsafe extern "C" fn on_pointer_constraint_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_pointer_constraint` into this constraint's own
+    // `events.destroy`; the constraint is still live memory for this emission.
+    // Identity comes from `l` — the address of this handler's own listener,
+    // under which `on_new_pointer_constraint` keyed the entry — never from the
+    // signal `data`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let key = l as usize;
+        let removed = (*session).pointer_constraints.borrow_mut().remove(&key);
+        if let Some(entry) = &removed
+            && runtime.active_constraint() == Some(entry.constraint)
+        {
+            runtime.inner.active_constraint.set(None);
+        }
         drop(removed);
     }
 }
@@ -4272,6 +4466,78 @@ unsafe extern "C" fn on_modifiers<S: Handlers>(
     }
 }
 
+/// Reconcile pointer-constraint activation with the surface that just gained
+/// pointer focus. Called from the single pointer-focus chokepoint
+/// ([`enter_surface_under_cursor`]) so activation tracks focus exactly.
+///
+/// First, if a constraint is active on a *different* surface than `focused`,
+/// deactivate it: send its `deactivated` event and clear `active_constraint`.
+/// When that constraint was a **lock** carrying an enabled cursor hint, warp
+/// the cursor to the hint first — the client's requested resting place for the
+/// pointer once the lock releases. (If the active constraint is already on
+/// `focused`, nothing changes and no re-activation is attempted.)
+///
+/// Then, if `focused` has a stored constraint for this `seat`, activate it:
+/// send its `activated` event and record it as `active_constraint`. This is
+/// gated on [`Runtime::is_session_locked`] — while the session is locked the
+/// lock surface owns focus and no client constraint may take the pointer, a
+/// defensive guard on top of the focus routing that already keeps a normal
+/// surface from being entered under a lock.
+///
+/// # Safety
+///
+/// `session` is this callback's own live `Session`; `focused` is a surface
+/// from this runtime's scene or null; `seat` must be a live `wlr_seat`.
+unsafe fn update_pointer_constraint_activation<S: Handlers>(
+    session: *const Session<'_, S>,
+    focused: *mut sys::wlr_surface,
+    seat: *mut sys::wlr_seat,
+) {
+    // SAFETY: `session` is live per the contract; the constraints it references
+    // are live for as long as they remain in the map (their destroy handler
+    // removes them synchronously).
+    unsafe {
+        let runtime = (*session).runtime;
+
+        // Deactivate the active constraint if focus moved off its surface.
+        if let Some(active) = runtime.active_constraint() {
+            if (*active.as_ptr()).surface == focused {
+                // Same surface still focused — the active constraint stands.
+                return;
+            }
+            // Locked with an enabled cursor hint: park the cursor at the hint
+            // before releasing the lock.
+            if (*active.as_ptr()).type_
+                == sys::wlr_pointer_constraint_v1_type::WLR_POINTER_CONSTRAINT_V1_LOCKED
+                && (*active.as_ptr()).current.cursor_hint.enabled
+            {
+                let hx = (*active.as_ptr()).current.cursor_hint.x;
+                let hy = (*active.as_ptr()).current.cursor_hint.y;
+                runtime.warp_cursor(hx, hy);
+            }
+            sys::wlr_pointer_constraint_v1_send_deactivated(active.as_ptr());
+            runtime.inner.active_constraint.set(None);
+        }
+
+        // Do not activate onto no surface, nor while the session is locked.
+        if focused.is_null() || runtime.is_session_locked() {
+            return;
+        }
+
+        // Activate a constraint stored for `focused` on this seat, if any.
+        let candidate = {
+            let map = (*session).pointer_constraints.borrow();
+            map.values()
+                .map(|entry| entry.constraint)
+                .find(|c| (*c.as_ptr()).surface == focused && (*c.as_ptr()).seat == seat)
+        };
+        if let Some(c) = candidate {
+            sys::wlr_pointer_constraint_v1_send_activated(c.as_ptr());
+            runtime.inner.active_constraint.set(Some(c));
+        }
+    }
+}
+
 /// Move the pointer focus and forward a motion to whatever the cursor is
 /// over, or clear pointer focus if it is over nothing. Shared by
 /// `on_pointer_motion`, `on_pointer_motion_absolute` and `on_pointer_button`
@@ -4293,24 +4559,37 @@ unsafe extern "C" fn on_modifiers<S: Handlers>(
 /// # Safety
 ///
 /// `seat` must be a live `wlr_seat`.
-unsafe fn enter_surface_under_cursor(
-    runtime: &Runtime,
+unsafe fn enter_surface_under_cursor<S: Handlers>(
+    session: *const Session<'_, S>,
     seat: *mut sys::wlr_seat,
     x: f64,
     y: f64,
     time_msec: u32,
 ) {
-    match runtime.leaf_surface_at(x, y) {
+    // SAFETY: `session` is this callback's own live `Session`; `runtime`
+    // outlives the call.
+    let runtime = unsafe { (*session).runtime };
+    let focused: *mut sys::wlr_surface = match runtime.leaf_surface_at(x, y) {
         // SAFETY: `leaf_surface_at` reads `surface` out of a live
         // `wlr_scene_surface` found in this runtime's own scene, which
         // outlives the call; the seat is live per this function's contract.
         Some((surface, sx, sy)) => unsafe {
             sys::wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
             sys::wlr_seat_pointer_notify_motion(seat, time_msec, sx, sy);
+            surface
         },
         // SAFETY: as above.
-        None => unsafe { sys::wlr_seat_pointer_notify_clear_focus(seat) },
-    }
+        None => unsafe {
+            sys::wlr_seat_pointer_notify_clear_focus(seat);
+            std::ptr::null_mut()
+        },
+    };
+    // This is the single pointer-focus chokepoint, so pointer-constraint
+    // activation tracks focus exactly: whatever surface (or nothing) the
+    // cursor just entered is what a constraint may activate on.
+    // SAFETY: `session`, `focused` (a surface from this runtime's scene or
+    // null), and `seat` are all live for this call.
+    unsafe { update_pointer_constraint_activation(session, focused, seat) };
 }
 
 unsafe extern "C" fn on_pointer_motion<S: Handlers>(
@@ -4330,7 +4609,59 @@ unsafe extern "C" fn on_pointer_motion<S: Handlers>(
         };
 
         let device = &raw mut (*(*ev).pointer).base;
-        sys::wlr_cursor_move(cursor.as_ptr(), device, (*ev).delta_x, (*ev).delta_y);
+        let (dx, dy) = ((*ev).delta_x, (*ev).delta_y);
+        let (udx, udy) = ((*ev).unaccel_dx, (*ev).unaccel_dy);
+        let time_msec = (*ev).time_msec;
+
+        // Pointer-constraint enforcement, applied to the *absolute* cursor
+        // motion before it is committed. A relative-pointer client still gets
+        // the raw deltas afterward, constraint or not.
+        let active = runtime.active_constraint();
+        let locked = matches!(active, Some(c)
+            if (*c.as_ptr()).type_
+                == sys::wlr_pointer_constraint_v1_type::WLR_POINTER_CONSTRAINT_V1_LOCKED);
+        match active {
+            // LOCKED: the cursor is frozen. Do not move it at all — skip the
+            // `wlr_cursor_move` entirely — but still emit relative motion below
+            // (a locked pointer is exactly what a relative-pointer client wants).
+            Some(_) if locked => {}
+            // CONFINED: clamp the intended motion into the region.
+            Some(c) => {
+                let region = &raw const (*c.as_ptr()).region;
+                let (cx0, cy0) = ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y);
+                let (nx, ny) = (cx0 + dx, cy0 + dy);
+                match runtime.confine_motion(region, cx0, cy0, nx, ny) {
+                    // Old position was inside the region: warp to the confined
+                    // point (never `wlr_cursor_move`, which would ignore the
+                    // clamp).
+                    Some((cxc, cyc)) => runtime.warp_cursor(cxc, cyc),
+                    // Old position outside the region — `confine` returned
+                    // `false` and left its out-params untouched. Re-anchor the
+                    // cursor into the region rather than "keeping it put",
+                    // which would wedge every future motion (a client can force
+                    // this via `set_region`; the set-region handler re-anchors
+                    // too, making this arm belt-and-suspenders).
+                    None => {
+                        runtime.reanchor_cursor_into_region(c);
+                    }
+                }
+            }
+            // Unconstrained: the ordinary path.
+            None => sys::wlr_cursor_move(cursor.as_ptr(), device, dx, dy),
+        }
+
+        // Always, on every motion regardless of constraint: forward the raw
+        // deltas to relative-pointer clients.
+        if let Some(seat) = runtime.seat_ptr() {
+            runtime.send_relative_pointer_motion(seat.as_ptr(), time_msec, dx, dy, udx, udy);
+        }
+
+        // A locked pointer produced no absolute motion: nothing to reposition,
+        // notify, or re-enter. Everything below concerns the moved cursor.
+        if locked {
+            return;
+        }
+
         runtime.ensure_cursor_image();
 
         let (x, y) = ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y);
@@ -4349,13 +4680,13 @@ unsafe extern "C" fn on_pointer_motion<S: Handlers>(
             Event::PointerMotion {
                 x_milli: (x * 1000.0) as i64,
                 y_milli: (y * 1000.0) as i64,
-                time_msec: (*ev).time_msec,
+                time_msec,
             },
             deliver,
         );
 
         if let Some(seat) = runtime.seat_ptr() {
-            enter_surface_under_cursor(runtime, seat.as_ptr(), x, y, (*ev).time_msec);
+            enter_surface_under_cursor(session, seat.as_ptr(), x, y, time_msec);
             sys::wlr_seat_pointer_notify_frame(seat.as_ptr());
         }
     }
@@ -4379,7 +4710,58 @@ unsafe extern "C" fn on_pointer_motion_absolute<S: Handlers>(
         };
 
         let device = &raw mut (*(*ev).pointer).base;
-        sys::wlr_cursor_warp_absolute(cursor.as_ptr(), device, (*ev).x, (*ev).y);
+        let time_msec = (*ev).time_msec;
+
+        // Where this absolute event *intends* to put the cursor, in layout
+        // coordinates: the event carries normalised 0..1 coordinates, so ask
+        // wlroots to map them exactly as `wlr_cursor_warp_absolute` would.
+        let (cx0, cy0) = ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y);
+        let (mut lx, mut ly) = (cx0, cy0);
+        sys::wlr_cursor_absolute_to_layout_coords(
+            cursor.as_ptr(),
+            device,
+            (*ev).x,
+            (*ev).y,
+            &mut lx,
+            &mut ly,
+        );
+        // Deltas for relative-pointer clients: the intended layout position
+        // minus the current one. An absolute event carries no separate
+        // unaccelerated delta, so the same delta feeds both.
+        let (dx, dy) = (lx - cx0, ly - cy0);
+
+        let active = runtime.active_constraint();
+        let locked = matches!(active, Some(c)
+            if (*c.as_ptr()).type_
+                == sys::wlr_pointer_constraint_v1_type::WLR_POINTER_CONSTRAINT_V1_LOCKED);
+        match active {
+            // LOCKED: freeze — skip the warp entirely.
+            Some(_) if locked => {}
+            // CONFINED: clamp the intended target into the region before
+            // warping (the confine keys off the current position, which the
+            // invariant keeps inside the region; if it has slipped out, the
+            // `None` arm re-anchors).
+            Some(c) => {
+                let region = &raw const (*c.as_ptr()).region;
+                match runtime.confine_motion(region, cx0, cy0, lx, ly) {
+                    Some((cxc, cyc)) => runtime.warp_cursor(cxc, cyc),
+                    None => {
+                        runtime.reanchor_cursor_into_region(c);
+                    }
+                }
+            }
+            // Unconstrained: the ordinary absolute warp.
+            None => sys::wlr_cursor_warp_absolute(cursor.as_ptr(), device, (*ev).x, (*ev).y),
+        }
+
+        if let Some(seat) = runtime.seat_ptr() {
+            runtime.send_relative_pointer_motion(seat.as_ptr(), time_msec, dx, dy, dx, dy);
+        }
+
+        if locked {
+            return;
+        }
+
         runtime.ensure_cursor_image();
 
         let (x, y) = ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y);
@@ -4394,13 +4776,13 @@ unsafe extern "C" fn on_pointer_motion_absolute<S: Handlers>(
             Event::PointerMotion {
                 x_milli: (x * 1000.0) as i64,
                 y_milli: (y * 1000.0) as i64,
-                time_msec: (*ev).time_msec,
+                time_msec,
             },
             deliver,
         );
 
         if let Some(seat) = runtime.seat_ptr() {
-            enter_surface_under_cursor(runtime, seat.as_ptr(), x, y, (*ev).time_msec);
+            enter_surface_under_cursor(session, seat.as_ptr(), x, y, time_msec);
             sys::wlr_seat_pointer_notify_frame(seat.as_ptr());
         }
     }
@@ -4447,7 +4829,7 @@ unsafe extern "C" fn on_pointer_button<S: Handlers>(
             // motion would, so a click on a window that never got a prior
             // motion event (the pointer warped there, say) still has pointer
             // focus before the button reaches it.
-            enter_surface_under_cursor(runtime, seat.as_ptr(), x, y, (*ev).time_msec);
+            enter_surface_under_cursor(session, seat.as_ptr(), x, y, (*ev).time_msec);
             sys::wlr_seat_pointer_notify_button(
                 seat.as_ptr(),
                 (*ev).time_msec,
@@ -4957,6 +5339,7 @@ mod tests {
                 idle_inhibitors: RefCell::new(HashMap::new()),
                 session_locks: RefCell::new(HashMap::new()),
                 lock_surfaces: RefCell::new(HashMap::new()),
+                pointer_constraints: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
                 runtime: &runtime,
                 deliver: deliver::<Recorder>,
@@ -5132,6 +5515,7 @@ mod tests {
             idle_inhibitors: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
+            pointer_constraints: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime: &runtime,
             deliver: deliver::<Recorder>,

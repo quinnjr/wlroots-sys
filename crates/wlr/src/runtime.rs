@@ -164,6 +164,27 @@ pub(crate) struct RuntimeInner {
     /// globals.
     pub(crate) idle_inhibit_manager: RefCell<Option<NonNull<sys::wlr_idle_inhibit_manager_v1>>>,
 
+    /// The pointer-constraints (`zwp_pointer_constraints_v1`) manager, once
+    /// created — lets a client confine or lock the pointer to a region of a
+    /// surface. `Option`, same rationale as the other manager globals.
+    pub(crate) pointer_constraints_manager:
+        RefCell<Option<NonNull<sys::wlr_pointer_constraints_v1>>>,
+
+    /// The relative-pointer (`zwp_relative_pointer_manager_v1`) manager, once
+    /// created — lets a client receive unaccelerated relative pointer motion
+    /// events, independent of absolute cursor position. `Option`, same
+    /// rationale as the other manager globals.
+    pub(crate) relative_pointer_manager:
+        RefCell<Option<NonNull<sys::wlr_relative_pointer_manager_v1>>>,
+
+    /// The pointer constraint currently activated on the focused surface, or
+    /// `None` when the pointer is unconstrained. `backend.rs`'s
+    /// `on_pointer_constraint_destroy` clears this the moment the active
+    /// constraint is destroyed (so enforcement stops); the activation policy —
+    /// which constraint becomes active on a focus change — lands in a follow-up
+    /// task. Init `None`.
+    pub(crate) active_constraint: std::cell::Cell<Option<NonNull<sys::wlr_pointer_constraint_v1>>>,
+
     /// The number of currently live `wlr_idle_inhibitor_v1` objects, tracked
     /// so [`Runtime::refresh_idle_inhibited`] knows whether to gate the idle
     /// notifier. `backend.rs`'s `on_new_idle_inhibitor`/
@@ -739,6 +760,9 @@ impl Runtime {
                 virtual_keyboard_manager: RefCell::new(None),
                 virtual_pointer_manager: RefCell::new(None),
                 screencopy_manager: RefCell::new(None),
+                pointer_constraints_manager: RefCell::new(None),
+                relative_pointer_manager: RefCell::new(None),
+                active_constraint: std::cell::Cell::new(None),
                 idle_notifier: RefCell::new(None),
                 idle_inhibit_manager: RefCell::new(None),
                 idle_inhibitors: std::cell::Cell::new(0),
@@ -2166,6 +2190,267 @@ impl Runtime {
         let raw = NonNull::new(raw).ok_or(Error::Create("wlr_screencopy_manager_v1_create"))?;
         *self.inner.screencopy_manager.borrow_mut() = Some(raw);
         Ok(())
+    }
+
+    /// Create the `zwp_pointer_constraints_v1` global, letting clients confine
+    /// or lock the pointer to a region of a surface. Errors if called twice.
+    pub fn create_pointer_constraints_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.pointer_constraints_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_pointer_constraints_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_pointer_constraints_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_pointer_constraints_v1_create"))?;
+        *self.inner.pointer_constraints_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// The `zwp_pointer_constraints_v1` manager, once created via
+    /// [`Runtime::create_pointer_constraints_manager`] — read by `backend.rs`'s
+    /// `register_toplevel_and_input` to link the `new_constraint` listener.
+    pub(crate) fn pointer_constraints_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_pointer_constraints_v1>> {
+        *self.inner.pointer_constraints_manager.borrow()
+    }
+
+    /// The pointer constraint currently activated on the focused surface, or
+    /// `None` when unconstrained. Read by the enforcement path (a follow-up
+    /// task); cleared by `backend.rs`'s `on_pointer_constraint_destroy` when
+    /// the active constraint is destroyed.
+    pub(crate) fn active_constraint(&self) -> Option<NonNull<sys::wlr_pointer_constraint_v1>> {
+        self.inner.active_constraint.get()
+    }
+
+    /// The cursor's current position in layout coordinates, or `(0.0, 0.0)`
+    /// when no seat cursor exists (a consumer that never called
+    /// [`create_seat`](Runtime::create_seat)). Read-only; the enforcement path
+    /// and tests consult it to observe where the pointer is relative to any
+    /// active constraint's region.
+    ///
+    /// A one-line delegate to [`pointer_position`](Runtime::pointer_position),
+    /// the pre-existing accessor for the exact same value: keeping a single
+    /// source of truth rather than two divergent bodies. The name is retained
+    /// because tests and the `DbCommand` layer reference it.
+    pub fn cursor_position(&self) -> (f64, f64) {
+        self.pointer_position()
+    }
+
+    /// Whether the layout point `(x, y)` lies inside `region`, decided by
+    /// wlroots' own predicate: [`wlr_region_confine`] returns `true` exactly
+    /// when its *start* point is in the region (it `floor`s the start to
+    /// integer pixels and asks `pixman_region32_contains_point`), so a
+    /// zero-length confine from the point to itself is a containment test that
+    /// uses the very same rounding the confine path uses. This is why the
+    /// enforcement path can rely on it: the answer here matches what
+    /// [`confine_motion`](Runtime::confine_motion) will decide for a motion
+    /// starting at the same point. (The dedicated `pixman_region32_*`
+    /// predicates are not exposed by `wlr-sys`'s `wlr_*`/`WLR_*` bindgen
+    /// allowlist; `wlr_region_confine` is, and is the wlroots-consistent
+    /// substitute.)
+    ///
+    /// # Safety
+    ///
+    /// `region` must point to a live `pixman_region32_t` (e.g. the `region`
+    /// field of a live `wlr_pointer_constraint_v1`).
+    pub(crate) unsafe fn region_contains_point(
+        &self,
+        region: *const sys::pixman_region32_t,
+        x: f64,
+        y: f64,
+    ) -> bool {
+        let mut ox = x;
+        let mut oy = y;
+        // SAFETY: `region` is live per the contract; the two out-params are
+        // live stack locals. A start==end confine writes the start back into
+        // the out-params on `true` and leaves them untouched on `false`; only
+        // the bool is consulted.
+        unsafe { sys::wlr_region_confine(region, x, y, x, y, &mut ox, &mut oy) }
+    }
+
+    /// Confine a motion from `(from_x, from_y)` to the intended `(to_x, to_y)`
+    /// against `region`, returning the confined layout point when the *old*
+    /// position `(from_x, from_y)` is inside the region, or `None` when it is
+    /// not (the ray never entered the region). This is a thin, safe wrapper
+    /// over [`wlr_region_confine`] that turns its `bool`/out-param contract
+    /// into an `Option`: on `false` `wlr_region_confine` leaves the out-params
+    /// untouched, so the caller must never read them — returning `None` makes
+    /// that impossible to get wrong.
+    ///
+    /// # Safety
+    ///
+    /// `region` must point to a live `pixman_region32_t`.
+    pub(crate) unsafe fn confine_motion(
+        &self,
+        region: *const sys::pixman_region32_t,
+        from_x: f64,
+        from_y: f64,
+        to_x: f64,
+        to_y: f64,
+    ) -> Option<(f64, f64)> {
+        // Initialised before the call so a spurious read can never see
+        // uninitialised memory; on `false` they are simply discarded.
+        let mut cx = to_x;
+        let mut cy = to_y;
+        // SAFETY: `region` is live per the contract; out-params are live locals.
+        let ok = unsafe {
+            sys::wlr_region_confine(region, from_x, from_y, to_x, to_y, &mut cx, &mut cy)
+        };
+        if ok { Some((cx, cy)) } else { None }
+    }
+
+    /// Warp the cursor to the layout point `(x, y)`, clamping to the nearest
+    /// in-layout point if it falls outside the output layout
+    /// ([`wlr_cursor_warp_closest`], which — unlike [`wlr_cursor_warp`] —
+    /// always moves the cursor rather than no-op'ing on an out-of-bounds
+    /// target). Passes a null device so no device mapping re-constrains the
+    /// already-computed target. A no-op with no seat cursor.
+    pub(crate) fn warp_cursor(&self, x: f64, y: f64) {
+        let Some(cursor) = self.cursor_ptr() else {
+            return;
+        };
+        // SAFETY: `cursor` is this runtime's own live cursor from `create_seat`;
+        // a null device is explicitly allowed and means "ignore device mapping".
+        unsafe { sys::wlr_cursor_warp_closest(cursor.as_ptr(), std::ptr::null_mut(), x, y) };
+    }
+
+    /// Send a relative-motion event to any `zwp_relative_pointer_v1` clients on
+    /// `seat`, converting the event's millisecond timestamp to the microseconds
+    /// the protocol carries. A no-op when no relative-pointer manager was
+    /// created. Emitted on *every* pointer motion — constrained or not — since a
+    /// relative-pointer client (a game, say) wants the raw deltas regardless of
+    /// where the absolute cursor is, or whether it moved at all under a lock.
+    ///
+    /// # Safety
+    ///
+    /// `seat` must be a live `wlr_seat`.
+    pub(crate) unsafe fn send_relative_pointer_motion(
+        &self,
+        seat: *mut sys::wlr_seat,
+        time_msec: u32,
+        dx: f64,
+        dy: f64,
+        unaccel_dx: f64,
+        unaccel_dy: f64,
+    ) {
+        let Some(mgr) = self.relative_pointer_manager() else {
+            return;
+        };
+        // SAFETY: `mgr` is the display-owned manager from
+        // `create_relative_pointer_manager`, live as long as this runtime;
+        // `seat` is live per the contract.
+        unsafe {
+            sys::wlr_relative_pointer_manager_v1_send_relative_motion(
+                mgr.as_ptr(),
+                seat,
+                (time_msec as u64) * 1000,
+                dx,
+                dy,
+                unaccel_dx,
+                unaccel_dy,
+            );
+        }
+    }
+
+    /// Restore the confine invariant for `constraint`: if the cursor has ended
+    /// up *outside* the constraint's region, warp it to a point genuinely
+    /// inside, returning that point (so the caller can re-enter the surface
+    /// under it). Returns `None` when no warp was needed or possible (cursor
+    /// already inside, or the region is empty).
+    ///
+    /// This exists because [`wlr_region_confine`]'s `bool` keys off the *old*
+    /// cursor position: a cursor left outside the region makes every future
+    /// confine return `false`, wedging the pointer forever — and a client can
+    /// trigger exactly that by moving its region off the cursor via
+    /// `set_region` while the constraint is live. Re-anchoring the moment that
+    /// can happen keeps the motion-path `false` arm effectively unreachable.
+    ///
+    /// The region is a set of rectangles that need not fill its bounding box,
+    /// so clamping into the extents can land in a hole (inside the extents,
+    /// outside the region) for a client-crafted L-shaped/split region. The
+    /// extents-clamp is therefore only a *candidate*: if it is still outside,
+    /// this falls back to clamping into the region's first rectangle, which is
+    /// inside by construction. Rectangular regions — the common case — resolve
+    /// on the first candidate, since a single rect's extents *is* the rect.
+    ///
+    /// # Safety
+    ///
+    /// `constraint` must point to a live `wlr_pointer_constraint_v1`.
+    pub(crate) unsafe fn reanchor_cursor_into_region(
+        &self,
+        constraint: NonNull<sys::wlr_pointer_constraint_v1>,
+    ) -> Option<(f64, f64)> {
+        // SAFETY: `constraint` is live per the contract; `region` is an inline
+        // field of it, and `data`/`extents` are plain fields of the
+        // `pixman_region32_t` there.
+        unsafe {
+            let region = &raw const (*constraint.as_ptr()).region;
+            let (cx, cy) = self.pointer_position();
+            if self.region_contains_point(region, cx, cy) {
+                // Invariant already holds — nothing to do.
+                return None;
+            }
+
+            let ext = (*constraint.as_ptr()).region.extents;
+            // Empty-region guard: pixman keeps an empty region's extents as a
+            // degenerate box, so there is nowhere valid to put the cursor.
+            // Never feed a garbage coordinate to the warp.
+            if ext.x2 <= ext.x1 || ext.y2 <= ext.y1 {
+                return None;
+            }
+
+            // Candidate 1: clamp into the extents box. Pixman boxes are
+            // half-open `[x1, x2)`, so the inclusive upper bound is `x2 - 1`
+            // (a non-empty box has `x2 > x1`, so `x2 - 1 >= x1` and the clamp
+            // range is valid).
+            let cand_x = cx.clamp(ext.x1 as f64, (ext.x2 - 1) as f64);
+            let cand_y = cy.clamp(ext.y1 as f64, (ext.y2 - 1) as f64);
+            let (wx, wy) = if self.region_contains_point(region, cand_x, cand_y) {
+                (cand_x, cand_y)
+            } else {
+                // The extents-clamp landed in a hole; fall back to the first
+                // rectangle, which is inside the region by construction.
+                let rect = first_region_rect(region, ext);
+                (
+                    cx.clamp(rect.x1 as f64, (rect.x2 - 1) as f64),
+                    cy.clamp(rect.y1 as f64, (rect.y2 - 1) as f64),
+                )
+            };
+
+            self.warp_cursor(wx, wy);
+            Some((wx, wy))
+        }
+    }
+
+    /// Create the `zwp_relative_pointer_manager_v1` global, letting clients
+    /// receive unaccelerated relative pointer motion events, independent of
+    /// absolute cursor position. Errors if called twice.
+    pub fn create_relative_pointer_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.relative_pointer_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_relative_pointer_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_relative_pointer_manager_v1_create(display.as_ptr()) };
+        let raw =
+            NonNull::new(raw).ok_or(Error::Create("wlr_relative_pointer_manager_v1_create"))?;
+        *self.inner.relative_pointer_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// The `zwp_relative_pointer_manager_v1` manager, once created via
+    /// [`Runtime::create_relative_pointer_manager`] — used internally by
+    /// [`send_relative_pointer_motion`](Runtime::send_relative_pointer_motion)
+    /// to forward raw deltas to relative-pointer clients on every motion.
+    pub(crate) fn relative_pointer_manager(
+        &self,
+    ) -> Option<NonNull<sys::wlr_relative_pointer_manager_v1>> {
+        *self.inner.relative_pointer_manager.borrow()
     }
 
     /// Create the `ext_idle_notifier_v1` global. Clients (e.g. swayidle) bind
@@ -4234,6 +4519,46 @@ impl Runtime {
     pub fn enable_test_touch(&self) {
         self.inner.test_touch_enabled.set(true);
         crate::backend::update_seat_capabilities(self);
+    }
+}
+
+/// The first rectangle of a pixman region, guaranteed inside the region by
+/// construction — the re-anchor fallback for a non-rectangular region whose
+/// extents-clamp landed in a hole.
+///
+/// A pixman region is either a single rectangle equal to its `extents` (when
+/// `data` is null) or a `data` header immediately followed by its rectangle
+/// array (pixman's decades-stable `PIXREGION_BOXPTR` layout — the boxes start
+/// one `pixman_region32_data` past `data`). The exact field layout this reads
+/// (`pixman_region32` / `pixman_region32_data` / `pixman_box32`) is pinned by
+/// `wlr-sys`'s own `const _` layout assertions, so this is not a guess about an
+/// opaque type. `extents` is passed in (already read by the caller) as the
+/// null-`data` answer and the `numRects == 0` backstop.
+///
+/// # Safety
+///
+/// `region` must point to a live `pixman_region32_t`; `extents` must be its
+/// (non-empty) extents box, so the fallback is only ever taken for a
+/// genuinely non-empty region.
+unsafe fn first_region_rect(
+    region: *const sys::pixman_region32_t,
+    extents: sys::pixman_box32,
+) -> sys::pixman_box32 {
+    // SAFETY: `region` is live per the contract. `data` null ⇒ the region is a
+    // single rect equal to `extents`. Otherwise the boxes follow the header:
+    // `(data as *const pixman_region32_data).add(1)` is exactly pixman's
+    // `PIXREGION_BOXPTR`, and a non-empty region has `numRects >= 1`, so the
+    // first box is initialised. The `numRects == 0` arm cannot arise for the
+    // non-empty region the caller guarantees, but is handled for total safety.
+    unsafe {
+        let data = (*region).data;
+        if data.is_null() || (*data).numRects == 0 {
+            extents
+        } else {
+            let boxes =
+                (data as *const sys::pixman_region32_data).add(1) as *const sys::pixman_box32;
+            *boxes
+        }
     }
 }
 

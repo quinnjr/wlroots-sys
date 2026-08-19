@@ -160,6 +160,48 @@ fn creating_the_screencopy_manager_twice_is_refused() {
 }
 
 #[test]
+fn creating_the_pointer_constraints_manager_twice_is_refused() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime
+        .create_pointer_constraints_manager(&display)
+        .expect("first");
+    assert!(
+        matches!(
+            runtime.create_pointer_constraints_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second pointer-constraints global would make the compositor advertise two"
+    );
+}
+
+#[test]
+fn cursor_position_is_the_origin_without_a_seat() {
+    // No `create_seat`, so there is no `wlr_cursor`; `cursor_position` must
+    // report the origin rather than dereferencing a null cursor. This is the
+    // reachable unit assertion for the accessor the constraint-enforcement path
+    // and the harness tests build on; full cursor motion is proven there.
+    let runtime = wlr::Runtime::new().expect("runtime");
+    assert_eq!(runtime.cursor_position(), (0.0, 0.0));
+}
+
+#[test]
+fn creating_the_relative_pointer_manager_twice_is_refused() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime
+        .create_relative_pointer_manager(&display)
+        .expect("first");
+    assert!(
+        matches!(
+            runtime.create_relative_pointer_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second relative-pointer global would make the compositor advertise two"
+    );
+}
+
+#[test]
 fn creating_the_idle_notifier_twice_is_refused() {
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
