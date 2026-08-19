@@ -2350,15 +2350,28 @@ impl Runtime {
         (entry.origin == NodeOrigin::Owned).then_some(entry.raw)
     }
 
-    /// `id`'s node, if moving or restyling it is allowed.
+    /// `id`'s node, if moving or restyling it is allowed — nodes this crate
+    /// created, and only those.
     ///
-    /// Everything except a band and the scene root: a band tree's origin is
-    /// `(0, 0)` by construction and
-    /// [`add_rect_in_band`](Runtime::add_rect_in_band)'s documented
-    /// coordinate space depends on it staying there.
+    /// Excludes `Protected` because a band tree's origin is `(0, 0)` by
+    /// construction and [`add_rect_in_band`](Runtime::add_rect_in_band)'s
+    /// documented coordinate space depends on it staying there.
+    ///
+    /// Excludes `Foreign` because those nodes belong to wlroots or to another
+    /// part of this crate — a toplevel's tree, a layer surface's tree, a
+    /// client's surface node — and this crate keeps placement bookkeeping for
+    /// them that a direct move would silently invalidate. `scene`'s module
+    /// doc has always promised that "every mutator on a protected or foreign
+    /// node returns `None`"; this used to test only for `Protected`, so the
+    /// promise held for half the nodes it named and
+    /// [`set_node_position`](Runtime::set_node_position) could walk a
+    /// toplevel's own tree out from under
+    /// [`set_toplevel_position`](Runtime::set_toplevel_position) and
+    /// [`raise_toplevel`](Runtime::raise_toplevel). Restack those through the
+    /// toplevel and layer APIs, which update the bookkeeping as they go.
     fn movable_node_ptr(&self, id: NodeId) -> Option<NonNull<sys::wlr_scene_node>> {
         let entry = self.node_entry(id)?;
-        (entry.origin != NodeOrigin::Protected).then_some(entry.raw)
+        (entry.origin == NodeOrigin::Owned).then_some(entry.raw)
     }
 
     /// `id`'s node as a tree, or `None` if it is not one.
@@ -7962,5 +7975,40 @@ mod tests {
             "and one moved back out must stop dying with it"
         );
         assert_eq!(rt.remove_rect(rect), Some(()));
+    }
+
+    /// A foreign node refuses the mutators, as `scene`'s module doc promises.
+    ///
+    /// It promised it for protected *and* foreign nodes, but the check tested
+    /// only for protected — so this half was documented and not enforced, and
+    /// `set_node_position` could move a toplevel's own tree while
+    /// `set_toplevel_position` and `raise_toplevel` went on believing they
+    /// knew where it was.
+    ///
+    /// `set_node_enabled` is deliberately still allowed: its own doc grants it
+    /// on every origin, and hiding a node breaks no bookkeeping.
+    #[test]
+    fn a_foreign_node_refuses_the_mutators_but_still_hides() {
+        let rt = headless_runtime();
+        let band = rt.band_ptr(Band::Toplevel).expect("band");
+        // SAFETY: the band tree is this runtime's own and lives for the process.
+        let tree = unsafe { sys::wlr_scene_tree_create(band.as_ptr()) };
+        let tree = NonNull::new(tree).expect("tree");
+
+        // SAFETY: `tree` was just created and is live.
+        let foreign =
+            unsafe { rt.ensure_node_id(&raw mut (*tree.as_ptr()).node, NodeOrigin::Foreign) }
+                .expect("a foreign node gets an id on demand");
+
+        assert_eq!(
+            rt.set_node_position(foreign, 5, 5),
+            None,
+            "moving a node this crate does not own must be refused"
+        );
+        assert_eq!(
+            rt.set_node_enabled(foreign, false),
+            Some(()),
+            "but hiding it is allowed on every origin"
+        );
     }
 }
