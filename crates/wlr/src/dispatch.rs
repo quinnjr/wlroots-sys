@@ -201,6 +201,33 @@ pub(crate) fn in_handler() -> bool {
 }
 
 thread_local! {
+    /// Set while a handler *delivery* is running on this thread.
+    ///
+    /// Narrower than [`IN_HANDLER`], which any borrow guard also raises. Only
+    /// [`HandlerGuard`] sets this one, so it answers "could a handler be
+    /// holding a [`BorrowedFd`](std::os::fd::BorrowedFd) this crate handed
+    /// it", which is a different question from "could a handle be live".
+    ///
+    /// [`crate::Runtime::remove_fd`] needs the narrow one. It defers the
+    /// `OwnedFd`'s close when a handler might still be reading the
+    /// descriptor, and the deferred queue is drained per-turn by a run. Asking
+    /// `in_handler()` made a scene borrow taken with no run on the stack — the
+    /// ordinary way to inspect the scene by id — look like a delivery, so
+    /// `rt.with_node(id, |_| rt.remove_fd(src))` queued the fd against a drain
+    /// that was never going to happen and leaked it for the process's life.
+    /// A borrow guard cannot be holding an fd borrow: the fd borrow only
+    /// exists for the duration of a `fd_ready` call, and that is exactly what
+    /// raises this flag.
+    static IN_DELIVERY: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether a handler delivery — not merely a borrow guard — is on this
+/// thread's stack. See [`IN_DELIVERY`].
+pub(crate) fn in_delivery() -> bool {
+    IN_DELIVERY.get()
+}
+
+thread_local! {
     /// The `wl_display` pointer (as `usize`) [`crate::Backend::run_all`] is
     /// currently driving, or `0` when no `run_all` call is on this thread's
     /// stack.
@@ -270,6 +297,10 @@ impl Drop for DisplayPinGuard {
 struct HandlerGuard<'a> {
     in_dispatch: &'a Cell<bool>,
 
+    /// As `previous`, for [`IN_DELIVERY`] — the narrower flag that says a
+    /// delivery specifically, rather than any borrow guard, is on the stack.
+    previous_delivery: bool,
+
     /// What [`IN_HANDLER`] read on the way in, restored rather than cleared on
     /// the way out. Today it is always `false` — a second dispatcher on one
     /// thread is what `Backend::run`'s `ReentryGuard` refuses — but restoring
@@ -282,9 +313,11 @@ impl<'a> HandlerGuard<'a> {
     fn enter(in_dispatch: &'a Cell<bool>) -> Self {
         in_dispatch.set(true);
         let previous = IN_HANDLER.replace(true);
+        let previous_delivery = IN_DELIVERY.replace(true);
         HandlerGuard {
             in_dispatch,
             previous,
+            previous_delivery,
         }
     }
 }
@@ -292,6 +325,7 @@ impl<'a> HandlerGuard<'a> {
 impl Drop for HandlerGuard<'_> {
     fn drop(&mut self) {
         IN_HANDLER.set(self.previous);
+        IN_DELIVERY.set(self.previous_delivery);
         self.in_dispatch.set(false);
     }
 }

@@ -300,6 +300,42 @@ fn a_huge_expansion_grows_rather_than_wrapping() {
     assert_eq!((small.width, small.height), (20, 20));
 }
 
+/// The expansion bound comes from the corners pixman holds, not from
+/// `extents()`.
+///
+/// `extents()` returns a `Box2D`, whose `width` is `x2 - x1` computed with
+/// `saturating_sub`. For a region spanning `x1 = -2` to `x2 = i32::MAX` that
+/// saturates, and reconstructing the right edge as `x + width` lands on
+/// `i32::MAX - 2` — so the bound claimed two pixels of headroom at an edge
+/// with none, and `wlr_region_expand`'s `x2 + distance` overflowed anyway,
+/// which is the wrap the whole clamp exists to prevent.
+///
+/// The span is built as a union of two far-apart boxes because no single
+/// `Box2D` can express it: `width` would have to be `i32::MAX + 2`.
+#[test]
+fn the_expansion_bound_survives_a_span_wider_than_i32() {
+    let r = Region::from_boxes(&[Box2D::new(-2, -2, 4, 4), Box2D::new(i32::MAX - 1, -2, 1, 4)]);
+    let before = r.extents();
+    assert_eq!(before.x, -2, "left corner as built");
+    assert_eq!(
+        before.width,
+        i32::MAX,
+        "the true span does not fit, so extents() saturates — which is the trap"
+    );
+
+    for distance in [1, 2, 3, 1000, u32::MAX] {
+        let e = r.expanded(distance).extents();
+        assert!(
+            e.x <= before.x,
+            "expanding by {distance} moved the left edge inward: {e:?}"
+        );
+        assert!(
+            e.width >= before.width,
+            "expanding by {distance} shrank the region: {e:?}"
+        );
+    }
+}
+
 /// Both constructors treat a box whose far corner does not fit as empty.
 ///
 /// They used to disagree: `from_box` produced a pixman complaint and nothing,

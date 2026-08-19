@@ -57,8 +57,7 @@ fn a_node_borrow_refuses_run_all_as_well_as_dispatch() {
     // One display throughout: `Runtime` pins itself to the display
     // `init_graphics` saw, and asserts if a run drives a different one.
     headless_env();
-    let display: &'static wlr::Display =
-        Box::leak(Box::new(wlr::Display::new().expect("display")));
+    let display: &'static wlr::Display = Box::leak(Box::new(wlr::Display::new().expect("display")));
     let backend: &'static wlr::Backend<'static> = Box::leak(Box::new(
         wlr::Backend::autocreate(&display.event_loop()).expect("backend"),
     ));
@@ -679,6 +678,22 @@ fn buffer_node_properties_round_trip() {
         .with_scene_buffer(node, |b| (b.dest_size(), b.source_box()))
         .expect("borrowable");
     assert_eq!(observed, (None, None));
+
+    // A half-set pair is not a destination size either. wlroots scales to one
+    // only when `dst_width > 0 && dst_height > 0`, so `(0, 200)` names a
+    // destination nothing is being scaled to; reporting `Some` for it would
+    // hand back a size that does not exist.
+    assert_eq!(rt.set_scene_buffer_dest_size(node, 0, 200), Some(()));
+    let observed = rt
+        .with_scene_buffer(node, |b| b.dest_size())
+        .expect("borrowable");
+    assert_eq!(observed, None, "one zero dimension is still no dest size");
+
+    assert_eq!(rt.set_scene_buffer_dest_size(node, 200, 0), Some(()));
+    let observed = rt
+        .with_scene_buffer(node, |b| b.dest_size())
+        .expect("borrowable");
+    assert_eq!(observed, None, "the other zero dimension likewise");
 }
 
 /// The colour setters are accepted on a live buffer node. What they mean is

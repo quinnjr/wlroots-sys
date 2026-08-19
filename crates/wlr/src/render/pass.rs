@@ -522,9 +522,7 @@ impl<'a> TextureOptions<'a> {
             return true;
         }
         // The renderer must advertise the encoding at all...
-        if self.color_encoding != ColorEncoding::None
-            && !encodings.contains(self.color_encoding)
-        {
+        if self.color_encoding != ColorEncoding::None && !encodings.contains(self.color_encoding) {
             return true;
         }
         // ...and it must be one the non-YCbCr pipeline key accepts, since we

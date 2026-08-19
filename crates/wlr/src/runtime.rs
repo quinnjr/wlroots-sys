@@ -1047,7 +1047,14 @@ impl Runtime {
         // still sees the descriptor closed synchronously, matching the
         // pre-0.20.5 behaviour for every case that isn't this one's new
         // re-entrant hazard.
-        if crate::dispatch::in_handler() {
+        //
+        // `in_delivery()`, not `in_handler()`. The latter is also raised by
+        // the scene borrow guards, which cannot be holding an fd borrow — that
+        // borrow exists only for the duration of an `fd_ready` call. Asking
+        // the broad question made `rt.with_node(id, |_| rt.remove_fd(src))`
+        // with no run on the stack queue the fd against `drain_pending_closes`,
+        // which only a run performs, so it was never closed at all.
+        if crate::dispatch::in_delivery() {
             self.inner.pending_close.borrow_mut().push(removed.fd);
         } else {
             drop(removed.fd);
@@ -4867,8 +4874,19 @@ impl Runtime {
     /// genuine unlock — a locker dying keeps the session locked, so its fill
     /// must remain to cover the now-uncovered outputs.
     fn remove_lock_fill(&self) {
-        if let Some(id) = self.inner.session_lock_fill.take() {
-            self.remove_rect(id);
+        // Take the id only once the destroy has actually happened.
+        //
+        // `remove_rect` refuses while a node borrow is live, and the fill is
+        // the opaque black rect that hides the desktop under a lock. Taking
+        // first meant that on the refused path the rect survived with its id
+        // gone: the session unlocks, the screen stays black, and there is no
+        // longer an id to remove it by. Unrecoverable from safe code, from a
+        // path with no error to report.
+        let Some(id) = self.inner.session_lock_fill.get() else {
+            return;
+        };
+        if self.remove_rect(id).is_some() {
+            self.inner.session_lock_fill.set(None);
         }
     }
 

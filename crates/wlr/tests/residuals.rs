@@ -51,6 +51,49 @@ fn remove_fd_forgets_the_declaration() {
     assert_eq!(runtime.remove_fd(id), None);
 }
 
+/// `remove_fd` closes the descriptor from inside a scene borrow, because a
+/// borrow is not a delivery.
+///
+/// The close is deferred only while a handler could still be reading the
+/// descriptor, and the deferred queue is drained per-turn *by a run*. The
+/// scene borrow guards raise the same `IN_HANDLER` flag a delivery does, so
+/// asking that broad question made this path queue the fd against a drain that
+/// was never going to happen — with no run on the stack, nothing would ever
+/// run it — and the descriptor leaked for the process's life. A borrow guard
+/// cannot be holding an fd borrow; only an `fd_ready` call can.
+///
+/// Observed through the pipe's write end: once the read end is really closed,
+/// writing fails. Rust ignores `SIGPIPE`, so that surfaces as `BrokenPipe`
+/// rather than killing the test.
+#[test]
+fn remove_fd_inside_a_scene_borrow_still_closes_the_descriptor() {
+    headless_env();
+    use std::io::Write;
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime
+        .init_graphics(&display, &backend)
+        .expect("renderer, allocator and core globals");
+    let root = runtime.scene_root_node().expect("scene root");
+
+    let (r, mut w) = std::io::pipe().expect("pipe");
+    let id = runtime.add_fd(r.into(), wlr::Interest::READABLE);
+
+    // No run has ever been started on this thread, so nothing will ever drain
+    // a deferred close.
+    let removed = runtime
+        .with_node(root, |_| runtime.remove_fd(id))
+        .expect("known node");
+    assert_eq!(removed, Some(()));
+
+    assert!(
+        w.write_all(b"x").is_err(),
+        "the read end must be closed, not queued against a drain that never runs"
+    );
+}
+
 #[test]
 fn removing_a_live_source_stops_its_callbacks() {
     // Registers two pipes, wakes both, removes one from inside its own

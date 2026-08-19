@@ -141,6 +141,12 @@ impl<'h> SceneBuffer<'h> {
     /// `None` when it is wlroots' default of zero, which means "use the
     /// buffer's own size" — the distinction matters, because `(0, 0)` is not a
     /// size a caller would ever have set deliberately.
+    ///
+    /// Both dimensions must be positive, matching the
+    /// `dst_width > 0 && dst_height > 0` wlroots itself tests before scaling
+    /// to a destination size. A half-set pair like `(0, 200)` is not a size
+    /// wlroots scales to, so reporting `Some` for it would name a destination
+    /// that does not exist.
     pub fn dest_size(&self) -> Option<(i32, i32)> {
         // SAFETY: the handle's lifetime guarantees the node is live.
         let (w, h) = unsafe {
@@ -149,7 +155,7 @@ impl<'h> SceneBuffer<'h> {
                 (*self.raw.as_ptr()).dst_height,
             )
         };
-        (w != 0 || h != 0).then_some((w, h))
+        (w > 0 && h > 0).then_some((w, h))
     }
 
     /// The region of the buffer that is sampled.

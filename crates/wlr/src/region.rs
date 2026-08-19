@@ -460,18 +460,30 @@ impl Region {
 
     /// The largest distance [`expanded`](Self::expanded) can apply to this
     /// region without any corner leaving `i32`.
+    ///
+    /// Read from the raw pixman corners, **not** from
+    /// [`extents`](Self::extents). That returns a [`Box2D`], whose `width` is
+    /// `x2 - x1` through `saturating_sub`, and the saturation loses exactly
+    /// the information this needs: a region spanning `x1 = -2, x2 = i32::MAX`
+    /// reports `width = i32::MAX`, so reconstructing the right edge as
+    /// `x + width` saturates back to `i32::MAX - 2` and claims two pixels of
+    /// headroom at an edge that has none — and `wlr_region_expand` overflows
+    /// anyway. The corners pixman actually holds are the only honest source.
     fn max_expansion(&self) -> u32 {
-        let e = self.extents();
         let head_room = |v: i32| -> u32 {
             // Distance to whichever bound this coordinate is nearer.
             let to_max = (i32::MAX as i64 - v as i64) as u64;
             let to_min = (v as i64 - i32::MIN as i64) as u64;
             to_max.min(to_min).min(u32::MAX as u64) as u32
         };
-        head_room(e.x)
-            .min(head_room(e.y))
-            .min(head_room(e.x.saturating_add(e.width)))
-            .min(head_room(e.y.saturating_add(e.height)))
+        // SAFETY: as in `extents`. `pixman_region32_extents` returns a pointer
+        // into the region itself (or pixman's shared empty region), valid for
+        // as long as `self` is and never null.
+        let b = unsafe { *pixman_region32_extents(self.as_ptr()) };
+        head_room(b.x1)
+            .min(head_room(b.y1))
+            .min(head_room(b.x2))
+            .min(head_room(b.y2))
     }
 
     /// The smallest region containing this one rotated by `rotation` **radians**
