@@ -125,7 +125,9 @@ pub use render::{Gles2, Gles2TextureAttribs};
 pub use render::{Vk, VkImageAttribs};
 pub use runtime::{Band, Runtime};
 pub use scene::{
-    NodeId, NodeKind, RectId, SceneBuffer, SceneBufferOptions, SceneNode, SceneRect, SceneTree,
+    DamageRing, DamageRingRef, NodeId, NodeKind, RectId, SceneBuffer, SceneBufferOptions,
+    SceneNode, SceneOutput, SceneOutputId, SceneOutputStateOptions, SceneRect, SceneSurface,
+    SceneTimer, SceneTree,
 };
 pub use seat::{KeyEvent, Modifiers};
 pub use toplevel::{Edges, Toplevel, ToplevelId};

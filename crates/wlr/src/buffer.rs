@@ -179,6 +179,20 @@ impl std::fmt::Debug for Buffer<'_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufferId(pub(crate) u64);
 
+impl BufferId {
+    /// An id no live buffer can have, for testing that an unknown id misses
+    /// cleanly rather than crashing.
+    ///
+    /// The same reserved top of the counter's range
+    /// [`ToplevelId::dangling_for_test`](crate::ToplevelId::dangling_for_test)
+    /// uses, and for the same reason: ids come from a process-wide counter
+    /// that starts at 1 and never reuses a value, so `u64::MAX` cannot be
+    /// handed to a real buffer.
+    pub fn dangling_for_test() -> BufferId {
+        BufferId(u64::MAX)
+    }
+}
+
 /// `DRM_FORMAT_ABGR8888`: bytes R, G, B, A in memory order (fourcc
 /// `'A','B','2','4'`, little-endian channel order per the DRM fourcc
 /// convention — the name is read MSB-first, the bytes are stored LSB-first).
@@ -415,5 +429,13 @@ mod tests {
     fn validate_pixels_rejects_a_mismatched_length() {
         assert!(!validate_pixels(2, 2, 2 * 2 * 4 - 1));
         assert!(!validate_pixels(2, 2, 2 * 2 * 4 + 1));
+    }
+
+    /// Pins the premise `dangling_for_test` rests on: the value it hands back
+    /// sits above anything the real counter can reach, so "every by-id call
+    /// misses on it" stays true rather than becoming true by luck.
+    #[test]
+    fn dangling_for_test_is_far_outside_the_real_id_space() {
+        assert!(BufferId::dangling_for_test().0 > u32::MAX as u64);
     }
 }

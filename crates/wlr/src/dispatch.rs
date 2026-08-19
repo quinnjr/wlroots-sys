@@ -44,7 +44,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
-use crate::{DecorationMode, Edges, LayerSurfaceId, OutputId, ToplevelId};
+use crate::{DecorationMode, Edges, LayerSurfaceId, NodeId, OutputId, SceneOutputId, ToplevelId};
 
 /// An event awaiting delivery.
 ///
@@ -108,6 +108,29 @@ pub(crate) enum Event {
     LayerSurfaceMapped(LayerSurfaceId),
     LayerSurfaceUnmapped(LayerSurfaceId),
     LayerSurfaceDestroyed(LayerSurfaceId),
+
+    /// An observed scene buffer node is now displayed on a scene output.
+    SceneBufferOutputEnter(NodeId, SceneOutputId),
+    /// An observed scene buffer node is no longer displayed on a scene output.
+    SceneBufferOutputLeave(NodeId, SceneOutputId),
+    /// The set of outputs an observed scene buffer node is displayed on
+    /// changed.
+    ///
+    /// Carries no payload beyond the node, deliberately. wlroots hands the
+    /// signal a C array that is valid only for the emission, and this enum is
+    /// `Copy + Eq` (this module's own reentrancy tests compare events with
+    /// `assert_eq!`), so a `Vec` cannot live here. The array is snapshotted at
+    /// emission time into the runtime instead, and
+    /// [`Runtime::scene_buffer_active_outputs`](crate::Runtime::scene_buffer_active_outputs)
+    /// reads it back at delivery — see that method's own doc for what a
+    /// deferred delivery therefore reports.
+    SceneBufferOutputsUpdate(NodeId),
+    /// An observed scene buffer node was sampled while rendering a scene
+    /// output. The bool is whether it was scanned out directly.
+    SceneBufferOutputSample(NodeId, SceneOutputId, bool),
+    /// An observed scene buffer node's own `frame_done` fired. The duration is
+    /// the timestamp wlroots named, read at emission time.
+    SceneBufferFrameDone(NodeId, SceneOutputId, std::time::Duration),
 
     Key {
         keysym: u32,

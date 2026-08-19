@@ -50,10 +50,30 @@ use crate::runtime::RuntimeInner;
 use crate::sys;
 
 mod buffer;
+mod damage;
+pub(crate) mod output;
 mod rect;
+mod surface;
 
 pub use buffer::{SceneBuffer, SceneBufferOptions};
+pub use damage::{DamageRing, DamageRingRef};
+pub use output::{SceneOutput, SceneOutputId, SceneOutputStateOptions, SceneTimer};
 pub use rect::SceneRect;
+pub use surface::SceneSurface;
+
+/// A moment, as wlroots' own `struct timespec`.
+///
+/// The crate hands wlroots timestamps in three places (a scene output's,
+/// a scene surface's and a scene buffer's frame-done), and one conversion is
+/// what keeps them from disagreeing about saturation. `Duration` is unsigned
+/// and 64-bit-plus; `tv_sec` is a signed 64-bit `time_t` on every target this
+/// crate builds for, so the clamp only ever fires on a value no clock produced.
+pub(crate) fn timespec_of(when: std::time::Duration) -> sys::timespec {
+    sys::timespec {
+        tv_sec: i64::try_from(when.as_secs()).unwrap_or(i64::MAX) as _,
+        tv_nsec: when.subsec_nanos() as _,
+    }
+}
 
 /// Identifies a solid-colour rect in the scene.
 ///

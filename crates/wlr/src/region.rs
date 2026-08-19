@@ -254,7 +254,7 @@ impl Region {
     /// Separate from [`as_ptr`](Self::as_ptr) rather than a `cast_mut()` on it:
     /// a pointer derived from a shared borrow must not be written through, and
     /// that is the kind of provenance bug that runs correctly for years.
-    fn as_mut_ptr(&mut self) -> *mut sys::pixman_region32 {
+    pub(crate) fn as_mut_ptr(&mut self) -> *mut sys::pixman_region32 {
         &raw mut *self.inner
     }
 
@@ -503,12 +503,10 @@ impl<'a> RegionRef<'a> {
     /// not outlive it. This never takes ownership: the region is not finished
     /// when the view drops.
     ///
-    /// Nothing in the crate mints one yet — the regions wlroots owns are
-    /// reached through `wlr_damage_ring` and `wlr_surface`, neither of which is
-    /// wrapped at this point in M5. The type and its constructor land with the
-    /// rest of the region surface so the borrow discipline is settled (and
-    /// compile-fail-tested) before there is a caller to get it wrong.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Minted by [`DamageRing::current`](crate::DamageRing::current) and its
+    /// borrowed twin, and by
+    /// [`SceneBuffer::opaque_region`](crate::SceneBuffer::opaque_region) — the
+    /// regions wlroots embeds in its own structs by value.
     pub(crate) unsafe fn from_raw(raw: *mut sys::pixman_region32) -> RegionRef<'a> {
         RegionRef {
             raw: NonNull::new(raw).expect("wlroots handed us a null pixman_region32"),

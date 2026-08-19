@@ -37,12 +37,14 @@ use crate::buffer::create_pixel_buffer;
 use crate::decoration::{DecorationEntry, DecorationMode};
 use crate::id::{SourceId, next_id};
 use crate::layer::Layer;
+use crate::scene::output::SceneOutputEntry;
 use crate::scene::{
-    LegacyId, NodeId, NodeKind, SceneBuffer, SceneBufferOptions, SceneNode, SceneRect, SceneTree,
-    attach_node_id, find_node_id,
+    LegacyId, NodeId, NodeKind, SceneBuffer, SceneBufferOptions, SceneNode, SceneOutput,
+    SceneOutputId, SceneOutputStateOptions, SceneRect, SceneSurface, SceneTree, attach_node_id,
+    find_node_id, timespec_of,
 };
 use crate::{
-    AllocatorRef, Backend, Buffer, BufferId, Display, Error, FBox, Interest, LayerSurfaceId,
+    AllocatorRef, Backend, Box2D, Buffer, BufferId, Display, Error, FBox, Interest, LayerSurfaceId,
     Output, OutputId, RectId, Region, RendererRef, Result, ToplevelId, Transform, sys,
 };
 use crate::{ColorEncoding, ColorRange, FilterMode, NamedPrimaries, TransferFunction};
@@ -107,6 +109,40 @@ pub(crate) struct RuntimeInner {
     /// Every live RGBA pixel-buffer scene node. Same shape and same purge
     /// rules as `rects` — see [`BufferEntry`]'s own doc.
     pub(crate) buffers: RefCell<HashMap<BufferId, BufferEntry>>,
+
+    /// The live run's scene-buffer observer, or `None` when no run is on the
+    /// stack.
+    ///
+    /// Installed by `run_inner` for exactly the duration of one
+    /// [`Backend::run_all`](crate::Backend::run_all) call and cleared by its
+    /// guard on every exit path — see [`SceneObserver`] for why the indirection
+    /// exists at all. `Cell`, not `RefCell`: it is read from
+    /// [`Runtime::observe_scene_buffer`] and friends, which must not be able to
+    /// fail on a borrow.
+    pub(crate) scene_observer: std::cell::Cell<Option<SceneObserver>>,
+
+    /// The scene outputs each observed buffer node was last reported to be
+    /// displayed on.
+    ///
+    /// Snapshotted by `backend.rs`'s `on_scene_buffer_outputs_update` when the
+    /// signal fires, because the C array it carries is valid only for that
+    /// emission, and read back by [`Runtime::scene_buffer_active_outputs`].
+    /// Purged when the node dies (`on_scene_buffer_node_destroy`) and when a
+    /// consumer stops observing it.
+    pub(crate) scene_buffer_outputs: RefCell<HashMap<NodeId, Vec<SceneOutputId>>>,
+
+    /// Every scene output this runtime has issued a [`SceneOutputId`] for.
+    ///
+    /// Written by `record_scene_output` — reached from
+    /// [`Runtime::init_output`], [`Runtime::add_scene_output`] and the lookup
+    /// in [`Runtime::scene_output`] — and purged by each row's own destroy
+    /// listener, which wlroots runs from inside `wlr_scene_output_destroy`.
+    /// Deliberately **not** cleared per run, unlike `outputs`: a scene output
+    /// belongs to the scene rather than to a `Backend::run_all` call, and its
+    /// watch belongs to this runtime, so it stays truthful across runs. See
+    /// `scene/output.rs`'s module doc for why the id needs a listener where
+    /// every other id in this crate needs only an addon.
+    pub(crate) scene_outputs: RefCell<HashMap<SceneOutputId, SceneOutputEntry>>,
 
     /// Every fd source currently registered with the event loop, keyed by
     /// the id its declaration in `sources` carries.
@@ -518,6 +554,16 @@ pub(crate) struct LayerSurfaceEntry {
     pub(crate) raw: NonNull<sys::wlr_layer_surface_v1>,
     pub(crate) scene_tree: NonNull<sys::wlr_scene_tree>,
 
+    /// The `wlr_scene_layer_surface_v1` helper `scene_tree` belongs to.
+    ///
+    /// Kept alongside the tree rather than recovered from it: the tree is the
+    /// helper's first field, so a `container_of` cast would work today, but it
+    /// would be an unchecked layout assumption about a struct this crate does
+    /// not own for the sake of eight bytes. wlroots frees this together with
+    /// the layer surface, so it is live for exactly as long as the entry is.
+    /// [`Runtime::configure_scene_layer_surface`] is what needs it.
+    pub(crate) scene: NonNull<sys::wlr_scene_layer_surface_v1>,
+
     /// A size [`Runtime::configure_layer_surface`] recorded instead of
     /// sending, because the surface was not yet initialized when the call
     /// was made. See `layer.rs`'s own module doc for the full argument, and
@@ -622,6 +668,37 @@ pub(crate) struct BufferEntry {
     /// buffer [`Runtime::add_buffer`] created, parented into the scene's
     /// root tree instead.
     pub(crate) parent: Option<ToplevelId>,
+}
+
+/// The live run's ability to watch a scene buffer node for this runtime.
+///
+/// The five signals a `wlr_scene_buffer` emits go to a **handler**, so the
+/// listeners that carry them must belong to a
+/// [`Backend::run_all`](crate::Backend::run_all) call — that is where the
+/// `&mut S` and the delivery function live. But the *nodes* belong to the
+/// runtime, and so does the by-id API a consumer uses to ask for one to be
+/// watched. This is the join: `run_all` plants its own erased `Session`
+/// pointer and three functions instantiated at its own `S`, and
+/// [`Runtime::observe_scene_buffer`] calls through them.
+///
+/// `Copy`, so reading it out of the `Cell` leaves the `Cell` populated — the
+/// hook must survive the call that used it.
+#[derive(Clone, Copy)]
+pub(crate) struct SceneObserver {
+    /// An erased `*const Session<'_, S>`, valid for exactly as long as this
+    /// value is installed. `run_inner`'s guard is what makes that true.
+    pub(crate) session: *const (),
+    /// Links the six listeners, or does nothing if they are already linked.
+    ///
+    /// # Safety
+    ///
+    /// The caller must pass `session` verbatim and a live `wlr_scene_buffer`
+    /// whose node carries the given [`NodeId`].
+    pub(crate) watch: unsafe fn(*const (), NodeId, *mut sys::wlr_scene_buffer),
+    /// Unlinks them again. `# Safety`: `session` must be passed verbatim.
+    pub(crate) unwatch: unsafe fn(*const (), NodeId),
+    /// Whether they are linked. `# Safety`: as for `unwatch`.
+    pub(crate) is_watching: unsafe fn(*const (), NodeId) -> bool,
 }
 
 /// Where a tracked scene node came from, and therefore what may be done to it.
@@ -852,6 +929,9 @@ impl Runtime {
                 nodes: RefCell::new(HashMap::new()),
                 node_borrows: std::cell::Cell::new(0),
                 buffers: RefCell::new(HashMap::new()),
+                scene_observer: std::cell::Cell::new(None),
+                scene_buffer_outputs: RefCell::new(HashMap::new()),
+                scene_outputs: RefCell::new(HashMap::new()),
                 live_sources: RefCell::new(HashMap::new()),
                 pending_close: RefCell::new(Vec::new()),
                 xdg_shell: RefCell::new(None),
@@ -1340,6 +1420,16 @@ impl Runtime {
                 layout_output.as_ptr(),
                 scene_output.as_ptr(),
             );
+
+            // Since 0.20.19: give the scene output an id, and start watching it
+            // for destruction, so a consumer can reach it by id
+            // (`Runtime::scene_output`) and so a stale one misses cleanly. Done
+            // last, after every fallible step: on an early return above there
+            // is no scene output to watch.
+            //
+            // SAFETY: `scene_output` is the one wlroots just created in this
+            // runtime's own scene, so it is live and nothing watches it yet.
+            self.record_scene_output(scene_output);
         }
         Ok(())
     }
@@ -1429,10 +1519,7 @@ impl Runtime {
             let now_dur = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default();
-            let mut now = sys::timespec {
-                tv_sec: now_dur.as_secs() as _,
-                tv_nsec: now_dur.subsec_nanos() as _,
-            };
+            let mut now = timespec_of(now_dur);
             sys::wlr_scene_output_send_frame_done(scene_output, &raw mut now);
         }
         Ok(())
@@ -2822,7 +2909,26 @@ impl Runtime {
     /// would abort the process instead.
     pub fn for_each_buffer(&self, node: NodeId, f: impl FnMut(NodeId, i32, i32)) -> Option<()> {
         let raw = self.node_ptr(node)?;
+        self.buffer_walk(f, |iterator, user_data| {
+            // SAFETY: a resolvable id names a live node; the iterator has
+            // `wlr_scene_buffer_iterator_func_t`'s signature and `user_data`
+            // outlives the call, both guaranteed by `buffer_walk`.
+            unsafe { sys::wlr_scene_node_for_each_buffer(raw.as_ptr(), iterator, user_data) };
+        });
+        Some(())
+    }
 
+    /// The body [`for_each_buffer`](Runtime::for_each_buffer) and
+    /// [`scene_output_for_each_buffer`](Runtime::scene_output_for_each_buffer)
+    /// share: one visitor trampoline, one borrow guard, one panic hand-off.
+    ///
+    /// `run` performs the wlroots call, handed the C iterator and the erased
+    /// context to pass through. It must not do anything else with either.
+    fn buffer_walk(
+        &self,
+        f: impl FnMut(NodeId, i32, i32),
+        run: impl FnOnce(sys::wlr_scene_buffer_iterator_func_t, *mut std::ffi::c_void),
+    ) {
         struct Ctx<'a> {
             runtime: &'a Runtime,
             f: &'a mut dyn FnMut(NodeId, i32, i32),
@@ -2877,23 +2983,12 @@ impl Runtime {
         // (the panic is caught above and resumed below, so the guard falls with
         // this frame either way). wlroots iterates with `wl_list_for_each`, so
         // a node freed or unlinked by `f` leaves the walk reading `link.next`
-        // out of reclaimed memory — see this method's own doc.
+        // out of reclaimed memory — see the callers' own docs.
         let _guard = NodeBorrowGuard::enter(&self.inner);
-        // SAFETY: a resolvable id names a live node; `visit` has
-        // `wlr_scene_buffer_iterator_func_t`'s signature, and `ctx` outlives
-        // the call it is handed to. The guard above is what keeps every node
-        // the walk touches alive and in place for its duration.
-        unsafe {
-            sys::wlr_scene_node_for_each_buffer(
-                raw.as_ptr(),
-                iterator,
-                (&raw mut ctx).cast::<std::ffi::c_void>(),
-            );
-        }
+        run(iterator, (&raw mut ctx).cast::<std::ffi::c_void>());
         if let Some(payload) = ctx.panic {
             std::panic::resume_unwind(payload);
         }
-        Some(())
     }
 
     /// Borrow `node` as a [`SceneNode`] handle for the duration of `f`.
@@ -3246,6 +3341,628 @@ impl Runtime {
         let raw = self.movable_scene_buffer_ptr(node)?;
         // SAFETY: a resolvable id of the right tag names a live buffer node.
         unsafe { sys::wlr_scene_buffer_set_color_range(raw.as_ptr(), range.into()) };
+        Some(())
+    }
+
+    // ---------------------------------------------------------------------
+    // Scene-buffer observation (0.20.19)
+    // ---------------------------------------------------------------------
+
+    /// Install the live run's observer hook. Called only by `run_inner`.
+    pub(crate) fn set_scene_observer(&self, observer: SceneObserver) {
+        self.inner.scene_observer.set(Some(observer));
+    }
+
+    /// Clear it again, which `run_inner`'s guard does on every exit path.
+    pub(crate) fn clear_scene_observer(&self) {
+        self.inner.scene_observer.set(None);
+        // The snapshots go with it: they name scene outputs by id, which stay
+        // valid, but nothing can refresh them once the listeners are gone, and
+        // a stale set answered after the run had ended would be worse than a
+        // miss.
+        self.inner.scene_buffer_outputs.borrow_mut().clear();
+    }
+
+    /// `id`'s node as a buffer node, whoever owns it.
+    ///
+    /// Unlike [`movable_scene_buffer_ptr`](Runtime::movable_scene_buffer_ptr)
+    /// this accepts a foreign node: observing a client's own surface node is
+    /// the main thing anyone wants to do with these signals, and observation
+    /// mutates nothing.
+    fn scene_buffer_ptr(&self, id: NodeId) -> Option<NonNull<sys::wlr_scene_buffer>> {
+        let raw = self.node_ptr(id)?;
+        // SAFETY: a resolvable id names a live node.
+        if NodeKind::from_raw(unsafe { (*raw.as_ptr()).type_ }) != Some(NodeKind::Buffer) {
+            return None;
+        }
+        // SAFETY: the tag says this node is a buffer node.
+        NonNull::new(unsafe { sys::wlr_scene_buffer_from_node(raw.as_ptr()) })
+    }
+
+    /// Start delivering `node`'s scene-buffer signals to the handler.
+    ///
+    /// Until this is called for a given node, none of the five
+    /// [`OutputHandler`](crate::OutputHandler) scene-buffer methods fire for
+    /// it. That is opt-in on purpose: these signals are per node, a scene holds
+    /// as many buffer nodes as there are mapped surfaces, and linking six
+    /// listeners into every one of them to deliver events nobody asked for
+    /// would be a cost with no buyer.
+    ///
+    /// `node` may be any buffer node, including a client's own surface node
+    /// found with [`node_at`](Runtime::node_at) — observation mutates nothing.
+    /// Calling this twice for the same node is harmless and links nothing the
+    /// second time, so a handler may call it unconditionally.
+    ///
+    /// The listeners belong to the [`Backend::run_all`](crate::Backend::run_all)
+    /// call that was running when this was called, and are unlinked when it
+    /// returns; a later run does not re-establish them.
+    ///
+    /// `None`, having linked nothing, when the id is unknown, stale or not a
+    /// buffer node, or when **no `run_all` call is running** — there is no
+    /// handler to deliver to, and no session to own the listeners.
+    /// [`Backend::run`](crate::Backend::run) does not count: its handler bound
+    /// is [`OutputHandler`](crate::OutputHandler) alone, and it installs no
+    /// observer.
+    pub fn observe_scene_buffer(&self, node: NodeId) -> Option<()> {
+        let raw = self.scene_buffer_ptr(node)?;
+        let observer = self.inner.scene_observer.get()?;
+        // SAFETY: `session` and `watch` are the pair `run_inner` installed
+        // together, so the erased pointer is the `Session` `watch` was
+        // instantiated for and is live for as long as the hook is installed —
+        // which is this call. `raw` is a live buffer node carrying `node` as
+        // its id, which is what `scene_buffer_ptr` just established.
+        unsafe { (observer.watch)(observer.session, node, raw.as_ptr()) };
+        Some(())
+    }
+
+    /// Stop delivering `node`'s scene-buffer signals.
+    ///
+    /// `None` when no run is running or the node was not being observed. A node
+    /// that is destroyed stops being observed on its own — the listeners are
+    /// unlinked from inside its destroy emission — so this is for a compositor
+    /// that has simply stopped caring.
+    pub fn unobserve_scene_buffer(&self, node: NodeId) -> Option<()> {
+        let observer = self.inner.scene_observer.get()?;
+        // SAFETY: as in `observe_scene_buffer`.
+        let watched = unsafe { (observer.is_watching)(observer.session, node) };
+        if !watched {
+            return None;
+        }
+        // SAFETY: as above.
+        unsafe { (observer.unwatch)(observer.session, node) };
+        self.forget_scene_buffer_outputs(node);
+        Some(())
+    }
+
+    /// Whether `node`'s scene-buffer signals are being delivered.
+    pub fn scene_buffer_observed(&self, node: NodeId) -> bool {
+        let Some(observer) = self.inner.scene_observer.get() else {
+            return false;
+        };
+        // SAFETY: as in `observe_scene_buffer`.
+        unsafe { (observer.is_watching)(observer.session, node) }
+    }
+
+    /// The scene outputs `node` is currently displayed on.
+    ///
+    /// The payload
+    /// [`OutputHandler::scene_buffer_outputs_update`](crate::OutputHandler::scene_buffer_outputs_update)
+    /// does not carry, because wlroots hands that signal an array valid only
+    /// for its own emission and this crate's events carry ids and scalars so a
+    /// deferred one cannot name freed memory. The array is snapshotted when the
+    /// signal fires, and this reads that snapshot back.
+    ///
+    /// So the honest description of what this returns is **the most recent set
+    /// wlroots reported**, which for a handler called synchronously is the
+    /// current one, and for a deferred delivery may be a later one than the
+    /// event that woke it named. A set that has been superseded is the only
+    /// thing a deferred event could honestly report; the alternative is a
+    /// snapshot of a state that no longer holds.
+    ///
+    /// `None` when nothing has been reported for `node` — it is not observed,
+    /// no update has fired yet, or the run that was observing it has ended. An
+    /// empty `Vec` is different, and means the node is displayed nowhere.
+    pub fn scene_buffer_active_outputs(&self, node: NodeId) -> Option<Vec<SceneOutputId>> {
+        self.inner.scene_buffer_outputs.borrow().get(&node).cloned()
+    }
+
+    /// Record what an `outputs_update` emission reported. Called from
+    /// `backend.rs` at emission time.
+    pub(crate) fn record_scene_buffer_outputs(&self, node: NodeId, active: Vec<SceneOutputId>) {
+        // `try_borrow_mut`: this is reached from an `extern "C"` frame, where a
+        // panic is an abort. No borrow of this table is ever held across a call
+        // into wlroots, so it cannot fail; if it ever did, the snapshot is
+        // simply not refreshed.
+        if let Ok(mut table) = self.inner.scene_buffer_outputs.try_borrow_mut() {
+            table.insert(node, active);
+        }
+    }
+
+    /// Drop `node`'s snapshot. Called when it is destroyed or unobserved.
+    pub(crate) fn forget_scene_buffer_outputs(&self, node: NodeId) {
+        // `try_borrow_mut` for the reason `record_scene_buffer_outputs` gives:
+        // one caller is a destroy callback under an `extern "C"` frame.
+        if let Ok(mut table) = self.inner.scene_buffer_outputs.try_borrow_mut() {
+            table.remove(&node);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Scene outputs (0.20.19)
+    //
+    // A scene output is the viewport that turns the scene into pixels on one
+    // `wlr_output`. Unlike everything above, its id is backed by a destroy
+    // listener rather than by an addon — `wlr_scene_output` has no addon set
+    // for one to live in — and it therefore survives the `Backend::run_all`
+    // call that created it, because the listener does. See `scene/output.rs`.
+    // ---------------------------------------------------------------------
+
+    /// `id`'s scene output, or `None` if it has been destroyed.
+    ///
+    /// The liveness flag, not the row's presence, is the authority: the row
+    /// removal in the destroy callback is best-effort, the flag is not.
+    fn scene_output_ptr(&self, id: SceneOutputId) -> Option<NonNull<sys::wlr_scene_output>> {
+        let table = self.inner.scene_outputs.borrow();
+        let entry = table.get(&id)?;
+        entry.alive.get().then_some(entry.raw)
+    }
+
+    /// The id this runtime already has for `raw`, if any.
+    ///
+    /// A linear scan, deliberately: a compositor has as many scene outputs as
+    /// it has monitors, and a reverse table keyed by pointer would be a second
+    /// thing for the destroy callback to keep in step for no measurable gain.
+    pub(crate) fn scene_output_id_of(
+        &self,
+        raw: NonNull<sys::wlr_scene_output>,
+    ) -> Option<SceneOutputId> {
+        self.inner
+            .scene_outputs
+            .borrow()
+            .iter()
+            .find(|(_, entry)| entry.raw == raw && entry.alive.get())
+            .map(|(id, _)| *id)
+    }
+
+    /// Give `raw` an id and start watching it for destruction.
+    ///
+    /// Idempotent: a scene output this runtime already knows keeps the id it
+    /// has, which matters because a second watch would purge the row twice.
+    ///
+    /// # Safety
+    ///
+    /// `raw` must point at a live `wlr_scene_output` belonging to this
+    /// runtime's scene.
+    pub(crate) unsafe fn record_scene_output(
+        &self,
+        raw: NonNull<sys::wlr_scene_output>,
+    ) -> SceneOutputId {
+        if let Some(id) = self.scene_output_id_of(raw) {
+            return id;
+        }
+        let id = SceneOutputId(next_id());
+        // SAFETY: forwarded from this function's own contract, plus the lookup
+        // above, which established this runtime does not already watch `raw`.
+        let entry = unsafe { crate::scene::output::watch(raw, &self.inner, id) };
+        self.inner.scene_outputs.borrow_mut().insert(id, entry);
+        id
+    }
+
+    /// The scene output showing this runtime's scene on `output`.
+    ///
+    /// `None` before [`init_graphics`](Runtime::init_graphics) has run, for an
+    /// unknown or stale [`OutputId`], and for an output that has never been
+    /// added to the scene — [`init_output`](Runtime::init_output) is what adds
+    /// one, and [`add_scene_output`](Runtime::add_scene_output) is the way to
+    /// add an output that should not go in the layout.
+    ///
+    /// An output added to the scene by this crate already has an id; one added
+    /// through the raw pointers gets one here.
+    pub fn scene_output(&self, output: OutputId) -> Option<SceneOutputId> {
+        let raw = self.output_ptr(output)?;
+        let scene = self.scene_ptr()?;
+        // SAFETY: a present `outputs` entry names a live output (removed by
+        // `forget_output` before wlroots frees it), and the scene is this
+        // runtime's own. `wlr_scene_get_scene_output` returns null for an
+        // output the scene does not have, which is checked.
+        let so = unsafe { sys::wlr_scene_get_scene_output(scene.as_ptr(), raw.as_ptr()) };
+        let so = NonNull::new(so)?;
+        // SAFETY: wlroots returned a scene output of this runtime's own scene,
+        // so it is live.
+        Some(unsafe { self.record_scene_output(so) })
+    }
+
+    /// Add `output` to the scene without putting it in the output layout.
+    ///
+    /// [`init_output`](Runtime::init_output) is what a compositor normally
+    /// calls — it initialises the renderer, places the output in the layout and
+    /// adds it here, all of which an output that should actually be displayed
+    /// needs. This is the narrower call for an output whose position the
+    /// consumer intends to drive themselves with
+    /// [`set_scene_output_position`](Runtime::set_scene_output_position).
+    ///
+    /// `None`, having added nothing, before
+    /// [`init_graphics`](Runtime::init_graphics) has run, for an unknown or
+    /// stale id, **or when the output is already in the scene** —
+    /// `wlr_scene_output_create`'s own documentation is that an output can be
+    /// added only once, and wlroots asserts it, which on this distribution's
+    /// build is a process abort rather than an error. Use
+    /// [`scene_output`](Runtime::scene_output) to ask for the existing one.
+    pub fn add_scene_output(&self, output: OutputId) -> Option<SceneOutputId> {
+        let raw = self.output_ptr(output)?;
+        let scene = self.scene_ptr()?;
+        // SAFETY: as in `scene_output`.
+        let existing = unsafe { sys::wlr_scene_get_scene_output(scene.as_ptr(), raw.as_ptr()) };
+        if !existing.is_null() {
+            return None;
+        }
+        // SAFETY: as above; the check just made is `wlr_scene_output_create`'s
+        // own "only once" precondition.
+        let so = unsafe { sys::wlr_scene_output_create(scene.as_ptr(), raw.as_ptr()) };
+        let so = NonNull::new(so)?;
+        // SAFETY: wlroots just created this scene output in this runtime's
+        // scene, so it is live and unwatched.
+        Some(unsafe { self.record_scene_output(so) })
+    }
+
+    /// Destroy a scene output, so the scene stops rendering to that output.
+    ///
+    /// The `wlr_output` itself is untouched — this removes the viewport, not
+    /// the monitor. Every [`SceneOutputId`] naming it misses cleanly
+    /// afterwards, including this one.
+    ///
+    /// `None`, having destroyed nothing, for an unknown or already-destroyed
+    /// id — a double destroy misses rather than double-freeing.
+    pub fn destroy_scene_output(&self, scene_output: SceneOutputId) -> Option<()> {
+        let raw = self.scene_output_ptr(scene_output)?;
+        // SAFETY: a resolvable id names a scene output wlroots has not freed —
+        // its destroy listener would have cleared the liveness flag otherwise.
+        // The row is dropped from the inside, by that listener, during this
+        // call, which is also what unlinks the listener itself.
+        unsafe { sys::wlr_scene_output_destroy(raw.as_ptr()) };
+        Some(())
+    }
+
+    /// Place a scene output's viewport at `(lx, ly)` in layout coordinates.
+    ///
+    /// For an output [`init_output`](Runtime::init_output) placed, the scene
+    /// output layout already keeps this in step with the output layout, and
+    /// [`set_output_position`](Runtime::set_output_position) is the call that
+    /// moves both together. This is the lower-level one, for an output added
+    /// with [`add_scene_output`](Runtime::add_scene_output).
+    ///
+    /// `None` for an unknown or destroyed id.
+    pub fn set_scene_output_position(
+        &self,
+        scene_output: SceneOutputId,
+        lx: i32,
+        ly: i32,
+    ) -> Option<()> {
+        let raw = self.scene_output_ptr(scene_output)?;
+        // SAFETY: a resolvable id names a live scene output.
+        unsafe { sys::wlr_scene_output_set_position(raw.as_ptr(), lx, ly) };
+        Some(())
+    }
+
+    /// A scene output's viewport position in layout coordinates. `None` for an
+    /// unknown or destroyed id.
+    pub fn scene_output_position(&self, scene_output: SceneOutputId) -> Option<(i32, i32)> {
+        let raw = self.scene_output_ptr(scene_output)?;
+        // SAFETY: a resolvable id names a live scene output.
+        Some(unsafe { ((*raw.as_ptr()).x, (*raw.as_ptr()).y) })
+    }
+
+    /// Whether the scene has anything new to draw on this output.
+    ///
+    /// `false` means [`commit_scene_output`](Runtime::commit_scene_output)
+    /// would skip, and a compositor pacing itself off frame events can skip
+    /// too. `None` for an unknown or destroyed id.
+    pub fn scene_output_needs_frame(&self, scene_output: SceneOutputId) -> Option<bool> {
+        let raw = self.scene_output_ptr(scene_output)?;
+        // SAFETY: a resolvable id names a live scene output.
+        Some(unsafe { sys::wlr_scene_output_needs_frame(raw.as_ptr()) })
+    }
+
+    /// Render and present this scene output, with options.
+    ///
+    /// The lower-level half of [`commit_output`](Runtime::commit_output):
+    /// that one is the whole body of a `frame` handler (commit, then
+    /// frame-done), while this one commits and nothing else, and takes the
+    /// timer, colour transform and swapchain
+    /// [`SceneOutputStateOptions`](crate::SceneOutputStateOptions) carries.
+    ///
+    /// `Ok(true)` means a frame was rendered and presented. `Ok(false)` means
+    /// wlroots legitimately skipped, because nothing had changed since the last
+    /// one — not a failure, and the case a compositor rendering on a timer will
+    /// see most often. The distinction is not in the C return value, which is
+    /// `true` for both; it comes from asking
+    /// [`scene_output_needs_frame`](Runtime::scene_output_needs_frame)
+    /// immediately before, which is exactly the test
+    /// `wlr_scene_output_commit` makes for itself (verified by disassembling
+    /// `libwlroots-0.20.so`: the commit's first act is that call, returning
+    /// `true` at once when it is false).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Destroyed`] for an unknown or destroyed id.
+    /// [`Error::Operation`] if wlroots rejected the commit — a genuine failure,
+    /// which for these options usually means a swapchain whose dimensions do
+    /// not match the output, or a colour transform on an output that already
+    /// has an image description.
+    pub fn commit_scene_output(
+        &self,
+        scene_output: SceneOutputId,
+        options: &SceneOutputStateOptions<'_>,
+    ) -> Result<bool> {
+        let Some(raw) = self.scene_output_ptr(scene_output) else {
+            return Err(Error::Destroyed("wlr_scene_output"));
+        };
+        let opts = options.as_c();
+        // SAFETY: a resolvable id names a live scene output; `opts` borrows the
+        // timer, transform and swapchain from `options`, all of which outlive
+        // this call.
+        unsafe {
+            let needed = sys::wlr_scene_output_needs_frame(raw.as_ptr());
+            if !sys::wlr_scene_output_commit(raw.as_ptr(), &raw const opts) {
+                return Err(Error::Operation("wlr_scene_output_commit"));
+            }
+            Ok(needed)
+        }
+    }
+
+    /// Tell every surface this scene output rendered that it may draw again.
+    ///
+    /// `when` is the presentation timestamp handed to the clients, as a
+    /// duration since whatever epoch the compositor's clock uses.
+    /// [`commit_output`](Runtime::commit_output) does this itself with the
+    /// current time; this is the call for a compositor driving the two halves
+    /// separately. `None` for an unknown or destroyed id.
+    pub fn send_scene_output_frame_done(
+        &self,
+        scene_output: SceneOutputId,
+        when: std::time::Duration,
+    ) -> Option<()> {
+        let raw = self.scene_output_ptr(scene_output)?;
+        let mut now = timespec_of(when);
+        // SAFETY: a resolvable id names a live scene output, and `now` is a
+        // live local for the call.
+        unsafe { sys::wlr_scene_output_send_frame_done(raw.as_ptr(), &raw mut now) };
+        Some(())
+    }
+
+    /// Visit every buffer node **visible on this output**, in render order.
+    ///
+    /// The scene-output half of
+    /// [`for_each_buffer`](Runtime::for_each_buffer): same root-to-leaves
+    /// order, same layout-local positions, and the same rule that nothing may
+    /// free or move a node from inside `f` — every call that could refuses
+    /// while the walk is running. The difference is the filter: this visits
+    /// what is actually on screen for this output, so a node scrolled off it,
+    /// or on another monitor, is not visited.
+    ///
+    /// `None` for an unknown or destroyed id.
+    ///
+    /// # Panics
+    ///
+    /// As for [`for_each_buffer`](Runtime::for_each_buffer): a panic escaping
+    /// `f` is caught, the remaining nodes are skipped, and it is resumed once
+    /// wlroots' own iteration has returned.
+    pub fn scene_output_for_each_buffer(
+        &self,
+        scene_output: SceneOutputId,
+        f: impl FnMut(NodeId, i32, i32),
+    ) -> Option<()> {
+        let raw = self.scene_output_ptr(scene_output)?;
+        self.buffer_walk(f, |iterator, user_data| {
+            // SAFETY: a resolvable id names a live scene output; the iterator
+            // has `wlr_scene_buffer_iterator_func_t`'s signature and
+            // `user_data` outlives the call, both guaranteed by `buffer_walk`.
+            unsafe { sys::wlr_scene_output_for_each_buffer(raw.as_ptr(), iterator, user_data) };
+        });
+        Some(())
+    }
+
+    /// Borrow a scene output as a [`SceneOutput`] handle for the duration of
+    /// `f`.
+    ///
+    /// The handle cannot escape `f`, and neither can the
+    /// [`DamageRingRef`](crate::DamageRingRef) reached through it — which is
+    /// the point: that ring is embedded in the scene output and dies with it.
+    ///
+    /// `None`, without calling `f`, for an unknown or destroyed id.
+    pub fn with_scene_output<R>(
+        &self,
+        scene_output: SceneOutputId,
+        f: impl FnOnce(&SceneOutput<'_>) -> R,
+    ) -> Option<R> {
+        let raw = self.scene_output_ptr(scene_output)?;
+        // SAFETY: a resolvable id names a live scene output. Nothing reachable
+        // from `SceneOutput`'s own methods destroys one — they read fields and
+        // damage the ring — so the handle names live memory for all of `f`.
+        let handle = unsafe { SceneOutput::from_raw_with_id(raw.as_ptr(), scene_output) };
+        Some(f(&handle))
+    }
+
+    // ---------------------------------------------------------------------
+    // Scene surfaces and the helpers built on them (0.20.19)
+    // ---------------------------------------------------------------------
+
+    /// Borrow `node` as a [`SceneSurface`] handle, if it is a buffer node whose
+    /// pixels come from a client surface.
+    ///
+    /// The [`with_node`](Runtime::with_node) contract applies verbatim,
+    /// including the destroy refusals while the borrow is live. `None`,
+    /// without calling `f`, when the id is unknown, stale, not a buffer node,
+    /// or a buffer node this crate uploaded pixels into rather than a client's.
+    ///
+    /// This is how a hit test becomes a surface: feed it the [`NodeId`]
+    /// [`node_at`](Runtime::node_at) returned. `wlr_scene_surface_try_from_buffer`
+    /// answers with null rather than misbehaving on a node that is not one, so
+    /// asking is always safe.
+    pub fn with_scene_surface<R>(
+        &self,
+        node: NodeId,
+        f: impl FnOnce(&SceneSurface<'_>) -> R,
+    ) -> Option<R> {
+        let raw = self.scene_surface_ptr(node)?;
+        let _guard = NodeBorrowGuard::enter(&self.inner);
+        // SAFETY: `scene_surface_ptr` resolved the node and asked wlroots
+        // whether it is surface-backed, so `raw` is a live `wlr_scene_surface`;
+        // the guard is what keeps its buffer node alive for the whole of `f`.
+        let handle = unsafe { SceneSurface::from_raw_with_node(raw.as_ptr(), node) };
+        Some(f(&handle))
+    }
+
+    /// `node`'s scene surface, if it has one.
+    ///
+    /// The shared resolution step: tag-check the node, downcast it to a buffer
+    /// node, then ask wlroots whether that buffer is surface-backed.
+    fn scene_surface_ptr(&self, node: NodeId) -> Option<NonNull<sys::wlr_scene_surface>> {
+        let raw = self.node_ptr(node)?;
+        // SAFETY: a resolvable id names a live node.
+        if NodeKind::from_raw(unsafe { (*raw.as_ptr()).type_ }) != Some(NodeKind::Buffer) {
+            return None;
+        }
+        // SAFETY: the tag check above is `wlr_scene_buffer_from_node`'s whole
+        // precondition, and `wlr_scene_surface_try_from_buffer` reports "not a
+        // surface" as null rather than as undefined behaviour.
+        unsafe {
+            let buffer = sys::wlr_scene_buffer_from_node(raw.as_ptr());
+            NonNull::new(sys::wlr_scene_surface_try_from_buffer(buffer))
+        }
+    }
+
+    /// Tell one surface it may draw again, if it is visible.
+    ///
+    /// [`send_scene_output_frame_done`](Runtime::send_scene_output_frame_done)
+    /// is the usual call — it covers every surface an output rendered. This one
+    /// is for a compositor answering a single surface, and wlroots skips it
+    /// silently when that surface is not actually on screen.
+    ///
+    /// `None` when the id is unknown, stale, or not a surface-backed buffer
+    /// node.
+    pub fn send_scene_surface_frame_done(
+        &self,
+        node: NodeId,
+        when: std::time::Duration,
+    ) -> Option<()> {
+        let raw = self.scene_surface_ptr(node)?;
+        let now = timespec_of(when);
+        // SAFETY: a resolvable surface-backed node names a live scene surface,
+        // and `now` is a live local wlroots reads out of.
+        unsafe { sys::wlr_scene_surface_send_frame_done(raw.as_ptr(), &raw const now) };
+        Some(())
+    }
+
+    /// Fire one buffer node's own `frame_done` signal.
+    ///
+    /// The signal a consumer watching a scene buffer
+    /// ([`observe_scene_buffer`](Runtime::observe_scene_buffer)) receives as
+    /// [`OutputHandler::scene_buffer_frame_done`](crate::OutputHandler::scene_buffer_frame_done).
+    /// Unlike [`send_scene_surface_frame_done`](Runtime::send_scene_surface_frame_done)
+    /// this sends the client nothing — it is the scene's own notification, for
+    /// a buffer node whose pixels a compositor produces itself.
+    ///
+    /// `None` when either id is unknown or stale, or when `node` is not a
+    /// buffer node.
+    pub fn send_scene_buffer_frame_done(
+        &self,
+        node: NodeId,
+        scene_output: SceneOutputId,
+        when: std::time::Duration,
+    ) -> Option<()> {
+        let raw = self.movable_scene_buffer_ptr(node)?;
+        let output = self.scene_output_ptr(scene_output)?;
+        let mut event = sys::wlr_scene_frame_done_event {
+            output: output.as_ptr(),
+            when: timespec_of(when),
+        };
+        // SAFETY: both ids resolve, so both name live objects, and `event` is a
+        // live local wlroots reads out of and passes to its listeners.
+        unsafe { sys::wlr_scene_buffer_send_frame_done(raw.as_ptr(), &raw mut event) };
+        Some(())
+    }
+
+    /// Crop every subsurface tree beneath `node` to `clip`.
+    ///
+    /// The clip is in the coordinate space of the **root surface** of each
+    /// subsurface tree, not of `node`, and `None` (or an empty box) disables
+    /// clipping. This is what makes a window that is larger than the space a
+    /// compositor wants to give it render cropped rather than overflowing —
+    /// the scene applies it to the client's subsurfaces as well as to its main
+    /// surface, which hand-positioning each node cannot do.
+    ///
+    /// `None` for an unknown or stale id. A node with no subsurface tree under
+    /// it is not an error: the call simply has nothing to clip.
+    pub fn set_subsurface_tree_clip(&self, node: NodeId, clip: Option<Box2D>) -> Option<()> {
+        let raw = self.node_ptr(node)?;
+        let ptr = clip.as_ref().map_or(std::ptr::null(), Box2D::as_c);
+        // SAFETY: a resolvable id names a live node; `ptr` is null or points at
+        // `clip`, a live local whose layout is pinned to `wlr_box`, which
+        // wlroots copies out of.
+        unsafe { sys::wlr_scene_subsurface_tree_set_clip(raw.as_ptr(), ptr) };
+        Some(())
+    }
+
+    /// Position and configure a layer surface from its own anchoring state, and
+    /// subtract what it claims from `usable`.
+    ///
+    /// This is wlroots' own layer-shell arithmetic, which
+    /// [`configure_layer_surface`](Runtime::configure_layer_surface) (a raw
+    /// "tell the client this size") deliberately does not do: it reads the
+    /// surface's anchors, margins and exclusive zone, moves its scene node,
+    /// sends the configure, and **mutates `usable` in place** so the next layer
+    /// surface sees what is left. Thread one `usable` through every layer
+    /// surface of an output, in order, starting from the output's own box:
+    ///
+    /// ```ignore
+    /// let full = Box2D::new(0, 0, width, height);
+    /// let mut usable = full;
+    /// for id in my_layer_surfaces_in_order {
+    ///     runtime.configure_scene_layer_surface(id, full, &mut usable);
+    /// }
+    /// ```
+    ///
+    /// `None`, having configured nothing and left `usable` untouched, when the
+    /// id is unknown or stale, or when the surface is **not yet initialized** —
+    /// wlroots' `wlr_layer_surface_v1_configure`, which this reaches, asserts
+    /// `initialized`, and this distribution's build of wlroots turns that into
+    /// a process abort. Unlike
+    /// [`configure_layer_surface`](Runtime::configure_layer_surface) there is
+    /// nothing to stage for later here: the call also moves the scene node and
+    /// rewrites `usable`, neither of which can be replayed at the surface's
+    /// next commit without the caller's boxes. Call this from
+    /// [`ToplevelHandler::layer_surface_commit`](crate::ToplevelHandler::layer_surface_commit),
+    /// which runs after that first commit, rather than from
+    /// `new_layer_surface`.
+    pub fn configure_scene_layer_surface(
+        &self,
+        id: LayerSurfaceId,
+        full: Box2D,
+        usable: &mut Box2D,
+    ) -> Option<()> {
+        let (raw, scene) = {
+            let table = self.inner.layer_surfaces.borrow();
+            let entry = table.get(&id)?;
+            (entry.raw, entry.scene)
+        };
+        // SAFETY: an entry is removed by `on_layer_surface_destroy` before
+        // wlroots frees the layer surface, so a present entry names a live one.
+        if !unsafe { (*raw.as_ptr()).initialized } {
+            return None;
+        }
+        // SAFETY: as above for `scene`, which wlroots frees together with the
+        // layer surface. `full` is read and `usable` is written through, both
+        // live locals of the caller's whose layout is pinned to `wlr_box`, and
+        // the `initialized` check above is the assert this call would otherwise
+        // abort on.
+        unsafe {
+            sys::wlr_scene_layer_surface_v1_configure(
+                scene.as_ptr(),
+                full.as_c(),
+                (&raw mut *usable).cast::<sys::wlr_box>(),
+            );
+        }
         Some(())
     }
 
@@ -4875,6 +5592,7 @@ impl Runtime {
         id: LayerSurfaceId,
         raw: NonNull<sys::wlr_layer_surface_v1>,
         scene_tree: NonNull<sys::wlr_scene_tree>,
+        scene: NonNull<sys::wlr_scene_layer_surface_v1>,
         band: Layer,
     ) {
         self.inner.layer_surfaces.borrow_mut().insert(
@@ -4882,6 +5600,7 @@ impl Runtime {
             LayerSurfaceEntry {
                 raw,
                 scene_tree,
+                scene,
                 staged_configure: std::cell::Cell::new(None),
                 band: std::cell::Cell::new(band),
             },
@@ -6611,6 +7330,7 @@ mod tests {
             id,
             NonNull::<sys::wlr_layer_surface_v1>::dangling(),
             tree,
+            NonNull::<sys::wlr_scene_layer_surface_v1>::dangling(),
             Layer::Background,
         );
 
@@ -6841,6 +7561,7 @@ mod tests {
             id,
             raw,
             NonNull::<sys::wlr_scene_tree>::dangling(),
+            NonNull::<sys::wlr_scene_layer_surface_v1>::dangling(),
             Layer::Background,
         );
 
@@ -6909,12 +7630,14 @@ mod tests {
             ls_a,
             NonNull::from(&mut ls_on_a),
             NonNull::<sys::wlr_scene_tree>::dangling(),
+            NonNull::<sys::wlr_scene_layer_surface_v1>::dangling(),
             Layer::Background,
         );
         rt.record_layer_surface(
             ls_b,
             NonNull::from(&mut ls_on_b),
             NonNull::<sys::wlr_scene_tree>::dangling(),
+            NonNull::<sys::wlr_scene_layer_surface_v1>::dangling(),
             Layer::Top,
         );
 

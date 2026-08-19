@@ -61,7 +61,7 @@ impl Box2D {
     }
 
     /// This box as the C type, for the duration of the borrow.
-    fn as_c(&self) -> *const sys::wlr_box {
+    pub(crate) fn as_c(&self) -> *const sys::wlr_box {
         (&raw const *self).cast::<sys::wlr_box>()
     }
 
