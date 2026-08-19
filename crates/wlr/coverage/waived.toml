@@ -364,12 +364,6 @@ note      = "Selection, drag-and-drop and the small standalone protocols."
 milestone = "M11"
 
 [[waived]]
-symbol    = "wlr_cursor_absolute_to_layout_coords"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
 symbol    = "wlr_cursor_destroy"
 reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
@@ -461,12 +455,6 @@ milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_cursor_warp"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_cursor_warp_closest"
 reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
@@ -2502,24 +2490,6 @@ note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
 
 [[waived]]
-symbol    = "wlr_pointer_constraint_v1"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_constraint_v1_send_activated"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_constraint_v1_send_deactivated"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
 symbol    = "wlr_pointer_constraint_v1_state"
 reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
@@ -2532,25 +2502,7 @@ note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
 
 [[waived]]
-symbol    = "wlr_pointer_constraint_v1_type"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_constraints_v1"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
 symbol    = "wlr_pointer_constraints_v1_constraint_for_surface"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_constraints_v1_create"
 reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
@@ -2800,24 +2752,6 @@ symbol    = "wlr_region_from_resource"
 reason    = "not-yet"
 note      = "Takes a wl_resource; belongs with compositor/surface depth, not util."
 milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_relative_pointer_manager_v1"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_relative_pointer_manager_v1_create"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_relative_pointer_manager_v1_send_relative_motion"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_relative_pointer_v1"

@@ -648,6 +648,19 @@ struct Session<'r, S> {
     /// `(*drag).icon` is null.
     drags: RefCell<HashMap<usize, Registration>>,
 
+    /// This run's listeners on every scene buffer node a consumer asked to
+    /// observe, keyed by that node's [`NodeId`].
+    ///
+    /// Unlike every other table here these are opt-in:
+    /// [`Runtime::observe_scene_buffer`](crate::Runtime::observe_scene_buffer)
+    /// is what fills a row, reaching this table through the erased hook
+    /// `install_scene_observer` plants on the runtime for the life of the run.
+    /// A row is removed — and so unlinked — either by
+    /// [`Runtime::unobserve_scene_buffer`](crate::Runtime::unobserve_scene_buffer),
+    /// or by `on_scene_buffer_node_destroy` from inside the node's own destroy
+    /// emission, before wlroots frees the signals these are linked into.
+    scene_buffers: RefCell<HashMap<NodeId, SceneBufferListeners>>,
+
     /// This run's destroy listener on every idle inhibitor currently live,
     /// keyed by the `destroy` listener's own address (as `usize`) — NOT the
     /// inhibitor object's, because wlroots emits the inhibitor's `destroy`
@@ -698,19 +711,6 @@ struct Session<'r, S> {
     /// it) together, and clears [`RuntimeInner::active_constraint`] if the
     /// entry it removed was the active one.
     pointer_constraints: RefCell<HashMap<usize, PointerConstraintListeners>>,
-
-    /// This run's listeners on every scene buffer node a consumer asked to
-    /// observe, keyed by that node's [`NodeId`].
-    ///
-    /// Unlike every other table here these are opt-in:
-    /// [`Runtime::observe_scene_buffer`](crate::Runtime::observe_scene_buffer)
-    /// is what fills a row, reaching this table through the erased hook
-    /// `install_scene_observer` plants on the runtime for the life of the run.
-    /// A row is removed — and so unlinked — either by
-    /// [`Runtime::unobserve_scene_buffer`](crate::Runtime::unobserve_scene_buffer),
-    /// or by `on_scene_buffer_node_destroy` from inside the node's own destroy
-    /// emission, before wlroots frees the signals these are linked into.
-    scene_buffers: RefCell<HashMap<NodeId, SceneBufferListeners>>,
 
     /// Whether the most recently delivered [`Event::Key`] was consumed by the
     /// handler. `on_key` cannot get a return value back through
@@ -2653,6 +2653,383 @@ unsafe extern "C" fn on_drag_destroy<S: Handlers>(
     }
 }
 
+// -------------------------------------------------------------------------
+// Scene-buffer observation (0.20.19)
+//
+// A `wlr_scene_buffer` announces where it is being displayed through five
+// signals, and a compositor that wants any of them has to link listeners into
+// that one node. Listeners belong to a run — they call handlers on `S` — but
+// the nodes they watch belong to the runtime, so the two are joined by an
+// erased hook the run installs on the runtime for its own duration
+// (`RuntimeInner::scene_observer`), which is what
+// `Runtime::observe_scene_buffer` reaches this file through.
+// -------------------------------------------------------------------------
+
+/// `Runtime::observe_scene_buffer`'s implementation, instantiated at this run's
+/// `S`.
+///
+/// Idempotent: observing a node twice leaves one set of listeners, which is
+/// what stops a consumer calling this from a `frame` handler every turn from
+/// linking a new set each time.
+///
+/// # Safety
+///
+/// * `session` must be the `*const Session<'_, S>` this run installed.
+/// * `buffer` must point at a live `wlr_scene_buffer` whose embedded node
+///   carries `node` as its id.
+unsafe fn watch_scene_buffer<S: Handlers>(
+    session: *const (),
+    node: NodeId,
+    buffer: *mut sys::wlr_scene_buffer,
+) {
+    // SAFETY: forwarded from this function's own contract. Each `link_node`
+    // call takes the address of one of the buffer's own signals, every one of
+    // which is initialised for the node's whole life, and pairs
+    // `(*session)`'s erased pointer with a callback instantiated at the same
+    // `S` — the pairing discipline `Bound::session` documents.
+    unsafe {
+        let session_ptr = session.cast::<Session<'_, S>>();
+        if (*session_ptr).scene_buffers.borrow().contains_key(&node) {
+            return;
+        }
+
+        let events = &raw mut (*buffer).events;
+        let outputs_update = Registration::link_node(
+            &raw mut (*events).outputs_update,
+            on_scene_buffer_outputs_update::<S>,
+            session,
+            node,
+        );
+        let output_enter = Registration::link_node(
+            &raw mut (*events).output_enter,
+            on_scene_buffer_output_enter::<S>,
+            session,
+            node,
+        );
+        let output_leave = Registration::link_node(
+            &raw mut (*events).output_leave,
+            on_scene_buffer_output_leave::<S>,
+            session,
+            node,
+        );
+        let output_sample = Registration::link_node(
+            &raw mut (*events).output_sample,
+            on_scene_buffer_output_sample::<S>,
+            session,
+            node,
+        );
+        let frame_done = Registration::link_node(
+            &raw mut (*events).frame_done,
+            on_scene_buffer_frame_done::<S>,
+            session,
+            node,
+        );
+        // The sixth, and the one that makes the other five sound: it removes
+        // this row from inside the node's own destroy emission, unlinking every
+        // registration here while the signals still exist.
+        let destroy = Registration::link_node(
+            &raw mut (*buffer).node.events.destroy,
+            on_scene_buffer_node_destroy::<S>,
+            session,
+            node,
+        );
+
+        let displaced = (*session_ptr).scene_buffers.borrow_mut().insert(
+            node,
+            SceneBufferListeners {
+                _outputs_update: outputs_update,
+                _output_enter: output_enter,
+                _output_leave: output_leave,
+                _output_sample: output_sample,
+                _frame_done: frame_done,
+                _destroy: destroy,
+            },
+        );
+        // Bound and dropped after the borrow statement, never inside it: the
+        // displaced entry's `Registration::drop`s must not run under a live
+        // `RefMut`. Nothing can be displaced here (the lookup above returned
+        // early if a row existed), but the discipline is absolute.
+        drop(displaced);
+    }
+}
+
+/// `Runtime::unobserve_scene_buffer`'s implementation.
+///
+/// # Safety
+///
+/// `session` must be the `*const Session<'_, S>` this run installed.
+unsafe fn unwatch_scene_buffer<S: Handlers>(session: *const (), node: NodeId) {
+    // SAFETY: forwarded.
+    unsafe {
+        let session = session.cast::<Session<'_, S>>();
+        let removed = (*session).scene_buffers.borrow_mut().remove(&node);
+        // As in `watch_scene_buffer`: the unlinking happens on this line, not
+        // under the borrow above.
+        drop(removed);
+    }
+}
+
+/// `Runtime::scene_buffer_observed`'s implementation.
+///
+/// # Safety
+///
+/// `session` must be the `*const Session<'_, S>` this run installed.
+unsafe fn scene_buffer_is_watched<S: Handlers>(session: *const (), node: NodeId) -> bool {
+    // SAFETY: forwarded.
+    unsafe {
+        let session = session.cast::<Session<'_, S>>();
+        (*session).scene_buffers.borrow().contains_key(&node)
+    }
+}
+
+/// Install this run as the runtime's scene-buffer observer.
+///
+/// The `S`-carrying half of [`SceneObserverGuard`], which is what clears it
+/// again: `run_inner` is generic over `OutputHandler` and cannot name these
+/// `Handlers`-bound functions, so `run_all` supplies them through
+/// [`RunHooks`].
+fn install_scene_observer<S: Handlers>(runtime: &Runtime, session: *const ()) {
+    runtime.set_scene_observer(SceneObserver {
+        session,
+        watch: watch_scene_buffer::<S>,
+        unwatch: unwatch_scene_buffer::<S>,
+        is_watching: scene_buffer_is_watched::<S>,
+    });
+}
+
+/// `run`'s counterpart: [`Backend::run`] takes only an `OutputHandler`, which
+/// has no scene-buffer methods to deliver to, so it installs nothing and
+/// `Runtime::observe_scene_buffer` reports that there is no run to observe
+/// through.
+fn no_scene_observer<S>(_runtime: &Runtime, _session: *const ()) {}
+
+/// Clears the runtime's scene-buffer observer when the `run_inner` call holding
+/// this guard returns, on every exit path — including a panic.
+///
+/// The hook it clears holds a raw pointer to that call's own `Session`, so
+/// leaving it installed past the return would be a dangling pointer any later
+/// `Runtime::observe_scene_buffer` would follow. Mirrors [`ToplevelTableGuard`]
+/// in shape and in why it is a `Drop` guard rather than a statement at the end
+/// of the function.
+struct SceneObserverGuard<'r>(&'r Runtime);
+
+impl Drop for SceneObserverGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear_scene_observer();
+    }
+}
+
+/// The `wlr_scene_output` a scene-buffer signal names, as an id this crate can
+/// deliver.
+///
+/// `None` when the runtime does not know that scene output, which drops the
+/// event: an id it never minted is one no handler could act on anyway.
+///
+/// # Safety
+///
+/// `raw` must be null or point at a live `wlr_scene_output`.
+unsafe fn scene_output_id_of<S>(
+    session: *const Session<'_, S>,
+    raw: *mut sys::wlr_scene_output,
+) -> Option<crate::SceneOutputId> {
+    let raw = NonNull::new(raw)?;
+    // SAFETY: the caller guarantees `raw` is live; this only compares it
+    // against the runtime's recorded pointers.
+    unsafe { (*session).runtime.scene_output_id_of(raw) }
+}
+
+unsafe extern "C" fn on_scene_buffer_output_enter<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener `watch_scene_buffer`
+    // linked into this buffer's `events.output_enter`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. That signal
+    // carries a `*mut wlr_scene_output`, live for the emission.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(node) = (*bound).node else { return };
+        let Some(output) = scene_output_id_of(session, data.cast::<sys::wlr_scene_output>()) else {
+            return;
+        };
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::SceneBufferOutputEnter(node, output),
+            deliver,
+        );
+    }
+}
+
+unsafe extern "C" fn on_scene_buffer_output_leave<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_scene_buffer_output_enter`, for `events.output_leave`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(node) = (*bound).node else { return };
+        let Some(output) = scene_output_id_of(session, data.cast::<sys::wlr_scene_output>()) else {
+            return;
+        };
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::SceneBufferOutputLeave(node, output),
+            deliver,
+        );
+    }
+}
+
+unsafe extern "C" fn on_scene_buffer_output_sample<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_scene_buffer_output_enter`, except that
+    // `events.output_sample` carries a `*mut wlr_scene_output_sample_event`,
+    // live for the emission, whose `output` field is the scene output.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(node) = (*bound).node else { return };
+        let event = data.cast::<sys::wlr_scene_output_sample_event>();
+        if event.is_null() {
+            return;
+        }
+        let Some(output) = scene_output_id_of(session, (*event).output) else {
+            return;
+        };
+        let direct_scanout = (*event).direct_scanout;
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::SceneBufferOutputSample(node, output, direct_scanout),
+            deliver,
+        );
+    }
+}
+
+unsafe extern "C" fn on_scene_buffer_frame_done<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_scene_buffer_output_sample`, for
+    // `events.frame_done`'s `wlr_scene_frame_done_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(node) = (*bound).node else { return };
+        let event = data.cast::<sys::wlr_scene_frame_done_event>();
+        if event.is_null() {
+            return;
+        }
+        let Some(output) = scene_output_id_of(session, (*event).output) else {
+            return;
+        };
+        // Read here, at emission time, rather than at delivery: a deferred
+        // frame-done must report the moment wlroots named, not the moment the
+        // handler happened to run. A negative `tv_sec` is not representable as
+        // a `Duration` and cannot come from a presentation clock; clamping it
+        // to zero is what keeps this conversion total inside a C frame.
+        let when = std::time::Duration::new(
+            u64::try_from((*event).when.tv_sec).unwrap_or(0),
+            u32::try_from((*event).when.tv_nsec).unwrap_or(0),
+        );
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::SceneBufferFrameDone(node, output, when),
+            deliver,
+        );
+    }
+}
+
+unsafe extern "C" fn on_scene_buffer_outputs_update<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_scene_buffer_output_sample`, for
+    // `events.outputs_update`'s `wlr_scene_outputs_update_event` — whose
+    // `active` array is valid only for this emission, which is exactly why the
+    // snapshot below is taken here rather than at delivery.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(node) = (*bound).node else { return };
+        let event = data.cast::<sys::wlr_scene_outputs_update_event>();
+        if event.is_null() {
+            return;
+        }
+
+        // An entry this crate cannot resolve makes the whole snapshot unusable,
+        // not shorter.
+        //
+        // Recording the survivors wrote a *truncated* list as the authoritative
+        // answer, and `scene_buffer_active_outputs` returns it as `Some` —
+        // indistinguishable from a correct one, so a compositor deciding which
+        // outputs to throttle to, or when to send frame callbacks, silently
+        // acts on a monitor list missing a monitor.
+        //
+        // It is reachable exactly at hotplug, which is when it matters most:
+        // `wlr_scene_output_create` runs `scene_output_update_geometry` (and so
+        // `update_node_update_outputs`) *before* this crate's
+        // `record_scene_output` has given the new output an id, so the new
+        // output is in this array with no id yet.
+        //
+        // Dropping the snapshot makes the query answer `None` — "not known
+        // right now" — which is a state the API already has and a caller can
+        // act on. The next emission, after the id exists, refreshes it.
+        let mut active = Vec::new();
+        let mut complete = true;
+        if !(*event).active.is_null() {
+            for i in 0..(*event).size {
+                let raw = *(*event).active.add(i);
+                match scene_output_id_of(session, raw) {
+                    Some(id) => active.push(id),
+                    None => complete = false,
+                }
+            }
+        }
+        if complete {
+            (*session).runtime.record_scene_buffer_outputs(node, active);
+        } else {
+            (*session).runtime.forget_scene_buffer_outputs(node);
+        }
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::SceneBufferOutputsUpdate(node), deliver);
+    }
+}
+
+/// An observed scene buffer's node is being destroyed.
+///
+/// Removes the row — and so unlinks all six listeners — from inside the node's
+/// own destroy emission, while the signals they are linked into still exist.
+/// Self-unlinking mid-emission is sound: `wl_signal_emit_mutable` advances its
+/// cursor past the firing listener before calling it.
+unsafe extern "C" fn on_scene_buffer_node_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `watch_scene_buffer` into this node's own
+    // `events.destroy`; the node is still live memory for this emission.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(node) = (*bound).node else { return };
+        // Copied out before the removal below, which frees the `Bound` this
+        // callback is running through.
+        let runtime = (*session).runtime;
+        let removed = (*session).scene_buffers.borrow_mut().remove(&node);
+        drop(removed);
+        runtime.forget_scene_buffer_outputs(node);
+    }
+}
+
 /// A client bound `zwp_idle_inhibit_manager_v1` and requested an inhibitor on
 /// one of its surfaces. Counts it in [`RuntimeInner::idle_inhibitors`] and
 /// re-gates the idle notifier via
@@ -3215,383 +3592,6 @@ unsafe extern "C" fn on_session_lock_destroy<S: Handlers>(
             // them; input stays refused to normal clients by the gates.
             runtime.clear_keyboard_focus();
         }
-    }
-}
-
-// -------------------------------------------------------------------------
-// Scene-buffer observation (0.20.19)
-//
-// A `wlr_scene_buffer` announces where it is being displayed through five
-// signals, and a compositor that wants any of them has to link listeners into
-// that one node. Listeners belong to a run — they call handlers on `S` — but
-// the nodes they watch belong to the runtime, so the two are joined by an
-// erased hook the run installs on the runtime for its own duration
-// (`RuntimeInner::scene_observer`), which is what
-// `Runtime::observe_scene_buffer` reaches this file through.
-// -------------------------------------------------------------------------
-
-/// `Runtime::observe_scene_buffer`'s implementation, instantiated at this run's
-/// `S`.
-///
-/// Idempotent: observing a node twice leaves one set of listeners, which is
-/// what stops a consumer calling this from a `frame` handler every turn from
-/// linking a new set each time.
-///
-/// # Safety
-///
-/// * `session` must be the `*const Session<'_, S>` this run installed.
-/// * `buffer` must point at a live `wlr_scene_buffer` whose embedded node
-///   carries `node` as its id.
-unsafe fn watch_scene_buffer<S: Handlers>(
-    session: *const (),
-    node: NodeId,
-    buffer: *mut sys::wlr_scene_buffer,
-) {
-    // SAFETY: forwarded from this function's own contract. Each `link_node`
-    // call takes the address of one of the buffer's own signals, every one of
-    // which is initialised for the node's whole life, and pairs
-    // `(*session)`'s erased pointer with a callback instantiated at the same
-    // `S` — the pairing discipline `Bound::session` documents.
-    unsafe {
-        let session_ptr = session.cast::<Session<'_, S>>();
-        if (*session_ptr).scene_buffers.borrow().contains_key(&node) {
-            return;
-        }
-
-        let events = &raw mut (*buffer).events;
-        let outputs_update = Registration::link_node(
-            &raw mut (*events).outputs_update,
-            on_scene_buffer_outputs_update::<S>,
-            session,
-            node,
-        );
-        let output_enter = Registration::link_node(
-            &raw mut (*events).output_enter,
-            on_scene_buffer_output_enter::<S>,
-            session,
-            node,
-        );
-        let output_leave = Registration::link_node(
-            &raw mut (*events).output_leave,
-            on_scene_buffer_output_leave::<S>,
-            session,
-            node,
-        );
-        let output_sample = Registration::link_node(
-            &raw mut (*events).output_sample,
-            on_scene_buffer_output_sample::<S>,
-            session,
-            node,
-        );
-        let frame_done = Registration::link_node(
-            &raw mut (*events).frame_done,
-            on_scene_buffer_frame_done::<S>,
-            session,
-            node,
-        );
-        // The sixth, and the one that makes the other five sound: it removes
-        // this row from inside the node's own destroy emission, unlinking every
-        // registration here while the signals still exist.
-        let destroy = Registration::link_node(
-            &raw mut (*buffer).node.events.destroy,
-            on_scene_buffer_node_destroy::<S>,
-            session,
-            node,
-        );
-
-        let displaced = (*session_ptr).scene_buffers.borrow_mut().insert(
-            node,
-            SceneBufferListeners {
-                _outputs_update: outputs_update,
-                _output_enter: output_enter,
-                _output_leave: output_leave,
-                _output_sample: output_sample,
-                _frame_done: frame_done,
-                _destroy: destroy,
-            },
-        );
-        // Bound and dropped after the borrow statement, never inside it: the
-        // displaced entry's `Registration::drop`s must not run under a live
-        // `RefMut`. Nothing can be displaced here (the lookup above returned
-        // early if a row existed), but the discipline is absolute.
-        drop(displaced);
-    }
-}
-
-/// `Runtime::unobserve_scene_buffer`'s implementation.
-///
-/// # Safety
-///
-/// `session` must be the `*const Session<'_, S>` this run installed.
-unsafe fn unwatch_scene_buffer<S: Handlers>(session: *const (), node: NodeId) {
-    // SAFETY: forwarded.
-    unsafe {
-        let session = session.cast::<Session<'_, S>>();
-        let removed = (*session).scene_buffers.borrow_mut().remove(&node);
-        // As in `watch_scene_buffer`: the unlinking happens on this line, not
-        // under the borrow above.
-        drop(removed);
-    }
-}
-
-/// `Runtime::scene_buffer_observed`'s implementation.
-///
-/// # Safety
-///
-/// `session` must be the `*const Session<'_, S>` this run installed.
-unsafe fn scene_buffer_is_watched<S: Handlers>(session: *const (), node: NodeId) -> bool {
-    // SAFETY: forwarded.
-    unsafe {
-        let session = session.cast::<Session<'_, S>>();
-        (*session).scene_buffers.borrow().contains_key(&node)
-    }
-}
-
-/// Install this run as the runtime's scene-buffer observer.
-///
-/// The `S`-carrying half of [`SceneObserverGuard`], which is what clears it
-/// again: `run_inner` is generic over `OutputHandler` and cannot name these
-/// `Handlers`-bound functions, so `run_all` supplies them through
-/// [`RunHooks`].
-fn install_scene_observer<S: Handlers>(runtime: &Runtime, session: *const ()) {
-    runtime.set_scene_observer(SceneObserver {
-        session,
-        watch: watch_scene_buffer::<S>,
-        unwatch: unwatch_scene_buffer::<S>,
-        is_watching: scene_buffer_is_watched::<S>,
-    });
-}
-
-/// `run`'s counterpart: [`Backend::run`] takes only an `OutputHandler`, which
-/// has no scene-buffer methods to deliver to, so it installs nothing and
-/// `Runtime::observe_scene_buffer` reports that there is no run to observe
-/// through.
-fn no_scene_observer<S>(_runtime: &Runtime, _session: *const ()) {}
-
-/// Clears the runtime's scene-buffer observer when the `run_inner` call holding
-/// this guard returns, on every exit path — including a panic.
-///
-/// The hook it clears holds a raw pointer to that call's own `Session`, so
-/// leaving it installed past the return would be a dangling pointer any later
-/// `Runtime::observe_scene_buffer` would follow. Mirrors [`ToplevelTableGuard`]
-/// in shape and in why it is a `Drop` guard rather than a statement at the end
-/// of the function.
-struct SceneObserverGuard<'r>(&'r Runtime);
-
-impl Drop for SceneObserverGuard<'_> {
-    fn drop(&mut self) {
-        self.0.clear_scene_observer();
-    }
-}
-
-/// The `wlr_scene_output` a scene-buffer signal names, as an id this crate can
-/// deliver.
-///
-/// `None` when the runtime does not know that scene output, which drops the
-/// event: an id it never minted is one no handler could act on anyway.
-///
-/// # Safety
-///
-/// `raw` must be null or point at a live `wlr_scene_output`.
-unsafe fn scene_output_id_of<S>(
-    session: *const Session<'_, S>,
-    raw: *mut sys::wlr_scene_output,
-) -> Option<crate::SceneOutputId> {
-    let raw = NonNull::new(raw)?;
-    // SAFETY: the caller guarantees `raw` is live; this only compares it
-    // against the runtime's recorded pointers.
-    unsafe { (*session).runtime.scene_output_id_of(raw) }
-}
-
-unsafe extern "C" fn on_scene_buffer_output_enter<S: Handlers>(
-    l: *mut sys::wl_listener,
-    data: *mut std::ffi::c_void,
-) {
-    // SAFETY: wlroots invokes this only for the listener `watch_scene_buffer`
-    // linked into this buffer's `events.output_enter`, whose `session` is the
-    // `*const Session<'_, S>` paired with this instantiation. That signal
-    // carries a `*mut wlr_scene_output`, live for the emission.
-    unsafe {
-        let bound = bound_of(l);
-        let session = (*bound).session.cast::<Session<'_, S>>();
-        let Some(node) = (*bound).node else { return };
-        let Some(output) = scene_output_id_of(session, data.cast::<sys::wlr_scene_output>()) else {
-            return;
-        };
-        let deliver = (*session).deliver;
-        (*session).dispatcher.emit(
-            &*session,
-            Event::SceneBufferOutputEnter(node, output),
-            deliver,
-        );
-    }
-}
-
-unsafe extern "C" fn on_scene_buffer_output_leave<S: Handlers>(
-    l: *mut sys::wl_listener,
-    data: *mut std::ffi::c_void,
-) {
-    // SAFETY: as for `on_scene_buffer_output_enter`, for `events.output_leave`.
-    unsafe {
-        let bound = bound_of(l);
-        let session = (*bound).session.cast::<Session<'_, S>>();
-        let Some(node) = (*bound).node else { return };
-        let Some(output) = scene_output_id_of(session, data.cast::<sys::wlr_scene_output>()) else {
-            return;
-        };
-        let deliver = (*session).deliver;
-        (*session).dispatcher.emit(
-            &*session,
-            Event::SceneBufferOutputLeave(node, output),
-            deliver,
-        );
-    }
-}
-
-unsafe extern "C" fn on_scene_buffer_output_sample<S: Handlers>(
-    l: *mut sys::wl_listener,
-    data: *mut std::ffi::c_void,
-) {
-    // SAFETY: as for `on_scene_buffer_output_enter`, except that
-    // `events.output_sample` carries a `*mut wlr_scene_output_sample_event`,
-    // live for the emission, whose `output` field is the scene output.
-    unsafe {
-        let bound = bound_of(l);
-        let session = (*bound).session.cast::<Session<'_, S>>();
-        let Some(node) = (*bound).node else { return };
-        let event = data.cast::<sys::wlr_scene_output_sample_event>();
-        if event.is_null() {
-            return;
-        }
-        let Some(output) = scene_output_id_of(session, (*event).output) else {
-            return;
-        };
-        let direct_scanout = (*event).direct_scanout;
-        let deliver = (*session).deliver;
-        (*session).dispatcher.emit(
-            &*session,
-            Event::SceneBufferOutputSample(node, output, direct_scanout),
-            deliver,
-        );
-    }
-}
-
-unsafe extern "C" fn on_scene_buffer_frame_done<S: Handlers>(
-    l: *mut sys::wl_listener,
-    data: *mut std::ffi::c_void,
-) {
-    // SAFETY: as for `on_scene_buffer_output_sample`, for
-    // `events.frame_done`'s `wlr_scene_frame_done_event`.
-    unsafe {
-        let bound = bound_of(l);
-        let session = (*bound).session.cast::<Session<'_, S>>();
-        let Some(node) = (*bound).node else { return };
-        let event = data.cast::<sys::wlr_scene_frame_done_event>();
-        if event.is_null() {
-            return;
-        }
-        let Some(output) = scene_output_id_of(session, (*event).output) else {
-            return;
-        };
-        // Read here, at emission time, rather than at delivery: a deferred
-        // frame-done must report the moment wlroots named, not the moment the
-        // handler happened to run. A negative `tv_sec` is not representable as
-        // a `Duration` and cannot come from a presentation clock; clamping it
-        // to zero is what keeps this conversion total inside a C frame.
-        let when = std::time::Duration::new(
-            u64::try_from((*event).when.tv_sec).unwrap_or(0),
-            u32::try_from((*event).when.tv_nsec).unwrap_or(0),
-        );
-        let deliver = (*session).deliver;
-        (*session).dispatcher.emit(
-            &*session,
-            Event::SceneBufferFrameDone(node, output, when),
-            deliver,
-        );
-    }
-}
-
-unsafe extern "C" fn on_scene_buffer_outputs_update<S: Handlers>(
-    l: *mut sys::wl_listener,
-    data: *mut std::ffi::c_void,
-) {
-    // SAFETY: as for `on_scene_buffer_output_sample`, for
-    // `events.outputs_update`'s `wlr_scene_outputs_update_event` — whose
-    // `active` array is valid only for this emission, which is exactly why the
-    // snapshot below is taken here rather than at delivery.
-    unsafe {
-        let bound = bound_of(l);
-        let session = (*bound).session.cast::<Session<'_, S>>();
-        let Some(node) = (*bound).node else { return };
-        let event = data.cast::<sys::wlr_scene_outputs_update_event>();
-        if event.is_null() {
-            return;
-        }
-
-        // An entry this crate cannot resolve makes the whole snapshot unusable,
-        // not shorter.
-        //
-        // Recording the survivors wrote a *truncated* list as the authoritative
-        // answer, and `scene_buffer_active_outputs` returns it as `Some` —
-        // indistinguishable from a correct one, so a compositor deciding which
-        // outputs to throttle to, or when to send frame callbacks, silently
-        // acts on a monitor list missing a monitor.
-        //
-        // It is reachable exactly at hotplug, which is when it matters most:
-        // `wlr_scene_output_create` runs `scene_output_update_geometry` (and so
-        // `update_node_update_outputs`) *before* this crate's
-        // `record_scene_output` has given the new output an id, so the new
-        // output is in this array with no id yet.
-        //
-        // Dropping the snapshot makes the query answer `None` — "not known
-        // right now" — which is a state the API already has and a caller can
-        // act on. The next emission, after the id exists, refreshes it.
-        let mut active = Vec::new();
-        let mut complete = true;
-        if !(*event).active.is_null() {
-            for i in 0..(*event).size {
-                let raw = *(*event).active.add(i);
-                match scene_output_id_of(session, raw) {
-                    Some(id) => active.push(id),
-                    None => complete = false,
-                }
-            }
-        }
-        if complete {
-            (*session).runtime.record_scene_buffer_outputs(node, active);
-        } else {
-            (*session).runtime.forget_scene_buffer_outputs(node);
-        }
-
-        let deliver = (*session).deliver;
-        (*session)
-            .dispatcher
-            .emit(&*session, Event::SceneBufferOutputsUpdate(node), deliver);
-    }
-}
-
-/// An observed scene buffer's node is being destroyed.
-///
-/// Removes the row — and so unlinks all six listeners — from inside the node's
-/// own destroy emission, while the signals they are linked into still exist.
-/// Self-unlinking mid-emission is sound: `wl_signal_emit_mutable` advances its
-/// cursor past the firing listener before calling it.
-unsafe extern "C" fn on_scene_buffer_node_destroy<S: Handlers>(
-    l: *mut sys::wl_listener,
-    _data: *mut std::ffi::c_void,
-) {
-    // SAFETY: linked by `watch_scene_buffer` into this node's own
-    // `events.destroy`; the node is still live memory for this emission.
-    unsafe {
-        let bound = bound_of(l);
-        let session = (*bound).session.cast::<Session<'_, S>>();
-        let Some(node) = (*bound).node else { return };
-        // Copied out before the removal below, which frees the `Bound` this
-        // callback is running through.
-        let runtime = (*session).runtime;
-        let removed = (*session).scene_buffers.borrow_mut().remove(&node);
-        drop(removed);
-        runtime.forget_scene_buffer_outputs(node);
     }
 }
 
@@ -6051,7 +6051,6 @@ mod tests {
                 dispatcher: Dispatcher::new(state),
                 outputs: RefCell::new(HashMap::new()),
                 toplevels: RefCell::new(HashMap::new()),
-                scene_buffers: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
                 layers: RefCell::new(HashMap::new()),
                 inputs: RefCell::new(HashMap::new()),
@@ -6059,6 +6058,7 @@ mod tests {
                 idle_inhibitors: RefCell::new(HashMap::new()),
                 session_locks: RefCell::new(HashMap::new()),
                 lock_surfaces: RefCell::new(HashMap::new()),
+                scene_buffers: RefCell::new(HashMap::new()),
                 pointer_constraints: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
                 runtime: &runtime,
@@ -6224,7 +6224,6 @@ mod tests {
         let runtime = Runtime::new().expect("runtime");
         let session: Session<'_, Recorder> = Session {
             // Never dereferenced: these tests call `deliver` directly and pass
-            scene_buffers: RefCell::new(HashMap::new()),
             // the state alongside, rather than going through `emit`.
             dispatcher: Dispatcher::new(std::ptr::null_mut()),
             outputs: RefCell::new(HashMap::new()),
@@ -6232,10 +6231,11 @@ mod tests {
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
-            drags: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
+            drags: RefCell::new(HashMap::new()),
+            scene_buffers: RefCell::new(HashMap::new()),
             pointer_constraints: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime: &runtime,

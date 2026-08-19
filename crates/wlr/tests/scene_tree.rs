@@ -266,10 +266,14 @@ fn children_are_reported_bottom_to_top_in_creation_order() {
     assert_eq!(rt.node_parent(first), Some(band));
 }
 
-/// The scene root's children are the five bands, in the fixed order
+/// The scene root's children are the six bands, in the fixed order
 /// `Graphics` documents, and they are reachable by id.
+///
+/// Enumerated explicitly rather than derived, so adding a band to `Band`
+/// without deciding where it stacks fails here — which is how `Lock` arriving
+/// above `Overlay` in 0.20.20 was caught.
 #[test]
-fn the_scene_root_reports_the_five_bands_in_order() {
+fn the_scene_root_reports_the_six_bands_in_order() {
     let rt = scene_runtime();
     let root = rt.scene_root_node().expect("scene root");
     let bands: Vec<wlr::NodeId> = [
@@ -278,6 +282,7 @@ fn the_scene_root_reports_the_five_bands_in_order() {
         wlr::Band::Toplevel,
         wlr::Band::Top,
         wlr::Band::Overlay,
+        wlr::Band::Lock,
     ]
     .into_iter()
     .map(|b| rt.band_node(b).expect("band id"))

@@ -1374,14 +1374,16 @@ impl Runtime {
             graphics.toplevel_band,
             graphics.top_band,
             graphics.overlay_band,
+            graphics.lock_band,
         ];
         *self.inner.graphics.borrow_mut() = Some(graphics);
-        // Ids for the six nodes a consumer can name but must not restructure.
+        // Ids for the seven nodes a consumer can name but must not restructure:
+        // the scene root and the six bands.
         // Attached *after* the fallible section, so `SceneGuard`'s rollback
         // never has to unwind a half-populated node table: on that path the
         // scene is destroyed before any id exists.
         //
-        // SAFETY: the scene root and the five band trees were created above
+        // SAFETY: the scene root and the six band trees were created above
         // and are live; none carries a node payload yet (this runs once —
         // `init_graphics` refuses a second call). `Protected` is what stops
         // `destroy_node`/`reparent_node` reaching them.
@@ -3060,7 +3062,7 @@ impl Runtime {
     /// `tree` must be null or point at a live `wlr_scene_tree` whose ancestor
     /// chain is walkable.
     unsafe fn classify_parent(&self, tree: *mut sys::wlr_scene_tree) -> RectParent {
-        let bands: [(Band, NonNull<sys::wlr_scene_tree>); 5] = {
+        let bands: [(Band, NonNull<sys::wlr_scene_tree>); 6] = {
             let g = self.inner.graphics.borrow();
             match g.as_ref() {
                 Some(g) => [
@@ -3069,6 +3071,7 @@ impl Runtime {
                     (Band::Toplevel, g.toplevel_band),
                     (Band::Top, g.top_band),
                     (Band::Overlay, g.overlay_band),
+                    (Band::Lock, g.lock_band),
                 ],
                 // No graphics means no bands and no toplevels either, so every
                 // row can only be a root one.

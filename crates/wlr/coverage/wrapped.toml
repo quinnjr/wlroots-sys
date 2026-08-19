@@ -1797,3 +1797,58 @@ item   = "Runtime::set_toplevel_maximized"
 symbol = "wlr_xdg_toplevel_set_size"
 module = "runtime"
 item   = "Runtime::set_toplevel_size"
+
+[[wrapped]]
+symbol = "wlr_cursor_absolute_to_layout_coords"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_cursor_warp_closest"
+module = "runtime"
+item   = "Runtime::cursor_position"
+
+[[wrapped]]
+symbol = "wlr_pointer_constraint_v1"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_pointer_constraint_v1_send_activated"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_pointer_constraint_v1_send_deactivated"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_pointer_constraint_v1_type"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_pointer_constraints_v1"
+module = "runtime"
+item   = "Runtime::create_pointer_constraints_manager"
+
+[[wrapped]]
+symbol = "wlr_pointer_constraints_v1_create"
+module = "runtime"
+item   = "Runtime::create_pointer_constraints_manager"
+
+[[wrapped]]
+symbol = "wlr_relative_pointer_manager_v1"
+module = "runtime"
+item   = "Runtime::create_relative_pointer_manager"
+
+[[wrapped]]
+symbol = "wlr_relative_pointer_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_relative_pointer_manager"
+
+[[wrapped]]
+symbol = "wlr_relative_pointer_manager_v1_send_relative_motion"
+module = "runtime"
+item   = "Runtime::create_relative_pointer_manager"
