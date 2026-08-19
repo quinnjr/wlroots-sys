@@ -61,6 +61,22 @@ fn audit() -> Report {
     coverage::reconcile(&symbols, &wrapped, &waived, &sys_uses)
 }
 
+/// One symbol per feature that gates a whole header, so a build missing any
+/// one of them is not mistaken for the full set.
+///
+/// Deliberately load-bearing names rather than a symbol count: a count would
+/// drift with every wlroots release and need maintaining, whereas a symbol
+/// that disappears is a real event the audit should notice anyway — which is
+/// what `the_all_features_markers_are_real_symbols` checks.
+const ALL_FEATURES_MARKERS: &[&str] = &[
+    "wlr_vk_renderer_create_with_drm_fd",    // vulkan-renderer
+    "wlr_gles2_renderer_create_with_drm_fd", // gles2-renderer
+    "wlr_drm_backend_create",                // drm-backend
+    "wlr_x11_backend_create",                // x11-backend
+    "wlr_libinput_backend_create",           // libinput-backend
+    "wlr_session_create",                    // session
+];
+
 /// Whether these bindings came from an all-features build.
 ///
 /// Asks for a symbol from each feature that gates a whole header, so a build
@@ -69,53 +85,44 @@ fn audit() -> Report {
 /// with every wlroots release and would have to be maintained, whereas a
 /// symbol that disappears is a real event the audit should notice anyway.
 fn is_all_features(bindings: &str) -> bool {
-    const MARKERS: &[&str] = &[
-        "wlr_vk_renderer_create_with_drm_fd",    // vulkan-renderer
-        "wlr_gles2_renderer_create_with_drm_fd", // gles2-renderer
-        "wlr_drm_backend_create",                // drm-backend
-        "wlr_x11_backend_create",                // x11-backend
-        "wlr_libinput_backend_create",           // libinput-backend
-        "wlr_session_create",                    // session
-    ];
-    MARKERS.iter().all(|m| bindings.contains(m))
+    ALL_FEATURES_MARKERS.iter().all(|m| bindings.contains(m))
 }
 
-/// The marker set has to actually be findable, or `is_all_features` is a
-/// permanent skip that looks like a pass — the exact failure it replaced.
+/// The marker set has to name symbols that really exist, or `is_all_features`
+/// can never return true and the stale-row gate skips forever — which is the
+/// exact failure it was introduced to replace.
 ///
-/// This runs in whatever configuration the suite was invoked with, so it
-/// cannot assert that the markers are *present*. It asserts the weaker thing
-/// that still catches the real regression: a marker that no longer names
-/// anything in a full build is a renamed or removed symbol, and the audit's
-/// own `every_ledger_symbol_exists_in_bindings` would then silently stop
-/// running. If these bindings *are* all-features, every marker must be there.
+/// Checked against `wlr-sys`'s committed docs.rs snapshot, **not** against the
+/// bindings this run was built with. That was the first attempt and it was
+/// wrong in a way only CI could show: it asserted at least one marker was
+/// present, which is true of an all-features build and false by construction
+/// of the `--no-default-features` one, where none of the gated symbols exists
+/// and that is the correct state rather than evidence of a rename.
+///
+/// The snapshot is the right source of truth because it does not vary with
+/// this run's features: `prebuilt/bindings-docsrs.rs` is regenerated from
+/// `--all-features` and CI already fails on drift, so a symbol renamed
+/// upstream changes it, and this notices in every configuration.
 #[test]
 fn the_all_features_markers_are_real_symbols() {
-    let source = bindings_source();
-    let found: Vec<&str> = [
-        "wlr_vk_renderer_create_with_drm_fd",
-        "wlr_gles2_renderer_create_with_drm_fd",
-        "wlr_drm_backend_create",
-        "wlr_x11_backend_create",
-        "wlr_libinput_backend_create",
-        "wlr_session_create",
-    ]
-    .into_iter()
-    .filter(|m| source.contains(m))
-    .collect();
+    let snapshot = manifest_dir()
+        .parent()
+        .expect("crates/")
+        .join("wlr-sys/prebuilt/bindings-docsrs.rs");
+    let source = read(&snapshot);
+    let missing: Vec<&str> = ALL_FEATURES_MARKERS
+        .iter()
+        .copied()
+        .filter(|m| !source.contains(m))
+        .collect();
     assert!(
-        !found.is_empty(),
-        "not one all-features marker appears in these bindings — every marker \
-         has been renamed or removed, so is_all_features can never return true \
-         and the stale-row gate would skip forever"
+        missing.is_empty(),
+        "{} names a symbol the all-features snapshot does not contain: {missing:?}. \
+         Renamed or removed upstream — update ALL_FEATURES_MARKERS, or \
+         is_all_features can never return true and the stale-row gate skips \
+         forever.",
+        snapshot.display()
     );
-    if is_all_features(&source) {
-        assert_eq!(
-            found.len(),
-            6,
-            "all-features build missing a marker: {found:?}"
-        );
-    }
 }
 
 /// The gate proper: nothing bound may be unaccounted for.
