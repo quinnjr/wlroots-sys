@@ -40,6 +40,52 @@ fn scene_runtime() -> wlr::Runtime {
     runtime
 }
 
+/// A node borrow refuses `run_all` too, not only `EventLoop::dispatch`.
+///
+/// There are two doors onto the event loop and the first fix only shut one.
+/// `EventLoop::dispatch` consults `IN_HANDLER`; `Backend::run_all` consulted
+/// only `RUNNING`, which is false whenever the borrow was taken outside a run
+/// — from `main`, before the first run, between runs — which is the ordinary
+/// way to inspect the scene by id. So the closure could drive the loop after
+/// all, and wlroots could free the node under the live handle.
+///
+/// Two reviewers found this independently against a fix that claimed to have
+/// closed it, which is why the test asserts the specific `Error::Reentrant`
+/// rather than `is_err()`: a different error would mean a different bug.
+#[test]
+fn a_node_borrow_refuses_run_all_as_well_as_dispatch() {
+    // One display throughout: `Runtime` pins itself to the display
+    // `init_graphics` saw, and asserts if a run drives a different one.
+    headless_env();
+    let display: &'static wlr::Display =
+        Box::leak(Box::new(wlr::Display::new().expect("display")));
+    let backend: &'static wlr::Backend<'static> = Box::leak(Box::new(
+        wlr::Backend::autocreate(&display.event_loop()).expect("backend"),
+    ));
+    let rt = wlr::Runtime::new().expect("runtime");
+    rt.init_graphics(display, backend).expect("init_graphics");
+    let root = rt.scene_root_node().expect("scene root");
+
+    struct Noop;
+    impl wlr::OutputHandler for Noop {}
+    impl wlr::ToplevelHandler for Noop {}
+    impl wlr::SeatHandler for Noop {}
+    impl wlr::FdHandler for Noop {}
+    impl wlr::LoopHandler for Noop {}
+
+    let inner = rt
+        .with_node(root, |_| {
+            let mut app = Noop;
+            backend.run_all(display, &mut app, &rt, wlr::Until::Turns(1))
+        })
+        .expect("known node");
+    assert_eq!(
+        inner,
+        Err(wlr::Error::Reentrant("Backend::run_all")),
+        "driving the loop through run_all from inside a borrow must be refused"
+    );
+}
+
 /// A node borrow refuses the loop, not just this crate's destroys.
 ///
 /// The by-id destroy refusals bind `wlr`; they say nothing to wlroots, which

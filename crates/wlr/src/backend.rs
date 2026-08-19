@@ -1257,6 +1257,32 @@ impl<'d> Backend<'d> {
         hooks: RunHooks<'d, S>,
     ) -> Result<()> {
         alive_or_err(&self.alive)?;
+        // Refused while a handler frame is on the stack — including the one a
+        // scene borrow raises.
+        //
+        // `ReentryGuard` below answers a different question: it consults
+        // `RUNNING`, which is set only for the duration of a run, and so
+        // catches `run_all` called from inside another `run_all`. It says
+        // nothing about a borrow taken *outside* any run, which is the
+        // ordinary way a compositor inspects the scene by id — from `main`,
+        // before the first run, or between runs. There `RUNNING` is false and
+        // this used to proceed:
+        //
+        // ```ignore
+        // rt.with_node(id, |n| { backend.run_all(..)?; n.position() })
+        // ```
+        //
+        // That dispatches clients, lets one unmap its surface, and wlroots
+        // frees the node under the live handle — a use-after-free with no
+        // `unsafe` written by the consumer, and worse inside
+        // `for_each_buffer`, where wlroots is mid-`wl_list_for_each`.
+        //
+        // The scene borrows raise `IN_HANDLER` precisely so a loop-driving
+        // call can refuse, and `EventLoop::dispatch` already did. This is the
+        // other loop-driving door, and it was left open.
+        if crate::dispatch::in_handler() {
+            return Err(Error::Reentrant("Backend::run_all"));
+        }
         let _reentry = ReentryGuard::acquire()?;
 
         // Pins `Runtime`'s Display-identity assert (see `Runtime`'s own doc

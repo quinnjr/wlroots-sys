@@ -153,6 +153,13 @@ impl<'a> BufferPassOptions<'a> {
         self
     }
 
+    /// The timer these options carry, for
+    /// [`Renderer::begin_buffer_pass`](crate::Renderer::begin_buffer_pass)'s
+    /// identity check.
+    pub(crate) fn timer_ref(&self) -> Option<&RenderTimer<'a>> {
+        self.timer
+    }
+
     /// Apply `transform` to everything this pass draws, on the way out.
     ///
     /// Requires a renderer whose
@@ -217,17 +224,43 @@ impl<'a> BufferPassOptions<'a> {
 /// renderer's own vtable.
 pub struct RenderTimer<'r> {
     raw: NonNull<sys::wlr_render_timer>,
+    /// The renderer that created this timer.
+    ///
+    /// `wlr_render_timer` is `{ impl }` and nothing else — unlike
+    /// `wlr_texture`, which carries a `renderer` back-pointer that
+    /// [`RenderPass::add_texture`] uses to refuse a texture from elsewhere.
+    /// Without recording it here there is no way to make the same check, and
+    /// `PhantomData<&'r ()>` proves only that *some* renderer outlives this
+    /// timer, not that it is the one being handed it.
+    ///
+    /// That mattered because a pass downcasts the timer to its own renderer's
+    /// private timer type at submit. Two live renderers of different kinds are
+    /// constructible here, so a GLES2 timer could reach a Vulkan pass and be
+    /// reinterpreted as a Vulkan one — a cross-type reinterpretation of a heap
+    /// object, reached with no `unsafe` at the call site.
+    renderer: *mut sys::wlr_renderer,
     _renderer: PhantomData<&'r ()>,
 }
 
 impl<'r> RenderTimer<'r> {
+    /// The renderer that created this timer, for the identity check
+    /// [`Renderer::begin_buffer_pass`](super::Renderer::begin_buffer_pass)
+    /// makes before accepting one.
+    pub(crate) fn renderer_ptr(&self) -> *mut sys::wlr_renderer {
+        self.renderer
+    }
+
     /// # Safety
     ///
-    /// `raw` must be a live timer this value takes ownership of, created by the
-    /// renderer `'r` borrows.
-    pub(crate) unsafe fn from_raw(raw: *mut sys::wlr_render_timer) -> RenderTimer<'r> {
+    /// `raw` must be a live timer this value takes ownership of, created by
+    /// `renderer`, which is the renderer `'r` borrows.
+    pub(crate) unsafe fn from_raw(
+        raw: *mut sys::wlr_render_timer,
+        renderer: *mut sys::wlr_renderer,
+    ) -> RenderTimer<'r> {
         RenderTimer {
             raw: NonNull::new(raw).expect("wlroots handed us a null wlr_render_timer"),
+            renderer,
             _renderer: PhantomData,
         }
     }
@@ -443,13 +476,66 @@ impl<'a> TextureOptions<'a> {
     }
 
     /// Whether these options name anything the renderer has to support.
-    fn unsupported_by(&self, features: &super::RendererFeatures) -> bool {
+    ///
+    /// The YCbCr pair is checked separately from the rest of the colour
+    /// options, because they are advertised by a different thing and one of
+    /// them can abort the process.
+    ///
+    /// `input_color_transform` governs transfer functions, primaries and the
+    /// luminance multiplier. It says nothing about YCbCr: a renderer
+    /// advertises those through the `color_encodings` **mask**, and the two
+    /// disagree in both directions on the renderers shipped today — Vulkan
+    /// has `input_color_transform = true` with only `BT709|BT601|BT2020` in
+    /// its mask, GLES2 has the transform off and an empty mask.
+    ///
+    /// Gating the pair on `input_color_transform` therefore let a Vulkan
+    /// renderer through with, say, `ColorEncoding::Bt709`, and
+    /// `setup_get_or_create_pipeline` in wlroots' Vulkan backend asserts
+    /// `encoding == NONE || encoding == IDENTITY` and
+    /// `range == NONE || range == FULL` for a pipeline key that is not YCbCr.
+    /// Both strings are compiled into the shipped `libwlroots-0.20.so`, so
+    /// that is a process abort out of a safe call.
+    ///
+    /// The narrow rule would be "allow a real encoding only for a YCbCr
+    /// texture", which this crate cannot express: `wlr_texture` carries
+    /// `impl`, `width`, `height` and `renderer` and no format, so there is no
+    /// way to ask a [`Texture`](super::Texture) whether it is YCbCr — and one
+    /// genuinely can be, via
+    /// [`texture_from_dmabuf`](super::Renderer::texture_from_dmabuf). So the
+    /// check mirrors the assertion instead and refuses what wlroots would
+    /// abort on. That over-refuses for a YCbCr texture, which is the safe
+    /// direction: a refusal is an `Err` a compositor can handle, and an
+    /// assertion is a process that is gone. Exposing the texture's format
+    /// would let this narrow to the exact rule.
+    fn unsupported_by(
+        &self,
+        features: &super::RendererFeatures,
+        encodings: super::ColorEncodings,
+    ) -> bool {
         let colour = self.transfer_function.is_some()
             || self.primaries.is_some()
-            || self.color_encoding != ColorEncoding::None
-            || self.color_range != ColorRange::None
             || self.luminance_multiplier.is_some();
-        (colour && !features.input_color_transform) || (self.wait.is_some() && !features.timeline)
+        if colour && !features.input_color_transform {
+            return true;
+        }
+        if self.wait.is_some() && !features.timeline {
+            return true;
+        }
+        // The renderer must advertise the encoding at all...
+        if self.color_encoding != ColorEncoding::None
+            && !encodings.contains(self.color_encoding)
+        {
+            return true;
+        }
+        // ...and it must be one the non-YCbCr pipeline key accepts, since we
+        // cannot prove the texture is YCbCr.
+        if !matches!(
+            self.color_encoding,
+            ColorEncoding::None | ColorEncoding::Identity
+        ) {
+            return true;
+        }
+        !matches!(self.color_range, ColorRange::None | ColorRange::Full)
     }
 
     /// Whether the source box lies inside the texture.
@@ -560,7 +646,7 @@ impl<'r, 'b> RenderPass<'r, 'b> {
         if !options.src_box_in_bounds() {
             return Err(Error::Operation("wlr_render_pass_add_texture"));
         }
-        if options.unsupported_by(&self.renderer.features()) {
+        if options.unsupported_by(&self.renderer.features(), self.renderer.color_encodings()) {
             return Err(Error::Operation("wlr_render_pass_add_texture"));
         }
 

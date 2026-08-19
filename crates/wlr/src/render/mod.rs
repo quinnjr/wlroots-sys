@@ -631,7 +631,7 @@ impl Renderer {
         }
         // SAFETY: non-null and freshly created by this renderer, which `'_`
         // makes outlive the timer.
-        Ok(unsafe { RenderTimer::from_raw(raw) })
+        Ok(unsafe { RenderTimer::from_raw(raw, self.raw.as_ptr()) })
     }
 
     /// Begin a pass drawing into `buffer`.
@@ -673,6 +673,19 @@ impl Renderer {
         }
         if options.unsupported_by(&self.features()) {
             return Err(Error::Operation("wlr_renderer_begin_buffer_pass"));
+        }
+        // A timer belongs to the renderer that made it. wlroots stores the
+        // pointer and, at submit, downcasts it to *this* renderer's private
+        // timer type — so one from another renderer is a cross-type
+        // reinterpretation of a heap object, reached with no `unsafe` at the
+        // call site. `add_texture` has always refused a foreign texture for
+        // the same reason; the timer had no such check because
+        // `wlr_render_timer` carries no back-pointer to compare against, so
+        // `RenderTimer` records its creator itself.
+        if let Some(timer) = options.timer_ref()
+            && timer.renderer_ptr() != self.raw.as_ptr()
+        {
+            return Err(Error::Mismatch("Renderer::begin_buffer_pass"));
         }
 
         let raw_options = options.to_sys();
