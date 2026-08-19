@@ -71,6 +71,32 @@ guarantee that nothing observable moved.
 
 No further compatibility exception is sanctioned in the `0.20` line.
 
+## 0.20.21
+
+Pointer constraints and relative pointer motion. All additive.
+
+- `Runtime::create_pointer_constraints_manager(&Display) -> Result<()>` — the
+  `zwp_pointer_constraints_v1` global. A client can **lock** the pointer (the
+  cursor is frozen in place — for FPS games and 3D viewports) or **confine** it
+  (the cursor is clamped to a region of a surface). The crate drives the whole
+  enforcement in the pointer path: a constraint activates when its surface holds
+  the seat's pointer focus (and deactivates on leave, warping to the client's
+  `cursor_hint` on lock release); while locked, the cursor does not move; while
+  confined, motion is clamped into the region. When a client moves the confine
+  region off the current cursor (via `set_region`), the cursor is re-anchored
+  into the new region rather than wedging — so a client cannot freeze its own
+  pointer.
+- `Runtime::create_relative_pointer_manager(&Display) -> Result<()>` — the
+  `zwp_relative_pointer_manager_v1` global. Unaccelerated relative motion
+  deltas are delivered to bound clients on every pointer motion, which is what
+  makes a locked pointer usable (the cursor is frozen, but the client still
+  receives the deltas).
+- `Runtime::cursor_position(&self) -> (f64, f64)` — the cursor's layout
+  position (a thin alias of `pointer_position`), for observing the cursor.
+
+Errors if either `create_*` is called twice. No existing item's name or
+signature changed.
+
 ## 0.20.20
 
 Session locking (`ext-session-lock-v1`) and idle management
