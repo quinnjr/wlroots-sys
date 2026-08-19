@@ -263,6 +263,14 @@ pub(crate) struct RuntimeInner {
     /// second one.
     pub(crate) session_lock_manager: RefCell<Option<NonNull<sys::wlr_session_lock_manager_v1>>>,
 
+    /// The `zwlr_output_manager_v1` global, once created — lets a client
+    /// (e.g. a display-settings app) enumerate output heads and request an
+    /// atomic reconfiguration. `Option`, same rationale as the other manager
+    /// globals: a consumer that never calls
+    /// [`create_output_manager`](Runtime::create_output_manager) never
+    /// advertises the global, and a second call would advertise a second one.
+    pub(crate) output_manager: RefCell<Option<NonNull<sys::wlr_output_manager_v1>>>,
+
     /// Whether the session is currently locked. **The security bit.** Set true
     /// the instant a locker takes a lock (`backend.rs`'s
     /// `on_new_session_lock`) and cleared **only** on a genuine unlock
@@ -961,6 +969,7 @@ impl Runtime {
                 idle_inhibit_manager: RefCell::new(None),
                 idle_inhibitors: std::cell::Cell::new(0),
                 session_lock_manager: RefCell::new(None),
+                output_manager: RefCell::new(None),
                 session_locked: std::cell::Cell::new(false),
                 session_lock: RefCell::new(None),
                 session_unlock_requested: std::cell::Cell::new(false),
@@ -4777,6 +4786,32 @@ impl Runtime {
         &self,
     ) -> Option<NonNull<sys::wlr_pointer_constraints_v1>> {
         *self.inner.pointer_constraints_manager.borrow()
+    }
+
+    /// Create the `zwlr_output_manager_v1` global, letting clients enumerate
+    /// output heads and request an atomic reconfiguration. Errors if called
+    /// twice.
+    pub fn create_output_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.output_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_output_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_output_manager_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_output_manager_v1_create"))?;
+        *self.inner.output_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// The `zwlr_output_manager_v1` manager, once created via
+    /// [`Runtime::create_output_manager`] — read by `backend.rs`'s
+    /// manager-setup block to link the `apply`/`test` listeners. Not yet
+    /// called: the manager-setup wiring lands in a follow-up task.
+    #[allow(dead_code)]
+    pub(crate) fn output_manager_ptr(&self) -> Option<NonNull<sys::wlr_output_manager_v1>> {
+        *self.inner.output_manager.borrow()
     }
 
     /// The pointer constraint currently activated on the focused surface, or
