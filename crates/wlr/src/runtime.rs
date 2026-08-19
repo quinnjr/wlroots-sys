@@ -1194,6 +1194,17 @@ impl Runtime {
     /// [`Error::Create`] naming whichever wlroots constructor returned null;
     /// [`Error::Operation`] for a second call, or if
     /// `wlr_renderer_init_wl_display` failed.
+    ///
+    /// # Call this before the run, not from inside it
+    ///
+    /// [`Backend::run_all`](crate::Backend::run_all) links its listeners once,
+    /// on entry, and the renderer's `lost` signal is among them — so it is
+    /// linked only if a renderer already exists at that moment. Initialising
+    /// graphics later, from inside
+    /// [`OutputHandler::new_output`](crate::OutputHandler::new_output) for
+    /// instance, produces a working renderer that nothing is watching, and
+    /// [`OutputHandler::renderer_lost`](crate::OutputHandler::renderer_lost)
+    /// is then never delivered for the rest of that run.
     pub fn init_graphics(&self, display: &Display, backend: &Backend<'_>) -> Result<()> {
         if self.inner.graphics.borrow().is_some() {
             return Err(Error::Operation("Runtime::init_graphics called twice"));
@@ -1950,6 +1961,16 @@ impl Runtime {
     /// Put a rect behind everything else in the scene. `None` if this runtime
     /// never issued `rect`.
     pub fn lower_rect_to_bottom(&self, rect: RectId) -> Option<()> {
+        // Refused while a scene borrow or buffer walk is live. wlroots
+        // iterates with `wl_list_for_each`, not the `_safe` variant, so
+        // unlinking a node and reinserting it elsewhere mid-walk leaves the
+        // iteration reading `link.next` from where the node used to be — it
+        // silently stops early rather than crashing, which is worse. The
+        // destroy calls have refused for this reason since 0.20.5; the
+        // restacks unlink just as thoroughly and did not.
+        if self.inner.node_borrows.get() != 0 {
+            return None;
+        }
         let raw = self.rect_ptr(rect)?;
         // SAFETY: as for `set_rect_position`.
         unsafe { sys::wlr_scene_node_lower_to_bottom(&raw mut (*raw.as_ptr()).node) };
@@ -2217,6 +2238,16 @@ impl Runtime {
     /// Put a buffer node behind everything else in the scene. `None` if
     /// this runtime never issued `buffer`.
     pub fn lower_buffer_to_bottom(&self, buffer: BufferId) -> Option<()> {
+        // Refused while a scene borrow or buffer walk is live. wlroots
+        // iterates with `wl_list_for_each`, not the `_safe` variant, so
+        // unlinking a node and reinserting it elsewhere mid-walk leaves the
+        // iteration reading `link.next` from where the node used to be — it
+        // silently stops early rather than crashing, which is worse. The
+        // destroy calls have refused for this reason since 0.20.5; the
+        // restacks unlink just as thoroughly and did not.
+        if self.inner.node_borrows.get() != 0 {
+            return None;
+        }
         let node = self.buffer_ptr(buffer)?;
         // SAFETY: as for `update_buffer`.
         unsafe { sys::wlr_scene_node_lower_to_bottom(&raw mut (*node.as_ptr()).node) };
@@ -2574,6 +2605,16 @@ impl Runtime {
     /// [`place_node_below`](Runtime::place_node_below): one copy of the three
     /// assert-avoiding checks, so they cannot drift apart.
     fn place_node(&self, node: NodeId, sibling: NodeId, above: bool) -> Option<()> {
+        // Refused while a scene borrow or buffer walk is live. wlroots
+        // iterates with `wl_list_for_each`, not the `_safe` variant, so
+        // unlinking a node and reinserting it elsewhere mid-walk leaves the
+        // iteration reading `link.next` from where the node used to be — it
+        // silently stops early rather than crashing, which is worse. The
+        // destroy calls have refused for this reason since 0.20.5; the
+        // restacks unlink just as thoroughly and did not.
+        if self.inner.node_borrows.get() != 0 {
+            return None;
+        }
         if node == sibling {
             return None;
         }
@@ -2607,6 +2648,16 @@ impl Runtime {
     /// `Graphics`' own doc). `None` for an unknown or stale id, or one this
     /// crate did not create for the consumer.
     pub fn raise_node_to_top(&self, node: NodeId) -> Option<()> {
+        // Refused while a scene borrow or buffer walk is live. wlroots
+        // iterates with `wl_list_for_each`, not the `_safe` variant, so
+        // unlinking a node and reinserting it elsewhere mid-walk leaves the
+        // iteration reading `link.next` from where the node used to be — it
+        // silently stops early rather than crashing, which is worse. The
+        // destroy calls have refused for this reason since 0.20.5; the
+        // restacks unlink just as thoroughly and did not.
+        if self.inner.node_borrows.get() != 0 {
+            return None;
+        }
         let raw = self.owned_node_ptr(node)?;
         // SAFETY: a resolvable id names a live node.
         unsafe { sys::wlr_scene_node_raise_to_top(raw.as_ptr()) };
@@ -2616,6 +2667,16 @@ impl Runtime {
     /// Make `node` the bottommost of its siblings. The mirror of
     /// [`raise_node_to_top`](Runtime::raise_node_to_top).
     pub fn lower_node_to_bottom(&self, node: NodeId) -> Option<()> {
+        // Refused while a scene borrow or buffer walk is live. wlroots
+        // iterates with `wl_list_for_each`, not the `_safe` variant, so
+        // unlinking a node and reinserting it elsewhere mid-walk leaves the
+        // iteration reading `link.next` from where the node used to be — it
+        // silently stops early rather than crashing, which is worse. The
+        // destroy calls have refused for this reason since 0.20.5; the
+        // restacks unlink just as thoroughly and did not.
+        if self.inner.node_borrows.get() != 0 {
+            return None;
+        }
         let raw = self.owned_node_ptr(node)?;
         // SAFETY: a resolvable id names a live node.
         unsafe { sys::wlr_scene_node_lower_to_bottom(raw.as_ptr()) };
@@ -5493,6 +5554,16 @@ impl Runtime {
     /// see [`Layer`](crate::Layer)'s doc for why `raise_layer_surface` does
     /// not exist and is not needed.
     pub fn raise_toplevel(&self, id: ToplevelId) -> Option<()> {
+        // Refused while a scene borrow or buffer walk is live. wlroots
+        // iterates with `wl_list_for_each`, not the `_safe` variant, so
+        // unlinking a node and reinserting it elsewhere mid-walk leaves the
+        // iteration reading `link.next` from where the node used to be — it
+        // silently stops early rather than crashing, which is worse. The
+        // destroy calls have refused for this reason since 0.20.5; the
+        // restacks unlink just as thoroughly and did not.
+        if self.inner.node_borrows.get() != 0 {
+            return None;
+        }
         let entry = self.toplevel_entry(id)?;
         // SAFETY: as above.
         unsafe { sys::wlr_scene_node_raise_to_top(&raw mut (*entry.tree.as_ptr()).node) };
@@ -7975,6 +8046,56 @@ mod tests {
             "and one moved back out must stop dying with it"
         );
         assert_eq!(rt.remove_rect(rect), Some(()));
+    }
+
+    /// Restacking is refused mid-walk, like destroying already was.
+    ///
+    /// `for_each_buffer`'s doc forbids freeing *or moving* a node during the
+    /// walk, but only the destroys enforced it. wlroots iterates with
+    /// `wl_list_for_each` rather than the `_safe` variant, so a node unlinked
+    /// and reinserted elsewhere leaves the walk following `link.next` into
+    /// where it used to be — the iteration stops early and silently, which is
+    /// the failure mode that does not announce itself.
+    #[test]
+    fn restacking_during_a_buffer_walk_is_refused() {
+        let rt = headless_runtime();
+        let a = rt
+            .add_rect_in_band(Band::Overlay, 4, 4, [1.0, 0.0, 0.0, 1.0])
+            .expect("rect a");
+        let b = rt
+            .add_rect_in_band(Band::Overlay, 4, 4, [0.0, 1.0, 0.0, 1.0])
+            .expect("rect b");
+        let node_a = rt.rect_node(a).expect("node a");
+        let node_b = rt.rect_node(b).expect("node b");
+        // A rect is not a buffer node, so a walk over rects alone visits
+        // nothing and the assertion below would hold vacuously. Give the walk
+        // something to actually visit.
+        let pixels = vec![0xffu8; 4 * 4 * 4];
+        let buffer = rt.add_buffer(4, 4, &pixels).expect("pixel buffer");
+
+        let mut refusals = Vec::new();
+        let root = rt.scene_root_node().expect("scene root");
+        rt.for_each_buffer(root, |_, _, _| {
+            refusals.push(rt.raise_node_to_top(node_a));
+            refusals.push(rt.lower_node_to_bottom(node_a));
+            refusals.push(rt.place_node_above(node_a, node_b));
+            refusals.push(rt.lower_rect_to_bottom(a));
+        })
+        .expect("the scene root is walkable");
+
+        assert!(
+            !refusals.is_empty(),
+            "the walk must have visited the buffer node, or this proves nothing"
+        );
+        assert!(
+            refusals.iter().all(|r| r.is_none()),
+            "no restack may succeed inside a walk: {refusals:?}"
+        );
+
+        // Outside the walk they work again, so the refusal is scoped.
+        assert_eq!(rt.raise_node_to_top(node_a), Some(()));
+        assert_eq!(rt.lower_rect_to_bottom(a), Some(()));
+        assert_eq!(rt.remove_buffer(buffer), Some(()));
     }
 
     /// A foreign node refuses the mutators, as `scene`'s module doc promises.

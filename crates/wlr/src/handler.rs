@@ -107,6 +107,17 @@ pub trait OutputHandler {
     /// On a renderer a consumer created themselves
     /// ([`Renderer::autocreate`](crate::Renderer::autocreate)) this is not
     /// delivered — ask [`Renderer::is_lost`](crate::Renderer::is_lost) instead.
+    ///
+    /// **Call [`Runtime::init_graphics`](crate::Runtime::init_graphics) before
+    /// [`Backend::run_all`](crate::Backend::run_all), not from inside a
+    /// handler.** The listener behind this method is linked once, when the run
+    /// registers its listeners, and only if a renderer exists by then. A run
+    /// whose graphics are initialised later — from inside
+    /// [`new_output`](OutputHandler::new_output), say — gets a renderer nobody
+    /// is watching, and this method is never called for the rest of that run.
+    /// The run still works; the notification is simply absent, which is the
+    /// hard kind of absence to notice, since a lost renderer is rare and its
+    /// symptom is every later draw failing rather than a missing callback.
     fn renderer_lost(&mut self, rt: &crate::Runtime) {
         let _ = rt;
     }
