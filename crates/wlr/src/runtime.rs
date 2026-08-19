@@ -1728,7 +1728,7 @@ impl Runtime {
         // is standing in, because which tree the cursor has reached is not
         // knowable from here — and a rule that holds only sometimes is the
         // one that gets relied on.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return Err(Error::Reentrant("scene insertion during a walk"));
         }
         let scene = {
@@ -1829,7 +1829,7 @@ impl Runtime {
         // is standing in, because which tree the cursor has reached is not
         // knowable from here — and a rule that holds only sometimes is the
         // one that gets relied on.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         let entry = self.toplevel_entry(toplevel)?;
@@ -1916,7 +1916,7 @@ impl Runtime {
         // is standing in, because which tree the cursor has reached is not
         // knowable from here — and a rule that holds only sometimes is the
         // one that gets relied on.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return Err(Error::Reentrant("scene insertion during a walk"));
         }
         // Same reasoning as `add_rect`'s identical branch: no
@@ -1980,7 +1980,7 @@ impl Runtime {
     /// closure can observe this, so it is additive to the published 0.20.5
     /// behaviour rather than a change to it.
     pub fn remove_rect(&self, rect: RectId) -> Option<()> {
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         let entry = self.inner.rects.borrow_mut().remove(&rect)?;
@@ -2051,7 +2051,7 @@ impl Runtime {
         // silently stops early rather than crashing, which is worse. The
         // destroy calls have refused for this reason since 0.20.5; the
         // restacks unlink just as thoroughly and did not.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         let raw = self.rect_ptr(rect)?;
@@ -2134,7 +2134,7 @@ impl Runtime {
         // is standing in, because which tree the cursor has reached is not
         // knowable from here — and a rule that holds only sometimes is the
         // one that gets relied on.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return Err(Error::Reentrant("scene insertion during a walk"));
         }
         if !crate::buffer::validate_pixels(width, height, rgba.len()) {
@@ -2216,7 +2216,7 @@ impl Runtime {
         // is standing in, because which tree the cursor has reached is not
         // knowable from here — and a rule that holds only sometimes is the
         // one that gets relied on.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         // Resolve `toplevel` before validating pixels: a stale/unknown id is
@@ -2364,7 +2364,7 @@ impl Runtime {
         // silently stops early rather than crashing, which is worse. The
         // destroy calls have refused for this reason since 0.20.5; the
         // restacks unlink just as thoroughly and did not.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         let node = self.buffer_ptr(buffer)?;
@@ -2387,7 +2387,7 @@ impl Runtime {
     /// [`for_each_buffer`](Runtime::for_each_buffer) walk is live — see
     /// [`remove_rect`](Runtime::remove_rect)'s own note.
     pub fn remove_buffer(&self, buffer: BufferId) -> Option<()> {
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         let entry = self.inner.buffers.borrow_mut().remove(&buffer)?;
@@ -2501,6 +2501,28 @@ impl Runtime {
             return None;
         }
         (entry.origin == NodeOrigin::Owned).then_some(entry.raw)
+    }
+
+    /// Whether the scene graph must not be restructured right now.
+    ///
+    /// Two independent reasons, and every gate needs both — which is why they
+    /// are asked in one place. This test was hand-copied into twenty-one
+    /// methods, each with its own comment, and the copies were where the gaps
+    /// lived: the ones that unlink a node had it, the ones that insert one did
+    /// not, and neither kind knew about foreign frames at all.
+    ///
+    /// A **live handle borrow** (`node_borrows`): a closure is holding a
+    /// `SceneNode<'_>` or a sibling, and destroying the node it names leaves it
+    /// dangling.
+    ///
+    /// A **foreign frame** ([`crate::dispatch::in_foreign_frame`]): wlroots is
+    /// running our code from inside one of its own calls — a `for_each_buffer`
+    /// visitor, a scene-output commit, a timeline waiter — and its list walks
+    /// use `wl_list_for_each`, not the `_safe` form. Its cursor holds a raw
+    /// `next`, so unlinking is a use-after-free inside its recursion and
+    /// inserting silently rewires the tail it is about to reach.
+    fn scene_is_being_walked(&self) -> bool {
+        self.inner.node_borrows.get() != 0 || crate::dispatch::in_foreign_frame()
     }
 
     /// Whether `raw` is the [`Band::Lock`] band or anything beneath it, while
@@ -2688,7 +2710,7 @@ impl Runtime {
         // is standing in, because which tree the cursor has reached is not
         // knowable from here — and a rule that holds only sometimes is the
         // one that gets relied on.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         let parent = self.band_ptr(band)?;
@@ -2721,7 +2743,7 @@ impl Runtime {
         // is standing in, because which tree the cursor has reached is not
         // knowable from here — and a rule that holds only sometimes is the
         // one that gets relied on.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         let parent = self.node_tree_ptr(parent)?;
@@ -2752,7 +2774,7 @@ impl Runtime {
     /// * a [`for_each_buffer`](Runtime::for_each_buffer) walk is live, which
     ///   would leave wlroots' own `wl_list_for_each` reading a freed link.
     pub fn destroy_node(&self, node: NodeId) -> Option<()> {
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         let raw = self.owned_node_ptr(node)?;
@@ -2840,7 +2862,7 @@ impl Runtime {
         // silently stops early rather than crashing, which is worse. The
         // destroy calls have refused for this reason since 0.20.5; the
         // restacks unlink just as thoroughly and did not.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         if node == sibling {
@@ -2883,7 +2905,7 @@ impl Runtime {
         // silently stops early rather than crashing, which is worse. The
         // destroy calls have refused for this reason since 0.20.5; the
         // restacks unlink just as thoroughly and did not.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         let raw = self.owned_node_ptr(node)?;
@@ -2902,7 +2924,7 @@ impl Runtime {
         // silently stops early rather than crashing, which is worse. The
         // destroy calls have refused for this reason since 0.20.5; the
         // restacks unlink just as thoroughly and did not.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         let raw = self.owned_node_ptr(node)?;
@@ -2928,7 +2950,7 @@ impl Runtime {
     /// a toplevel's tree would still be purged when that toplevel died, and
     /// one moved *into* it would not be.
     pub fn reparent_node(&self, node: NodeId, new_parent: NodeId) -> Option<()> {
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         if node == new_parent {
@@ -3491,7 +3513,7 @@ impl Runtime {
         // is standing in, because which tree the cursor has reached is not
         // knowable from here — and a rule that holds only sometimes is the
         // one that gets relied on.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         if width < 0 || height < 0 {
@@ -3568,7 +3590,7 @@ impl Runtime {
         // is standing in, because which tree the cursor has reached is not
         // knowable from here — and a rule that holds only sometimes is the
         // one that gets relied on.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         let tree = self.node_tree_ptr(parent)?;
@@ -3641,7 +3663,7 @@ impl Runtime {
         // that: the node is fine, its region's heap block is not. Every other
         // appearance setter writes a scalar into the node and is safe to leave
         // open.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         let raw = self.restylable_scene_buffer_ptr(node)?;
@@ -4090,7 +4112,7 @@ impl Runtime {
         // reason `remove_rect` documents: the handle held by the closure that
         // is calling us would dangle for the rest of that closure, and a
         // `scene_output_for_each_buffer` walk would read a freed list link.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         let raw = self.scene_output_ptr(scene_output)?;
@@ -5907,7 +5929,7 @@ impl Runtime {
         // silently stops early rather than crashing, which is worse. The
         // destroy calls have refused for this reason since 0.20.5; the
         // restacks unlink just as thoroughly and did not.
-        if self.inner.node_borrows.get() != 0 {
+        if self.scene_is_being_walked() {
             return None;
         }
         let entry = self.toplevel_entry(id)?;
@@ -8445,6 +8467,62 @@ mod tests {
             Some(live),
             "a destroy refused by a live borrow must keep the id to retry with"
         );
+    }
+
+    /// A foreign frame refuses scene restructuring on its own, with no
+    /// `NodeBorrowGuard` beside it.
+    ///
+    /// Seven of the eight sites that enter a `ForeignFrame` pair it with a
+    /// `NodeBorrowGuard`, and that pairing was what actually refused destroys
+    /// — the frame itself refused only the event loop. `render::sync`'s
+    /// timeline waiter is the eighth and has no runtime to raise a guard on,
+    /// so a callback there could commit a scene output and, because no
+    /// dispatcher is in dispatch, have `output_sample` delivered synchronously
+    /// into a handler that destroys a node mid-commit. wlroots asserts on
+    /// that, which on Arch is a dead process.
+    ///
+    /// Tested directly rather than through the timeline: that path needs a DRM
+    /// node, so it self-skips on a GPU-less runner and would prove nothing
+    /// there. The property is the frame, not the caller.
+    #[test]
+    fn a_foreign_frame_alone_refuses_scene_restructuring() {
+        let rt = headless_runtime();
+        let band = rt.band_node(Band::Overlay).expect("band");
+        let doomed = rt.create_tree_under(band).expect("tree");
+
+        assert!(
+            !rt.scene_is_being_walked(),
+            "nothing is walking the scene yet"
+        );
+
+        {
+            // Exactly what sync.rs's waiter enters, and nothing else.
+            let _frame = crate::dispatch::ForeignFrame::enter();
+            assert!(rt.scene_is_being_walked());
+            assert_eq!(
+                rt.destroy_node(doomed),
+                None,
+                "wlroots may be mid-wl_list_for_each; unlinking is a UAF in its recursion"
+            );
+            assert_eq!(
+                rt.create_tree_under(band).map(|_| ()),
+                None,
+                "and inserting rewires the tail its cursor is about to read"
+            );
+            // Restacking relinks, so it is refused for the same reason.
+            let sibling = rt.band_node(Band::Top).expect("band");
+            assert_eq!(rt.reparent_node(doomed, sibling), None);
+
+            // Position is *not* refused, and should not be:
+            // `wlr_scene_node_set_position` writes x/y into the node and
+            // touches no list, so it cannot disturb a cursor. The rule is
+            // about relinking, not about mutation in general.
+            assert_eq!(rt.set_node_position(doomed, 1, 1), Some(()));
+        }
+
+        // The frame is a scope, not a latch.
+        assert!(!rt.scene_is_being_walked());
+        assert_eq!(rt.destroy_node(doomed), Some(()));
     }
 
     /// The Lock band cannot be hidden while a lock is held.

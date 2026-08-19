@@ -341,15 +341,27 @@ impl Drop for HandlerGuard<'_> {
 /// hold a `&Display` and drive the loop from underneath the dispatch that is
 /// running it.
 ///
-/// So this sets only [`IN_HANDLER`], and restores rather than clears it for the
-/// same reason `HandlerGuard` does: a frame nested inside a real handler
-/// delivery must not reopen the loop when it returns.
+/// So this sets [`IN_HANDLER`], and restores rather than clears it for the same
+/// reason `HandlerGuard` does: a frame nested inside a real handler delivery
+/// must not reopen the loop when it returns.
+///
+/// It also raises [`FOREIGN_FRAMES`], which is what makes scene destroys and
+/// insertions refuse. Seven of the eight sites that enter one of these
+/// happened to pair it with a `NodeBorrowGuard`, and that pairing — not this
+/// type — was doing that work; `render::sync`'s timeline waiter is the eighth
+/// and had no runtime to raise a guard on. So a callback there could commit a
+/// scene output, have wlroots emit `output_sample` per observed node,
+/// and — because no dispatcher is in dispatch — see that delivered
+/// synchronously into a handler that destroys a node mid-commit, which wlroots
+/// asserts on. Carrying the refusal here covers that site and every future one
+/// without anybody remembering the pairing.
 pub(crate) struct ForeignFrame {
     previous: bool,
 }
 
 impl ForeignFrame {
     pub(crate) fn enter() -> ForeignFrame {
+        FOREIGN_FRAMES.set(FOREIGN_FRAMES.get() + 1);
         ForeignFrame {
             previous: IN_HANDLER.replace(true),
         }
@@ -359,7 +371,31 @@ impl ForeignFrame {
 impl Drop for ForeignFrame {
     fn drop(&mut self) {
         IN_HANDLER.set(self.previous);
+        FOREIGN_FRAMES.set(FOREIGN_FRAMES.get() - 1);
     }
+}
+
+thread_local! {
+    /// How many [`ForeignFrame`]s are on this thread's stack.
+    ///
+    /// A count rather than a flag because these nest: a timeline callback that
+    /// commits a scene output enters one, and the scene borrows the commit
+    /// path takes enter more.
+    ///
+    /// Thread-local rather than per-runtime because the frame is entered from
+    /// `extern "C"` callbacks that have no runtime to hand. That makes it
+    /// conservative — a foreign frame refuses scene mutation on *every*
+    /// runtime on the thread, not just the one involved. With `Runtime` being
+    /// `!Send` and a compositor having one, that costs nothing real, and
+    /// erring toward refusal is the right direction for a guard whose failure
+    /// mode is a use-after-free inside wlroots' own iteration.
+    static FOREIGN_FRAMES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Whether wlroots is running consumer code from inside one of its own calls,
+/// where mutating the scene graph is unsafe. See [`ForeignFrame`].
+pub(crate) fn in_foreign_frame() -> bool {
+    FOREIGN_FRAMES.get() != 0
 }
 
 /// Routes events to handler traits, one at a time.
