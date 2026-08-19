@@ -40,6 +40,63 @@ fn scene_runtime() -> wlr::Runtime {
     runtime
 }
 
+/// Setting the opaque region is refused while a node borrow is live, unlike
+/// its sibling appearance setters.
+///
+/// `SceneBuffer::opaque_region` hands out a `RegionRef` borrowed from the
+/// node's embedded `pixman_region32`, and
+/// `wlr_scene_buffer_set_opaque_region` copies over it —
+/// `pixman_region32_copy` frees the old box array, so an iterator taken
+/// earlier in the same closure reads freed memory. No `unsafe` at the call
+/// site.
+///
+/// `NodeBorrowGuard` does not cover this on its own: it keeps the *node*
+/// alive, and the node is fine. It is the region's heap block that goes. Every
+/// other appearance setter writes a scalar into the node and stays open.
+#[test]
+fn setting_the_opaque_region_is_refused_while_a_node_is_borrowed() {
+    let rt = scene_runtime();
+    let band = rt.band_node(wlr::Band::Overlay).expect("band");
+    let node = rt.create_scene_buffer(band, None).expect("buffer node");
+
+    let small = wlr::Region::from_box(wlr::Box2D::new(0, 0, 4, 4));
+    let bigger = wlr::Region::from_box(wlr::Box2D::new(0, 0, 4096, 4096));
+    assert_eq!(
+        rt.set_scene_buffer_opaque_region(node, Some(&small)),
+        Some(())
+    );
+
+    let refused = rt
+        .with_scene_buffer(node, |b| {
+            // A live borrow into the very region the setter would free.
+            let region = b.opaque_region();
+            let count = region.rectangles().count();
+            let attempted = rt.set_scene_buffer_opaque_region(node, Some(&bigger));
+            // The borrow is still readable precisely because the write was
+            // refused; this is the read that faulted before.
+            assert_eq!(region.rectangles().count(), count);
+            attempted
+        })
+        .expect("borrowable");
+    assert_eq!(
+        refused, None,
+        "the write frees memory the live RegionRef points into"
+    );
+
+    // Outside the borrow it is an ordinary setter again.
+    assert_eq!(
+        rt.set_scene_buffer_opaque_region(node, Some(&bigger)),
+        Some(())
+    );
+
+    // And the scalar appearance setters stay open inside a borrow, since they
+    // free nothing.
+    let inner = rt
+        .with_scene_buffer(node, |_| rt.set_scene_buffer_opacity(node, 0.5))
+        .expect("borrowable");
+    assert_eq!(inner, Some(()), "scalar setters are not affected");
+}
+
 /// A node borrow refuses `run_all` too, not only `EventLoop::dispatch`.
 ///
 /// There are two doors onto the event loop and the first fix only shut one.

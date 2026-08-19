@@ -2385,7 +2385,61 @@ impl Runtime {
     /// the scene root would invalidate half this crate's tables at once.
     fn owned_node_ptr(&self, id: NodeId) -> Option<NonNull<sys::wlr_scene_node>> {
         let entry = self.node_entry(id)?;
+        if self.is_locked_lock_band_descendant(entry.raw) {
+            return None;
+        }
         (entry.origin == NodeOrigin::Owned).then_some(entry.raw)
+    }
+
+    /// Whether `raw` is the [`Band::Lock`] band or anything beneath it, while
+    /// a lock is actually held.
+    ///
+    /// The band itself was never the interesting target. What hides the
+    /// desktop is the opaque black fill *inside* it, and that fill is created
+    /// through `add_rect_in_band` like any other rect, so it is
+    /// `NodeOrigin::Owned` and fully mutable — and it is reachable from safe
+    /// code in two public calls: `band_node(Band::Lock)` then `node_children`.
+    /// Hiding it, destroying it, or walking it off-screen uncovers a live
+    /// desktop while `is_session_locked()` still reports `true`, which is
+    /// verbatim what refusing on the band alone was supposed to prevent. Lock
+    /// surfaces live under the same band and want the same protection.
+    ///
+    /// Walks wlroots' own `parent` chain rather than this crate's tables,
+    /// because that chain is what actually decides what draws over what — a
+    /// node reparented into the band by any route inherits the rule.
+    ///
+    /// Guards only the `NodeId` API, deliberately. The crate installs and
+    /// repositions the fill through `RectId` (`set_rect_size`,
+    /// `set_rect_position`, `remove_rect`), which resolves through `rect_ptr`
+    /// on a separate path, so `install_lock_fill`'s takeover branch keeps
+    /// working while locked — and a consumer cannot reach that path, because
+    /// the fill's `RectId` is never handed out.
+    fn is_locked_lock_band_descendant(&self, raw: NonNull<sys::wlr_scene_node>) -> bool {
+        if !self.is_session_locked() {
+            return false;
+        }
+        let Some(band) = self.band_ptr(Band::Lock) else {
+            return false;
+        };
+        // SAFETY: `band_ptr` returns this runtime's own scene tree, live for as
+        // long as its graphics are; taking the address of its embedded `node`
+        // reads nothing.
+        let band_node: *mut sys::wlr_scene_node = unsafe { &raw mut (*band.as_ptr()).node };
+        let mut cursor: *mut sys::wlr_scene_node = raw.as_ptr();
+        loop {
+            if std::ptr::eq(cursor, band_node) {
+                return true;
+            }
+            // SAFETY: `cursor` is a live node — the caller resolved it, and each
+            // step moves to its parent tree, which outlives its children.
+            let parent = unsafe { (*cursor).parent };
+            if parent.is_null() {
+                return false;
+            }
+            // SAFETY: `parent` is a live `wlr_scene_tree` whose `node` is
+            // embedded by value.
+            cursor = unsafe { &raw mut (*parent).node };
+        }
     }
 
     /// `id`'s node, if moving or restyling it is allowed — nodes this crate
@@ -2409,6 +2463,9 @@ impl Runtime {
     /// toplevel and layer APIs, which update the bookkeeping as they go.
     fn movable_node_ptr(&self, id: NodeId) -> Option<NonNull<sys::wlr_scene_node>> {
         let entry = self.node_entry(id)?;
+        if self.is_locked_lock_band_descendant(entry.raw) {
+            return None;
+        }
         (entry.origin == NodeOrigin::Owned).then_some(entry.raw)
     }
 
@@ -2580,17 +2637,8 @@ impl Runtime {
     /// the band uniquely unmanageable for no benefit.
     pub fn set_node_enabled(&self, node: NodeId, enabled: bool) -> Option<()> {
         let raw = self.node_ptr(node)?;
-        if !enabled
-            && self.is_session_locked()
-            && let Some(band) = self.band_ptr(Band::Lock)
-        {
-            // SAFETY: `band_ptr` returns this runtime's own scene tree, alive
-            // for as long as the runtime's graphics are; taking the address of
-            // its embedded `node` reads nothing.
-            let band_node = unsafe { &raw mut (*band.as_ptr()).node };
-            if std::ptr::eq(band_node, raw.as_ptr()) {
-                return None;
-            }
+        if !enabled && self.is_locked_lock_band_descendant(raw) {
+            return None;
         }
         // SAFETY: a resolvable id names a live node.
         unsafe { sys::wlr_scene_node_set_enabled(raw.as_ptr(), enabled) };
@@ -3390,6 +3438,21 @@ impl Runtime {
         node: NodeId,
         region: Option<&Region>,
     ) -> Option<()> {
+        // Refused while a node borrow is live, unlike its sibling appearance
+        // setters, because this one *frees memory a live handle can be
+        // pointing into*. `SceneBuffer::opaque_region` hands out a
+        // `RegionRef` borrowed from the node's embedded `pixman_region32`,
+        // and `wlr_scene_buffer_set_opaque_region` copies over it —
+        // `pixman_region32_copy` frees the old box array, so a `RegionRef`
+        // iterator taken earlier in the same closure reads freed memory.
+        //
+        // `NodeBorrowGuard` keeps the *node* alive and says nothing about
+        // that: the node is fine, its region's heap block is not. Every other
+        // appearance setter writes a scalar into the node and is safe to leave
+        // open.
+        if self.inner.node_borrows.get() != 0 {
+            return None;
+        }
         let raw = self.restylable_scene_buffer_ptr(node)?;
         let ptr = region.map_or(std::ptr::null(), |r| r.as_ptr());
         // SAFETY: a resolvable id of the right tag names a live buffer node;
@@ -4943,6 +5006,23 @@ impl Runtime {
             return;
         };
         if self.remove_rect(id).is_some() {
+            self.inner.session_lock_fill.set(None);
+            return;
+        }
+        // `remove_rect` missed, and the two reasons need opposite answers.
+        //
+        // A live node borrow refused it: the rect is still there, so keep the
+        // id — a later unlock retries and the fill is still removable.
+        //
+        // The row is already gone (a cascade destroyed it, or the node API
+        // did): there is nothing left to destroy, and holding the id is
+        // actively harmful. `install_lock_fill` early-returns on a `Some`
+        // fill and repositions it, so a latched dead id makes every
+        // *subsequent* lock install no fill at all — the session locks with
+        // nothing covering the outputs the locker has not painted. Unconditional
+        // `take()` self-healed this for free; recovering the refusal case cost
+        // it, so it is restored explicitly here.
+        if !self.inner.rects.borrow().contains_key(&id) {
             self.inner.session_lock_fill.set(None);
         }
     }
@@ -8061,6 +8141,119 @@ mod tests {
         );
         assert_eq!(rt.remove_rect(rect), None, "and remove_rect now misses");
         assert_eq!(rt.node_kind(node), None);
+    }
+
+    /// Nothing under a held lock is mutable through the `NodeId` API, not
+    /// just the band itself.
+    ///
+    /// Refusing on the band alone missed the only node that matters: the
+    /// opaque black fill *inside* it, created through `add_rect_in_band` like
+    /// any other rect and so `Owned` and fully mutable. Two public calls reach
+    /// it — `band_node(Band::Lock)` then `node_children` — after which
+    /// hiding, destroying or walking it off-screen uncovers a live desktop
+    /// under a session the compositor still reports as locked.
+    #[test]
+    fn nothing_under_a_held_lock_is_mutable_through_the_node_api() {
+        let rt = headless_runtime();
+        // Built exactly as `install_lock_fill` builds it — an opaque black
+        // rect appended to the lock band — without needing an output layout,
+        // which a unit-test runtime has none of. The origin is what matters
+        // here, and `add_rect_in_band` is the same call it makes.
+        let fill_rect = rt
+            .add_rect_in_band(Band::Lock, 8, 8, [0.0, 0.0, 0.0, 1.0])
+            .expect("fill");
+        rt.inner.session_lock_fill.set(Some(fill_rect));
+        let band = rt.band_node(Band::Lock).expect("lock band");
+        let fill = *rt
+            .node_children(band)
+            .expect("band children")
+            .first()
+            .expect("the fill is a child of the lock band");
+
+        // Unlocked, the fill is an ordinary owned rect.
+        assert_eq!(rt.set_node_enabled(fill, false), Some(()));
+        assert_eq!(rt.set_node_enabled(fill, true), Some(()));
+
+        rt.inner.session_locked.set(true);
+        assert_eq!(
+            rt.set_node_enabled(fill, false),
+            None,
+            "hiding the fill uncovers the desktop just as hiding the band does"
+        );
+        assert_eq!(
+            rt.set_node_position(fill, 99_999, 99_999),
+            None,
+            "walking it off-screen is the same uncovering by another route"
+        );
+        assert_eq!(
+            rt.destroy_node(fill),
+            None,
+            "and destroying it outright certainly is"
+        );
+        // The band itself is still covered by the same rule.
+        assert_eq!(rt.set_node_enabled(band, false), None);
+
+        // A node outside the lock band is untouched by any of this.
+        let elsewhere = rt
+            .add_rect_in_band(Band::Top, 4, 4, [1.0, 0.0, 0.0, 1.0])
+            .expect("rect");
+        let elsewhere = rt.rect_node(elsewhere).expect("node id");
+        assert_eq!(rt.set_node_enabled(elsewhere, false), Some(()));
+        assert_eq!(rt.set_node_position(elsewhere, 5, 5), Some(()));
+
+        rt.inner.session_locked.set(false);
+        // And once unlocked the fill is ordinary again — the refusal is scoped
+        // to the lock, not a permanent quarantine.
+        assert_eq!(rt.set_node_enabled(fill, false), Some(()));
+    }
+
+    /// A lock fill whose row died elsewhere must not latch its id forever.
+    ///
+    /// `remove_lock_fill` used an unconditional `take()`, which self-healed
+    /// for free. Keeping the id across a borrow-refused destroy cost that, and
+    /// a latched dead id is worse than the bug it fixed: `install_lock_fill`
+    /// early-returns on a `Some` fill and repositions it, so every *later*
+    /// lock installs no fill at all and the session locks with nothing
+    /// covering the outputs the locker has not painted.
+    #[test]
+    fn a_lock_fill_whose_row_died_elsewhere_is_reinstalled_not_latched() {
+        let rt = headless_runtime();
+        let first = rt
+            .add_rect_in_band(Band::Lock, 8, 8, [0.0, 0.0, 0.0, 1.0])
+            .expect("fill");
+        rt.inner.session_lock_fill.set(Some(first));
+
+        // Kill the row the way a cascade would, behind the Cell's back.
+        assert_eq!(rt.remove_rect(first), Some(()));
+        assert!(
+            rt.inner.session_lock_fill.get().is_some(),
+            "the Cell still names the dead rect — this is the state to recover from"
+        );
+
+        rt.remove_lock_fill();
+        assert_eq!(
+            rt.inner.session_lock_fill.get(),
+            None,
+            "a fill that no longer exists must stop being named, or \
+             install_lock_fill's early return makes every later lock bare"
+        );
+
+        // The refusal case still keeps its id, which is what the conditional
+        // clear was introduced for and must not regress.
+        let live = rt
+            .add_rect_in_band(Band::Lock, 8, 8, [0.0, 0.0, 0.0, 1.0])
+            .expect("fill");
+        rt.inner.session_lock_fill.set(Some(live));
+        let node = rt.rect_node(live).expect("node id");
+        rt.with_node(node, |_| {
+            rt.remove_lock_fill();
+        })
+        .expect("borrowable");
+        assert_eq!(
+            rt.inner.session_lock_fill.get(),
+            Some(live),
+            "a destroy refused by a live borrow must keep the id to retry with"
+        );
     }
 
     /// The Lock band cannot be hidden while a lock is held.
