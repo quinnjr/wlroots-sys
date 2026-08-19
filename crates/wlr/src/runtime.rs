@@ -3012,6 +3012,15 @@ impl Runtime {
         // a node freed or unlinked by `f` leaves the walk reading `link.next`
         // out of reclaimed memory — see the callers' own docs.
         let _guard = NodeBorrowGuard::enter(&self.inner);
+        // The borrow guard only makes *this crate's* by-id destroys refuse. It
+        // says nothing to wlroots, which frees nodes on its own schedule the
+        // moment the event loop runs — and the closure can drive that loop, by
+        // holding a `&Display` or an `&EventLoop`. A client unmapping its
+        // window mid-closure would then free the subtree under a live handle.
+        // `ForeignFrame` sets the same flag a real handler delivery does, so
+        // `EventLoop::dispatch` refuses for the life of the borrow and that
+        // window cannot open.
+        let _frame = crate::dispatch::ForeignFrame::enter();
         run(iterator, (&raw mut ctx).cast::<std::ffi::c_void>());
         if let Some(payload) = ctx.panic {
             std::panic::resume_unwind(payload);
@@ -3029,12 +3038,29 @@ impl Runtime {
     /// acting when called from inside `f`, on this runtime or on any clone of
     /// it. Nesting borrows is fine; they are read-only.
     ///
+    /// Those refusals are only half of it, because they bind this crate and
+    /// wlroots frees nodes on its own schedule. The other half is that
+    /// [`EventLoop::dispatch`](crate::EventLoop::dispatch) also refuses for
+    /// the life of the borrow: without that, a closure holding a `&Display`
+    /// could drive the loop, a client could unmap its window, and wlroots
+    /// would free the subtree under a handle that is still live — with no
+    /// `unsafe` written anywhere.
+    ///
     /// `None`, without calling `f`, for an unknown or stale id.
     pub fn with_node<R>(&self, node: NodeId, f: impl FnOnce(&SceneNode<'_>) -> R) -> Option<R> {
         let raw = self.node_ptr(node)?;
         // Raised before the handle is minted and lowered by `Drop`, so a panic
         // escaping `f` cannot leave the runtime permanently refusing destroys.
         let _guard = NodeBorrowGuard::enter(&self.inner);
+        // The borrow guard only makes *this crate's* by-id destroys refuse. It
+        // says nothing to wlroots, which frees nodes on its own schedule the
+        // moment the event loop runs — and the closure can drive that loop, by
+        // holding a `&Display` or an `&EventLoop`. A client unmapping its
+        // window mid-closure would then free the subtree under a live handle.
+        // `ForeignFrame` sets the same flag a real handler delivery does, so
+        // `EventLoop::dispatch` refuses for the life of the borrow and that
+        // window cannot open.
+        let _frame = crate::dispatch::ForeignFrame::enter();
         // SAFETY: a resolvable id names a live node, and the guard above is
         // what keeps it live for the whole of `f` — every call that could free
         // it refuses while the guard is held.
@@ -3050,6 +3076,15 @@ impl Runtime {
     pub fn with_tree<R>(&self, node: NodeId, f: impl FnOnce(&SceneTree<'_>) -> R) -> Option<R> {
         let raw = self.node_tree_ptr(node)?;
         let _guard = NodeBorrowGuard::enter(&self.inner);
+        // The borrow guard only makes *this crate's* by-id destroys refuse. It
+        // says nothing to wlroots, which frees nodes on its own schedule the
+        // moment the event loop runs — and the closure can drive that loop, by
+        // holding a `&Display` or an `&EventLoop`. A client unmapping its
+        // window mid-closure would then free the subtree under a live handle.
+        // `ForeignFrame` sets the same flag a real handler delivery does, so
+        // `EventLoop::dispatch` refuses for the life of the borrow and that
+        // window cannot open.
+        let _frame = crate::dispatch::ForeignFrame::enter();
         // SAFETY: as in `with_node`; `node_tree_ptr` additionally checked the
         // node's tag, which is `wlr_scene_tree_from_node`'s precondition.
         let handle = unsafe { SceneTree::from_raw_with_id(raw.as_ptr(), node) };
@@ -3066,6 +3101,15 @@ impl Runtime {
             return None;
         }
         let _guard = NodeBorrowGuard::enter(&self.inner);
+        // The borrow guard only makes *this crate's* by-id destroys refuse. It
+        // says nothing to wlroots, which frees nodes on its own schedule the
+        // moment the event loop runs — and the closure can drive that loop, by
+        // holding a `&Display` or an `&EventLoop`. A client unmapping its
+        // window mid-closure would then free the subtree under a live handle.
+        // `ForeignFrame` sets the same flag a real handler delivery does, so
+        // `EventLoop::dispatch` refuses for the life of the borrow and that
+        // window cannot open.
+        let _frame = crate::dispatch::ForeignFrame::enter();
         // SAFETY: as in `with_node`, plus the tag check just above, which is
         // `wlr_scene_rect_from_node`'s precondition.
         let handle = unsafe {
@@ -3088,6 +3132,15 @@ impl Runtime {
             return None;
         }
         let _guard = NodeBorrowGuard::enter(&self.inner);
+        // The borrow guard only makes *this crate's* by-id destroys refuse. It
+        // says nothing to wlroots, which frees nodes on its own schedule the
+        // moment the event loop runs — and the closure can drive that loop, by
+        // holding a `&Display` or an `&EventLoop`. A client unmapping its
+        // window mid-closure would then free the subtree under a live handle.
+        // `ForeignFrame` sets the same flag a real handler delivery does, so
+        // `EventLoop::dispatch` refuses for the life of the borrow and that
+        // window cannot open.
+        let _frame = crate::dispatch::ForeignFrame::enter();
         // SAFETY: as in `with_node`, plus the tag check just above.
         let handle = unsafe {
             SceneBuffer::from_raw_with_id(sys::wlr_scene_buffer_from_node(raw.as_ptr()), node)
@@ -3820,6 +3873,15 @@ impl Runtime {
         // Raised before the handle is minted and lowered by `Drop`, so a panic
         // escaping `f` cannot leave the runtime permanently refusing destroys.
         let _guard = NodeBorrowGuard::enter(&self.inner);
+        // The borrow guard only makes *this crate's* by-id destroys refuse. It
+        // says nothing to wlroots, which frees nodes on its own schedule the
+        // moment the event loop runs — and the closure can drive that loop, by
+        // holding a `&Display` or an `&EventLoop`. A client unmapping its
+        // window mid-closure would then free the subtree under a live handle.
+        // `ForeignFrame` sets the same flag a real handler delivery does, so
+        // `EventLoop::dispatch` refuses for the life of the borrow and that
+        // window cannot open.
+        let _frame = crate::dispatch::ForeignFrame::enter();
         // SAFETY: a resolvable id names a live scene output, and the guard
         // above is what keeps it live for the whole of `f`.
         //
@@ -3855,6 +3917,15 @@ impl Runtime {
     ) -> Option<R> {
         let raw = self.scene_surface_ptr(node)?;
         let _guard = NodeBorrowGuard::enter(&self.inner);
+        // The borrow guard only makes *this crate's* by-id destroys refuse. It
+        // says nothing to wlroots, which frees nodes on its own schedule the
+        // moment the event loop runs — and the closure can drive that loop, by
+        // holding a `&Display` or an `&EventLoop`. A client unmapping its
+        // window mid-closure would then free the subtree under a live handle.
+        // `ForeignFrame` sets the same flag a real handler delivery does, so
+        // `EventLoop::dispatch` refuses for the life of the borrow and that
+        // window cannot open.
+        let _frame = crate::dispatch::ForeignFrame::enter();
         // SAFETY: `scene_surface_ptr` resolved the node and asked wlroots
         // whether it is surface-backed, so `raw` is a live `wlr_scene_surface`;
         // the guard is what keeps its buffer node alive for the whole of `f`.

@@ -40,6 +40,35 @@ fn scene_runtime() -> wlr::Runtime {
     runtime
 }
 
+/// A node borrow refuses the loop, not just this crate's destroys.
+///
+/// The by-id destroy refusals bind `wlr`; they say nothing to wlroots, which
+/// frees nodes whenever the event loop runs. A closure holding a `&Display`
+/// could drive the loop itself, let a client unmap its window, and be left
+/// holding a handle to a freed subtree — with no `unsafe` at the call site.
+///
+/// So `EventLoop::dispatch` must refuse for the life of the borrow. Asserting
+/// the specific `Error::Reentrant` rather than merely `is_err()` is what makes
+/// this fail for the right reason if the refusal is ever removed.
+#[test]
+fn a_node_borrow_refuses_the_event_loop() {
+    let rt = scene_runtime();
+    let display: &'static wlr::Display = Box::leak(Box::new(wlr::Display::new().expect("display")));
+    let root = rt.scene_root_node().expect("scene root");
+
+    let inner = rt
+        .with_node(root, |_| display.event_loop().dispatch(0))
+        .expect("known node");
+    assert_eq!(
+        inner,
+        Err(wlr::Error::Reentrant("EventLoop::dispatch")),
+        "driving the loop from inside a borrow must be refused"
+    );
+
+    // And the refusal is scoped to the borrow, not permanent.
+    assert!(display.event_loop().dispatch(0).is_ok());
+}
+
 /// Creation order is stacking order, because wlroots appends every new child
 /// at the end of its parent's list. The crate's whole band design rests on
 /// that, so it is asserted directly rather than inferred.
