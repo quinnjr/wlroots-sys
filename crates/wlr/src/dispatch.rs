@@ -165,6 +165,17 @@ pub(crate) enum Event {
     /// synchronously by then), so a deferred delivery still reports the
     /// transition that actually happened.
     SessionLockChanged(bool),
+
+    /// A client's `zwlr_output_manager_v1` configuration was applied. Carries
+    /// no data — the owned `Vec<AppliedHead>` payload cannot ride in a `Copy`,
+    /// `Eq` enum, so it is staged in
+    /// [`Session::applied_heads`](crate::backend) instead and popped, FIFO,
+    /// when this marker is delivered. One marker is emitted per pushed payload,
+    /// in the same order, so the pairing holds even under deferral (which does
+    /// not actually happen for this event — a client apply is dispatched at top
+    /// level, never from inside a handler — but the queue keeps it sound if it
+    /// ever did).
+    OutputConfigurationApplied,
 }
 
 thread_local! {

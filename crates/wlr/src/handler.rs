@@ -6,8 +6,47 @@
 
 use crate::{
     DecorationMode, Edges, KeyEvent, LayerSurface, LayerSurfaceId, NodeId, Output, OutputId,
-    SceneOutputId, Toplevel, ToplevelId,
+    SceneOutputId, Toplevel, ToplevelId, Transform,
 };
+
+/// One output head as it stands *after* a client's output-management
+/// configuration has been applied and committed.
+///
+/// Handed to [`OutputHandler::output_configuration_applied`] as an owned value
+/// — every field is a copy, and no wlroots pointer is carried across the
+/// boundary — so a handler may keep it for as long as it likes. The wlroots
+/// `wlr_output_configuration_v1` the values are derived from is freed the
+/// instant the apply callback returns; nothing here borrows it.
+///
+/// The values are what wlroots reports on the output *after* the commit, not
+/// what the client requested: `width`/`height`/`refresh_mhz` come from the
+/// output's resulting mode (all `0` on a head that ended up disabled),
+/// `x`/`y` are the layout position the crate applied (output-management
+/// `state_apply` does not place the output — the crate does that separately),
+/// and `scale`/`transform`/`enabled` are read back from the committed output.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppliedHead {
+    /// The connector name (`output.name()`), the stable key a compositor
+    /// matches a persisted layout against. `None` on the rare output wlroots
+    /// has not named yet.
+    pub name: Option<String>,
+    /// Whether the head is enabled after the commit.
+    pub enabled: bool,
+    /// Resulting mode width in pixels, `0` if disabled.
+    pub width: i32,
+    /// Resulting mode height in pixels, `0` if disabled.
+    pub height: i32,
+    /// Resulting refresh rate in mHz, `0` if disabled or backend-picked.
+    pub refresh_mhz: i32,
+    /// Layout x position the crate applied.
+    pub x: i32,
+    /// Layout y position the crate applied.
+    pub y: i32,
+    /// Resulting scale.
+    pub scale: f32,
+    /// Resulting transform.
+    pub transform: Transform,
+}
 
 /// Output lifecycle and frame events.
 ///
@@ -209,6 +248,25 @@ pub trait OutputHandler {
         when: std::time::Duration,
     ) {
         let _ = (rt, node, scene_output, when);
+    }
+
+    /// A client's `zwlr_output_manager_v1` configuration was applied and
+    /// committed. `heads` is the resulting per-head state as owned
+    /// [`AppliedHead`] values (see that type's own doc) — the compositor's cue
+    /// to re-derive its geometry from the new layout and persist it.
+    ///
+    /// Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl OutputHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged.
+    ///
+    /// Only fired after a **successful** apply — a rejected configuration
+    /// sends the client `failed` and this is not called. The crate has already
+    /// committed each head and applied its layout position by the time this
+    /// runs; the handler's job is its own bookkeeping, exactly as
+    /// `session_lock_changed`'s is.
+    fn output_configuration_applied(&mut self, heads: Vec<AppliedHead>) {
+        let _ = heads;
     }
 }
 

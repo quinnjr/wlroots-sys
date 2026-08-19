@@ -28,7 +28,7 @@
 //!    panicking paths where the condition is recoverable; see [`ensure_id_raw`].
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::os::fd::AsRawFd;
 use std::ptr::NonNull;
@@ -40,8 +40,9 @@ use crate::layer::Layer;
 use crate::runtime::SceneObserver;
 use crate::seat::{KeyEvent, Modifiers};
 use crate::{
-    Band, Display, Error, EventLoop, Handlers, LayerSurface, LayerSurfaceId, LoopHandler, NodeId,
-    Output, OutputHandler, OutputId, Result, Runtime, Toplevel, ToplevelId, sys,
+    AppliedHead, Band, Display, Error, EventLoop, Handlers, LayerSurface, LayerSurfaceId,
+    LoopHandler, NodeId, Output, OutputHandler, OutputId, Result, Runtime, Toplevel, ToplevelId,
+    Transform, sys,
 };
 
 /// `wl_seat.capability` bit values from `wayland.xml`. Not bound by
@@ -721,6 +722,16 @@ struct Session<'r, S> {
     /// what "consumed" means to a compositor.
     last_key_consumed: Cell<bool>,
 
+    /// Owned [`AppliedHead`] payloads awaiting delivery to
+    /// [`OutputHandler::output_configuration_applied`], one `Vec` per
+    /// successful `zwlr_output_manager_v1` apply. The matching
+    /// [`Event::OutputConfigurationApplied`] marker carries no data — it cannot,
+    /// being `Copy`/`Eq` — so the payload is staged here and popped, FIFO, when
+    /// the marker is delivered. `on_output_manager_apply` pushes exactly one
+    /// payload immediately before emitting exactly one marker, so the two
+    /// queues stay in lock-step (see that handler, and the marker's own doc).
+    applied_heads: RefCell<VecDeque<Vec<AppliedHead>>>,
+
     /// The runtime this run is serving, borrowed for the call.
     ///
     /// Borrowed rather than cloned so that `Session`'s lifetime, and the
@@ -1310,6 +1321,7 @@ impl<'d> Backend<'d> {
             lock_surfaces: RefCell::new(HashMap::new()),
             pointer_constraints: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
+            applied_heads: RefCell::new(VecDeque::new()),
             runtime,
             deliver: hooks.deliver,
         };
@@ -1770,6 +1782,33 @@ impl<'d> Backend<'d> {
             });
         }
 
+        if let Some(manager) = runtime.output_manager_ptr() {
+            // SAFETY: `create_output_manager` returned a non-null manager owned
+            // by the display, which this call requires to outlive it, exactly
+            // as for the xdg shell above — null liveness is correct. These are
+            // the `apply`/`test` signals wlroots raises when a client requests
+            // a configuration; both handlers process the borrowed
+            // `wlr_output_configuration_v1` synchronously and destroy it before
+            // returning (the compositor owns it — see the handlers' own docs),
+            // so no borrowed config crosses into deferred delivery.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.apply,
+                    on_output_manager_apply::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.test,
+                    on_output_manager_test::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
         Ok(regs)
     }
 }
@@ -2113,6 +2152,15 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
             );
         }
         Event::SessionLockChanged(locked) => state.session_lock_changed(locked),
+        Event::OutputConfigurationApplied => {
+            // Pop the owned payload staged alongside this marker. FIFO, so the
+            // `Vec` popped here is the one `on_output_manager_apply` pushed for
+            // this marker (see `Session::applied_heads`). `unwrap_or_default`
+            // rather than `unwrap`: this runs under an `extern "C"` frame where
+            // a panic aborts, and an empty configuration is harmless.
+            let heads = session.applied_heads.borrow_mut().pop_front().unwrap_or_default();
+            state.output_configuration_applied(heads);
+        }
     }
 }
 
@@ -3254,6 +3302,160 @@ unsafe extern "C" fn on_pointer_constraint_destroy<S: Handlers>(
             runtime.inner.active_constraint.set(None);
         }
         drop(removed);
+    }
+}
+
+/// A client requested that its `zwlr_output_manager_v1` configuration be
+/// **applied**. Handled fully synchronously here: each head is committed and,
+/// on success, positioned, the client is told `succeeded` xor `failed`, the
+/// configuration is destroyed (the compositor owns it), and — on overall
+/// success only — the handler is notified with owned [`AppliedHead`] data.
+///
+/// See [`handle_output_configuration`] for the shared mechanics; this is the
+/// `apply` half.
+unsafe extern "C" fn on_output_manager_apply<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_output_manager_v1.events.apply`, whose `session` is the paired
+    // `*const Session<'_, S>`. The signal carries a live, non-null
+    // `*mut wlr_output_configuration_v1` the compositor now owns.
+    unsafe { handle_output_configuration::<S>(l, data, true) };
+}
+
+/// A client requested that its `zwlr_output_manager_v1` configuration be
+/// **tested** (checked for validity without being applied). Same mechanics as
+/// [`on_output_manager_apply`] but using `wlr_output_test_state` instead of
+/// `wlr_output_commit_state`, applying no position, and notifying no handler —
+/// a test changes nothing.
+unsafe extern "C" fn on_output_manager_test<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_output_manager_apply`, for the `test` signal.
+    unsafe { handle_output_configuration::<S>(l, data, false) };
+}
+
+/// The shared body of the `apply`/`test` handlers.
+///
+/// `apply` selects between committing (`true`) and only testing (`false`) each
+/// head's state. The whole thing is synchronous — the borrowed
+/// `wlr_output_configuration_v1` is never routed through the deferred [`Event`]
+/// queue, because wlroots frees it the moment this returns and a deferred
+/// delivery would dereference freed memory. Only owned [`AppliedHead`] values
+/// cross into the (possibly deferred) handler notification.
+///
+/// # Safety
+///
+/// `l` must be a live `apply`/`test` listener whose `Bound::session` is a
+/// `*const Session<'_, S>`; `data` is the `*mut wlr_output_configuration_v1`
+/// wlroots passes, which the compositor owns and this function destroys exactly
+/// once on every path.
+unsafe fn handle_output_configuration<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+    apply: bool,
+) {
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+
+        // The signal data is documented non-null, but guard anyway — with no
+        // config there is nothing to reply to or destroy.
+        let Some(config) = NonNull::new(data.cast::<sys::wlr_output_configuration_v1>()) else {
+            return;
+        };
+
+        // Collect the head pointers FIRST, before touching any wlroots call
+        // that could dispatch or free, exactly as `Output::modes` does. Each
+        // `wlr_output_head_v1` is linked through its own `link` field.
+        let heads: Vec<*mut sys::wlr_output_head_v1> = sys::wl_list_for_each!(
+            &raw mut (*config.as_ptr()).heads,
+            sys::wlr_output_head_v1,
+            link
+        )
+        .collect();
+
+        let mut all_ok = true;
+        // Owned resulting state, built only on the apply path and only used if
+        // every head committed. No borrowed pointer is retained.
+        let mut applied: Vec<AppliedHead> = Vec::new();
+
+        for head in heads {
+            let output = (*head).state.output;
+            if output.is_null() {
+                all_ok = false;
+                continue;
+            }
+
+            // Build a fresh `wlr_output_state`: MaybeUninit → init → head-state
+            // apply → commit/test → finish on EVERY path, the scaffold
+            // `Output::commit` uses.
+            let mut st = std::mem::MaybeUninit::<sys::wlr_output_state>::uninit();
+            sys::wlr_output_state_init(st.as_mut_ptr());
+            let mut st = st.assume_init();
+            sys::wlr_output_head_v1_state_apply(&raw const (*head).state, &raw mut st);
+
+            let ok = if apply {
+                sys::wlr_output_commit_state(output, &raw const st)
+            } else {
+                sys::wlr_output_test_state(output, &raw const st)
+            };
+            sys::wlr_output_state_finish(&raw mut st);
+
+            if !ok {
+                all_ok = false;
+                continue;
+            }
+
+            if apply {
+                // `state_apply` does not place the output — do it manually from
+                // the head's requested position, resolving the output's id
+                // through its addon set (attached when wlroots announced it).
+                let x = (*head).state.x;
+                let y = (*head).state.y;
+                let id = OutputId(ensure_id_raw(&raw mut (*output).addons));
+                runtime.set_output_position(id, x, y);
+
+                // Read the resulting state back off the committed output. Owned
+                // copies only — the `name` string is cloned, nothing borrows
+                // the config or the output past this scope.
+                let name = Output::<'_>::from_raw(output).name();
+                applied.push(AppliedHead {
+                    name,
+                    enabled: (*output).enabled,
+                    width: (*output).width,
+                    height: (*output).height,
+                    refresh_mhz: (*output).refresh,
+                    x,
+                    y,
+                    scale: (*output).scale,
+                    transform: Transform::try_from((*output).transform).unwrap_or(Transform::Normal),
+                });
+            }
+        }
+
+        // EXACTLY ONE reply, EXACTLY ONCE, then destroy the config on EVERY
+        // path — the compositor owns it and must free it exactly once.
+        if all_ok {
+            sys::wlr_output_configuration_v1_send_succeeded(config.as_ptr());
+        } else {
+            sys::wlr_output_configuration_v1_send_failed(config.as_ptr());
+        }
+        sys::wlr_output_configuration_v1_destroy(config.as_ptr());
+
+        // Notify only on a fully-successful apply. Owned payload staged next to
+        // its marker so the deferred-delivery contract holds (see
+        // `Session::applied_heads`).
+        if apply && all_ok {
+            (*session).applied_heads.borrow_mut().push_back(applied);
+            let deliver = (*session).deliver;
+            (*session)
+                .dispatcher
+                .emit(&*session, Event::OutputConfigurationApplied, deliver);
+        }
     }
 }
 
@@ -5646,7 +5848,10 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         // Unreachable: `run` never registers a session-lock manager either
         // (`Backend::register_toplevel_and_input` is `run_all`'s hook; `run`
         // uses `no_extra`), so this cannot be produced on this path.
-        | Event::SessionLockChanged(..) => {}
+        | Event::SessionLockChanged(..)
+        // Unreachable: `run` never registers an output manager either, for the
+        // same reason — so no `apply` can fire on this path.
+        | Event::OutputConfigurationApplied => {}
     }
 }
 
@@ -6061,6 +6266,7 @@ mod tests {
                 scene_buffers: RefCell::new(HashMap::new()),
                 pointer_constraints: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
+            applied_heads: RefCell::new(VecDeque::new()),
                 runtime: &runtime,
                 deliver: deliver::<Recorder>,
             };
@@ -6238,6 +6444,7 @@ mod tests {
             scene_buffers: RefCell::new(HashMap::new()),
             pointer_constraints: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
+            applied_heads: RefCell::new(VecDeque::new()),
             runtime: &runtime,
             deliver: deliver::<Recorder>,
         };
