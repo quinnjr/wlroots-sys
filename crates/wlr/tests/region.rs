@@ -251,3 +251,68 @@ fn debug_prints_a_summary_rather_than_every_rectangle() {
     assert!(printed.contains("Region"), "{printed}");
     assert!(printed.contains("rectangles: 2"), "{printed}");
 }
+
+/// A scale pixman cannot act on yields an empty region and no stderr noise.
+///
+/// wlroots multiplies the corners and hands the result to pixman, which
+/// rejects an inverted or non-finite rectangle by *printing* to the process's
+/// stderr and returning nothing. The answer was always empty; what a
+/// compositor also got was a `*** BUG ***` line in its log that no consumer
+/// could act on or suppress.
+#[test]
+fn an_unusable_scale_is_empty_rather_than_a_pixman_complaint() {
+    let r = Region::from_box(Box2D::new(0, 0, 10, 10));
+    for bad in [0.0f32, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(
+            r.scaled(bad).is_empty(),
+            "scale {bad} should give an empty region"
+        );
+        assert!(r.scaled_xy(bad, 1.0).is_empty(), "scale_x {bad}");
+        assert!(r.scaled_xy(1.0, bad).is_empty(), "scale_y {bad}");
+    }
+    // A usable factor still scales.
+    assert!(!r.scaled(2.0).is_empty());
+}
+
+/// Expanding by more than the coordinate space allows grows the region as far
+/// as it can, rather than overflowing into a smaller one.
+///
+/// Clamping the argument to `i32::MAX` looked sufficient and was not: wlroots
+/// computes `x2 + distance`, so a huge distance wrapped and came back with
+/// extents near `i32::MIN` and a width of 8 — a *smaller* region, from a call
+/// asking to grow it.
+#[test]
+fn a_huge_expansion_grows_rather_than_wrapping() {
+    let r = Region::from_box(Box2D::new(0, 0, 10, 10));
+    let e = r.expanded(u32::MAX).extents();
+    assert!(
+        e.width >= 10 && e.height >= 10,
+        "expanding must not shrink: got {e:?}"
+    );
+    assert!(
+        e.x <= 0 && e.y <= 0,
+        "expanding must not move inward: {e:?}"
+    );
+
+    // An ordinary expansion is unaffected.
+    let small = r.expanded(5).extents();
+    assert_eq!((small.x, small.y), (-5, -5));
+    assert_eq!((small.width, small.height), (20, 20));
+}
+
+/// Both constructors treat a box whose far corner does not fit as empty.
+///
+/// They used to disagree: `from_box` produced a pixman complaint and nothing,
+/// while `from_boxes` silently truncated the same input to one pixel wide.
+#[test]
+fn an_unrepresentable_box_is_empty_through_either_constructor() {
+    let overflowing = Box2D::new(i32::MAX - 1, 0, 10, 10);
+    let via_boxes = Region::from_boxes(&[overflowing]);
+    let via_box = Region::from_box(overflowing);
+    assert_eq!(
+        via_boxes.is_empty(),
+        via_box.is_empty(),
+        "the two constructors must agree on an unrepresentable box"
+    );
+    assert!(via_boxes.is_empty(), "and both must call it empty");
+}

@@ -15,6 +15,48 @@
 //! outlive the timeline, and unlike everything else in this module that is a
 //! documented rule rather than a borrow: [`SyncTimeline`] carries no lifetime.
 //!
+//! **This is the one place in the crate where a rule stands in for a
+//! guarantee, and it is worth being blunt about the hole it leaves.** The
+//! following compiles, contains no `unsafe`, and is a use-after-close:
+//!
+//! ```ignore
+//! let t = SyncTimeline::create(renderer.drm_fd()?)?;
+//! drop(renderer);   // the descriptor closes; the number becomes reusable
+//! t.signal(1)?;     // ioctl against whatever now owns that number
+//! ```
+//!
+//! Everywhere else this crate turns that shape into a compile error. Here it
+//! does not, and the reason is not oversight.
+//!
+//! **Why not a lifetime.** Tying a `SyncTimeline` to the
+//! [`Renderer`](crate::Renderer) whose `drm_fd()` it came from would make
+//! storing one beside its renderer a self-referential struct — and storing
+//! them is the entire point. `linux-drm-syncobj-v1` keeps timelines on surface
+//! state, passes name them, buffers hold them; that is why wlroots
+//! reference-counts them at all. A lifetime would forbid the use case the type
+//! exists for.
+//!
+//! **Why not dup internally.** The obvious repair — have the timeline
+//! duplicate the descriptor and own the copy — was implemented and reverted,
+//! because `drm_syncobj.h` says of `wlr_drm_syncobj_timeline_transfer`:
+//! *"Both timelines must have been created with the same DRM FD."* Not the
+//! same device: the same descriptor. Per-timeline dups give every timeline a
+//! different number, so `transfer` becomes illegal between any two of them —
+//! and the normal case is one renderer descriptor with many timelines on it.
+//! That trade buys soundness against a documented rule by breaking a
+//! documented operation, which is a bad bargain.
+//!
+//! A registry sharing one dup per device would satisfy both, at the cost of
+//! `fstat` to key it — a new dependency for a crate that currently has none of
+//! that kind. That is the shape a real fix takes; it is not free, and it has
+//! not been done.
+//!
+//! **So: keep the descriptor open for as long as any timeline on it lives.**
+//! In practice a compositor uses the renderer's, which lives as long as the
+//! renderer, and the rule costs nothing. It bites when a timeline outlives the
+//! renderer it was made from — which is exactly the storable-timeline use case
+//! above, so it is not a hypothetical corner.
+//!
 //! That is deliberate. wlroots' own use of timelines — `linux-drm-syncobj-v1`
 //! stores them on surface state, passes name them, buffers hold them — is the
 //! reason they are reference-counted at all, and a lifetime tying one to the
@@ -117,6 +159,18 @@ impl SyncTimeline {
     /// it lives: wlroots keeps the descriptor and uses it to destroy the kernel
     /// object.
     ///
+    /// **This is a rule, not a guarantee — the one in this crate that is.**
+    /// Closing it early is a use-after-close reachable without `unsafe`, and
+    /// no borrow here expresses the requirement: the returned timeline carries
+    /// no lifetime, deliberately, because timelines are meant to be stored
+    /// beside the renderer they came from. The module doc explains why neither
+    /// a lifetime nor an internal `dup` is the right repair — the second was
+    /// tried and reverted, because it makes
+    /// [`transfer`](SyncTimeline::transfer) illegal between any two timelines.
+    ///
+    /// In practice, pass the renderer's descriptor and let the renderer
+    /// outlive the timelines made from it.
+    ///
     /// # Errors
     ///
     /// [`Error::Create`] if the `DRM_IOCTL_SYNCOBJ_CREATE` ioctl failed —
@@ -134,7 +188,8 @@ impl SyncTimeline {
     ///
     /// `syncobj_fd` is borrowed — wlroots turns it into a handle and never
     /// stores it, so the caller still owns and closes it. `drm_fd` is retained,
-    /// exactly as in [`create`](SyncTimeline::create).
+    /// exactly as in [`create`](SyncTimeline::create), including that
+    /// keeping it open is a rule this crate cannot enforce.
     ///
     /// # Errors
     ///

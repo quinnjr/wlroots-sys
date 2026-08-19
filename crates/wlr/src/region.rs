@@ -103,23 +103,59 @@ unsafe extern "C" {
 
 /// `pixman_box32` is `{x1, y1, x2, y2}` — corners, not origin-and-extent —
 /// which is the one conversion in this module a reader will get wrong.
+///
+/// The extent is saturated because the difference of two `i32` corners does
+/// not always fit in an `i32`: a region spanning most of the coordinate space
+/// — which [`Region::expanded`] can legitimately produce — has a width above
+/// `i32::MAX`. Subtracting directly panicked in debug builds and wrapped to a
+/// negative extent in release ones, so a caller asking a very wide region for
+/// its extents got either a crash or a box claiming negative size.
 fn box_from_pixman(b: sys::pixman_box32) -> Box2D {
     Box2D {
         x: b.x1,
         y: b.y1,
-        width: b.x2 - b.x1,
-        height: b.y2 - b.y1,
+        width: b.x2.saturating_sub(b.x1),
+        height: b.y2.saturating_sub(b.y1),
     }
+}
+
+/// Whether a scale factor is one pixman can act on: finite and above zero.
+///
+/// Anything else makes wlroots hand pixman an inverted or non-finite
+/// rectangle, which it refuses loudly on stderr rather than by return value.
+fn usable_scale(scale: f32) -> bool {
+    scale.is_finite() && scale > 0.0
 }
 
 /// The reverse, clamping so a negative extent becomes an empty corner pair
 /// rather than an inverted box pixman would misbehave on.
+///
+/// A box whose far corner does not fit in an `i32` becomes empty rather than
+/// truncated. `saturating_add` alone was worse than it looks: a box at
+/// `x = i32::MAX - 1` with `width = 10` came back one pixel wide, silently,
+/// while the same box through [`Region::from_box`] made pixman print
+/// `*** BUG *** In pixman_region32_init_rect` and yield nothing. Two
+/// constructors gave two different wrong answers for one input; now both
+/// treat an unrepresentable box as contributing nothing.
 fn box_to_pixman(b: Box2D) -> sys::pixman_box32 {
+    let w = b.width.max(0);
+    let h = b.height.max(0);
+    let (x2, x_ok) = b.x.overflowing_add(w);
+    let (y2, y_ok) = b.y.overflowing_add(h);
+    if x_ok || y_ok {
+        // Empty: pixman treats x1 == x2 as no area at all.
+        return sys::pixman_box32 {
+            x1: b.x,
+            y1: b.y,
+            x2: b.x,
+            y2: b.y,
+        };
+    }
     sys::pixman_box32 {
         x1: b.x,
         y1: b.y,
-        x2: b.x.saturating_add(b.width.max(0)),
-        y2: b.y.saturating_add(b.height.max(0)),
+        x2,
+        y2,
     }
 }
 
@@ -335,8 +371,26 @@ impl Region {
 
     /// This region scaled by `scale`, rounded **outward**: for `scale >= 1` the
     /// result contains the scaled original rather than merely approximating it.
+    ///
+    /// An empty region for a `scale` that is not finite and positive. wlroots
+    /// multiplies the corners and hands the result to pixman, which rejects an
+    /// inverted or non-finite rectangle by printing
+    /// `*** BUG *** In pixman_region32_init_rect` to the process's stderr and
+    /// returning nothing — so `0.0`, a negative, `NAN` and `INFINITY` all
+    /// produced an empty region *plus* a line of libpixman noise in a
+    /// compositor's log that no consumer could act on. The answer is the same;
+    /// only the noise is gone.
     pub fn scaled(&self, scale: f32) -> Region {
         let mut out = Region::new();
+        if !usable_scale(scale) {
+            return out;
+        }
+        // Calls `wlr_region_scale` rather than delegating to `scaled_xy`:
+        // wlroots exposes both, the coverage ledger records this crate as
+        // wrapping both, and a delegation would make that record false — the
+        // audit's `no_wrapped_entry_is_stale` check catches exactly that, and
+        // did when this was first written as a delegation.
+        //
         // SAFETY: `out` is initialised and distinct from `self`; wlroots does
         // not document `dst == src` as supported, so it is never aliased here.
         unsafe { sys::wlr_region_scale(out.as_mut_ptr(), self.as_ptr(), scale) };
@@ -344,9 +398,16 @@ impl Region {
     }
 
     /// [`scaled`](Self::scaled) with a separate factor per axis.
+    ///
+    /// Empty for any factor that is not finite and positive, as
+    /// [`scaled`](Self::scaled) describes.
     pub fn scaled_xy(&self, scale_x: f32, scale_y: f32) -> Region {
         let mut out = Region::new();
-        // SAFETY: as in `scaled`.
+        if !usable_scale(scale_x) || !usable_scale(scale_y) {
+            return out;
+        }
+        // SAFETY: `out` is initialised and distinct from `self`; wlroots does
+        // not document `dst == src` as supported, so it is never aliased here.
         unsafe {
             sys::wlr_region_scale_xy(out.as_mut_ptr(), self.as_ptr(), scale_x, scale_y);
         }
@@ -372,20 +433,45 @@ impl Region {
     /// This region grown by `distance` on both axes.
     ///
     /// `u32` rather than `i32` because wlroots requires a non-negative
-    /// distance, and an unrepresentable precondition needs no runtime check. A
-    /// distance beyond `i32::MAX` saturates there; every pixel of every
-    /// plausible display is already inside that.
+    /// distance, and an unrepresentable precondition needs no runtime check.
+    ///
+    /// A distance larger than this region can absorb is reduced to the largest
+    /// one that can be. Clamping the *argument* to `i32::MAX` was not enough
+    /// and read as though it were: wlroots computes `x2 + distance`, so
+    /// `expanded(u32::MAX)` on a small box overflowed and came back with
+    /// extents near `i32::MIN` and a width of 8 — a smaller region, from a
+    /// call asking to grow it. The bound has to come from this region's own
+    /// extents, which is what it does now.
     pub fn expanded(&self, distance: u32) -> Region {
         let mut out = Region::new();
-        // SAFETY: as in `scaled`; `distance` is non-negative by construction.
+        let capped = self.max_expansion().min(distance);
+        // SAFETY: as in `scaled`. `capped` is non-negative and small enough
+        // that neither `x1 - capped` nor `x2 + capped` can leave `i32`, which
+        // is the arithmetic `wlr_region_expand` performs on every rectangle.
         unsafe {
             sys::wlr_region_expand(
                 out.as_mut_ptr(),
                 self.as_ptr(),
-                c_int::try_from(distance).unwrap_or(c_int::MAX),
+                c_int::try_from(capped).unwrap_or(c_int::MAX),
             );
         }
         out
+    }
+
+    /// The largest distance [`expanded`](Self::expanded) can apply to this
+    /// region without any corner leaving `i32`.
+    fn max_expansion(&self) -> u32 {
+        let e = self.extents();
+        let head_room = |v: i32| -> u32 {
+            // Distance to whichever bound this coordinate is nearer.
+            let to_max = (i32::MAX as i64 - v as i64) as u64;
+            let to_min = (v as i64 - i32::MIN as i64) as u64;
+            to_max.min(to_min).min(u32::MAX as u64) as u32
+        };
+        head_room(e.x)
+            .min(head_room(e.y))
+            .min(head_room(e.x.saturating_add(e.width)))
+            .min(head_room(e.y.saturating_add(e.height)))
     }
 
     /// The smallest region containing this one rotated by `rotation` **radians**
