@@ -177,6 +177,14 @@ pub(crate) struct RuntimeInner {
     pub(crate) relative_pointer_manager:
         RefCell<Option<NonNull<sys::wlr_relative_pointer_manager_v1>>>,
 
+    /// The pointer constraint currently activated on the focused surface, or
+    /// `None` when the pointer is unconstrained. `backend.rs`'s
+    /// `on_pointer_constraint_destroy` clears this the moment the active
+    /// constraint is destroyed (so enforcement stops); the activation policy —
+    /// which constraint becomes active on a focus change — lands in a follow-up
+    /// task. Init `None`.
+    pub(crate) active_constraint: std::cell::Cell<Option<NonNull<sys::wlr_pointer_constraint_v1>>>,
+
     /// The number of currently live `wlr_idle_inhibitor_v1` objects, tracked
     /// so [`Runtime::refresh_idle_inhibited`] knows whether to gate the idle
     /// notifier. `backend.rs`'s `on_new_idle_inhibitor`/
@@ -754,6 +762,7 @@ impl Runtime {
                 screencopy_manager: RefCell::new(None),
                 pointer_constraints_manager: RefCell::new(None),
                 relative_pointer_manager: RefCell::new(None),
+                active_constraint: std::cell::Cell::new(None),
                 idle_notifier: RefCell::new(None),
                 idle_inhibit_manager: RefCell::new(None),
                 idle_inhibitors: std::cell::Cell::new(0),
@@ -2197,6 +2206,38 @@ impl Runtime {
         let raw = NonNull::new(raw).ok_or(Error::Create("wlr_pointer_constraints_v1_create"))?;
         *self.inner.pointer_constraints_manager.borrow_mut() = Some(raw);
         Ok(())
+    }
+
+    /// The `zwp_pointer_constraints_v1` manager, once created via
+    /// [`Runtime::create_pointer_constraints_manager`] — read by `backend.rs`'s
+    /// `register_toplevel_and_input` to link the `new_constraint` listener.
+    pub(crate) fn pointer_constraints_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_pointer_constraints_v1>> {
+        *self.inner.pointer_constraints_manager.borrow()
+    }
+
+    /// The pointer constraint currently activated on the focused surface, or
+    /// `None` when unconstrained. Read by the enforcement path (a follow-up
+    /// task); cleared by `backend.rs`'s `on_pointer_constraint_destroy` when
+    /// the active constraint is destroyed.
+    pub(crate) fn active_constraint(&self) -> Option<NonNull<sys::wlr_pointer_constraint_v1>> {
+        self.inner.active_constraint.get()
+    }
+
+    /// The cursor's current position in layout coordinates, or `(0.0, 0.0)`
+    /// when no seat cursor exists (a consumer that never called
+    /// [`create_seat`](Runtime::create_seat)). Read-only; the enforcement path
+    /// (a follow-up task) and tests consult it to observe where the pointer is
+    /// relative to any active constraint's region.
+    pub fn cursor_position(&self) -> (f64, f64) {
+        match self.cursor_ptr() {
+            // SAFETY: `cursor` was created by `create_seat` and lives as long
+            // as this runtime; `x`/`y` are plain `f64` fields wlroots keeps
+            // current, read without aliasing anything.
+            Some(cursor) => unsafe { ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y) },
+            None => (0.0, 0.0),
+        }
     }
 
     /// Create the `zwp_relative_pointer_manager_v1` global, letting clients

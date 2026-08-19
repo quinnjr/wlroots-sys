@@ -535,6 +535,20 @@ struct Session<'r, S> {
     /// `on_session_lock_surface_destroy`, mirroring `drags`.
     lock_surfaces: RefCell<HashMap<usize, LockSurfaceListeners>>,
 
+    /// This run's `set_region`/`destroy` listeners on every live
+    /// `wlr_pointer_constraint_v1`, keyed by the `destroy` listener's own
+    /// address (as `usize`). wlroots does emit the constraint's `destroy`
+    /// signal with the constraint itself as `data` (unlike the null-`data`
+    /// session-lock/lock-surface signals and the surface-`data` idle-inhibitor
+    /// one), but this map keys on the firing listener regardless — the same
+    /// discipline every other destroy-keyed table here uses, so identity never
+    /// depends on what a given signal happens to pass. `on_pointer_constraint_destroy`
+    /// removes one specific constraint's entry synchronously the moment that
+    /// constraint is destroyed, dropping the two-listener bundle (and unlinking
+    /// it) together, and clears [`RuntimeInner::active_constraint`] if the
+    /// entry it removed was the active one.
+    pointer_constraints: RefCell<HashMap<usize, PointerConstraintListeners>>,
+
     /// Whether the most recently delivered [`Event::Key`] was consumed by the
     /// handler. `on_key` cannot get a return value back through
     /// `Dispatcher::emit` directly — an `extern "C"` callback has no way to
@@ -620,6 +634,24 @@ struct SessionLockListeners {
 /// `commit` (which drives the send-`locked` decision) and the lock surface's
 /// own `destroy` (which drops its scene tree from the runtime before wlroots
 /// frees it). Field order is not load-bearing, as for [`ToplevelListeners`].
+/// One live `wlr_pointer_constraint_v1`'s listeners: its own `set_region` and
+/// `destroy`. Field order is not load-bearing, as for [`ToplevelListeners`] —
+/// both must drop, and so unlink, as part of removing the entry, which happens
+/// while the constraint is still alive (its own `destroy` emission removes it,
+/// after `wl_signal_emit_mutable` has advanced past the firing listener).
+struct PointerConstraintListeners {
+    _set_region: Registration,
+    _destroy: Registration,
+    /// The constraint this entry's listeners are linked on, as a raw pointer,
+    /// so `on_pointer_constraint_destroy` can tell whether the constraint it is
+    /// tearing down is the one recorded in
+    /// [`RuntimeInner::active_constraint`](crate::runtime::RuntimeInner) and
+    /// clear it. Captured at link time rather than read from the destroy
+    /// signal's `data`, keeping identity independent of the signal — the same
+    /// reason `LockSurfaceListeners` captures its `output`.
+    constraint: NonNull<sys::wlr_pointer_constraint_v1>,
+}
+
 struct LockSurfaceListeners {
     _commit: Registration,
     _destroy: Registration,
@@ -1060,6 +1092,7 @@ impl<'d> Backend<'d> {
             idle_inhibitors: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
+            pointer_constraints: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime,
             deliver: hooks.deliver,
@@ -1461,6 +1494,23 @@ impl<'d> Backend<'d> {
                 Registration::link_bare(
                     &raw mut (*manager.as_ptr()).events.new_lock,
                     on_new_session_lock::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
+        if let Some(manager) = runtime.pointer_constraints_manager_ptr() {
+            // SAFETY: `create_pointer_constraints_manager` returned a non-null
+            // manager owned by the display, which this call requires to outlive
+            // it, exactly as for the xdg shell above — null liveness is correct.
+            // This is the `new_constraint` signal wlroots raises when a client
+            // confines or locks the pointer to a surface region;
+            // `on_new_pointer_constraint` records the constraint's lifecycle.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.new_constraint,
+                    on_new_pointer_constraint::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     std::ptr::null(),
                 )
@@ -2350,6 +2400,109 @@ unsafe extern "C" fn on_idle_inhibitor_destroy<S: Handlers>(
         runtime.refresh_idle_inhibited();
         let key = l as usize;
         let removed = (*session).idle_inhibitors.borrow_mut().remove(&key);
+        drop(removed);
+    }
+}
+
+/// A client bound `zwp_pointer_constraints_v1` and requested a constraint
+/// (confine or lock) on one of its surfaces. Links this run's `set_region` and
+/// `destroy` listeners on the constraint's own signals and records them in
+/// `Session::pointer_constraints`, keyed by the `destroy` listener's own
+/// address — the same keying discipline every other destroy-tracked table here
+/// uses, so identity never depends on what the destroy signal happens to pass
+/// as `data` (it passes the constraint, but this code does not rely on that).
+///
+/// This is lifecycle + observability only: it does **not** activate the
+/// constraint. Which constraint becomes the active one — and the motion
+/// suppression/clamp it then drives — is the enforcement path's job, landing in
+/// a follow-up task; a freshly created constraint stays inactive here and that
+/// path picks it up on the next focus resolution.
+unsafe extern "C" fn on_new_pointer_constraint<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_pointer_constraints_v1.events.new_constraint`, whose `session` is
+    // the `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_pointer_constraint_v1`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(constraint) = NonNull::new(data.cast::<sys::wlr_pointer_constraint_v1>()) else {
+            return;
+        };
+
+        // Linked on the constraint's own `set_region`/`destroy`. No `alive`
+        // backstop, as for the idle inhibitor this mirrors: the constraint
+        // cannot be freed by anything other than the destroy this very listener
+        // watches, so there is no "owner died first" case to guard against.
+        let set_region = Registration::link_bare(
+            &raw mut (*constraint.as_ptr()).events.set_region,
+            on_pointer_constraint_set_region::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        let destroy = Registration::link_bare(
+            &raw mut (*constraint.as_ptr()).events.destroy,
+            on_pointer_constraint_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        // Key by the destroy listener's own address: the destroy handler
+        // recovers the same key from the `l` it is handed, never from the
+        // signal `data`.
+        let key = destroy.listener_addr();
+        (*session).pointer_constraints.borrow_mut().insert(
+            key,
+            PointerConstraintListeners {
+                _set_region: set_region,
+                _destroy: destroy,
+                constraint,
+            },
+        );
+    }
+}
+
+/// The active constraint's region changed. wlroots keeps `constraint->region`
+/// current, so there is no stored geometry to update here — the enforcement
+/// path reads the region live when it clamps. A no-op in this task; a follow-up
+/// task may re-clamp the cursor here if this constraint is the active one.
+unsafe extern "C" fn on_pointer_constraint_set_region<S: Handlers>(
+    _l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+}
+
+/// The pointer constraint is about to be freed. Removes this constraint's entry
+/// from `Session::pointer_constraints` — keyed by the firing listener's own
+/// address (`l`), NOT the signal `data` — which drops and so unlinks its two
+/// listeners together, sound for the same reason `on_idle_inhibitor_destroy`
+/// unlinking itself is: `wl_signal_emit_mutable` has already advanced its
+/// cursor past this listener before the callback runs. If the constraint being
+/// destroyed is the one recorded in
+/// [`RuntimeInner::active_constraint`](crate::runtime::RuntimeInner), clears it
+/// so enforcement stops — comparing against the constraint captured in the
+/// removed entry, never against the destroy signal's `data`.
+unsafe extern "C" fn on_pointer_constraint_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_pointer_constraint` into this constraint's own
+    // `events.destroy`; the constraint is still live memory for this emission.
+    // Identity comes from `l` — the address of this handler's own listener,
+    // under which `on_new_pointer_constraint` keyed the entry — never from the
+    // signal `data`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let key = l as usize;
+        let removed = (*session).pointer_constraints.borrow_mut().remove(&key);
+        if let Some(entry) = &removed
+            && runtime.active_constraint() == Some(entry.constraint)
+        {
+            runtime.inner.active_constraint.set(None);
+        }
         drop(removed);
     }
 }
@@ -4957,6 +5110,7 @@ mod tests {
                 idle_inhibitors: RefCell::new(HashMap::new()),
                 session_locks: RefCell::new(HashMap::new()),
                 lock_surfaces: RefCell::new(HashMap::new()),
+                pointer_constraints: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
                 runtime: &runtime,
                 deliver: deliver::<Recorder>,
@@ -5132,6 +5286,7 @@ mod tests {
             idle_inhibitors: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
+            pointer_constraints: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime: &runtime,
             deliver: deliver::<Recorder>,
