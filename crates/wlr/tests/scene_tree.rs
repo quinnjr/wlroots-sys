@@ -143,7 +143,7 @@ fn placing_a_node_reorders_its_siblings() {
 }
 
 /// Raising and lowering touch siblings only, so nothing inside a band can
-/// escape it. This is the property the five-band stacking guarantee is built
+/// escape it. This is the property the six-band stacking guarantee is built
 /// on; if it ever stopped holding, a `Top` panel could be covered by a
 /// toplevel.
 #[test]

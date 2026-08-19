@@ -583,7 +583,7 @@ pub(crate) struct LayerSurfaceEntry {
 }
 
 /// A named scene band a rect (or, in principle, anything else this crate
-/// later parents by band) can live in — the same five stacking bands
+/// later parents by band) can live in — the same six stacking bands
 /// `Graphics` creates, plus [`Band::Toplevel`] for the band every
 /// toplevel's own tree lives in.
 ///
@@ -1252,7 +1252,7 @@ impl Runtime {
             // out.
             scene_guard.0 = Some(scene);
 
-            // The five stacking bands, created in bottom-to-top order right
+            // The six stacking bands, created in bottom-to-top order right
             // after the scene itself and before anything else can be
             // inserted — see `Graphics::background_band`'s own doc for why
             // this order is what fixes the stacking order permanently.
@@ -3641,6 +3641,13 @@ impl Runtime {
     /// `None`, having destroyed nothing, for an unknown or already-destroyed
     /// id — a double destroy misses rather than double-freeing.
     pub fn destroy_scene_output(&self, scene_output: SceneOutputId) -> Option<()> {
+        // Refused while any scene-node or scene-output borrow is live, for the
+        // reason `remove_rect` documents: the handle held by the closure that
+        // is calling us would dangle for the rest of that closure, and a
+        // `scene_output_for_each_buffer` walk would read a freed list link.
+        if self.inner.node_borrows.get() != 0 {
+            return None;
+        }
         let raw = self.scene_output_ptr(scene_output)?;
         // SAFETY: a resolvable id names a scene output wlroots has not freed —
         // its destroy listener would have cleared the liveness flag otherwise.
@@ -3810,9 +3817,17 @@ impl Runtime {
         f: impl FnOnce(&SceneOutput<'_>) -> R,
     ) -> Option<R> {
         let raw = self.scene_output_ptr(scene_output)?;
-        // SAFETY: a resolvable id names a live scene output. Nothing reachable
-        // from `SceneOutput`'s own methods destroys one — they read fields and
-        // damage the ring — so the handle names live memory for all of `f`.
+        // Raised before the handle is minted and lowered by `Drop`, so a panic
+        // escaping `f` cannot leave the runtime permanently refusing destroys.
+        let _guard = NodeBorrowGuard::enter(&self.inner);
+        // SAFETY: a resolvable id names a live scene output, and the guard
+        // above is what keeps it live for the whole of `f`.
+        //
+        // Reasoning about what `SceneOutput`'s own methods can do is not
+        // enough, and was the bug here: `f` captures the `Runtime` it was
+        // called on, so it can call `destroy_scene_output` directly — the
+        // hazard arrives through the closure's captures, not through the
+        // handle. `destroy_scene_output` consults this guard for that reason.
         let handle = unsafe { SceneOutput::from_raw_with_id(raw.as_ptr(), scene_output) };
         Some(f(&handle))
     }

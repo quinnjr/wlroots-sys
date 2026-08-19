@@ -303,7 +303,7 @@ addressable: trees, nesting, restacking, reparenting and hit testing, all by id.
   exercises each one, and the process surviving that test *is* the assertion.
 - Three origins, because not every node in the scene is the consumer's to
   restructure. Nodes this crate created for them are fully mutable; the scene
-  root and the five bands are readable and enable-able but never destroyed,
+  root and the six bands are readable and enable-able but never destroyed,
   restacked or reparented; and a node wlroots owns — a toplevel's tree, a layer
   surface's tree, a client's surface node — gets an id when `node_at` or
   `node_children` reaches it, but only reads and property changes. Restack

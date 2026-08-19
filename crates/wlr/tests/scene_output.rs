@@ -251,6 +251,56 @@ fn a_destroyed_scene_output_misses_on_every_call() {
     assert_eq!(runtime.destroy_scene_output(scene_output), None);
 }
 
+/// A borrow refuses the destroy that would pull the ground out from under it.
+///
+/// The hazard is not what `SceneOutput`'s own methods can do — they only read
+/// fields and damage the ring. It is that the closure captures the `Runtime`
+/// it was called on, so it can call `destroy_scene_output` directly and then
+/// keep using the handle it was just given. Without the borrow guard that is
+/// a use-after-free reachable with no `unsafe` at the call site.
+///
+/// The second half is the part that discriminates: asserting only that the
+/// destroy returned `None` would also pass if the destroy had run and merely
+/// reported failure. Using the handle afterwards, and finding the scene output
+/// still alive when the borrow ends, is what shows nothing was freed.
+#[test]
+fn a_live_borrow_refuses_a_destroy_of_the_scene_output_it_names() {
+    headless_env();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+
+    let mut app = App {
+        runtime: Some(runtime.clone()),
+        ..App::default()
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Turns(4))
+        .expect("run_all");
+    let scene_output = *app.scene_outputs.first().expect("a scene output");
+
+    let refused = runtime
+        .with_scene_output(scene_output, |so| {
+            let destroyed = runtime.destroy_scene_output(scene_output);
+            // Touch the handle *after* the attempted destroy: this is the
+            // dereference that would be reading freed memory.
+            let _ = so.position();
+            so.damage_ring().add_box(Box2D::new(0, 0, 4, 4));
+            destroyed
+        })
+        .expect("known scene output");
+    assert_eq!(
+        refused, None,
+        "a destroy under a live borrow must be refused"
+    );
+
+    // Still alive once the borrow ends — nothing was freed behind the refusal.
+    assert!(runtime.scene_output_position(scene_output).is_some());
+    // And the destroy works again now that nothing is borrowing it.
+    assert_eq!(runtime.destroy_scene_output(scene_output), Some(()));
+}
+
 /// The other way a scene output dies: the `wlr_output` under it goes. wlroots
 /// destroys the scene output from its own `output_destroy` listener, which is
 /// the emission this crate's watch is linked into.

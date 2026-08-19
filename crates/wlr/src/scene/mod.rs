@@ -23,7 +23,7 @@
 //! - **owned** — created through [`Runtime::create_tree_in_band`](crate::Runtime::create_tree_in_band),
 //!   [`Runtime::create_rect`](crate::Runtime::create_rect), [`Runtime::add_rect`](crate::Runtime::add_rect) and friends. Everything
 //!   is permitted.
-//! - **protected** — the scene root and the five stacking bands
+//! - **protected** — the scene root and the six stacking bands
 //!   ([`Band`](crate::Band)). Readable, and [`Runtime::set_node_enabled`](crate::Runtime::set_node_enabled)
 //!   works, but nothing may destroy, restack or reparent one: the bands' order
 //!   is the crate's whole stacking guarantee (see `Graphics`' own doc), and
