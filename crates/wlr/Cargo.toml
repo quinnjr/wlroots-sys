@@ -9,6 +9,15 @@ description = "Safe bindings to wlroots"
 keywords = ["wayland", "wlroots", "compositor"]
 categories = ["api-bindings", "gui"]
 readme = "README.md"
+# The coverage audit is development machinery, not part of the published
+# crate: `coverage/*.toml` is ~200K of ledger, and `src/coverage.rs` is
+# pulled into `tests/coverage_audit.rs` by `#[path]` rather than through
+# `lib.rs` precisely so it never ships. Nothing enforced that until CI grew a
+# `cargo package -p wlr` step, and all three were going out in the tarball.
+#
+# All three together: the test `#[path]`-includes the module, so excluding the
+# module alone would leave a test that cannot compile from a clean extraction.
+exclude = ["coverage/**", "src/coverage.rs", "tests/coverage_audit.rs"]
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

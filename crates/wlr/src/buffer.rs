@@ -545,7 +545,7 @@ impl BufferId {
 /// it is what [`Runtime::add_buffer`](crate::Runtime::add_buffer)'s and
 /// [`Runtime::update_buffer`](crate::Runtime::update_buffer)'s docs promise
 /// callers: pixels are R, G, B, A per pixel, row-major.
-const DRM_FORMAT_ABGR8888: u32 = 0x3432_4241;
+pub(crate) const DRM_FORMAT_ABGR8888: u32 = 0x3432_4241;
 
 /// A `wlr_buffer` backed by owned RGBA8888 pixels, plus the stride wlroots
 /// needs to interpret them.

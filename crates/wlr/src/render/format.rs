@@ -541,7 +541,11 @@ mod tests {
     /// them to say what the bytes are.
     #[test]
     fn abgr8888_matches_the_buffer_modules_hand_rolled_constant() {
-        assert_eq!(FourCc::ABGR8888.0, 0x3432_4241);
+        // Named the buffer module's constant and then compared against a
+        // literal instead, so the two could drift apart with the test still
+        // green — which is the entire thing it exists to prevent. `buffer.rs`
+        // hand-rolls its own copy because it predates this module.
+        assert_eq!(FourCc::ABGR8888.0, crate::buffer::DRM_FORMAT_ABGR8888);
     }
 
     #[test]

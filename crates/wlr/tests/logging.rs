@@ -124,9 +124,24 @@ fn an_installed_sink_receives_wlroots_log_lines_with_their_arguments_substituted
         levels.len() > 1,
         "bring-up logs at more than one level: {levels:?}"
     );
+    // This test requested `Debug`, which admits everything, so "nothing above
+    // the verbosity arrived" is not a claim it can make — comparing against
+    // `LogLevel::Debug` held for every possible value, and deleting the
+    // trampoline's filter outright left it passing.
+    //
+    // Nor can it read `log_verbosity()` and compare against that: wlroots'
+    // verbosity is process-global, these tests share a process, and another
+    // test lowering it mid-run made exactly that version fail with
+    // "verbosity (Error) ... got [Info, Debug]".
+    //
+    // So the filter is tested where it can actually be tested — by
+    // `silent_filters_everything_and_the_verbosity_is_readable_back`, which
+    // takes `sink_lock()` and so owns the verbosity for its own duration. What is asserted here is the thing
+    // this test does establish: `Debug` really does admit the quieter levels,
+    // so a filter that wrongly dropped them would show up as a missing level.
     assert!(
-        levels.iter().all(|&l| l <= wlr::LogLevel::Debug),
-        "nothing above the requested verbosity arrives: {levels:?}"
+        levels.contains(&wlr::LogLevel::Error) || levels.contains(&wlr::LogLevel::Info),
+        "Debug must admit the quieter levels too, not only Debug itself: {levels:?}"
     );
 }
 

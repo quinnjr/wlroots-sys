@@ -54,6 +54,30 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
 
+      # The default set does not compile `render/vulkan.rs` at all, so it was
+      # never linted under `-D warnings`, and none of `wlr`'s test files was
+      # ever compiled without default features — a `#[cfg]`-gated item that
+      # stopped existing would have merged green.
+      - run: cargo clippy -p wlr --all-targets --all-features
+        env:
+          RUSTFLAGS: -D warnings
+
+      - run: cargo clippy -p wlr --all-targets --no-default-features
+        env:
+          RUSTFLAGS: -D warnings
+
+      # `render/sync.rs` is only exercised where a DRM render node exists; ten
+      # of the twelve tests self-skip otherwise, which is indistinguishable
+      # from passing. Where the node *is* present, demand it — so losing it
+      # fails the job instead of quietly halving the suite.
+      - name: Explicit-sync tests, if this runner has a render node
+        run: |
+          if [ -e /dev/dri/renderD128 ]; then
+            WLR_REQUIRE_DRM=1 cargo test -p wlr --test render_sync
+          else
+            echo "::warning::no /dev/dri render node; render/sync.rs is unexercised on this runner"
+          fi
+
       # Workspace-wide, so this already builds and tests `wlr` alongside
       # `wlr-sys` — no separate `-p wlr` step is needed. `wlr` binds this
       # branch's wlroots minor; older minors live on their own support/*
@@ -96,8 +120,6 @@ jobs:
           # Informational: the burn-down table, so a milestone's progress is
           # visible in the log without anyone running it locally.
           cargo run -p xtask -- coverage
-        env:
-          WLR_COVERAGE_ALL_FEATURES: 1
 
       # The same gate against the no-default-features bindings — a subset, so
       # the other three checks must still hold.
@@ -204,6 +226,11 @@ jobs:
       # or an include_str! escaping the package root first shows up. A published
       # version can only be yanked, never replaced.
       - run: cargo package -p wlr-sys --allow-dirty
+
+      # `wlr` has its own packaging hazards `wlr-sys` does not: `coverage/*.toml`
+      # is ~200K of audit ledger and `src/coverage.rs` is audit machinery, and
+      # neither belongs in a published crate. Nothing checked before.
+      - run: cargo package -p wlr --allow-dirty
 
   miri:
     # Validates the reentrancy-deferring dispatcher in `wlr` under Miri, which

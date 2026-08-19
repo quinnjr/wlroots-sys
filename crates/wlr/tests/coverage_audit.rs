@@ -61,6 +61,63 @@ fn audit() -> Report {
     coverage::reconcile(&symbols, &wrapped, &waived, &sys_uses)
 }
 
+/// Whether these bindings came from an all-features build.
+///
+/// Asks for a symbol from each feature that gates a whole header, so a build
+/// missing any one of them is not mistaken for the full set. These are
+/// deliberately load-bearing names rather than a count: a count would drift
+/// with every wlroots release and would have to be maintained, whereas a
+/// symbol that disappears is a real event the audit should notice anyway.
+fn is_all_features(bindings: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "wlr_vk_renderer_create_with_drm_fd",    // vulkan-renderer
+        "wlr_gles2_renderer_create_with_drm_fd", // gles2-renderer
+        "wlr_drm_backend_create",                // drm-backend
+        "wlr_x11_backend_create",                // x11-backend
+        "wlr_libinput_backend_create",           // libinput-backend
+        "wlr_session_create",                    // session
+    ];
+    MARKERS.iter().all(|m| bindings.contains(m))
+}
+
+/// The marker set has to actually be findable, or `is_all_features` is a
+/// permanent skip that looks like a pass — the exact failure it replaced.
+///
+/// This runs in whatever configuration the suite was invoked with, so it
+/// cannot assert that the markers are *present*. It asserts the weaker thing
+/// that still catches the real regression: a marker that no longer names
+/// anything in a full build is a renamed or removed symbol, and the audit's
+/// own `every_ledger_symbol_exists_in_bindings` would then silently stop
+/// running. If these bindings *are* all-features, every marker must be there.
+#[test]
+fn the_all_features_markers_are_real_symbols() {
+    let source = bindings_source();
+    let found: Vec<&str> = [
+        "wlr_vk_renderer_create_with_drm_fd",
+        "wlr_gles2_renderer_create_with_drm_fd",
+        "wlr_drm_backend_create",
+        "wlr_x11_backend_create",
+        "wlr_libinput_backend_create",
+        "wlr_session_create",
+    ]
+    .into_iter()
+    .filter(|m| source.contains(m))
+    .collect();
+    assert!(
+        !found.is_empty(),
+        "not one all-features marker appears in these bindings — every marker \
+         has been renamed or removed, so is_all_features can never return true \
+         and the stale-row gate would skip forever"
+    );
+    if is_all_features(&source) {
+        assert_eq!(
+            found.len(),
+            6,
+            "all-features build missing a marker: {found:?}"
+        );
+    }
+}
+
 /// The gate proper: nothing bound may be unaccounted for.
 #[test]
 fn every_wlr_symbol_is_wrapped_or_waived() {
@@ -123,13 +180,24 @@ fn no_symbol_is_in_both_ledgers() {
 /// Only a hard failure in the all-features configuration, which is where the
 /// spec defines 100%: a smaller feature set produces a strict subset of the
 /// symbols, so every ledger row for a gated symbol would otherwise fail there.
-/// CI's all-features step sets `WLR_COVERAGE_ALL_FEATURES=1`.
+///
+/// Which configuration this is, is read out of the bindings themselves rather
+/// than out of an environment variable. It used to take
+/// `WLR_COVERAGE_ALL_FEATURES=1`, and the failure mode was silent in the worst
+/// way: copying CI's `run:` block without its separate `env:` key left every
+/// stale ledger row unchecked while the test still reported ok. A gate whose
+/// skip is indistinguishable from a pass is not a gate. The bindings know what
+/// they contain, so they are asked.
 #[test]
 fn every_ledger_symbol_exists_in_bindings() {
-    if std::env::var_os("WLR_COVERAGE_ALL_FEATURES").is_none() {
+    let source = bindings_source();
+    if !is_all_features(&source) {
         eprintln!(
-            "skipped: set WLR_COVERAGE_ALL_FEATURES=1 after building \
-             `wlr-sys --all-features` to check for stale ledger rows"
+            "skipped: these bindings are not the all-features configuration \
+             (no gated marker symbols present). Build `wlr-sys --all-features` \
+             into an isolated CARGO_TARGET_DIR and point WLR_COVERAGE_BINDINGS \
+             at its bindings.rs — a plain rebuild is often a cache hit that \
+             leaves the newest bindings.rs belonging to another configuration."
         );
         return;
     }

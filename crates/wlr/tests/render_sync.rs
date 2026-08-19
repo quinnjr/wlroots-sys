@@ -45,8 +45,32 @@ fn drm_node() -> Option<File> {
 }
 
 /// Announce a skip on the machine's terms rather than the test's.
+/// Report a test that could not run for want of a DRM render node.
+///
+/// Ten of the twelve tests in this file gate on one, and on a GPU-less runner
+/// every one of them skips — so all of `render/sync.rs` goes unexercised while
+/// the job reports green. A double `waiter_finish`, a leaked eventfd or a
+/// stale `wl_event_source` in `SyncWaiter::Drop` would all merge without
+/// anything noticing.
+///
+/// That cannot be fixed by asking harder: the hardware is either there or it
+/// is not. What can be fixed is the silence. Setting `WLR_REQUIRE_DRM=1` turns
+/// a skip into a failure, so a runner that is *supposed* to have a render node
+/// says so when it stops having one — which is the regression that would
+/// otherwise be invisible, because it looks exactly like success.
 fn skip(what: &str) {
-    eprintln!("skipping {what}: no usable /dev/dri render node on this machine");
+    if std::env::var_os("WLR_REQUIRE_DRM").is_some() {
+        panic!(
+            "{what} needs a /dev/dri render node and WLR_REQUIRE_DRM=1 says \
+             this machine has one. Either the node disappeared or the variable \
+             is set on a runner that never had one."
+        );
+    }
+    eprintln!(
+        "skipping {what}: no usable /dev/dri render node on this machine. \
+         render/sync.rs is NOT covered by this run — set WLR_REQUIRE_DRM=1 on \
+         a machine with a render node to make this a failure instead."
+    );
 }
 
 /// Where libdrm's `drm.h` lives, according to pkg-config.

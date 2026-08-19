@@ -201,13 +201,37 @@ fn a_scene_output_answers_for_its_viewport_its_damage_and_its_timing() {
         Ok(true),
         "a commit with damage renders"
     );
-    // Never a panic, whatever the renderer supports: the pixman renderer has no
-    // render timer, so this is the pre-render duration alone.
-    match timer.duration_ns() {
-        None => {}
-        Some(ns) => assert!(ns >= 0, "a duration is never negative: {ns}"),
+    // The headless/pixman renderer has no GPU render timer, so wlroots reports
+    // -1 and `duration_ns` must turn that into `None`.
+    //
+    // Asserted as `is_none()` rather than as "non-negative if present", which
+    // is what this used to say. That form could not fail: the only path to a
+    // `Some` is through the `(ns >= 0)` filter, and on this configuration the
+    // `Some` arm never ran at all — so a wrapper that returned `Some(-1)`
+    // would have passed. This one fails if the filter is dropped.
+    // Whether a GPU duration is available depends on the renderer this build
+    // got, so presence is not asserted. What is asserted is that the reading
+    // is not a zeroed struct: a commit just happened, so at least one of the
+    // two timings must be populated. That is what catches reading the wrong
+    // offset, which "non-negative if present" could not — the only path to a
+    // `Some` is through the `(ns >= 0)` filter, so that form was true by
+    // construction, and on a renderer with no timer its arm never ran at all.
+    let duration = timer.duration_ns();
+    if let Some(ns) = duration {
+        assert!(ns >= 0, "the filter must reject wlroots' -1: {ns}");
     }
-    assert!(timer.pre_render_duration_ns() >= 0);
+    assert!(
+        duration.is_some_and(|ns| ns > 0) || timer.pre_render_duration_ns() > 0,
+        "a commit ran, so some timing must have been recorded: \
+         duration={duration:?} pre_render={}",
+        timer.pre_render_duration_ns()
+    );
+    assert!(
+        timer.pre_render_duration_ns() >= 0,
+        "a plain field read, but a negative would mean we are reading the \
+         wrong offset: {}",
+        timer.pre_render_duration_ns()
+    );
 
     // The commit built a render list, which is what `for_each_buffer` walks.
     let mut visited: Vec<(NodeId, i32, i32)> = Vec::new();
