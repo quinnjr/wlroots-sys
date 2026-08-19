@@ -87,10 +87,11 @@ Session locking (`ext-session-lock-v1`) and idle management
   (`finished`); and a locker that *dies without unlocking* leaves the session
   locked (an opaque black fill covers every output) rather than exposing the
   desktop. `Runtime::is_session_locked(&self) -> bool` observes the state.
-- `SessionLockHandler::session_lock_changed(&mut self, locked: bool)` — a new
-  defaulted handler method (folded into the `Handlers` supertrait) telling the
-  compositor to suspend its own focus/layout work while locked. Existing
-  `Handlers` impls need an (empty) `impl SessionLockHandler` block.
+- `SeatHandler::session_lock_changed(&mut self, locked: bool)` — a new
+  defaulted method on the existing `SeatHandler` trait telling the compositor to
+  suspend its own focus/layout work while locked. Transparently additive:
+  existing `SeatHandler` impls inherit the default, so no code change is
+  required.
 - `Runtime::create_idle_notifier(&Display) -> Result<()>` — the
   `ext_idle_notifier_v1` global. The seat input path reports activity centrally,
   so wlroots drives clients' idle timers with no per-event wiring.

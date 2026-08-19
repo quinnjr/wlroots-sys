@@ -45,7 +45,6 @@ struct App {
 }
 
 impl wlr::SeatHandler for App {}
-impl wlr::SessionLockHandler for App {}
 impl wlr::FdHandler for App {}
 
 impl wlr::LoopHandler for App {

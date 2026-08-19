@@ -43,7 +43,6 @@ fn two_headless_outputs_get_disjoint_layout_boxes() {
     }
     impl wlr::ToplevelHandler for App {}
     impl wlr::SeatHandler for App {}
-    impl wlr::SessionLockHandler for App {}
     impl wlr::FdHandler for App {}
     impl wlr::LoopHandler for App {
         fn should_stop(&mut self) -> bool {
@@ -93,7 +92,6 @@ fn layout_box_after_the_run_is_stale_and_misses_cleanly() {
     }
     impl wlr::ToplevelHandler for App {}
     impl wlr::SeatHandler for App {}
-    impl wlr::SessionLockHandler for App {}
     impl wlr::FdHandler for App {}
     impl wlr::LoopHandler for App {
         fn should_stop(&mut self) -> bool {

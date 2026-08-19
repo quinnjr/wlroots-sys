@@ -32,8 +32,6 @@ impl wlr::SeatHandler for App {
     }
 }
 
-impl wlr::SessionLockHandler for App {}
-
 #[test]
 fn a_seat_can_be_created_and_a_run_survives_it() {
     // SAFETY: the only test in this binary, so no other harness thread can
