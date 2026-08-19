@@ -160,6 +160,38 @@ fn creating_the_screencopy_manager_twice_is_refused() {
 }
 
 #[test]
+fn creating_the_pointer_constraints_manager_twice_is_refused() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime
+        .create_pointer_constraints_manager(&display)
+        .expect("first");
+    assert!(
+        matches!(
+            runtime.create_pointer_constraints_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second pointer-constraints global would make the compositor advertise two"
+    );
+}
+
+#[test]
+fn creating_the_relative_pointer_manager_twice_is_refused() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime
+        .create_relative_pointer_manager(&display)
+        .expect("first");
+    assert!(
+        matches!(
+            runtime.create_relative_pointer_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second relative-pointer global would make the compositor advertise two"
+    );
+}
+
+#[test]
 fn creating_the_idle_notifier_twice_is_refused() {
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");

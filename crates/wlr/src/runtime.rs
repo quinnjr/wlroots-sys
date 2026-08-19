@@ -164,6 +164,19 @@ pub(crate) struct RuntimeInner {
     /// globals.
     pub(crate) idle_inhibit_manager: RefCell<Option<NonNull<sys::wlr_idle_inhibit_manager_v1>>>,
 
+    /// The pointer-constraints (`zwp_pointer_constraints_v1`) manager, once
+    /// created — lets a client confine or lock the pointer to a region of a
+    /// surface. `Option`, same rationale as the other manager globals.
+    pub(crate) pointer_constraints_manager:
+        RefCell<Option<NonNull<sys::wlr_pointer_constraints_v1>>>,
+
+    /// The relative-pointer (`zwp_relative_pointer_manager_v1`) manager, once
+    /// created — lets a client receive unaccelerated relative pointer motion
+    /// events, independent of absolute cursor position. `Option`, same
+    /// rationale as the other manager globals.
+    pub(crate) relative_pointer_manager:
+        RefCell<Option<NonNull<sys::wlr_relative_pointer_manager_v1>>>,
+
     /// The number of currently live `wlr_idle_inhibitor_v1` objects, tracked
     /// so [`Runtime::refresh_idle_inhibited`] knows whether to gate the idle
     /// notifier. `backend.rs`'s `on_new_idle_inhibitor`/
@@ -739,6 +752,8 @@ impl Runtime {
                 virtual_keyboard_manager: RefCell::new(None),
                 virtual_pointer_manager: RefCell::new(None),
                 screencopy_manager: RefCell::new(None),
+                pointer_constraints_manager: RefCell::new(None),
+                relative_pointer_manager: RefCell::new(None),
                 idle_notifier: RefCell::new(None),
                 idle_inhibit_manager: RefCell::new(None),
                 idle_inhibitors: std::cell::Cell::new(0),
@@ -2166,6 +2181,52 @@ impl Runtime {
         let raw = NonNull::new(raw).ok_or(Error::Create("wlr_screencopy_manager_v1_create"))?;
         *self.inner.screencopy_manager.borrow_mut() = Some(raw);
         Ok(())
+    }
+
+    /// Create the `zwp_pointer_constraints_v1` global, letting clients confine
+    /// or lock the pointer to a region of a surface. Errors if called twice.
+    pub fn create_pointer_constraints_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.pointer_constraints_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_pointer_constraints_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_pointer_constraints_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_pointer_constraints_v1_create"))?;
+        *self.inner.pointer_constraints_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// Create the `zwp_relative_pointer_manager_v1` global, letting clients
+    /// receive unaccelerated relative pointer motion events, independent of
+    /// absolute cursor position. Errors if called twice.
+    pub fn create_relative_pointer_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.relative_pointer_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_relative_pointer_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_relative_pointer_manager_v1_create(display.as_ptr()) };
+        let raw =
+            NonNull::new(raw).ok_or(Error::Create("wlr_relative_pointer_manager_v1_create"))?;
+        *self.inner.relative_pointer_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// The `zwp_relative_pointer_manager_v1` manager, once created via
+    /// [`Runtime::create_relative_pointer_manager`] — used internally to send
+    /// relative pointer motion events to clients. Not yet called from this
+    /// crate: the `new_constraint` wiring that reads it lands in a follow-up
+    /// task, so `dead_code` is allowed here in the meantime.
+    #[allow(dead_code)]
+    pub(crate) fn relative_pointer_manager(
+        &self,
+    ) -> Option<NonNull<sys::wlr_relative_pointer_manager_v1>> {
+        *self.inner.relative_pointer_manager.borrow()
     }
 
     /// Create the `ext_idle_notifier_v1` global. Clients (e.g. swayidle) bind
