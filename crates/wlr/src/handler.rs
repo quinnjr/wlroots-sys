@@ -455,20 +455,7 @@ pub trait SeatHandler {
     fn pointer_button(&mut self, x: f64, y: f64, button: u32, pressed: bool, time_msec: u32) {
         let _ = (x, y, button, pressed, time_msec);
     }
-}
 
-/// The session's lock state changed.
-///
-/// A single defaulted method, folded into [`Handlers`] additively — an
-/// `impl SessionLockHandler for MyState {}` written today, or none at all,
-/// still satisfies the supertrait list, exactly as [`SeatHandler`] did when
-/// its own methods were added.
-///
-/// # Panics
-///
-/// As for [`SeatHandler`]: the method runs underneath an `extern "C"` frame,
-/// so a panic escaping it **aborts the process**.
-pub trait SessionLockHandler {
     /// The session's lock state changed. `locked = true` when a locker takes a
     /// lock (the compositor should suspend its own focus/layout work and stop
     /// painting normal chrome); `locked = false` **only** on a genuine
@@ -497,12 +484,12 @@ pub trait SessionLockHandler {
 /// hand-written impl would overlap it. That is deliberate — it is what keeps
 /// the supertrait list, rather than each consumer's idea of it, the contract.
 pub trait Handlers:
-    OutputHandler + ToplevelHandler + SeatHandler + SessionLockHandler + FdHandler + LoopHandler
+    OutputHandler + ToplevelHandler + SeatHandler + FdHandler + LoopHandler
 {
 }
 
 impl<T> Handlers for T where
-    T: OutputHandler + ToplevelHandler + SeatHandler + SessionLockHandler + FdHandler + LoopHandler
+    T: OutputHandler + ToplevelHandler + SeatHandler + FdHandler + LoopHandler
 {
 }
 
@@ -526,7 +513,6 @@ mod tests {
     impl OutputHandler for MinimalAll {}
     impl ToplevelHandler for MinimalAll {}
     impl SeatHandler for MinimalAll {}
-    impl SessionLockHandler for MinimalAll {}
     impl FdHandler for MinimalAll {}
     impl LoopHandler for MinimalAll {}
 

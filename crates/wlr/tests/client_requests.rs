@@ -57,7 +57,6 @@ fn a_defaulted_handler_still_satisfies_handlers() {
     impl wlr::OutputHandler for Old {}
     impl wlr::ToplevelHandler for Old {}
     impl wlr::SeatHandler for Old {}
-    impl wlr::SessionLockHandler for Old {}
     impl wlr::FdHandler for Old {}
     impl wlr::LoopHandler for Old {}
     fn takes_handlers<S: wlr::Handlers>(_s: &S) {}
