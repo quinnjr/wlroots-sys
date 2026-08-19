@@ -97,7 +97,7 @@ mod seat;
 mod toplevel;
 
 pub use backend::{Backend, Until};
-pub use buffer::{Buffer, BufferId};
+pub use buffer::{Buffer, BufferDataAccess, BufferId, DataPtrAccess};
 pub use decoration::DecorationMode;
 pub use display::{Display, EventLoop};
 pub use error::{Error, Result};
@@ -115,9 +115,9 @@ pub use render::{
     ColorTransform, DMABUF_MAX_PLANES, DmabufAttributes, DmabufAttributesRef, DmabufPlane,
     DrmFormat, DrmFormatRef, DrmFormatSet, DrmFormatSetRef, Egl, FilterMode, FourCc, LockedBuffer,
     Modifier, NamedPrimaries, OwnedBuffer, Pixman, ReadPixels, RectOptions, RenderColor,
-    RenderPass, RenderTimer, Renderer, RendererFeatures, RendererRef, SWAPCHAIN_CAP, Swapchain,
-    SyncFlags, SyncTimeline, SyncWaiter, Texture, TextureOptions, TransferFunction,
-    TransferFunctions,
+    RenderPass, RenderTimer, Renderer, RendererFeatures, RendererRef, SWAPCHAIN_CAP,
+    ShmAttributesRef, Swapchain, SyncFlags, SyncTimeline, SyncWaiter, Texture, TextureOptions,
+    TransferFunction, TransferFunctions,
 };
 #[cfg(wlr_has_gles2_renderer)]
 pub use render::{Gles2, Gles2TextureAttribs};

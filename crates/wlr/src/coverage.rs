@@ -468,6 +468,10 @@ pub struct Report {
     /// `wrapped.toml` rows whose symbol no longer appears in a `sys::` use.
     /// Hard failure.
     pub stale_wrapped: Vec<String>,
+    /// `waived.toml` rows still tagged `not-yet` whose symbol *does* appear in
+    /// a `sys::` use. Hard failure — the wrapper exists and the row was never
+    /// moved, so the backlog over-counts.
+    pub stale_not_yet: Vec<String>,
     /// Symbols listed in both ledgers. Hard failure.
     pub duplicated: Vec<String>,
     /// Ledger rows naming a symbol bindgen never emitted. Hard failure in the
@@ -503,6 +507,11 @@ pub fn reconcile(
             .filter(|w| !sys_uses.contains(&w.symbol))
             .map(|w| w.symbol.clone())
             .collect(),
+        stale_not_yet: waived
+            .iter()
+            .filter(|w| w.reason == WaiveReason::NotYet && sys_uses.contains(&w.symbol))
+            .map(|w| w.symbol.clone())
+            .collect(),
         duplicated: wrapped_names
             .intersection(&waived_names)
             .map(|s| (*s).to_owned())
@@ -535,6 +544,7 @@ pub fn reconcile(
 
     report.unlisted.sort();
     report.stale_wrapped.sort();
+    report.stale_not_yet.sort();
     report.not_yet.sort_by(|a, b| a.symbol.cmp(&b.symbol));
     report
 }
@@ -544,6 +554,7 @@ impl Report {
     pub fn is_clean(&self) -> bool {
         self.unlisted.is_empty()
             && self.stale_wrapped.is_empty()
+            && self.stale_not_yet.is_empty()
             && self.duplicated.is_empty()
             && self.unknown_symbol.is_empty()
     }
@@ -581,6 +592,16 @@ impl Report {
                 self.stale_wrapped.len()
             ));
             for name in &self.stale_wrapped {
+                s.push_str(&format!("  {name}\n"));
+            }
+        }
+        if !self.stale_not_yet.is_empty() {
+            s.push_str(&format!(
+                "{} waived.toml row(s) tagged not-yet whose symbol crates/wlr/src \
+                 already uses:\n",
+                self.stale_not_yet.len()
+            ));
+            for name in &self.stale_not_yet {
                 s.push_str(&format!("  {name}\n"));
             }
         }
@@ -1169,6 +1190,41 @@ milestone = \"M5\"
         let report = reconcile(&symbols, &[wrapped("wlr_a")], &[], &uses(&[]));
         assert!(!report.is_clean());
         assert_eq!(report.stale_wrapped, vec!["wlr_a".to_owned()]);
+    }
+
+    /// The mirror of [`reconcile_reports_a_stale_wrapped_row`]. A `not-yet` row
+    /// whose symbol the source already reaches is work that was done and never
+    /// booked, and only this direction can see it: the row is well-formed, the
+    /// symbol is bound, it appears in exactly one ledger, so every other check
+    /// is green while the backlog over-counts.
+    #[test]
+    fn reconcile_reports_a_not_yet_row_the_source_already_uses() {
+        let symbols = vec![sym("wlr_a", Kind::Fn), sym("wlr_b", Kind::Fn)];
+        let report = reconcile(
+            &symbols,
+            &[wrapped("wlr_a")],
+            &[waived("wlr_b", WaiveReason::NotYet)],
+            &uses(&["wlr_a", "wlr_b"]),
+        );
+        assert!(!report.is_clean());
+        assert_eq!(report.stale_not_yet, vec!["wlr_b".to_owned()]);
+        assert!(report.render_failures().contains("wlr_b"));
+    }
+
+    /// A waiver with any other reason is not backlog, so a `sys::` use of it is
+    /// ordinary internal plumbing rather than an unbooked wrapper — the
+    /// `wlr_addon_set_*` and `wlr_keyboard_init` rows are exactly this shape.
+    #[test]
+    fn a_used_symbol_waived_for_another_reason_is_not_reported() {
+        let symbols = vec![sym("wlr_a", Kind::Fn)];
+        let report = reconcile(
+            &symbols,
+            &[],
+            &[waived("wlr_a", WaiveReason::InterfaceImplOnly)],
+            &uses(&["wlr_a"]),
+        );
+        assert!(report.is_clean());
+        assert!(report.stale_not_yet.is_empty());
     }
 
     #[test]

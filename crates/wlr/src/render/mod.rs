@@ -113,8 +113,9 @@ mod format;
 #[cfg(wlr_has_gles2_renderer)]
 mod gles2;
 mod pass;
-mod pixel_format;
+pub(crate) mod pixel_format;
 mod pixman;
+mod shm;
 mod swapchain;
 mod sync;
 mod texture;
@@ -152,6 +153,7 @@ pub use pass::{
     TextureOptions,
 };
 pub use pixman::Pixman;
+pub use shm::ShmAttributesRef;
 pub use swapchain::{LockedBuffer, SWAPCHAIN_CAP, Swapchain};
 pub use sync::{SyncFlags, SyncTimeline, SyncWaiter};
 pub use texture::{ReadPixels, Texture};
@@ -593,8 +595,18 @@ impl Renderer {
     ///
     /// # Errors
     ///
-    /// [`Error::Create`] if the renderer could not use the buffer.
+    /// [`Error::Operation`] if a mapping opened by
+    /// [`Buffer::begin_data_ptr_access`](crate::Buffer::begin_data_ptr_access)
+    /// is still live on `buffer`: the shared-memory paths of both renderers
+    /// open wlroots' own data-pointer bracket on it
+    /// (`pixman_texture_from_buffer`, `gles2_texture_from_buffer`), whose
+    /// entry `assert(!buffer->accessing_data_ptr)` would abort the process on
+    /// the non-`NDEBUG` builds this crate targets. [`Error::Create`] if the
+    /// renderer could not use the buffer.
     pub fn texture_from_buffer(&self, buffer: &Buffer<'_>) -> Result<Texture<'_>> {
+        if buffer.data_ptr_access_open() {
+            return Err(Error::Operation("wlr_texture_from_buffer"));
+        }
         // SAFETY: this value owns a live renderer, and the borrow keeps the
         // buffer alive for the call (after which wlroots' own lock does).
         let raw = unsafe { sys::wlr_texture_from_buffer(self.raw.as_ptr(), buffer.as_ptr()) };
@@ -641,8 +653,13 @@ impl Renderer {
     /// failing. [`Error::Operation`] if `options` name a colour transform or a
     /// signal timeline this renderer does not support — wlroots ignores both
     /// silently, and a colour-managed compositor that is quietly not
-    /// colour-managed is worse than one that fails. [`Error::Create`] if the
-    /// renderer refused the buffer.
+    /// colour-managed is worse than one that fails. [`Error::Operation`] also
+    /// if a mapping opened by
+    /// [`Buffer::begin_data_ptr_access`](crate::Buffer::begin_data_ptr_access)
+    /// is still live on `buffer` — the pixman renderer maps the pass's target
+    /// through wlroots' own data-pointer bracket, whose entry
+    /// `assert(!buffer->accessing_data_ptr)` would abort the process.
+    /// [`Error::Create`] if the renderer refused the buffer.
     pub fn begin_buffer_pass<'r, 'b>(
         &'r self,
         buffer: &'b Buffer<'b>,
@@ -650,6 +667,9 @@ impl Renderer {
     ) -> Result<RenderPass<'r, 'b>> {
         if self.pass_live.get() {
             return Err(Error::Reentrant("Renderer::begin_buffer_pass"));
+        }
+        if buffer.data_ptr_access_open() {
+            return Err(Error::Operation("wlr_renderer_begin_buffer_pass"));
         }
         if options.unsupported_by(&self.features()) {
             return Err(Error::Operation("wlr_renderer_begin_buffer_pass"));

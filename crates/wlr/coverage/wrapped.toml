@@ -119,9 +119,19 @@ module = "buffer"
 item   = "Buffer"
 
 [[wrapped]]
+symbol = "wlr_buffer_begin_data_ptr_access"
+module = "buffer"
+item   = "Buffer::begin_data_ptr_access"
+
+[[wrapped]]
 symbol = "wlr_buffer_cap"
 module = "render"
 item   = "BufferCaps"
+
+[[wrapped]]
+symbol = "wlr_buffer_data_ptr_access_flag"
+module = "buffer"
+item   = "DataPtrAccess"
 
 [[wrapped]]
 symbol = "wlr_buffer_drop"
@@ -129,9 +139,19 @@ module = "render::allocator"
 item   = "OwnedBuffer (Drop)"
 
 [[wrapped]]
+symbol = "wlr_buffer_end_data_ptr_access"
+module = "buffer"
+item   = "BufferDataAccess"
+
+[[wrapped]]
 symbol = "wlr_buffer_get_dmabuf"
 module = "buffer"
 item   = "Buffer::dmabuf"
+
+[[wrapped]]
+symbol = "wlr_buffer_get_shm"
+module = "buffer"
+item   = "Buffer::shm"
 
 [[wrapped]]
 symbol = "wlr_buffer_is_opaque"
@@ -249,6 +269,81 @@ module = "runtime"
 item   = "Runtime::init_graphics"
 
 [[wrapped]]
+symbol = "wlr_cursor"
+module = "runtime"
+item   = "Runtime::create_seat"
+
+[[wrapped]]
+symbol = "wlr_cursor_attach_input_device"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_cursor_attach_output_layout"
+module = "runtime"
+item   = "Runtime::create_seat"
+
+[[wrapped]]
+symbol = "wlr_cursor_create"
+module = "runtime"
+item   = "Runtime::create_seat"
+
+[[wrapped]]
+symbol = "wlr_cursor_move"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_cursor_set_xcursor"
+module = "runtime"
+item   = "Runtime::pointer_position"
+
+[[wrapped]]
+symbol = "wlr_cursor_warp_absolute"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_damage_ring"
+module = "scene::damage"
+item   = "DamageRing"
+
+[[wrapped]]
+symbol = "wlr_damage_ring_add"
+module = "scene::damage"
+item   = "DamageRing::add"
+
+[[wrapped]]
+symbol = "wlr_damage_ring_add_box"
+module = "scene::damage"
+item   = "DamageRing::add_box"
+
+[[wrapped]]
+symbol = "wlr_damage_ring_add_whole"
+module = "scene::damage"
+item   = "DamageRing::add_whole"
+
+[[wrapped]]
+symbol = "wlr_damage_ring_finish"
+module = "scene::damage"
+item   = "DamageRing"
+
+[[wrapped]]
+symbol = "wlr_damage_ring_init"
+module = "scene::damage"
+item   = "DamageRing::new"
+
+[[wrapped]]
+symbol = "wlr_damage_ring_rotate_buffer"
+module = "scene::damage"
+item   = "DamageRing::rotate_buffer"
+
+[[wrapped]]
+symbol = "wlr_data_control_manager_v1"
+module = "runtime"
+item   = "Runtime::create_data_control_manager"
+
+[[wrapped]]
 symbol = "wlr_data_control_manager_v1_create"
 module = "runtime"
 item   = "Runtime::create_data_control_manager"
@@ -272,6 +367,11 @@ item   = "DmabufAttributesRef::try_clone"
 symbol = "wlr_dmabuf_attributes_finish"
 module = "render::dmabuf"
 item   = "DmabufAttributes (Drop)"
+
+[[wrapped]]
+symbol = "wlr_drag"
+module = "backend"
+item   = "Runtime::drag_icon_position"
 
 [[wrapped]]
 symbol = "wlr_drm_format"
@@ -474,6 +574,61 @@ module = "render::texture"
 item   = "Texture::gles2_attribs"
 
 [[wrapped]]
+symbol = "wlr_idle_inhibit_manager_v1"
+module = "runtime"
+item   = "Runtime::create_idle_inhibit_manager"
+
+[[wrapped]]
+symbol = "wlr_idle_inhibit_v1_create"
+module = "runtime"
+item   = "Runtime::create_idle_inhibit_manager"
+
+[[wrapped]]
+symbol = "wlr_idle_inhibitor_v1"
+module = "backend"
+item   = "Runtime::create_idle_inhibit_manager"
+
+[[wrapped]]
+symbol = "wlr_idle_notifier_v1"
+module = "runtime"
+item   = "Runtime::create_idle_notifier"
+
+[[wrapped]]
+symbol = "wlr_idle_notifier_v1_create"
+module = "runtime"
+item   = "Runtime::create_idle_notifier"
+
+[[wrapped]]
+symbol = "wlr_idle_notifier_v1_notify_activity"
+module = "runtime"
+item   = "Runtime::create_idle_notifier"
+
+[[wrapped]]
+symbol = "wlr_idle_notifier_v1_set_inhibited"
+module = "runtime"
+item   = "Runtime::create_idle_inhibit_manager"
+
+[[wrapped]]
+symbol = "wlr_input_device"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_input_device_type"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_keyboard"
+module = "backend"
+item   = "SeatHandler::key"
+
+[[wrapped]]
+symbol = "wlr_keyboard_from_input_device"
+module = "backend"
+item   = "SeatHandler::key"
+
+[[wrapped]]
 symbol = "wlr_keyboard_get_modifiers"
 module = "seat"
 item   = "KeyEvent::modifiers"
@@ -487,6 +642,21 @@ item   = "KeyEvent"
 symbol = "wlr_keyboard_modifier"
 module = "seat"
 item   = "Modifiers"
+
+[[wrapped]]
+symbol = "wlr_keyboard_set_keymap"
+module = "backend"
+item   = "SeatHandler::key"
+
+[[wrapped]]
+symbol = "wlr_keyboard_set_repeat_info"
+module = "backend"
+item   = "SeatHandler::key"
+
+[[wrapped]]
+symbol = "wlr_layer_shell_v1"
+module = "runtime"
+item   = "Runtime::create_layer_shell"
 
 [[wrapped]]
 symbol = "wlr_layer_shell_v1_create"
@@ -539,6 +709,11 @@ module = "runtime"
 item   = "Runtime::init_output"
 
 [[wrapped]]
+symbol = "wlr_output_layout"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
 symbol = "wlr_output_layout_add"
 module = "runtime"
 item   = "Runtime::set_output_position"
@@ -569,6 +744,21 @@ module = "output"
 item   = "Output::schedule_frame"
 
 [[wrapped]]
+symbol = "wlr_output_state"
+module = "output"
+item   = "Output::commit"
+
+[[wrapped]]
+symbol = "wlr_output_state_finish"
+module = "output"
+item   = "Output::commit"
+
+[[wrapped]]
+symbol = "wlr_output_state_init"
+module = "output"
+item   = "Output::commit"
+
+[[wrapped]]
 symbol = "wlr_output_state_set_enabled"
 module = "output"
 item   = "Output::enable_with_preferred_mode"
@@ -594,6 +784,11 @@ module = "geom"
 item   = "Transform::invert"
 
 [[wrapped]]
+symbol = "wlr_output_transformed_resolution"
+module = "output"
+item   = "Output::transformed_size"
+
+[[wrapped]]
 symbol = "wlr_pixman_renderer_create"
 module = "render"
 item   = "Renderer::pixman"
@@ -609,9 +804,19 @@ module = "render::texture"
 item   = "Texture::pixman_image"
 
 [[wrapped]]
+symbol = "wlr_pointer"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
 symbol = "wlr_pointer_button_event"
 module = "backend"
 item   = "SeatHandler::pointer_button"
+
+[[wrapped]]
+symbol = "wlr_pointer_from_input_device"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
 
 [[wrapped]]
 symbol = "wlr_pointer_motion_absolute_event"
@@ -622,6 +827,11 @@ item   = "SeatHandler::pointer_motion"
 symbol = "wlr_pointer_motion_event"
 module = "backend"
 item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_primary_selection_v1_device_manager"
+module = "runtime"
+item   = "Runtime::create_primary_selection_manager"
 
 [[wrapped]]
 symbol = "wlr_primary_selection_v1_device_manager_create"
@@ -784,6 +994,11 @@ module = "render::pass"
 item   = "FilterMode"
 
 [[wrapped]]
+symbol = "wlr_scene"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
 symbol = "wlr_scene_attach_output_layout"
 module = "runtime"
 item   = "Runtime::init_graphics"
@@ -807,6 +1022,11 @@ item   = "SceneNode::try_as_buffer"
 symbol = "wlr_scene_buffer_iterator_func_t"
 module = "runtime"
 item   = "Runtime::for_each_buffer"
+
+[[wrapped]]
+symbol = "wlr_scene_buffer_send_frame_done"
+module = "runtime"
+item   = "Runtime::send_scene_buffer_frame_done"
 
 [[wrapped]]
 symbol = "wlr_scene_buffer_set_buffer"
@@ -879,9 +1099,34 @@ module = "runtime"
 item   = "Runtime::init_graphics"
 
 [[wrapped]]
+symbol = "wlr_scene_drag_icon_create"
+module = "backend"
+item   = "Runtime::drag_icon_position"
+
+[[wrapped]]
+symbol = "wlr_scene_frame_done_event"
+module = "backend"
+item   = "OutputHandler::scene_buffer_frame_done"
+
+[[wrapped]]
 symbol = "wlr_scene_get_scene_output"
 module = "runtime"
 item   = "Runtime::commit_output"
+
+[[wrapped]]
+symbol = "wlr_scene_layer_surface_v1"
+module = "runtime"
+item   = "Runtime::configure_scene_layer_surface"
+
+[[wrapped]]
+symbol = "wlr_scene_layer_surface_v1_configure"
+module = "runtime"
+item   = "Runtime::configure_scene_layer_surface"
+
+[[wrapped]]
+symbol = "wlr_scene_layer_surface_v1_create"
+module = "backend"
+item   = "ToplevelHandler::new_layer_surface"
 
 [[wrapped]]
 symbol = "wlr_scene_node"
@@ -949,6 +1194,11 @@ module = "scene"
 item   = "NodeKind"
 
 [[wrapped]]
+symbol = "wlr_scene_output"
+module = "scene::output"
+item   = "SceneOutput"
+
+[[wrapped]]
 symbol = "wlr_scene_output_commit"
 module = "runtime"
 item   = "Runtime::commit_output"
@@ -959,14 +1209,54 @@ module = "runtime"
 item   = "Runtime::init_output"
 
 [[wrapped]]
+symbol = "wlr_scene_output_destroy"
+module = "runtime"
+item   = "Runtime::destroy_scene_output"
+
+[[wrapped]]
+symbol = "wlr_scene_output_for_each_buffer"
+module = "runtime"
+item   = "Runtime::scene_output_for_each_buffer"
+
+[[wrapped]]
+symbol = "wlr_scene_output_layout"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
 symbol = "wlr_scene_output_layout_add_output"
 module = "runtime"
 item   = "Runtime::init_output"
 
 [[wrapped]]
+symbol = "wlr_scene_output_needs_frame"
+module = "scene::output"
+item   = "SceneOutput::needs_frame"
+
+[[wrapped]]
+symbol = "wlr_scene_output_sample_event"
+module = "backend"
+item   = "OutputHandler::scene_buffer_output_sample"
+
+[[wrapped]]
 symbol = "wlr_scene_output_send_frame_done"
 module = "runtime"
 item   = "Runtime::commit_output"
+
+[[wrapped]]
+symbol = "wlr_scene_output_set_position"
+module = "runtime"
+item   = "Runtime::set_scene_output_position"
+
+[[wrapped]]
+symbol = "wlr_scene_output_state_options"
+module = "scene::output"
+item   = "SceneOutputStateOptions"
+
+[[wrapped]]
+symbol = "wlr_scene_outputs_update_event"
+module = "backend"
+item   = "OutputHandler::scene_buffer_outputs_update"
 
 [[wrapped]]
 symbol = "wlr_scene_rect"
@@ -994,6 +1284,46 @@ module = "runtime"
 item   = "Runtime::set_rect_size"
 
 [[wrapped]]
+symbol = "wlr_scene_subsurface_tree_create"
+module = "backend"
+item   = "SeatHandler::session_lock_changed"
+
+[[wrapped]]
+symbol = "wlr_scene_subsurface_tree_set_clip"
+module = "runtime"
+item   = "Runtime::set_subsurface_tree_clip"
+
+[[wrapped]]
+symbol = "wlr_scene_surface"
+module = "scene::surface"
+item   = "SceneSurface"
+
+[[wrapped]]
+symbol = "wlr_scene_surface_send_frame_done"
+module = "runtime"
+item   = "Runtime::send_scene_surface_frame_done"
+
+[[wrapped]]
+symbol = "wlr_scene_surface_try_from_buffer"
+module = "runtime"
+item   = "Runtime::with_scene_surface"
+
+[[wrapped]]
+symbol = "wlr_scene_timer"
+module = "scene::output"
+item   = "SceneTimer"
+
+[[wrapped]]
+symbol = "wlr_scene_timer_finish"
+module = "scene::output"
+item   = "SceneTimer"
+
+[[wrapped]]
+symbol = "wlr_scene_timer_get_duration_ns"
+module = "scene::output"
+item   = "SceneTimer::duration_ns"
+
+[[wrapped]]
 symbol = "wlr_scene_tree"
 module = "scene"
 item   = "SceneTree"
@@ -1009,9 +1339,34 @@ module = "scene"
 item   = "SceneNode::try_as_tree"
 
 [[wrapped]]
+symbol = "wlr_scene_xdg_surface_create"
+module = "backend"
+item   = "ToplevelHandler::new_toplevel"
+
+[[wrapped]]
+symbol = "wlr_screencopy_manager_v1"
+module = "runtime"
+item   = "Runtime::create_screencopy_manager"
+
+[[wrapped]]
+symbol = "wlr_screencopy_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_screencopy_manager"
+
+[[wrapped]]
+symbol = "wlr_seat"
+module = "runtime"
+item   = "Runtime::create_seat"
+
+[[wrapped]]
 symbol = "wlr_seat_create"
 module = "runtime"
 item   = "Runtime::create_seat"
+
+[[wrapped]]
+symbol = "wlr_seat_get_keyboard"
+module = "runtime"
+item   = "Runtime::focus_toplevel_keyboard"
 
 [[wrapped]]
 symbol = "wlr_seat_keyboard_notify_clear_focus"
@@ -1024,9 +1379,164 @@ module = "runtime"
 item   = "Runtime::focus_toplevel_keyboard"
 
 [[wrapped]]
+symbol = "wlr_seat_keyboard_notify_key"
+module = "backend"
+item   = "SeatHandler::key"
+
+[[wrapped]]
+symbol = "wlr_seat_keyboard_notify_modifiers"
+module = "backend"
+item   = "SeatHandler::key"
+
+[[wrapped]]
+symbol = "wlr_seat_pointer_notify_button"
+module = "backend"
+item   = "SeatHandler::pointer_button"
+
+[[wrapped]]
+symbol = "wlr_seat_pointer_notify_clear_focus"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_seat_pointer_notify_enter"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_seat_pointer_notify_frame"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_seat_pointer_notify_motion"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_seat_request_set_primary_selection_event"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_request_set_selection_event"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_request_start_drag_event"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_set_capabilities"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_set_keyboard"
+module = "backend"
+item   = "SeatHandler::key"
+
+[[wrapped]]
+symbol = "wlr_seat_set_primary_selection"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_set_selection"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_start_pointer_drag"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_start_touch_drag"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_notify_down"
+module = "runtime"
+item   = "Runtime::inject_touch_down"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_notify_motion"
+module = "runtime"
+item   = "Runtime::inject_touch_motion"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_notify_up"
+module = "runtime"
+item   = "Runtime::inject_touch_up"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_point_focus"
+module = "runtime"
+item   = "Runtime::inject_touch_motion"
+
+[[wrapped]]
+symbol = "wlr_seat_validate_pointer_grab_serial"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_seat_validate_touch_grab_serial"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_session_lock_manager_v1"
+module = "runtime"
+item   = "Runtime::create_session_lock_manager"
+
+[[wrapped]]
+symbol = "wlr_session_lock_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_session_lock_manager"
+
+[[wrapped]]
+symbol = "wlr_session_lock_surface_v1"
+module = "backend"
+item   = "SeatHandler::session_lock_changed"
+
+[[wrapped]]
+symbol = "wlr_session_lock_surface_v1_configure"
+module = "backend"
+item   = "SeatHandler::session_lock_changed"
+
+[[wrapped]]
+symbol = "wlr_session_lock_v1"
+module = "runtime"
+item   = "Runtime::is_session_locked"
+
+[[wrapped]]
+symbol = "wlr_session_lock_v1_destroy"
+module = "backend"
+item   = "Runtime::is_session_locked"
+
+[[wrapped]]
+symbol = "wlr_session_lock_v1_send_locked"
+module = "runtime"
+item   = "Runtime::is_session_locked"
+
+[[wrapped]]
+symbol = "wlr_shm_attributes"
+module = "render::shm"
+item   = "ShmAttributesRef"
+
+[[wrapped]]
 symbol = "wlr_subcompositor_create"
 module = "runtime"
 item   = "Runtime::init_graphics"
+
+[[wrapped]]
+symbol = "wlr_surface"
+module = "toplevel"
+item   = "Toplevel::current_size"
 
 [[wrapped]]
 symbol = "wlr_swapchain"
@@ -1119,13 +1629,38 @@ module = "render::texture"
 item   = "Texture::update_from_buffer"
 
 [[wrapped]]
+symbol = "wlr_touch_point"
+module = "backend"
+item   = "Backend::run"
+
+[[wrapped]]
+symbol = "wlr_virtual_keyboard_manager_v1"
+module = "runtime"
+item   = "Runtime::create_virtual_keyboard_manager"
+
+[[wrapped]]
 symbol = "wlr_virtual_keyboard_manager_v1_create"
 module = "runtime"
 item   = "Runtime::create_virtual_keyboard_manager"
 
 [[wrapped]]
+symbol = "wlr_virtual_keyboard_v1"
+module = "backend"
+item   = "Runtime::create_virtual_keyboard_manager"
+
+[[wrapped]]
+symbol = "wlr_virtual_pointer_manager_v1"
+module = "runtime"
+item   = "Runtime::create_virtual_pointer_manager"
+
+[[wrapped]]
 symbol = "wlr_virtual_pointer_manager_v1_create"
 module = "runtime"
+item   = "Runtime::create_virtual_pointer_manager"
+
+[[wrapped]]
+symbol = "wlr_virtual_pointer_v1_new_pointer_event"
+module = "backend"
 item   = "Runtime::create_virtual_pointer_manager"
 
 [[wrapped]]
@@ -1169,14 +1704,44 @@ module = "render::texture"
 item   = "Texture::vulkan_has_alpha"
 
 [[wrapped]]
+symbol = "wlr_xcursor_manager"
+module = "runtime"
+item   = "Runtime::create_seat"
+
+[[wrapped]]
+symbol = "wlr_xcursor_manager_create"
+module = "runtime"
+item   = "Runtime::create_seat"
+
+[[wrapped]]
+symbol = "wlr_xcursor_manager_load"
+module = "runtime"
+item   = "Runtime::pointer_position"
+
+[[wrapped]]
+symbol = "wlr_xdg_decoration_manager_v1"
+module = "runtime"
+item   = "Runtime::create_xdg_decoration_manager"
+
+[[wrapped]]
 symbol = "wlr_xdg_decoration_manager_v1_create"
 module = "runtime"
 item   = "Runtime::create_xdg_decoration_manager"
 
 [[wrapped]]
+symbol = "wlr_xdg_shell"
+module = "runtime"
+item   = "Runtime::create_xdg_shell"
+
+[[wrapped]]
 symbol = "wlr_xdg_shell_create"
 module = "runtime"
 item   = "Runtime::create_xdg_shell"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface"
+module = "toplevel"
+item   = "Toplevel::current_size"
 
 [[wrapped]]
 symbol = "wlr_xdg_surface_schedule_configure"
@@ -1187,6 +1752,11 @@ item   = "Runtime::configure_toplevel"
 symbol = "wlr_xdg_toplevel"
 module = "toplevel"
 item   = "Toplevel"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_decoration_v1"
+module = "runtime"
+item   = "Runtime::set_decoration_mode"
 
 [[wrapped]]
 symbol = "wlr_xdg_toplevel_decoration_v1_mode"

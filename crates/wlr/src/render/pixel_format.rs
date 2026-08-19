@@ -115,7 +115,7 @@ const TABLE: &[Info] = &[
 /// sub-sampled entries at an odd width, and no renderer reaches memory with
 /// one: both pixman and GLES2 refuse a `YVYU`/`VYUY` read-back before touching
 /// the destination, having no pixel format to map it to.
-fn min_stride(format: FourCc, width: u64) -> Option<u64> {
+pub(crate) fn min_stride(format: FourCc, width: u64) -> Option<u64> {
     let info = TABLE.iter().find(|info| info.format == format)?;
     Some(
         width

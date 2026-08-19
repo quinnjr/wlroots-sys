@@ -122,7 +122,18 @@ impl<'r> Texture<'r> {
     /// to fall back to re-creating the texture from scratch via
     /// `wlr_texture_from_buffer()`" — [`Renderer::texture_from_buffer`](crate::Renderer::texture_from_buffer)
     /// here. Treating this as fatal is a bug.
+    ///
+    /// The same error covers one case that is not wlroots' own refusal: a
+    /// mapping opened by
+    /// [`Buffer::begin_data_ptr_access`](crate::Buffer::begin_data_ptr_access)
+    /// still being live on `buffer`. The GLES2 update path reads a
+    /// shared-memory buffer through wlroots' own data-pointer bracket, whose
+    /// entry `assert(!buffer->accessing_data_ptr)` would abort the process on
+    /// the non-`NDEBUG` builds this crate targets, so this refuses first.
     pub fn update_from_buffer(&self, buffer: &Buffer<'_>, damage: Option<&Region>) -> Result<()> {
+        if buffer.data_ptr_access_open() {
+            return Err(Error::Operation("wlr_texture_update_from_buffer"));
+        }
         let whole;
         let damage = match damage {
             Some(damage) => damage,

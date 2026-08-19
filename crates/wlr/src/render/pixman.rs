@@ -59,8 +59,14 @@ impl<'r> Pixman<'r> {
     /// calls `create_buffer` on a miss (`render/pixman/renderer.c`). So this is
     /// not a way to ask whether the buffer has been rendered into.
     ///
-    /// `None` only when the entry could not be made, which is what a buffer the
-    /// pixman renderer cannot map — a DMA-BUF, say — answers.
+    /// `None` when the entry could not be made, which is what a buffer the
+    /// pixman renderer cannot map — a DMA-BUF, say — answers, and also when a
+    /// mapping opened by
+    /// [`Buffer::begin_data_ptr_access`](crate::Buffer::begin_data_ptr_access)
+    /// is still live on `buffer`: creating the cache entry opens wlroots' own
+    /// data-pointer bracket on it, whose entry
+    /// `assert(!buffer->accessing_data_ptr)` would abort the process on the
+    /// non-`NDEBUG` builds this crate targets.
     ///
     /// # Safety
     ///
@@ -69,6 +75,9 @@ impl<'r> Pixman<'r> {
     /// `pixman_image_unref`ed. Using it at all requires pixman, which this
     /// crate does not wrap.
     pub unsafe fn buffer_image(&self, buffer: &Buffer<'_>) -> Option<*mut sys::pixman_image_t> {
+        if buffer.data_ptr_access_open() {
+            return None;
+        }
         // SAFETY: `'r` guarantees the renderer is live and the type test that
         // produced this view proved it is the pixman one; the borrow keeps the
         // buffer alive for the call.

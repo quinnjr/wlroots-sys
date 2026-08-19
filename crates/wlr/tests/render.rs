@@ -557,3 +557,135 @@ fn the_runtimes_renderer_and_allocator_are_reachable_as_views() {
     assert!(swapchain.allocator_alive());
     assert!(swapchain.acquire().is_ok());
 }
+
+/// `wlr_shm_allocator` buffers report shared-memory attributes matching what
+/// they were created with, and are not DMA-BUFs — the mirror image of
+/// `produced.dmabuf().is_none()` above.
+#[test]
+fn an_shm_allocator_buffer_reports_its_shm_attributes() {
+    headless_env();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let renderer = Renderer::pixman().expect("pixman renderer");
+    let allocator = Allocator::autocreate(&backend, &renderer).expect("allocator");
+
+    let buffer = allocator.create_buffer(4, 2, &argb()).expect("buffer");
+    let shm = buffer.shm().expect("wlr_shm_allocator buffers are shm");
+    assert_eq!(shm.format(), FourCc::ARGB8888);
+    assert_eq!(shm.width(), 4);
+    assert_eq!(shm.height(), 2);
+    assert!(shm.stride() >= 4 * 4, "at least 4 bytes per pixel wide");
+    assert!(shm.offset() >= 0);
+}
+
+/// `begin_data_ptr_access`/the guard's `Drop` round-trip: writing through the
+/// mapping and reading it back through a second, later mapping sees the
+/// write, and the format/stride the guard reports match what `shm()` itself
+/// reports for the same buffer.
+#[test]
+fn data_ptr_access_writes_are_visible_after_the_guard_is_dropped_and_reopened() {
+    headless_env();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let renderer = Renderer::pixman().expect("pixman renderer");
+    let allocator = Allocator::autocreate(&backend, &renderer).expect("allocator");
+
+    let buffer = allocator.create_buffer(2, 2, &argb()).expect("buffer");
+    let stride = buffer.shm().expect("shm buffer").stride() as usize;
+
+    {
+        let mut access = buffer
+            .begin_data_ptr_access(wlr::DataPtrAccess::WRITE)
+            .expect("no other mapping is open");
+        assert_eq!(access.stride(), stride);
+        let data = access.data_mut().expect("opened with WRITE");
+        data.fill(0xAB);
+        assert!(access.data().is_none(), "not opened with READ");
+    }
+
+    let access = buffer
+        .begin_data_ptr_access(wlr::DataPtrAccess::READ)
+        .expect("the previous guard released the mapping on drop");
+    let data = access.data().expect("opened with READ");
+    assert!(data.iter().all(|&b| b == 0xAB));
+}
+
+/// The most direct route to wlroots' own `!accessing_data_ptr` assertion —
+/// the one `Buffer::begin_data_ptr_access` stands in front of — is opening a
+/// second mapping while the first is still alive. This must return `None`,
+/// not abort. (It is not the only route; see
+/// `renderer_calls_are_refused_while_a_data_ptr_mapping_is_open`.)
+#[test]
+fn a_second_data_ptr_access_while_the_first_is_open_is_refused() {
+    headless_env();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let renderer = Renderer::pixman().expect("pixman renderer");
+    let allocator = Allocator::autocreate(&backend, &renderer).expect("allocator");
+
+    let buffer = allocator.create_buffer(2, 2, &argb()).expect("buffer");
+    let _first = buffer
+        .begin_data_ptr_access(wlr::DataPtrAccess::READ)
+        .expect("first mapping opens");
+
+    assert!(
+        buffer
+            .begin_data_ptr_access(wlr::DataPtrAccess::READ)
+            .is_none(),
+        "wlroots' accessing_data_ptr assert must never be reached"
+    );
+}
+
+/// The *other* route into that same assert, and the one a borrow cannot close:
+/// the renderer opens wlroots' own data-pointer bracket on any shared-memory
+/// buffer it textures, and every entry point that does takes only a shared
+/// `&Buffer` — so a live `BufferDataAccess` guard does not stop the call from
+/// compiling. Each of them must refuse while a mapping is open rather than
+/// call in and abort the process.
+#[test]
+fn renderer_calls_are_refused_while_a_data_ptr_mapping_is_open() {
+    headless_env();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let renderer = Renderer::pixman().expect("pixman renderer");
+    let allocator = Allocator::autocreate(&backend, &renderer).expect("allocator");
+
+    let buffer = allocator.create_buffer(2, 2, &argb()).expect("buffer");
+    // A texture made *before* the mapping opens, so that the refusal below is
+    // about the mapping and not about the texture being unmakeable.
+    let texture = renderer
+        .texture_from_buffer(&buffer)
+        .expect("texture from a buffer with no mapping open");
+
+    let access = buffer
+        .begin_data_ptr_access(wlr::DataPtrAccess::READ)
+        .expect("mapping opens");
+
+    assert!(
+        renderer.texture_from_buffer(&buffer).is_err(),
+        "texturing opens wlroots' own data-ptr bracket"
+    );
+    assert!(
+        renderer
+            .begin_buffer_pass(&buffer, &BufferPassOptions::new())
+            .is_err(),
+        "a pixman pass maps its target through the same bracket"
+    );
+    assert!(
+        texture.update_from_buffer(&buffer, None).is_err(),
+        "an update reads the source through the same bracket"
+    );
+    let pixman = renderer.as_pixman().expect("this is the pixman renderer");
+    // SAFETY: the returned image is only ever compared against `None` here; it
+    // is never dereferenced, unref'd, or kept.
+    assert!(
+        unsafe { pixman.buffer_image(&buffer) }.is_none(),
+        "creating the pixman cache entry opens the same bracket"
+    );
+
+    drop(access);
+    assert!(
+        renderer.texture_from_buffer(&buffer).is_ok(),
+        "and every one of them works again once the guard is gone"
+    );
+}

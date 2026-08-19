@@ -1484,7 +1484,21 @@ impl Runtime {
     /// nothing new to draw and skips the commit (see `wlr_scene.h`'s
     /// `wlr_scene_output_needs_frame` doc), so an `Err` here always means the
     /// commit was attempted and wlroots said no.
+    ///
+    /// [`Error::Operation`] also while any mapping opened by
+    /// [`Buffer::begin_data_ptr_access`](crate::Buffer::begin_data_ptr_access)
+    /// is live on this thread. A commit textures whatever buffers the scene
+    /// graph holds, which this crate cannot enumerate to check one by one, and
+    /// texturing a shared-memory buffer opens wlroots' own data-pointer
+    /// bracket on it — whose entry `assert(!buffer->accessing_data_ptr)` would
+    /// abort the process if the scene happened to hold the mapped buffer.
+    /// Refusing every commit while a mapping is open is the conservative
+    /// reading of a question that cannot be asked precisely; drop the guard
+    /// before committing.
     pub fn commit_output(&self, output: &Output<'_>) -> Result<()> {
+        if crate::buffer::any_data_ptr_access_open() {
+            return Err(Error::Operation("Runtime::commit_output"));
+        }
         // Debug-only bug detector, not a safety mechanism a release build
         // relies on — see `RuntimeInner::pinned_display`'s own doc and
         // `add_rect`'s identical check.
@@ -3701,12 +3715,19 @@ impl Runtime {
     /// [`Error::Operation`] if wlroots rejected the commit — a genuine failure,
     /// which for these options usually means a swapchain whose dimensions do
     /// not match the output, or a colour transform on an output that already
-    /// has an image description.
+    /// has an image description. It is also what a commit attempted while any
+    /// mapping opened by
+    /// [`Buffer::begin_data_ptr_access`](crate::Buffer::begin_data_ptr_access)
+    /// is live on this thread returns, for the reason
+    /// [`commit_output`](Runtime::commit_output) gives.
     pub fn commit_scene_output(
         &self,
         scene_output: SceneOutputId,
         options: &SceneOutputStateOptions<'_>,
     ) -> Result<bool> {
+        if crate::buffer::any_data_ptr_access_open() {
+            return Err(Error::Operation("Runtime::commit_scene_output"));
+        }
         let Some(raw) = self.scene_output_ptr(scene_output) else {
             return Err(Error::Destroyed("wlr_scene_output"));
         };

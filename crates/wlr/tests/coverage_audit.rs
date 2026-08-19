@@ -85,6 +85,28 @@ fn no_wrapped_entry_is_stale() {
     );
 }
 
+/// The mirror of [`no_wrapped_entry_is_stale`]: a `waived.toml` row still
+/// tagged `not-yet` whose symbol `crates/wlr/src` already reaches.
+///
+/// It exists because a burn-down counted in one direction only reports
+/// progress that is not real. Nothing outside this test forces a milestone to
+/// move a row out of the backlog at the moment it wraps the symbol, and every
+/// other check stays green when it forgets: the row is well-formed, the symbol
+/// is bound, it appears in exactly one ledger. The only visible effect is that
+/// `not-yet` keeps counting work that is already done, so the remaining
+/// distance to 100% reads larger than it is and nobody has a reason to look.
+/// Checking both directions is what makes the backlog a measurement.
+#[test]
+fn no_not_yet_entry_is_already_wrapped() {
+    let report = audit();
+    assert!(
+        report.stale_not_yet.is_empty(),
+        "\n{}\nMove each row from crates/wlr/coverage/waived.toml to \
+         wrapped.toml, naming the module and the safe item that covers it.\n",
+        report.render_failures()
+    );
+}
+
 #[test]
 fn no_symbol_is_in_both_ledgers() {
     let report = audit();

@@ -53,13 +53,20 @@ provides it. So the rows point at the ids rather than at an addon API that will
 never exist. `wlr_addon_set_*` is genuinely different and stays waived: only code
 that *owns* a set calls those, which in this crate is nobody.
 
-Contrast `wlr_scene_surface_try_from_buffer`, called on every pointer motion so
-input reaches the right surface, but with no consumer-visible effect of its own —
-that stays waived until a milestone gives a consumer scene-node access.
+`wlr_scene_surface_try_from_buffer` used to be the counter-example here: called
+on every pointer motion so input reaches the right surface, but with no
+consumer-visible effect of its own. `Runtime::with_scene_surface` gave it one, so
+it is wrapped now — and that is the general rule. A symbol the crate has started
+calling has an item somewhere that its effect reaches, even when the call site is
+plumbing; find that item rather than leaving the row in the backlog.
 
-Every row is validated twice by the gate: the symbol must exist in `bindings.rs`,
-and it must still appear in a `sys::` use somewhere under `crates/wlr/src`. The
-second check is what stops a row from outliving the wrapper it describes.
+Every row is validated three ways by the gate: the symbol must exist in
+`bindings.rs`; a `wrapped.toml` row must still appear in a `sys::` use somewhere
+under `crates/wlr/src`; and a `not-yet` row must **not**. The second check stops
+a row from outliving the wrapper it describes. The third is its mirror, and it is
+the one that keeps the burn-down honest — without it a milestone can wrap a
+symbol, forget to move the row, and leave `not-yet` counting work that is already
+done, with every other check still green.
 
 ## Editing
 
