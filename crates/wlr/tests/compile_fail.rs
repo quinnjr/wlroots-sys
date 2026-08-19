@@ -185,3 +185,21 @@ fn scene_node_lifetime_parameter_and_calling_convention_are_pinned() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/scene_node_escapes_borrow.rs");
 }
+
+/// Damaging a ring while iterating its current region is a borrow error, not a
+/// use-after-free.
+///
+/// `DamageRing::current` hands out a `RegionRef` borrowed from the ring and
+/// `rectangles()` walks pixman's box array in place, while `add_box` runs
+/// `pixman_region32_union` and reallocates that array. Both took `&self` at
+/// first, so both could be live at once and the iterator read freed memory —
+/// confirmed under valgrind, with no `unsafe` at the call site. The mutators
+/// take `&mut self` so the compiler refuses it instead.
+///
+/// This is the guard for the whole shape, not one method: any future `&self`
+/// mutator on a type that also hands out a borrowed `RegionRef` reopens it.
+#[test]
+fn a_damage_ring_cannot_be_damaged_while_its_region_is_iterated() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/damage_ring_mutated_during_iteration.rs");
+}

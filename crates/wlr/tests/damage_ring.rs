@@ -31,7 +31,7 @@ fn argb() -> DrmFormat {
 /// The three ways damage goes in, and the one way it comes back out.
 #[test]
 fn a_ring_accumulates_every_shape_of_damage() {
-    let ring = DamageRing::new();
+    let mut ring = DamageRing::new();
     assert!(ring.current().is_empty());
 
     ring.add_box(Box2D::new(0, 0, 16, 16));
@@ -71,7 +71,7 @@ fn rotating_a_buffer_takes_the_accumulated_damage_and_empties_it() {
     let first = allocator.create_buffer(64, 64, &argb()).expect("buffer");
     let second = allocator.create_buffer(64, 64, &argb()).expect("buffer");
 
-    let ring = DamageRing::new();
+    let mut ring = DamageRing::new();
     ring.add_box(Box2D::new(8, 8, 16, 16));
     assert_eq!(ring.current().extents(), Box2D::new(8, 8, 16, 16));
 
@@ -115,7 +115,7 @@ fn add_whole_is_sized_by_the_buffers_the_ring_has_seen() {
     let allocator = Allocator::autocreate(&backend, &renderer).expect("allocator");
     let buffer = allocator.create_buffer(32, 24, &argb()).expect("buffer");
 
-    let ring = DamageRing::new();
+    let mut ring = DamageRing::new();
     ring.add_whole();
     assert!(
         ring.current().is_empty(),
@@ -143,7 +143,7 @@ fn a_ring_survives_being_moved_after_a_buffer_has_been_rotated() {
     let allocator = Allocator::autocreate(&backend, &renderer).expect("allocator");
     let buffer = allocator.create_buffer(16, 16, &argb()).expect("buffer");
 
-    let ring = DamageRing::new();
+    let mut ring = DamageRing::new();
     let _ = ring.rotate_buffer(&buffer);
     let address = ring.as_ptr();
 
@@ -152,7 +152,7 @@ fn a_ring_survives_being_moved_after_a_buffer_has_been_rotated() {
         ring: DamageRing,
     }
     let holder = Holder { ring };
-    let moved = holder.ring;
+    let mut moved = holder.ring;
     assert_eq!(moved.as_ptr(), address);
 
     moved.add_box(Box2D::new(2, 2, 4, 4));

@@ -315,7 +315,7 @@ impl Region {
     /// The rectangles making up the region, in pixman's canonical
     /// decomposition (band-sorted, non-overlapping) — not the boxes it was
     /// built from.
-    pub fn rectangles(&self) -> impl Iterator<Item = Box2D> + '_ {
+    pub fn rectangles(&self) -> impl Iterator<Item = Box2D> + use<'_> {
         // SAFETY: `self.inner` is live and initialised; the borrow of `self`
         // outlives the returned iterator, and nothing in that iterator can
         // modify the region, so the slice stays valid for its whole life.
@@ -644,10 +644,28 @@ impl<'a> RegionRef<'a> {
     }
 
     /// The rectangles making up the region.
-    pub fn rectangles(&self) -> impl Iterator<Item = Box2D> + '_ {
+    pub fn rectangles(&self) -> impl Iterator<Item = Box2D> + use<'_> {
         // SAFETY: the handle's lifetime guarantees the region is live, and the
-        // borrow of `self` outlives the returned iterator. Nothing reachable
-        // from this view can modify the region.
+        // borrow of `self` outlives the returned iterator.
+        //
+        // The third clause this used to carry — "nothing reachable from this
+        // view can modify the region" — was not true, and was the whole
+        // argument. `read::rectangles` mints a `&'static [pixman_box32]` that
+        // this re-binds to `&self`, so the iterator is only as sound as the
+        // guarantee that nothing mutates the region while it lives. Owners
+        // that expose *shared*-reference mutators broke exactly that:
+        // `DamageRing::current(&self)` and `add_box(&self)` were both shared,
+        // so both could be live at once, and `pixman_region32_union`
+        // reallocates the box array the iterator is walking. A use-after-free
+        // reachable with no `unsafe` written by the consumer.
+        //
+        // The fix belongs at the owners, and is that every mutator on a type
+        // that also hands out a borrowed `RegionRef` takes `&mut self` — so
+        // the aliasing is a borrow error. That is a standing obligation on
+        // anything that grows a `RegionRef` accessor, not a property this
+        // method can check, which is why it is written here where the
+        // `'static` is minted. `tests/ui/damage_ring_mutated_during_iteration.rs`
+        // pins it.
         unsafe { read::rectangles(self.as_ptr()) }
             .iter()
             .copied()

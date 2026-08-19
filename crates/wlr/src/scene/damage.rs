@@ -143,7 +143,7 @@ impl DamageRing {
     }
 
     /// Add `area`, in buffer-local coordinates, to the accumulated damage.
-    pub fn add_box(&self, area: Box2D) {
+    pub fn add_box(&mut self, area: Box2D) {
         // SAFETY: as for `add`.
         unsafe { ops::add_box(self.as_ptr(), area) };
     }
@@ -158,7 +158,7 @@ impl DamageRing {
     /// this does nothing at all** — the maximum over an empty list is `0 × 0` —
     /// and [`add_box`](Self::add_box) with the size you are about to render is
     /// the call that works before the first frame.
-    pub fn add_whole(&self) {
+    pub fn add_whole(&mut self) {
         // SAFETY: as for `add`.
         unsafe { ops::add_whole(self.as_ptr()) };
     }
@@ -180,7 +180,7 @@ impl DamageRing {
     /// region a renderer must cover. Rotating is not undoable: **if rendering
     /// or submission then fails, re-damage the ring**, or the next frame will
     /// believe those pixels are already correct.
-    pub fn rotate_buffer(&self, buffer: &Buffer<'_>) -> Region {
+    pub fn rotate_buffer(&mut self, buffer: &Buffer<'_>) -> Region {
         // SAFETY: as for `add`; the handle's lifetime guarantees the buffer is
         // live for the call.
         unsafe { ops::rotate_buffer(self.as_ptr(), buffer) }
@@ -255,14 +255,14 @@ impl<'a> DamageRingRef<'a> {
     }
 
     /// Add `area`, in buffer-local coordinates, to the accumulated damage.
-    pub fn add_box(&self, area: Box2D) {
+    pub fn add_box(&mut self, area: Box2D) {
         // SAFETY: as for `add`.
         unsafe { ops::add_box(self.as_ptr(), area) };
     }
 
     /// Damage everything, as [`DamageRing::add_whole`] means it — the largest
     /// buffer this ring has rotated, and nothing at all before the first one.
-    pub fn add_whole(&self) {
+    pub fn add_whole(&mut self) {
         // SAFETY: as for `add`.
         unsafe { ops::add_whole(self.as_ptr()) };
     }
@@ -280,7 +280,7 @@ impl<'a> DamageRingRef<'a> {
     /// scene output's ring by hand is for a compositor doing its own rendering
     /// off that output; [`Runtime::commit_scene_output`](crate::Runtime::commit_scene_output)
     /// rotates it itself.
-    pub fn rotate_buffer(&self, buffer: &Buffer<'_>) -> Region {
+    pub fn rotate_buffer(&mut self, buffer: &Buffer<'_>) -> Region {
         // SAFETY: as for `add`; the handle's lifetime guarantees the buffer is
         // live for the call.
         unsafe { ops::rotate_buffer(self.as_ptr(), buffer) }
@@ -312,7 +312,7 @@ mod tests {
     /// The three ways damage goes in, read back through `current`.
     #[test]
     fn damage_accumulates_and_reads_back() {
-        let ring = DamageRing::new();
+        let mut ring = DamageRing::new();
         assert!(ring.current().is_empty(), "a fresh ring has no damage");
 
         ring.add_box(Box2D::new(0, 0, 10, 10));
@@ -332,7 +332,7 @@ mod tests {
     /// against the shipped library.
     #[test]
     fn add_whole_adds_nothing_to_a_ring_that_has_seen_no_buffer() {
-        let ring = DamageRing::new();
+        let mut ring = DamageRing::new();
         ring.add_whole();
         assert!(
             ring.current().is_empty(),
@@ -353,12 +353,12 @@ mod tests {
     /// usable afterwards.
     #[test]
     fn a_moved_ring_is_still_coherent() {
-        let ring = DamageRing::new();
+        let mut ring = DamageRing::new();
         ring.add_box(Box2D::new(1, 2, 3, 4));
         let address = ring.as_ptr();
 
         // The move that would break a ring held inline.
-        let moved = ring;
+        let mut moved = ring;
         assert_eq!(
             moved.as_ptr(),
             address,
@@ -378,7 +378,7 @@ mod tests {
         {
             // SAFETY: `owned` outlives the view, and its ring was initialised
             // by `DamageRing::new`.
-            let view = unsafe { DamageRingRef::from_raw(owned.as_ptr()) };
+            let mut view = unsafe { DamageRingRef::from_raw(owned.as_ptr()) };
             view.add_box(Box2D::new(0, 0, 8, 8));
             assert_eq!(view.current().extents(), Box2D::new(0, 0, 8, 8));
         }
