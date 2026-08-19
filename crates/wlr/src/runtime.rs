@@ -593,8 +593,12 @@ pub(crate) struct LayerSurfaceEntry {
 /// reusing it here would either strand `Band::Toplevel` outside that
 /// vocabulary or force a fifth variant onto a type whose four variants are
 /// already frozen as of 0.20.x's layer-shell surface. `Band` is a new,
-/// separate enum instead, covering exactly the five bands
-/// [`Runtime::add_rect_in_band`] can target.
+/// separate enum instead, covering exactly the six bands
+/// [`Runtime::add_rect_in_band`] can target — including [`Band::Lock`],
+/// which the crate itself uses for the session-lock fill and which a
+/// compositor may target too. Clients cannot reach this API at all, so the
+/// lock band being writable is a compositor's own business, not a way past
+/// the lock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Band {
     /// Beneath everything — `Graphics::background_band`.
@@ -710,7 +714,7 @@ pub(crate) enum NodeOrigin {
     /// Created through this crate's own node or rect/buffer API. Fully
     /// mutable.
     Owned,
-    /// The scene root or one of the five bands. Readable, and
+    /// The scene root or one of the six bands. Readable, and
     /// [`Runtime::set_node_enabled`] works; nothing may destroy, restack or
     /// reparent one.
     Protected,
@@ -802,7 +806,7 @@ pub(crate) struct Graphics {
     /// itself, as siblings of these five trees, exactly as before this
     /// field existed. A plain root rect/buffer therefore still lands above
     /// everything by default (it is created after every band, so it starts
-    /// at the end of the root's own children list, above all five bands),
+    /// at the end of the root's own children list, above all six bands),
     /// and [`Runtime::lower_rect_to_bottom`]/[`lower_buffer_to_bottom`](Runtime::lower_buffer_to_bottom)
     /// still put it beneath everything, `background_band` included, because
     /// "everything" is still just its root-level siblings — the bands
@@ -1188,7 +1192,7 @@ impl Runtime {
         // Frees `scene` (and every band already attached to it) if this
         // function returns early via `?` anywhere after the scene is
         // created. Nothing else does: `Graphics` has no `Drop`, and none of
-        // the fallible steps below (the five bands, the output layout, the
+        // the fallible steps below (the six bands, the output layout, the
         // renderer, the allocator, `wlr_renderer_init_wl_display`, the three
         // protocol globals) undoes an earlier one's work on its own way out
         // — without this, a mid-build failure would leak the scene tree and
@@ -1814,7 +1818,7 @@ impl Runtime {
                 "Runtime reused across a different Display"
             );
         }
-        // SAFETY: `tree` names one of the five band trees `init_graphics`
+        // SAFETY: `tree` names one of the six band trees `init_graphics`
         // created and this runtime owns; it outlives this call. `color` is
         // a live four-float array for the duration of the call, which is
         // all `wlr_scene_rect_create` reads (it copies the value).
@@ -2427,7 +2431,7 @@ impl Runtime {
     /// wlroots could not create the tree.
     pub fn create_tree_in_band(&self, band: Band) -> Option<NodeId> {
         let parent = self.band_ptr(band)?;
-        // SAFETY: `parent` is one of the five band trees `init_graphics`
+        // SAFETY: `parent` is one of the six band trees `init_graphics`
         // created and this runtime owns; it outlives the call.
         let tree = unsafe { sys::wlr_scene_tree_create(parent.as_ptr()) };
         let tree = NonNull::new(tree)?;
@@ -2460,7 +2464,7 @@ impl Runtime {
     ///
     /// * `node` is unknown or already destroyed — a double destroy misses
     ///   cleanly rather than double-freeing;
-    /// * `node` is the scene root or one of the five bands;
+    /// * `node` is the scene root or one of the six bands;
     /// * `node` is one wlroots owns (a toplevel's tree, a layer surface's
     ///   tree, a drag icon) — tear those down through the object that owns
     ///   them;
@@ -4930,7 +4934,7 @@ impl Runtime {
         })
     }
 
-    /// The scene tree `band` names — any of the five bands, including
+    /// The scene tree `band` names — any of the six bands, including
     /// [`Band::Toplevel`], which [`layer_band_ptr`](Runtime::layer_band_ptr)
     /// cannot express since [`Layer`] has no toplevel variant. `None`
     /// before [`init_graphics`](Runtime::init_graphics) has run.
@@ -5680,7 +5684,7 @@ impl Runtime {
         };
         // SAFETY: `tree` came from a live `LayerSurfaceEntry` (the table
         // lookup above just resolved it), so it names a scene node this
-        // runtime's own scene still owns; `band` is one of the five band
+        // runtime's own scene still owns; `band` is one of the six band
         // trees created once in `init_graphics` and never destroyed while
         // this runtime is.
         unsafe { sys::wlr_scene_node_reparent(&raw mut (*tree.as_ptr()).node, band.as_ptr()) };
