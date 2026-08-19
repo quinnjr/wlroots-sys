@@ -277,6 +277,19 @@ impl Registration {
         Registration { bound }
     }
 
+    /// The address of this registration's linked `wl_listener`, as `usize`.
+    ///
+    /// Stable for the life of the `Registration` — the listener lives in a
+    /// boxed [`Bound`] whose address `link` fixed — and equal to the `l`
+    /// pointer wlroots hands the notify callback. A map keyed by this can
+    /// therefore be looked up from inside the callback even on the destroy
+    /// signals wlroots emits with a **null** `data` (the session lock and its
+    /// surfaces both do; see `on_session_lock_surface_destroy`), where the
+    /// object pointer that would otherwise be the key is unavailable.
+    fn listener_addr(&self) -> usize {
+        &self.bound.listener as *const sys::wl_listener as usize
+    }
+
     /// Link a listener that routes no per-entity event: the backend-level
     /// signals and the per-input-device ones, which resolve their target some
     /// way other than a `Bound` id field (or route nothing at all, like the
@@ -485,6 +498,43 @@ struct Session<'r, S> {
     /// `(*drag).icon` is null.
     drags: RefCell<HashMap<usize, Registration>>,
 
+    /// This run's destroy listener on every idle inhibitor currently live,
+    /// keyed by the `destroy` listener's own address (as `usize`) — NOT the
+    /// inhibitor object's, because wlroots emits the inhibitor's `destroy`
+    /// signal with its **surface** as `data` (not the inhibitor), so the
+    /// handler recovers its key from the firing `wl_listener` `l` instead. The
+    /// map still serves `drags`' role: `on_idle_inhibitor_destroy` must find
+    /// and remove one specific inhibitor's entry synchronously, the moment that
+    /// inhibitor is destroyed, without touching any other live inhibitor's
+    /// listener.
+    idle_inhibitors: RefCell<HashMap<usize, Registration>>,
+
+    /// This run's `new_surface`/`unlock`/`destroy` listeners on every live
+    /// `wlr_session_lock_v1`, keyed by the `destroy` listener's own address
+    /// (as `usize`) — NOT the lock object's, because wlroots emits the
+    /// session-lock `destroy` signal with a null `data`, so the handler
+    /// recovers its key from the firing `wl_listener` `l` instead.
+    /// `on_session_lock_destroy` must find and remove one specific
+    /// lock's listeners synchronously the moment that lock is destroyed, so
+    /// the three-listener bundle is dropped (and unlinked) together. At most
+    /// one entry is normally live — wlroots serialises locks — but the map,
+    /// not a single slot, is what lets a lock's destroy remove exactly its own
+    /// bundle by key without assuming which one it is.
+    session_locks: RefCell<HashMap<usize, SessionLockListeners>>,
+
+    /// This run's `commit`/`destroy` listeners on every live
+    /// `wlr_session_lock_surface_v1`, keyed by the `destroy` listener's own
+    /// address (as `usize`) — NOT the lock-surface object's, because wlroots
+    /// emits the `destroy` signal with a null `data`; the handler recovers its
+    /// key from the firing `wl_listener` and the covered output from the
+    /// stored entry. The commit listener
+    /// drives the "all outputs covered → send `locked` once" decision; the
+    /// destroy listener drops the surface's scene tree from
+    /// [`RuntimeInner::lock_surface_trees`](crate::runtime::RuntimeInner)
+    /// before wlroots frees it. Removed — and so unlinked — from
+    /// `on_session_lock_surface_destroy`, mirroring `drags`.
+    lock_surfaces: RefCell<HashMap<usize, LockSurfaceListeners>>,
+
     /// Whether the most recently delivered [`Event::Key`] was consumed by the
     /// handler. `on_key` cannot get a return value back through
     /// `Dispatcher::emit` directly — an `extern "C"` callback has no way to
@@ -552,6 +602,36 @@ struct LayerSurfaceListeners {
     _map: Registration,
     _unmap: Registration,
     _destroy: Registration,
+}
+
+/// One live `wlr_session_lock_v1`'s three listeners: `new_surface`, `unlock`,
+/// and the lock's own `destroy`. Field order is not load-bearing, as for
+/// [`ToplevelListeners`] — all three must drop, and so unlink, as part of
+/// removing the entry, which happens while the lock is still alive (its own
+/// `destroy` emission removes it, after `wl_signal_emit_mutable` has already
+/// advanced past the firing listener).
+struct SessionLockListeners {
+    _new_surface: Registration,
+    _unlock: Registration,
+    _destroy: Registration,
+}
+
+/// One live `wlr_session_lock_surface_v1`'s listeners: the base surface's
+/// `commit` (which drives the send-`locked` decision) and the lock surface's
+/// own `destroy` (which drops its scene tree from the runtime before wlroots
+/// frees it). Field order is not load-bearing, as for [`ToplevelListeners`].
+struct LockSurfaceListeners {
+    _commit: Registration,
+    _destroy: Registration,
+    /// The `wlr_output` this lock surface covered, as `usize`, so
+    /// `on_session_lock_surface_destroy` can drop the surface's tree from
+    /// [`RuntimeInner::lock_surface_trees`](crate::runtime::RuntimeInner)
+    /// (which is keyed by output). wlroots emits the lock surface's `destroy`
+    /// signal with a **null** `data`, so the output cannot be recovered from
+    /// the signal at destroy time — it is captured here at link time instead,
+    /// the same discipline [`Bound::layer`] uses for that surface's own
+    /// null-`data` events.
+    output: usize,
 }
 
 /// Clears `Runtime`'s layer-surface table when the `run_inner` call holding
@@ -977,6 +1057,9 @@ impl<'d> Backend<'d> {
             layers: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
+            idle_inhibitors: RefCell::new(HashMap::new()),
+            session_locks: RefCell::new(HashMap::new()),
+            lock_surfaces: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime,
             deliver: hooks.deliver,
@@ -1354,6 +1437,36 @@ impl<'d> Backend<'d> {
             });
         }
 
+        if let Some(manager) = runtime.idle_inhibit_manager_ptr() {
+            // SAFETY: `create_idle_inhibit_manager` returned a non-null
+            // manager owned by the display, which this call requires to outlive
+            // it, exactly as for the xdg shell above — null liveness is correct.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.new_inhibitor,
+                    on_new_idle_inhibitor::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
+        if let Some(manager) = runtime.session_lock_manager_ptr() {
+            // SAFETY: `create_session_lock_manager` returned a non-null manager
+            // owned by the display, which this call requires to outlive it,
+            // exactly as for the xdg shell above — null liveness is correct.
+            // This is the `new_lock` signal a locker raises to lock the
+            // session; `on_new_session_lock` enters the locked state.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.new_lock,
+                    on_new_session_lock::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
         Ok(regs)
     }
 }
@@ -1662,6 +1775,7 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
                 time_msec,
             );
         }
+        Event::SessionLockChanged(locked) => state.session_lock_changed(locked),
     }
 }
 
@@ -2154,6 +2268,427 @@ unsafe extern "C" fn on_drag_destroy<S: Handlers>(
         let key = data as usize;
         let removed = (*session).drags.borrow_mut().remove(&key);
         drop(removed);
+    }
+}
+
+/// A client bound `zwp_idle_inhibit_manager_v1` and requested an inhibitor on
+/// one of its surfaces. Counts it in [`RuntimeInner::idle_inhibitors`] and
+/// re-gates the idle notifier via
+/// [`Runtime::refresh_idle_inhibited`](crate::Runtime::refresh_idle_inhibited),
+/// then links a destroy listener on the inhibitor's own `events.destroy`,
+/// keyed in `Session::idle_inhibitors` by that destroy listener's own address
+/// — NOT the inhibitor pointer, because wlroots emits the inhibitor's
+/// `destroy` signal with its **surface** as the signal `data`, not the
+/// inhibitor. Mirrors the session-lock keying discipline: the destroy handler
+/// recovers the same key from the `wl_listener` `l` it is handed.
+unsafe extern "C" fn on_new_idle_inhibitor<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_idle_inhibit_manager_v1.events.new_inhibitor`, whose `session` is
+    // the `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_idle_inhibitor_v1`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let inhibitor = data.cast::<sys::wlr_idle_inhibitor_v1>();
+
+        runtime
+            .inner
+            .idle_inhibitors
+            .set(runtime.inner.idle_inhibitors.get() + 1);
+        runtime.refresh_idle_inhibited();
+
+        // Linked on the inhibitor's own `events.destroy`. No `alive`
+        // backstop: as for the drag icon this mirrors, the inhibitor cannot
+        // be freed by anything other than the destroy this very listener
+        // watches, so there is no "owner died first" case to guard against.
+        let destroy = Registration::link_bare(
+            &raw mut (*inhibitor).events.destroy,
+            on_idle_inhibitor_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        // Key by the destroy listener's own address, not the inhibitor
+        // pointer: wlroots emits the inhibitor's `destroy` with its surface as
+        // `data`, so the destroy handler recovers the key from the `l` it is
+        // handed (equal to this address), never from the signal `data`.
+        let key = destroy.listener_addr();
+        (*session).idle_inhibitors.borrow_mut().insert(key, destroy);
+    }
+}
+
+/// The idle inhibitor is about to be freed. Decrements
+/// [`RuntimeInner::idle_inhibitors`] (saturating — this handler and
+/// `on_new_idle_inhibitor` are the only writers, so it never underflows in
+/// practice, but a stray double-fire must not panic) and re-gates the idle
+/// notifier, then removes this inhibitor's entry from
+/// `Session::idle_inhibitors`, which unlinks this very listener — sound for
+/// the same reason `on_drag_destroy` unlinking itself is:
+/// `wl_signal_emit_mutable` has already advanced its cursor past the firing
+/// listener before this callback runs.
+unsafe extern "C" fn on_idle_inhibitor_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_idle_inhibitor` into this inhibitor's own
+    // `events.destroy`; the inhibitor is still live memory for this emission.
+    // wlroots emits this signal with the inhibitor's **surface** as `data`
+    // (NOT the inhibitor), so identity comes from `l` — the address of this
+    // handler's own listener, under which `on_new_idle_inhibitor` keyed the
+    // `idle_inhibitors` entry — never from the signal `data`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        runtime
+            .inner
+            .idle_inhibitors
+            .set(runtime.inner.idle_inhibitors.get().saturating_sub(1));
+        runtime.refresh_idle_inhibited();
+        let key = l as usize;
+        let removed = (*session).idle_inhibitors.borrow_mut().remove(&key);
+        drop(removed);
+    }
+}
+
+/// A locker took a lock on the session — the security core. wlroots hands this
+/// a `wlr_session_lock_v1` the instant a client binds
+/// `ext_session_lock_manager_v1` and sends `lock`. This **synchronously**
+/// enters the locked state ([`Runtime::begin_session_lock`]: `session_locked =
+/// true`, the lock recorded, keyboard focus pulled off whatever normal client
+/// held it), links the lock's own `new_surface`/`unlock`/`destroy` listeners,
+/// and then notifies the handler via `session_lock_changed(true)`. The state
+/// change is applied here and now, not deferred behind the handler — the lock
+/// is in force the moment this returns, whatever a handler does.
+///
+/// A new lock may arrive while [`Runtime::is_session_locked`] is already
+/// `true` — the previous locker died without unlocking, leaving the session
+/// locked (see [`on_session_lock_destroy`]) — in which case this simply takes
+/// over: `session_lock` was cleared to `None` by that destroy, so recording
+/// the new one and re-clearing focus is exactly right.
+unsafe extern "C" fn on_new_session_lock<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_session_lock_manager_v1.events.new_lock`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_session_lock_v1`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let lock = data.cast::<sys::wlr_session_lock_v1>();
+        let Some(lock) = NonNull::new(lock) else {
+            return;
+        };
+
+        // Reject a second, concurrent lock. wlroots fires `new_lock` for EVERY
+        // lock request; refusing one while another is still live is the
+        // compositor's job. If we accepted it, a malicious client could take a
+        // second lock over the already-locked session, cover the outputs to
+        // drive `locked`, then `unlock_and_destroy` to unlock the session with
+        // no user authentication — a full lock-screen bypass. Per
+        // ext-session-lock, reject by destroying the new lock (this sends
+        // `finished` to that client) and leave the existing lock untouched.
+        // `session_lock_ptr()` is `None` both when never locked and when a
+        // previous locker DIED (its destroy cleared it), so the legitimate
+        // takeover-after-crash path is preserved; only a second lock over a
+        // still-live one is refused.
+        if runtime.session_lock_ptr().is_some() {
+            sys::wlr_session_lock_v1_destroy(lock.as_ptr());
+            return;
+        }
+
+        // Enter the locked state synchronously — the security bit is set here,
+        // before anything else runs.
+        runtime.begin_session_lock(lock);
+
+        // Link the lock's three signals. Null liveness flag: each is dropped
+        // from inside `on_session_lock_destroy`, while the lock is still
+        // alive, the same discipline the toplevel listeners use.
+        let new_surface = Registration::link_bare(
+            &raw mut (*lock.as_ptr()).events.new_surface,
+            on_session_lock_new_surface::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        let unlock = Registration::link_bare(
+            &raw mut (*lock.as_ptr()).events.unlock,
+            on_session_unlock::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        let destroy = Registration::link_bare(
+            &raw mut (*lock.as_ptr()).events.destroy,
+            on_session_lock_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        // Key by the destroy listener's own address, not the lock pointer:
+        // wlroots emits the lock's `destroy` with a null `data`, so the
+        // destroy handler recovers the key from the `l` it is handed (equal to
+        // this address), never from the object pointer.
+        let key = destroy.listener_addr();
+        (*session).session_locks.borrow_mut().insert(
+            key,
+            SessionLockListeners {
+                _new_surface: new_surface,
+                _unlock: unlock,
+                _destroy: destroy,
+            },
+        );
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::SessionLockChanged(true), deliver);
+    }
+}
+
+/// A lock surface arrived for the active lock — one per output the locker
+/// wants to cover. Renders it in [`Band::Lock`] (topmost, above every normal
+/// surface), configures it to the output's current size, focuses the first
+/// one for the keyboard, and links its commit/destroy listeners. The commit
+/// listener is what eventually sends the protocol's `locked` event once every
+/// output is covered.
+unsafe extern "C" fn on_session_lock_new_surface<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into a live
+    // `wlr_session_lock_v1.events.new_surface`, whose `session` is the paired
+    // `*const Session<'_, S>`. The signal carries a live
+    // `*mut wlr_session_lock_surface_v1`, with its `.output` and `.surface`
+    // set.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let lock_surface = data.cast::<sys::wlr_session_lock_surface_v1>();
+        let Some(lock_surface) = NonNull::new(lock_surface) else {
+            return;
+        };
+        let output = (*lock_surface.as_ptr()).output;
+        let surface = (*lock_surface.as_ptr()).surface;
+        if surface.is_null() {
+            return;
+        }
+
+        // No lock band means graphics was never initialised — drop the surface
+        // rather than dereference a null tree, the same shape `on_new_toplevel`
+        // takes for its band.
+        let Some(lock_band) = runtime.band_ptr(Band::Lock) else {
+            return;
+        };
+
+        // Render the lock surface in the topmost lock band.
+        let tree = sys::wlr_scene_subsurface_tree_create(lock_band.as_ptr(), surface);
+        let Some(tree) = NonNull::new(tree) else {
+            return;
+        };
+
+        // Focus the *first* lock surface for the keyboard: if nothing is
+        // covered yet, this is the first. Computed before recording so the
+        // check is honest.
+        let is_first = runtime.inner.lock_surface_trees.borrow().is_empty();
+        runtime.record_lock_surface(output, tree, surface);
+
+        // Configure it to the output's current pixel size, so the client can
+        // paint a full-screen lock. `width`/`height` are `i32` on `wlr_output`
+        // and non-negative for a real mode; clamp to be safe before the `u32`
+        // cast the protocol call takes.
+        let (w, h) = if output.is_null() {
+            (0u32, 0u32)
+        } else {
+            (
+                (*output).width.max(0) as u32,
+                (*output).height.max(0) as u32,
+            )
+        };
+        sys::wlr_session_lock_surface_v1_configure(lock_surface.as_ptr(), w, h);
+
+        if is_first {
+            // SAFETY: `surface` is the live surface of a just-announced lock
+            // surface.
+            runtime.focus_lock_surface_keyboard(surface);
+        }
+
+        // Commit drives the send-`locked` decision; destroy drops the tree
+        // from the runtime before wlroots frees it. Both null-liveness, both
+        // dropped from `on_session_lock_surface_destroy`.
+        let commit = Registration::link_bare(
+            &raw mut (*surface).events.commit,
+            on_session_lock_surface_commit::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        let destroy = Registration::link_bare(
+            &raw mut (*lock_surface.as_ptr()).events.destroy,
+            on_session_lock_surface_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        // Key by the destroy listener's own address, not the lock surface
+        // pointer: wlroots emits this surface's `destroy` with a null `data`,
+        // so the destroy handler recovers the key from the `l` it is handed
+        // (equal to this address), never from the object pointer.
+        let key = destroy.listener_addr();
+        (*session).lock_surfaces.borrow_mut().insert(
+            key,
+            LockSurfaceListeners {
+                _commit: commit,
+                _destroy: destroy,
+                output: output as usize,
+            },
+        );
+    }
+}
+
+/// A lock surface committed. Once every live output is covered by a committed,
+/// mapped lock surface — and it has not already been sent — this sends the
+/// protocol's `locked` event exactly once ([`Runtime::send_locked_if_covered`]
+/// carries the coverage check and the send-once guard). `data` (the surface)
+/// is unused: the decision is global, not per-surface.
+unsafe extern "C" fn on_session_lock_surface_commit<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_session_lock_new_surface` into a live lock
+    // surface's underlying `wlr_surface.events.commit`, unlinked before that
+    // surface is freed.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        (*session).runtime.send_locked_if_covered();
+    }
+}
+
+/// A lock surface is about to be freed. Drops its scene tree from the runtime
+/// (keyed by the output it covered) *before* wlroots frees the tree — the
+/// subsurface tree is destroyed together with its surface — and unlinks this
+/// surface's own commit/destroy listeners by removing its `lock_surfaces`
+/// entry. The tree is only ever dropped here, never destroyed by this crate:
+/// wlroots owns it.
+unsafe extern "C" fn on_session_lock_surface_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_session_lock_new_surface` into this lock surface's
+    // own `events.destroy`; the lock surface is still live memory for this
+    // emission. wlroots emits this signal with a **null** `data`
+    // (`wlr_session_lock_v1.c`'s `lock_surface_destroy` passes NULL, then
+    // asserts the listener list is empty), so identity comes from `l` — the
+    // address of this handler's own listener, under which
+    // `on_session_lock_new_surface` keyed the `lock_surfaces` entry — and the
+    // covered output was captured in that entry at link time, not read from
+    // `data` here.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        // wlroots emits this signal with a null `data`, so the lock surface
+        // pointer (and thus its `.output`) is not available here. The key is
+        // the destroy listener's own address, which is exactly the `l` wlroots
+        // handed us; the covered output was captured in the entry at link time.
+        let key = l as usize;
+        let removed = (*session).lock_surfaces.borrow_mut().remove(&key);
+        if let Some(entry) = &removed {
+            runtime.forget_lock_surface(entry.output as *mut sys::wlr_output);
+        }
+        drop(removed);
+    }
+}
+
+/// The active locker asked to **unlock** the session — a genuine unlock, the
+/// only path that clears the lock. Records the unlock (so the following lock
+/// `destroy` completes the teardown rather than staying locked), drops the
+/// lock surfaces, leaves the session unlocked, and notifies the handler via
+/// `session_lock_changed(false)`. The compositor re-establishes its own focus
+/// from that callback.
+unsafe extern "C" fn on_session_unlock<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_session_lock` into a live
+    // `wlr_session_lock_v1.events.unlock`, whose `session` is the paired
+    // `*const Session<'_, S>`. `_data` unused — the active lock is already
+    // recorded on the runtime.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+
+        // Apply the unlock synchronously: session_locked -> false, unlock
+        // requested recorded, surfaces dropped.
+        runtime.unlock_session();
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::SessionLockChanged(false), deliver);
+    }
+}
+
+/// The active `wlr_session_lock_v1` is about to be freed — **the security
+/// invariant lives here**. wlroots frees the lock either after an `unlock`
+/// (the client's own teardown) or when the locker dies. These two must be told
+/// apart:
+///
+/// - **After a genuine unlock** ([`on_session_unlock`] ran first, so
+///   [`Runtime::take_lock_destroy_was_unlocked`] returns `true`): the session
+///   is already unlocked; this just finishes the teardown — clears the lock
+///   pointer, drops any leftover surface trees, unlinks the lock's listeners.
+///
+/// - **Without an unlock** (the locker crashed or was killed;
+///   `take_lock_destroy_was_unlocked` returns `false`): the session **stays
+///   locked**. `session_locked` is left `true`, the lock band stays in place
+///   (now blank — the dead client's surface trees are dropped, but input is
+///   still refused to every normal client by the focus/hit-test gates), and
+///   `session_lock_changed(false)` is **never** fired. A subsequent
+///   `on_new_session_lock` may take over and eventually unlock. This is what
+///   keeps the screen locked when a lock screen crashes; it is reviewed
+///   adversarially and must not be weakened.
+unsafe extern "C" fn on_session_lock_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_session_lock` into this lock's own
+    // `events.destroy`; the lock is still live memory for this emission.
+    // wlroots emits this signal with a **null** `data`, so identity comes from
+    // `l` — the address of this handler's own listener, under which
+    // `on_new_session_lock` keyed the `session_locks` entry — not from the
+    // object pointer.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+
+        // Common cleanup, and the unlock/no-unlock discriminant. This never
+        // touches `session_locked`, so the stay-locked path is preserved by
+        // construction — only the genuine-unlock branch, via
+        // `on_session_unlock`, ever cleared it.
+        let was_unlocked = runtime.take_lock_destroy_was_unlocked();
+
+        // Unlink this lock's own three listeners.
+        let key = l as usize;
+        let removed = (*session).session_locks.borrow_mut().remove(&key);
+        drop(removed);
+
+        if was_unlocked {
+            // Genuine unlock already ran: teardown is complete, session is
+            // unlocked, handler was already told. Nothing more.
+        } else {
+            // SECURITY: the locker died without unlocking. Keep the session
+            // locked — do NOT clear `session_locked`, do NOT fire
+            // `session_lock_changed(false)`. The dead client's surfaces are
+            // gone (their trees dropped above), so pull keyboard focus off
+            // them; input stays refused to normal clients by the gates.
+            runtime.clear_keyboard_focus();
+        }
     }
 }
 
@@ -3653,6 +4188,7 @@ unsafe extern "C" fn on_key<S: Handlers>(l: *mut sys::wl_listener, data: *mut st
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_keyboard_key_event>();
+        (*session).runtime.notify_seat_activity();
         let Some(seat) = (*session).runtime.seat_ptr() else {
             return;
         };
@@ -3788,6 +4324,7 @@ unsafe extern "C" fn on_pointer_motion<S: Handlers>(
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_pointer_motion_event>();
         let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
         let Some(cursor) = runtime.cursor_ptr() else {
             return;
         };
@@ -3836,6 +4373,7 @@ unsafe extern "C" fn on_pointer_motion_absolute<S: Handlers>(
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_pointer_motion_absolute_event>();
         let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
         let Some(cursor) = runtime.cursor_ptr() else {
             return;
         };
@@ -3879,6 +4417,7 @@ unsafe extern "C" fn on_pointer_button<S: Handlers>(
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_pointer_button_event>();
         let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
         let Some(cursor) = runtime.cursor_ptr() else {
             return;
         };
@@ -4002,7 +4541,11 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::LayerSurfaceDestroyed(..)
         | Event::Key { .. }
         | Event::PointerMotion { .. }
-        | Event::PointerButton { .. } => {}
+        | Event::PointerButton { .. }
+        // Unreachable: `run` never registers a session-lock manager either
+        // (`Backend::register_toplevel_and_input` is `run_all`'s hook; `run`
+        // uses `no_extra`), so this cannot be produced on this path.
+        | Event::SessionLockChanged(..) => {}
     }
 }
 
@@ -4411,6 +4954,9 @@ mod tests {
                 layers: RefCell::new(HashMap::new()),
                 inputs: RefCell::new(HashMap::new()),
                 drags: RefCell::new(HashMap::new()),
+                idle_inhibitors: RefCell::new(HashMap::new()),
+                session_locks: RefCell::new(HashMap::new()),
+                lock_surfaces: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
                 runtime: &runtime,
                 deliver: deliver::<Recorder>,
@@ -4583,6 +5129,9 @@ mod tests {
             layers: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
+            idle_inhibitors: RefCell::new(HashMap::new()),
+            session_locks: RefCell::new(HashMap::new()),
+            lock_surfaces: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             runtime: &runtime,
             deliver: deliver::<Recorder>,

@@ -121,6 +121,7 @@ pub(crate) mod tests {
     impl crate::OutputHandler for Recorder {}
     impl crate::ToplevelHandler for Recorder {}
     impl crate::SeatHandler for Recorder {}
+    impl crate::SessionLockHandler for Recorder {}
 
     impl crate::FdHandler for Recorder {
         fn fd_ready(

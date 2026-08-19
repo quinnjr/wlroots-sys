@@ -68,6 +68,7 @@ fn removing_a_live_source_stops_its_callbacks() {
     impl wlr::OutputHandler for App {}
     impl wlr::ToplevelHandler for App {}
     impl wlr::SeatHandler for App {}
+    impl wlr::SessionLockHandler for App {}
     impl wlr::FdHandler for App {
         fn fd_ready(
             &mut self,
@@ -159,6 +160,7 @@ fn removed_fd_stays_valid_for_the_rest_of_its_own_callback() {
     impl wlr::OutputHandler for App {}
     impl wlr::ToplevelHandler for App {}
     impl wlr::SeatHandler for App {}
+    impl wlr::SessionLockHandler for App {}
     impl wlr::FdHandler for App {
         fn fd_ready(
             &mut self,
@@ -298,6 +300,7 @@ fn eintr_from_a_signal_during_a_blocking_run_all_does_not_fail_the_run() {
     impl wlr::OutputHandler for App {}
     impl wlr::ToplevelHandler for App {}
     impl wlr::SeatHandler for App {}
+    impl wlr::SessionLockHandler for App {}
     impl wlr::FdHandler for App {
         fn fd_ready(
             &mut self,

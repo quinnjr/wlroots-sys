@@ -89,6 +89,7 @@ fn set_layer_surface_output_on_dead_ids_is_none() {
     }
     impl wlr::ToplevelHandler for App {}
     impl wlr::SeatHandler for App {}
+    impl wlr::SessionLockHandler for App {}
     impl wlr::FdHandler for App {}
     impl wlr::LoopHandler for App {
         fn should_stop(&mut self) -> bool {
@@ -122,6 +123,7 @@ fn the_layer_methods_are_additive() {
     impl wlr::OutputHandler for Old {}
     impl wlr::ToplevelHandler for Old {}
     impl wlr::SeatHandler for Old {}
+    impl wlr::SessionLockHandler for Old {}
     impl wlr::FdHandler for Old {}
     impl wlr::LoopHandler for Old {}
     fn takes_handlers<S: wlr::Handlers>(_s: &S) {}

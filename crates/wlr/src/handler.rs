@@ -457,23 +457,52 @@ pub trait SeatHandler {
     }
 }
 
+/// The session's lock state changed.
+///
+/// A single defaulted method, folded into [`Handlers`] additively — an
+/// `impl SessionLockHandler for MyState {}` written today, or none at all,
+/// still satisfies the supertrait list, exactly as [`SeatHandler`] did when
+/// its own methods were added.
+///
+/// # Panics
+///
+/// As for [`SeatHandler`]: the method runs underneath an `extern "C"` frame,
+/// so a panic escaping it **aborts the process**.
+pub trait SessionLockHandler {
+    /// The session's lock state changed. `locked = true` when a locker takes a
+    /// lock (the compositor should suspend its own focus/layout work and stop
+    /// painting normal chrome); `locked = false` **only** on a genuine
+    /// `unlock` (never when a locker dies — the session stays locked then, so
+    /// this is not called on that path). Defaulted to a no-op.
+    ///
+    /// The crate has already enforced the security half by the time this runs:
+    /// while locked, no normal toplevel or layer surface can take keyboard or
+    /// pointer focus regardless of what a handler does here (see
+    /// [`Runtime::is_session_locked`](crate::Runtime::is_session_locked)). This
+    /// callback is the compositor's cue to stop *its own* bookkeeping, not the
+    /// thing that makes the lock safe.
+    fn session_lock_changed(&mut self, locked: bool) {
+        let _ = locked;
+    }
+}
+
 /// Every handler trait at once.
 ///
 /// The bound on [`Backend::run_all`](crate::Backend::run_all), and
 /// blanket-implemented, so a consumer never writes `impl Handlers` — they
-/// implement whichever of the five traits they care about (all methods are
+/// implement whichever of the traits they care about (all methods are
 /// defaulted, so an empty `impl` is enough for the rest) and this follows.
 ///
 /// The blanket impl also means this trait cannot be implemented manually: any
 /// hand-written impl would overlap it. That is deliberate — it is what keeps
 /// the supertrait list, rather than each consumer's idea of it, the contract.
 pub trait Handlers:
-    OutputHandler + ToplevelHandler + SeatHandler + FdHandler + LoopHandler
+    OutputHandler + ToplevelHandler + SeatHandler + SessionLockHandler + FdHandler + LoopHandler
 {
 }
 
 impl<T> Handlers for T where
-    T: OutputHandler + ToplevelHandler + SeatHandler + FdHandler + LoopHandler
+    T: OutputHandler + ToplevelHandler + SeatHandler + SessionLockHandler + FdHandler + LoopHandler
 {
 }
 
@@ -497,6 +526,7 @@ mod tests {
     impl OutputHandler for MinimalAll {}
     impl ToplevelHandler for MinimalAll {}
     impl SeatHandler for MinimalAll {}
+    impl SessionLockHandler for MinimalAll {}
     impl FdHandler for MinimalAll {}
     impl LoopHandler for MinimalAll {}
 

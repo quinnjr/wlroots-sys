@@ -124,6 +124,15 @@ pub(crate) enum Event {
         pressed: bool,
         time_msec: u32,
     },
+
+    /// The session's lock state changed. Carries the new state — `true` when a
+    /// locker takes a lock, `false` only on a genuine unlock. Never emitted
+    /// with `false` on the "locker died without unlocking" path: the session
+    /// stays locked there, so no state change is announced. The bool is read
+    /// at emission time (the crate has already applied the state change
+    /// synchronously by then), so a deferred delivery still reports the
+    /// transition that actually happened.
+    SessionLockChanged(bool),
 }
 
 thread_local! {
