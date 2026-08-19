@@ -1470,7 +1470,18 @@ impl<'d> Backend<'d> {
             // `&mut S` live. This is the discharge site `state_ptr`'s own
             // doc requires: the caller states, right here, why no handler
             // is on the stack.
-            let stop = unsafe { (hooks.should_stop)(session.dispatcher.state_ptr()) };
+            //
+            // Run as a handler frame. The paragraph above is true about the
+            // *entry* to this call and was mistaken for a statement about the
+            // whole of it: `should_stop` is consumer code holding a `&mut S`,
+            // and anything it calls that makes wlroots emit a signal used to
+            // be delivered synchronously — a second `&mut S` aliasing the one
+            // it is running with, and a nested handler free to destroy a node
+            // while wlroots is mid-commit. Marking the frame makes those
+            // events defer, exactly as they do for every other handler.
+            let stop = session.dispatcher.in_handler_frame(|| unsafe {
+                (hooks.should_stop)(session.dispatcher.state_ptr())
+            });
             if stop {
                 return Ok(());
             }

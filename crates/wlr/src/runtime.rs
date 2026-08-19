@@ -1429,6 +1429,28 @@ impl Runtime {
             }
         };
 
+        // `wlr_scene_output_create` may be called at most once per (scene,
+        // output) pair: it plants an addon keyed by that pair, and a second
+        // call reaches `wlr_addon_init`'s
+        // `assert(0 && "Can't have two addons of the same type with the same
+        // owner")`, which Arch compiles in — so the process dies rather than
+        // returning an error.
+        //
+        // `add_scene_output` has probed for this since it was written; this
+        // path never did, and it is the one every doc and example tells a
+        // compositor to call from `new_output`. A second `new_output` for one
+        // output (a re-plug racing a slow first init, or a consumer that also
+        // calls it from its own setup) took the process down.
+        //
+        // Reported rather than silently accepted: a consumer that init'd the
+        // same output twice has a bookkeeping bug, and hiding it behind `Ok`
+        // would leave them wondering why the second output never renders.
+        // SAFETY: the handle's lifetime guarantees the output is live, and the
+        // scene is this runtime's own.
+        if !unsafe { sys::wlr_scene_get_scene_output(scene.as_ptr(), output.as_ptr()) }.is_null() {
+            return Err(Error::Operation("Runtime::init_output called twice"));
+        }
+
         // SAFETY: the handle's lifetime guarantees the output is live; the
         // renderer and allocator were created by `init_graphics` and are owned
         // by wlroots for the backend's life; the layout, scene and scene
@@ -1691,6 +1713,24 @@ impl Runtime {
     /// one shares it with (`wlr_scene_rect_create` versus
     /// `wlr_scene_rect_set_size`).
     pub fn add_rect(&self, width: i32, height: i32, color: [f32; 4]) -> Result<RectId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.inner.node_borrows.get() != 0 {
+            return Err(Error::Reentrant("scene insertion during a walk"));
+        }
         let scene = {
             let g = self.inner.graphics.borrow();
             match g.as_ref() {
@@ -1774,6 +1814,24 @@ impl Runtime {
         height: i32,
         color: [f32; 4],
     ) -> Option<RectId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.inner.node_borrows.get() != 0 {
+            return None;
+        }
         let entry = self.toplevel_entry(toplevel)?;
         // SAFETY: a present entry names a live tree (its destroy callback
         // removes the entry before wlroots frees it); `color` is a live
@@ -1843,6 +1901,24 @@ impl Runtime {
         height: i32,
         color: [f32; 4],
     ) -> Result<RectId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.inner.node_borrows.get() != 0 {
+            return Err(Error::Reentrant("scene insertion during a walk"));
+        }
         // Same reasoning as `add_rect`'s identical branch: no
         // `wlr_scene_rect_create` ran, so the payload names this Rust entry
         // point rather than a C function that was never called.
@@ -2043,6 +2119,24 @@ impl Runtime {
     /// this names the Rust entry point rather than a C function), or if
     /// wlroots could not create the node.
     pub fn add_buffer(&self, width: i32, height: i32, rgba: &[u8]) -> Result<BufferId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.inner.node_borrows.get() != 0 {
+            return Err(Error::Reentrant("scene insertion during a walk"));
+        }
         if !crate::buffer::validate_pixels(width, height, rgba.len()) {
             return Err(Error::Operation("pixel buffer dimensions or length"));
         }
@@ -2107,6 +2201,24 @@ impl Runtime {
         height: i32,
         rgba: &[u8],
     ) -> Option<BufferId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.inner.node_borrows.get() != 0 {
+            return None;
+        }
         // Resolve `toplevel` before validating pixels: a stale/unknown id is
         // the routine, expected `None` this method's own doc promises, but a
         // caller passing bad dimensions or a mismatched `rgba` length against
@@ -2561,6 +2673,24 @@ impl Runtime {
     /// `None` before [`init_graphics`](Runtime::init_graphics) has run, or if
     /// wlroots could not create the tree.
     pub fn create_tree_in_band(&self, band: Band) -> Option<NodeId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.inner.node_borrows.get() != 0 {
+            return None;
+        }
         let parent = self.band_ptr(band)?;
         // SAFETY: `parent` is one of the six band trees `init_graphics`
         // created and this runtime owns; it outlives the call.
@@ -2576,6 +2706,24 @@ impl Runtime {
     /// `None` if `parent` is unknown, stale, or not a tree — a rect and a
     /// buffer node have no children, and asking is not an error.
     pub fn create_tree_under(&self, parent: NodeId) -> Option<NodeId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.inner.node_borrows.get() != 0 {
+            return None;
+        }
         let parent = self.node_tree_ptr(parent)?;
         // SAFETY: a resolvable id names a live tree.
         let tree = unsafe { sys::wlr_scene_tree_create(parent.as_ptr()) };
@@ -3078,9 +3226,16 @@ impl Runtime {
     /// `wl_list_for_each`, **not** the `_safe` form: it reads the current
     /// node's `link.next` *after* `f` returns, so destroying the node `f` was
     /// just handed (or any ancestor of it, which frees the list heads the walk
-    /// is standing in) is a use-after-free inside wlroots' own recursion. Note
-    /// this covers freeing and moving only — creating a node under a tree the
-    /// walk has not reached yet is legal, and the walk will visit it.
+    /// is standing in) is a use-after-free inside wlroots' own recursion.
+    ///
+    /// **Creating** a node is refused for the same reason, which this doc used
+    /// to say the opposite of. Appending to the tree the cursor is standing in
+    /// rewires the `next` it is about to read, so the walk never reaches the
+    /// end: `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+    /// allocates without bound from entirely safe code. It was true that a
+    /// tree the walk has *not reached* is harmless — but nothing here can tell
+    /// the caller which trees those are, so the permission could not be acted
+    /// on safely and is withdrawn.
     ///
     /// # Panics
     ///
@@ -3321,6 +3476,24 @@ impl Runtime {
         height: i32,
         color: [f32; 4],
     ) -> Option<NodeId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.inner.node_borrows.get() != 0 {
+            return None;
+        }
         if width < 0 || height < 0 {
             return None;
         }
@@ -3380,6 +3553,24 @@ impl Runtime {
         parent: NodeId,
         buffer: Option<&Buffer<'_>>,
     ) -> Option<NodeId> {
+        // Refused while a node borrow or a scene walk is live.
+        //
+        // The borrow gate was added to every call that *unlinks* a node and to
+        // none that *inserts* one, which left the more dangerous half open:
+        // wlroots walks with `wl_list_for_each`, not the `_safe` variant, so
+        // its cursor holds a raw `next` pointer. Unlinking mid-walk was
+        // refused; appending rewires the tail the cursor is about to reach,
+        // and `for_each_buffer` then never terminates —
+        // `rt.for_each_buffer(t, |..| { rt.create_scene_buffer(t, None); })`
+        // allocates without bound, from entirely safe code.
+        //
+        // Refused for any live borrow rather than only for the tree the walk
+        // is standing in, because which tree the cursor has reached is not
+        // knowable from here — and a rule that holds only sometimes is the
+        // one that gets relied on.
+        if self.inner.node_borrows.get() != 0 {
+            return None;
+        }
         let tree = self.node_tree_ptr(parent)?;
         let buf = buffer.map_or(std::ptr::null_mut(), |b| b.as_ptr());
         // SAFETY: a resolvable id names a live tree; `buf` is null or a live

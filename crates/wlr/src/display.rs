@@ -88,9 +88,36 @@ impl Display {
     /// [`Backend::run_all`](crate::Backend::run_all) calls it once per turn,
     /// which is why a consumer using that entry point never has to.
     ///
-    /// Infallible: libwayland reports per-client flush failures by killing the
-    /// offending client, and returns nothing to the caller.
-    pub fn flush_clients(&self) {
+    /// Reports per-client flush failures by killing the offending client, and
+    /// returns nothing about them to the caller — so `Some(())` means the
+    /// flush ran, not that every client survived it.
+    ///
+    /// `None`, having done nothing, while a handler or a scene borrow is on
+    /// this thread's stack. That killing *is* the reason: disassembling
+    /// `wl_display_flush_clients` shows it calling `wl_client_destroy`
+    /// directly for any client whose socket errors with anything but `EAGAIN`
+    /// — a crashed or exited client, which is routine — and this crate parents
+    /// client surfaces into the scene, so that frees scene nodes. A handler
+    /// holding a `SceneNode<'_>`, or a `with_node` closure, is then holding a
+    /// dangling one:
+    ///
+    /// ```ignore
+    /// rt.with_node(id, |n| { display.flush_clients(); n.position() })
+    /// ```
+    ///
+    /// No `unsafe` anywhere in that. It is the same hazard as driving the
+    /// event loop from inside a handler, by a different route:
+    /// [`EventLoop::dispatch`](crate::EventLoop::dispatch) and
+    /// [`Backend::run_all`](crate::Backend::run_all) refuse for it, and this
+    /// is the third door onto the same room — the one that does not look like
+    /// a loop at all, which is why it stayed open longest.
+    ///
+    /// A hand-driven loop is unaffected: it flushes between turns, not from
+    /// inside a handler.
+    pub fn flush_clients(&self) -> Option<()> {
+        if crate::dispatch::in_handler() {
+            return None;
+        }
         use sys::wayland_sys::ffi_dispatch;
         #[allow(unused_imports)]
         use sys::wayland_sys::server::*;
@@ -103,6 +130,7 @@ impl Display {
                 self.raw.as_ptr()
             )
         };
+        Some(())
     }
 
     /// The raw display, for the one in-crate caller that has to compare it

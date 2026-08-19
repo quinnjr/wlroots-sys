@@ -378,6 +378,27 @@ impl<S> Dispatcher<S> {
         }
     }
 
+    /// Run `f` as a handler frame: events it causes are deferred rather than
+    /// delivered, and the loop cannot be driven from inside it.
+    ///
+    /// `run_inner`'s between-turn `should_stop` needs this. It derefs
+    /// [`state_ptr`](Dispatcher::state_ptr) into a `&mut S` and holds it for
+    /// the whole call, and it was made with every flag down — `in_dispatch`,
+    /// `IN_HANDLER`, `IN_DELIVERY` and `node_borrows` all clear. So a
+    /// `should_stop` that called one plain safe mutator on an observed scene
+    /// buffer had its event delivered *synchronously*, re-entering the
+    /// handlers with a second `&mut S` aliasing the live one — the exact thing
+    /// [`emit`](Dispatcher::emit)'s own `# Safety` forbids — and a handler
+    /// reached that way saw `node_borrows == 0` and could destroy a node
+    /// mid-commit, which wlroots asserts on.
+    ///
+    /// It is a handler in every way that matters; it was simply never marked
+    /// as one, because it is spelled as a query.
+    pub(crate) fn in_handler_frame<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _guard = HandlerGuard::enter(&self.in_dispatch);
+        f()
+    }
+
     /// The state pointer, for `run_inner`'s between-turn `should_stop` check.
     ///
     /// `pub(crate)` and returning a raw pointer rather than a reference: the

@@ -97,6 +97,80 @@ fn setting_the_opaque_region_is_refused_while_a_node_is_borrowed() {
     assert_eq!(inner, Some(()), "scalar setters are not affected");
 }
 
+/// Creating a node during a buffer walk is refused, not just destroying one.
+///
+/// The borrow gate went onto every call that unlinks a node and none that
+/// inserts one, which left the more dangerous half open. wlroots walks with
+/// `wl_list_for_each`, not `_safe`, so its cursor holds a raw `next`:
+/// appending rewires the tail it is about to reach and the walk never
+/// terminates. Unbounded allocation from safe code — a worse outcome than the
+/// use-after-free the gate was added for.
+#[test]
+fn creating_a_node_during_a_buffer_walk_is_refused() {
+    let rt = scene_runtime();
+    let band = rt.band_node(wlr::Band::Overlay).expect("band");
+    let tree = rt.create_tree_under(band).expect("tree");
+
+    // A real buffer node, so the walk actually visits something — a walk over
+    // an empty tree would make every assertion below hold vacuously.
+    let buffer = rt.add_buffer(1, 1, &[0, 0, 0, 255]).expect("buffer");
+    let node = rt.buffer_node(buffer).expect("buffer node");
+    assert_eq!(rt.reparent_node(node, tree), Some(()));
+
+    let mut visited = 0usize;
+    let mut refusals = Vec::new();
+    rt.for_each_buffer(tree, |_, _, _| {
+        visited += 1;
+        assert!(
+            visited < 100,
+            "the walk is not terminating — an insertion rewired the cursor"
+        );
+        refusals.push(rt.create_scene_buffer(tree, None).map(|_| ()));
+        refusals.push(rt.create_rect(tree, 2, 2, [1.0, 0.0, 0.0, 1.0]).map(|_| ()));
+        refusals.push(rt.create_tree_under(tree).map(|_| ()));
+    })
+    .expect("walkable");
+
+    assert_eq!(visited, 1, "the one buffer node, once");
+    assert!(!refusals.is_empty(), "the visitor must actually have run");
+    assert!(
+        refusals.iter().all(|r| r.is_none()),
+        "every creator must refuse mid-walk: {refusals:?}"
+    );
+
+    // Outside the walk they work normally again.
+    assert!(rt.create_scene_buffer(tree, None).is_some());
+    assert!(rt.create_rect(tree, 2, 2, [1.0, 0.0, 0.0, 1.0]).is_some());
+}
+
+/// `flush_clients` is the third door onto the event loop, and it is shut.
+///
+/// It does not look like one, which is why it stayed open. But
+/// `wl_display_flush_clients` calls `wl_client_destroy` directly for any
+/// client whose socket errors with anything but `EAGAIN` — a crashed or
+/// exited client, which is routine — and this crate parents client surfaces
+/// into the scene, so that frees scene nodes under a live `SceneNode<'_>`.
+#[test]
+fn flush_clients_is_refused_inside_a_node_borrow() {
+    let rt = scene_runtime();
+    let display = wlr::Display::new().expect("display");
+    let root = rt.scene_root_node().expect("scene root");
+
+    // Outside any borrow it is an ordinary call.
+    assert_eq!(display.flush_clients(), Some(()));
+
+    let inner = rt
+        .with_node(root, |_| display.flush_clients())
+        .expect("known node");
+    assert_eq!(
+        inner, None,
+        "flushing can destroy clients, and so free the node being held"
+    );
+
+    // And it works again once the borrow is over.
+    assert_eq!(display.flush_clients(), Some(()));
+}
+
 /// A node borrow refuses `run_all` too, not only `EventLoop::dispatch`.
 ///
 /// There are two doors onto the event loop and the first fix only shut one.

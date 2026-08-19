@@ -148,12 +148,29 @@ impl DmabufAttributes {
         Ok(DmabufAttributes { raw })
     }
 
+    /// `None` when `raw.n_planes` is outside `1..=DMABUF_MAX_PLANES`.
+    ///
+    /// The borrowing constructor has always rejected that, and
+    /// [`plane_count_in_range`]'s own doc claims it is "validated at every
+    /// construction from raw" — which this one made false. It matters here
+    /// more than there: the accessors clamp with `.min(DMABUF_MAX_PLANES)` and
+    /// stay in bounds, but `Drop` calls `wlr_dmabuf_attributes_finish`, which
+    /// loops `0..n_planes` with no clamp — so an `n_planes` of 5 reads `fd[4]`
+    /// past the end of a four-element array and `close()`s whatever integer is
+    /// there. Some unrelated descriptor in the process, chosen by whatever the
+    /// struct happens to be followed by.
+    ///
+    /// Latent today, because the one caller is fed by an already-validated
+    /// `Ref`. The safety contract is what the next caller reads, though, and
+    /// it did not forbid the case — and a `wlr_buffer_impl` supplied by a
+    /// client is exactly where an out-of-range count would come from.
+    ///
     /// # Safety
     ///
     /// `raw` must be a fully-initialised `wlr_dmabuf_attributes` whose
     /// descriptors this value may close.
-    pub(crate) unsafe fn from_raw(raw: sys::wlr_dmabuf_attributes) -> DmabufAttributes {
-        DmabufAttributes { raw }
+    pub(crate) unsafe fn from_raw(raw: sys::wlr_dmabuf_attributes) -> Option<DmabufAttributes> {
+        plane_count_in_range(raw.n_planes).then_some(DmabufAttributes { raw })
     }
 
     pub(crate) fn as_ptr(&self) -> *const sys::wlr_dmabuf_attributes {
@@ -311,7 +328,15 @@ impl<'a> DmabufAttributesRef<'a> {
             return Err(Error::Operation("wlr_dmabuf_attributes_copy"));
         }
         // SAFETY: the descriptors in `dst` are fresh dups this call now owns.
-        Ok(unsafe { DmabufAttributes::from_raw(dst) })
+        //
+        // The plane-count check inside `from_raw` cannot fail here — `self` is
+        // a validated `Ref` and `wlr_dmabuf_attributes_copy` carries the count
+        // across unchanged — but going through it rather than around it is the
+        // point: the guarantee lives in one place, and a future caller that
+        // is *not* already validated inherits it.
+        unsafe { DmabufAttributes::from_raw(dst) }.ok_or(Error::Operation(
+            "wlr_dmabuf_attributes n_planes out of range",
+        ))
     }
 }
 

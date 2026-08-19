@@ -189,8 +189,13 @@ where
     *guard = installed;
     drop(guard);
 
-    // Null is documented as "use wlroots' default logger", which is exactly
-    // what `sink: None` asks for.
+    // Null does *not* restore wlroots' default logger, whatever its header
+    // says: `wlr_log_init` ignores a null callback rather than storing it (see
+    // `log_trampoline`'s own comment for the disassembly), so the trampoline
+    // stays installed for the process's life once it has been installed once.
+    // Passing null is still right — it is what keeps a first-ever `None` call
+    // on wlroots' real default — and the `None`-after-`Some` case is handled
+    // in the trampoline, which is the only place that can still see the line.
     let callback: sys::wlr_log_func_t = installed.map(|_| {
         log_trampoline
             as unsafe extern "C" fn(sys::wlr_log_importance, *const c_char, *mut sys::__va_list_tag)
@@ -231,7 +236,6 @@ unsafe extern "C" fn log_trampoline(
         };
         *guard
     };
-    let Some(sink) = sink else { return };
     // A level wlroots invented and this crate does not know: dropping the line
     // is the only honest option, since there is no `LogLevel` to report it as.
     let Some(level) = LogLevel::from_raw(importance.0) else {
@@ -259,6 +263,29 @@ unsafe extern "C" fn log_trampoline(
     // buffer; clamp to what was actually written, short of the NUL.
     let len = (written as usize).min(BUF_LEN - 1);
     let line = String::from_utf8_lossy(&buf[..len]);
+
+    let Some(sink) = sink else {
+        // No sink installed, but the trampoline is still wlroots' callback and
+        // always will be — `wlr_log_init` *ignores* a null callback rather
+        // than clearing it. Disassembling the shipped `libwlroots-0.20.so`
+        // shows `test %rdx,%rdx ; je` skipping the store to `log_callback`,
+        // and `_wlr_vlog` is an unconditional `jmp *log_callback`, so the
+        // pointer can only ever be overwritten, never cleared — and wlroots
+        // exports no default-logger symbol to overwrite it back with.
+        //
+        // So returning here dropped every wlroots line for the rest of the
+        // process: no backend probe failures, no DRM errors, no
+        // `wlr_log_errno`, silently, from a call documented as *restoring* the
+        // default logger. Writing the line is the only way to keep that
+        // promise, so this is that default: this crate's, not wlroots' own,
+        // which is unreachable once overwritten. The format is deliberately
+        // close but not claimed to be identical.
+        let _ = std::io::Write::write_fmt(
+            &mut std::io::stderr(),
+            format_args!("[wlr] [{level:?}] {line}\n"),
+        );
+        return;
+    };
 
     // wlroots runs this under an `extern "C"` frame, where an unwind aborts.
     // `AssertUnwindSafe` is honest here: the only state the sink could leave

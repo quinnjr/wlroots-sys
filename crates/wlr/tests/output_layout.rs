@@ -19,6 +19,61 @@ fn headless_env() {
     });
 }
 
+/// A second `init_output` for one output is an error, not a dead process.
+///
+/// `wlr_scene_output_create` plants an addon keyed by `(scene, output)`, and a
+/// second call reaches `wlr_addon_init`'s `assert(0 && "Can't have two addons
+/// of the same type with the same owner")` — which Arch compiles in, so the
+/// process dies rather than returning anything. `add_scene_output` has probed
+/// for this since it was written; `init_output` never did, and it is the call
+/// every doc and example tells a compositor to make from `new_output`. A
+/// re-plug racing a slow first init, or a consumer that also inits from its
+/// own setup, took the whole compositor down.
+///
+/// The process surviving this test *is* the assertion.
+#[test]
+fn initialising_one_output_twice_is_refused_rather_than_fatal() {
+    headless_env();
+    struct App {
+        runtime: wlr::Runtime,
+        second: Option<bool>,
+        turns: u32,
+    }
+    impl wlr::OutputHandler for App {
+        fn new_output(&mut self, output: &wlr::Output<'_>) {
+            let _ = output.enable_with_preferred_mode();
+            let first = self.runtime.init_output(output);
+            assert!(first.is_ok(), "the first init must succeed: {first:?}");
+            // The call that used to abort.
+            self.second = Some(self.runtime.init_output(output).is_err());
+        }
+    }
+    impl wlr::ToplevelHandler for App {}
+    impl wlr::SeatHandler for App {}
+    impl wlr::FdHandler for App {}
+    impl wlr::LoopHandler for App {
+        fn should_stop(&mut self) -> bool {
+            self.turns += 1;
+            self.turns > 8 || self.second.is_some()
+        }
+    }
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    let mut app = App {
+        runtime: runtime.clone(),
+        second: None,
+        turns: 0,
+    };
+    let _ = backend.run_all(&display, &mut app, &runtime, wlr::Until::Turns(12));
+    assert_eq!(
+        app.second,
+        Some(true),
+        "the second init must report an error, having reached new_output at all"
+    );
+}
+
 /// `init_output` is what actually calls `wlr_output_layout_add_auto` (see
 /// its own doc) — `enable_with_preferred_mode` alone only gives the output a
 /// mode and a renderer target, not a place in the layout. Both tests below
