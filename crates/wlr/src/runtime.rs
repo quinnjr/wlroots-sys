@@ -263,6 +263,14 @@ pub(crate) struct RuntimeInner {
     /// second one.
     pub(crate) session_lock_manager: RefCell<Option<NonNull<sys::wlr_session_lock_manager_v1>>>,
 
+    /// The `zwlr_output_manager_v1` global, once created — lets a client
+    /// (e.g. a display-settings app) enumerate output heads and request an
+    /// atomic reconfiguration. `Option`, same rationale as the other manager
+    /// globals: a consumer that never calls
+    /// [`create_output_manager`](Runtime::create_output_manager) never
+    /// advertises the global, and a second call would advertise a second one.
+    pub(crate) output_manager: RefCell<Option<NonNull<sys::wlr_output_manager_v1>>>,
+
     /// Whether the session is currently locked. **The security bit.** Set true
     /// the instant a locker takes a lock (`backend.rs`'s
     /// `on_new_session_lock`) and cleared **only** on a genuine unlock
@@ -961,6 +969,7 @@ impl Runtime {
                 idle_inhibit_manager: RefCell::new(None),
                 idle_inhibitors: std::cell::Cell::new(0),
                 session_lock_manager: RefCell::new(None),
+                output_manager: RefCell::new(None),
                 session_locked: std::cell::Cell::new(false),
                 session_lock: RefCell::new(None),
                 session_unlock_requested: std::cell::Cell::new(false),
@@ -1672,6 +1681,36 @@ impl Runtime {
         } else {
             Some(())
         }
+    }
+
+    /// Ask wlroots to fire [`OutputHandler::frame`](crate::OutputHandler::frame)
+    /// for the output this [`OutputId`] names, resolving the id back to its
+    /// `*mut wlr_output` the same way
+    /// [`output_layout_box`](Runtime::output_layout_box) and
+    /// [`set_output_position`](Runtime::set_output_position) do.
+    ///
+    /// This is the id-keyed sibling of
+    /// [`Output::schedule_frame`](crate::Output::schedule_frame): identical
+    /// effect (`wlr_output_schedule_frame`), for the callers that hold only an
+    /// [`OutputId`] and no live [`Output`](crate::Output) handle — most
+    /// notably an output re-enabled through
+    /// [`OutputHandler::output_configuration_applied`](crate::OutputHandler::output_configuration_applied),
+    /// which is handed heads and ids but no `Output`, and still needs the
+    /// one-time kick so a freshly re-enabled output that draws nothing gets its
+    /// first `frame` callback and commit.
+    ///
+    /// Returns `None` on an unknown or stale id (see
+    /// [`output_layout_box`](Runtime::output_layout_box)'s own doc for that
+    /// rule); `Some(())` once the frame has been scheduled. Infallible past the
+    /// id lookup, because `wlr_output_schedule_frame` returns nothing.
+    pub fn schedule_frame(&self, id: OutputId) -> Option<()> {
+        let raw = self.output_ptr(id)?;
+        // SAFETY: a present `outputs` entry names an output still linked into
+        // that table (removed synchronously by `forget_output` before wlroots
+        // frees it), so `raw` is live. `wlr_output_schedule_frame` only marks
+        // the output for a frame; it does not dispatch or re-enter this crate.
+        unsafe { sys::wlr_output_schedule_frame(raw.as_ptr()) };
+        Some(())
     }
 
     /// Add a solid-colour rect to the scene, at the root, in RGBA where each
@@ -4777,6 +4816,93 @@ impl Runtime {
         &self,
     ) -> Option<NonNull<sys::wlr_pointer_constraints_v1>> {
         *self.inner.pointer_constraints_manager.borrow()
+    }
+
+    /// Create the `zwlr_output_manager_v1` global, letting clients enumerate
+    /// output heads and request an atomic reconfiguration. Errors if called
+    /// twice.
+    pub fn create_output_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.output_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_output_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_output_manager_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_output_manager_v1_create"))?;
+        *self.inner.output_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// The `zwlr_output_manager_v1` manager, once created via
+    /// [`Runtime::create_output_manager`] — read by `backend.rs`'s
+    /// manager-setup block to link the `apply`/`test` listeners, and by
+    /// [`update_output_manager_state`](Runtime::update_output_manager_state).
+    pub(crate) fn output_manager_ptr(&self) -> Option<NonNull<sys::wlr_output_manager_v1>> {
+        *self.inner.output_manager.borrow()
+    }
+
+    /// Broadcast the compositor's current output layout to
+    /// `zwlr_output_manager_v1` clients.
+    ///
+    /// Builds a fresh `wlr_output_configuration_v1` describing every output
+    /// this runtime knows of — one config head per output, pre-filled by
+    /// wlroots from the output's committed state (enabled/mode/scale/transform)
+    /// and given its layout position from
+    /// [`output_layout_box`](Runtime::output_layout_box) — then hands it to
+    /// `wlr_output_manager_v1_set_configuration`, which takes ownership and
+    /// sends the current state to bound clients.
+    ///
+    /// A no-op when no manager has been created (a compositor that never called
+    /// [`create_output_manager`](Runtime::create_output_manager)). Compositors
+    /// call this after any output change — hotplug, or applying a persisted
+    /// layout — so clients see an up-to-date view.
+    pub fn update_output_manager_state(&self) {
+        let Some(manager) = self.output_manager_ptr() else {
+            return;
+        };
+
+        // Snapshot the (id, raw) pairs before any wlroots call below, so no
+        // `outputs` borrow is held across FFI, matching every other method
+        // here. `output_layout_box` borrows `graphics`, not `outputs`, so
+        // querying positions after the snapshot is borrow-safe.
+        let outputs: Vec<(OutputId, NonNull<sys::wlr_output>)> = self
+            .inner
+            .outputs
+            .borrow()
+            .iter()
+            .map(|(id, raw)| (*id, *raw))
+            .collect();
+
+        // SAFETY: `wlr_output_configuration_v1_create` allocates a fresh,
+        // owned configuration. Each recorded `raw` names an output still live
+        // in this run — `forget_output` removes an entry synchronously before
+        // wlroots frees the output — so passing it to
+        // `wlr_output_configuration_head_v1_create` (which reads the output and
+        // links a head into the config) is sound. The head it returns is owned
+        // by the config; writing its `state.x`/`.y` is a plain field
+        // assignment. `set_configuration` takes ownership of the config and
+        // frees it, so this crate never touches it again.
+        unsafe {
+            let config = sys::wlr_output_configuration_v1_create();
+            if config.is_null() {
+                return;
+            }
+            for (id, raw) in outputs {
+                let head = sys::wlr_output_configuration_head_v1_create(config, raw.as_ptr());
+                if head.is_null() {
+                    continue;
+                }
+                // `head_v1_create` pre-fills mode/scale/transform/enabled but
+                // not position; supply it from the layout box.
+                if let Some((x, y, _, _)) = self.output_layout_box(id) {
+                    (*head).state.x = x;
+                    (*head).state.y = y;
+                }
+            }
+            sys::wlr_output_manager_v1_set_configuration(manager.as_ptr(), config);
+        }
     }
 
     /// The pointer constraint currently activated on the focused surface, or

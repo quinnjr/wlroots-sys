@@ -84,6 +84,7 @@ fn two_headless_outputs_get_disjoint_layout_boxes() {
     headless_env();
     struct App {
         boxes: Vec<(i32, i32, i32, i32)>,
+        scheduled: usize,
         runtime: wlr::Runtime,
         turns: u32,
     }
@@ -91,6 +92,11 @@ fn two_headless_outputs_get_disjoint_layout_boxes() {
         fn new_output(&mut self, output: &wlr::Output<'_>) {
             let _ = output.enable_with_preferred_mode();
             let _ = self.runtime.init_output(output);
+            // The id-keyed `schedule_frame` must resolve a live output id the
+            // same way `output_layout_box` (called just below) does.
+            if self.runtime.schedule_frame(output.id()).is_some() {
+                self.scheduled += 1;
+            }
             if let Some(b) = self.runtime.output_layout_box(output.id()) {
                 self.boxes.push(b);
             }
@@ -111,6 +117,7 @@ fn two_headless_outputs_get_disjoint_layout_boxes() {
     runtime.init_graphics(&display, &backend).expect("graphics");
     let mut app = App {
         boxes: vec![],
+        scheduled: 0,
         runtime: runtime.clone(),
         turns: 0,
     };
@@ -118,6 +125,10 @@ fn two_headless_outputs_get_disjoint_layout_boxes() {
         .run_all(&display, &mut app, &runtime, wlr::Until::Turns(16))
         .expect("run");
     assert_eq!(app.boxes.len(), 2, "both outputs must be in the layout");
+    assert_eq!(
+        app.scheduled, 2,
+        "schedule_frame must resolve every live output id it is handed"
+    );
     let (a, b) = (app.boxes[0], app.boxes[1]);
     let disjoint = a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1;
     assert!(
@@ -170,4 +181,7 @@ fn layout_box_after_the_run_is_stale_and_misses_cleanly() {
     // Output tables are per-run: after run_all returns the id is stale.
     assert_eq!(runtime.output_layout_box(stale), None);
     assert_eq!(runtime.set_output_position(stale, 0, 0), None);
+    // `schedule_frame` shares the same id-resolution rule, so a stale id must
+    // miss cleanly (return `None`) rather than touch freed/reused memory.
+    assert_eq!(runtime.schedule_frame(stale), None);
 }

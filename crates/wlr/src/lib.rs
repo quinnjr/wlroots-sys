@@ -102,12 +102,14 @@ pub use decoration::DecorationMode;
 pub use display::{Display, EventLoop};
 pub use error::{Error, Result};
 pub use geom::{Box2D, FBox, Transform};
-pub use handler::{FdHandler, Handlers, LoopHandler, OutputHandler, SeatHandler, ToplevelHandler};
+pub use handler::{
+    AppliedHead, FdHandler, Handlers, LoopHandler, OutputHandler, SeatHandler, ToplevelHandler,
+};
 pub use id::{OutputId, SourceId};
 pub use interest::{Interest, Readiness};
 pub use layer::{Anchor, Layer, LayerSurface, LayerSurfaceId};
 pub use log::{LogLevel, init_logging, log_verbosity};
-pub use output::Output;
+pub use output::{Mode, Output};
 pub use region::{Region, RegionRef};
 pub use render::{
     Allocator, AllocatorRef, AlphaMode, BlendMode, BufferCaps, BufferPassOptions, ChromaLocation,

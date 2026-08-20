@@ -1852,3 +1852,88 @@ item   = "Runtime::create_relative_pointer_manager"
 symbol = "wlr_relative_pointer_manager_v1_send_relative_motion"
 module = "runtime"
 item   = "Runtime::create_relative_pointer_manager"
+
+[[wrapped]]
+symbol = "wlr_output_configuration_head_v1"
+module = "runtime"
+item   = "Runtime::update_output_manager_state"
+
+[[wrapped]]
+symbol = "wlr_output_configuration_head_v1_create"
+module = "runtime"
+item   = "Runtime::update_output_manager_state"
+
+[[wrapped]]
+symbol = "wlr_output_configuration_v1"
+module = "runtime"
+item   = "Runtime::update_output_manager_state"
+
+[[wrapped]]
+symbol = "wlr_output_configuration_v1_create"
+module = "runtime"
+item   = "Runtime::update_output_manager_state"
+
+[[wrapped]]
+symbol = "wlr_output_configuration_v1_destroy"
+module = "backend"
+item   = "OutputHandler::output_configuration_applied"
+
+[[wrapped]]
+symbol = "wlr_output_configuration_v1_send_failed"
+module = "backend"
+item   = "OutputHandler::output_configuration_applied"
+
+[[wrapped]]
+symbol = "wlr_output_configuration_v1_send_succeeded"
+module = "backend"
+item   = "OutputHandler::output_configuration_applied"
+
+[[wrapped]]
+symbol = "wlr_output_head_v1"
+module = "backend"
+item   = "OutputHandler::output_configuration_applied"
+
+[[wrapped]]
+symbol = "wlr_output_head_v1_state_apply"
+module = "backend"
+item   = "OutputHandler::output_configuration_applied"
+
+[[wrapped]]
+symbol = "wlr_output_manager_v1"
+module = "runtime"
+item   = "Runtime::create_output_manager"
+
+[[wrapped]]
+symbol = "wlr_output_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_output_manager"
+
+[[wrapped]]
+symbol = "wlr_output_manager_v1_set_configuration"
+module = "runtime"
+item   = "Runtime::update_output_manager_state"
+
+[[wrapped]]
+symbol = "wlr_output_mode"
+module = "output"
+item   = "Output::modes"
+
+[[wrapped]]
+symbol = "wlr_output_state_set_custom_mode"
+module = "output"
+item   = "Output::set_mode"
+
+[[wrapped]]
+symbol = "wlr_output_state_set_scale"
+module = "output"
+item   = "Output::set_scale"
+
+[[wrapped]]
+symbol = "wlr_output_state_set_transform"
+module = "output"
+item   = "Output::set_transform"
+
+[[wrapped]]
+symbol = "wlr_output_test_state"
+module = "backend"
+item   = "OutputHandler::output_configuration_applied"

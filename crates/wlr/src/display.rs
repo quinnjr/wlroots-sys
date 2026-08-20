@@ -187,9 +187,41 @@ impl Drop for Display {
         #[allow(unused_imports)]
         use sys::wayland_sys::server::*;
 
-        // SAFETY: we own this display and destroy it exactly once, here, as
-        // the display goes out of scope.
+        // Destroy every still-connected client BEFORE the display, which is
+        // the teardown order every wlroots compositor follows (`tinywl`, sway)
+        // and which `wl_display_destroy` alone does not give us.
+        //
+        // The hazard it closes is a use-after-free during teardown. A number
+        // of seat-scoped protocol objects — a `wlr_data_control_device_v1`, a
+        // `zwp_virtual_keyboard_v1`, a `zwp_relative_pointer_v1`, a
+        // `zwp_locked/confined_pointer_v1` — are *client resources* linked into
+        // a list owned by their *manager global*. Each manager frees itself
+        // from its own `display_destroy` listener, and `wlr_seat_destroy` frees
+        // the devices from its own `events.destroy`; both listeners fire from
+        // inside `wl_display_destroy`, in registration order. Because the seat
+        // is created after those managers, its listener runs *after* they have
+        // already `free()`d themselves, so each device's seat-destroy handler
+        // then `wl_list_remove`s itself out of a manager list that now lives in
+        // freed heap — a write through a dangling pointer. It is normally
+        // silent (the freed block is not yet reused), but any allocation churn
+        // during teardown — e.g. the output-management manager's config/heads —
+        // can reuse that block first and turn the stray write into glibc heap
+        // corruption ("corrupted double-linked list").
+        //
+        // `wl_display_destroy_clients` destroys those client resources first,
+        // while their managers are still alive, so every device unlinks from a
+        // live list. By the time `wl_display_destroy` fires the manager and
+        // seat destroy listeners there are no device children left to dangle.
+        //
+        // SAFETY: we own this display and destroy it exactly once, here, as the
+        // display goes out of scope; `destroy_clients` immediately precedes it
+        // on the same live pointer, as libwayland requires.
         unsafe {
+            ffi_dispatch!(
+                sys::wayland_sys::server::wayland_server_handle(),
+                wl_display_destroy_clients,
+                self.raw.as_ptr()
+            );
             ffi_dispatch!(
                 sys::wayland_sys::server::wayland_server_handle(),
                 wl_display_destroy,
