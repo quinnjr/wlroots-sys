@@ -1683,6 +1683,36 @@ impl Runtime {
         }
     }
 
+    /// Ask wlroots to fire [`OutputHandler::frame`](crate::OutputHandler::frame)
+    /// for the output this [`OutputId`] names, resolving the id back to its
+    /// `*mut wlr_output` the same way
+    /// [`output_layout_box`](Runtime::output_layout_box) and
+    /// [`set_output_position`](Runtime::set_output_position) do.
+    ///
+    /// This is the id-keyed sibling of
+    /// [`Output::schedule_frame`](crate::Output::schedule_frame): identical
+    /// effect (`wlr_output_schedule_frame`), for the callers that hold only an
+    /// [`OutputId`] and no live [`Output`](crate::Output) handle — most
+    /// notably an output re-enabled through
+    /// [`OutputHandler::output_configuration_applied`](crate::OutputHandler::output_configuration_applied),
+    /// which is handed heads and ids but no `Output`, and still needs the
+    /// one-time kick so a freshly re-enabled output that draws nothing gets its
+    /// first `frame` callback and commit.
+    ///
+    /// Returns `None` on an unknown or stale id (see
+    /// [`output_layout_box`](Runtime::output_layout_box)'s own doc for that
+    /// rule); `Some(())` once the frame has been scheduled. Infallible past the
+    /// id lookup, because `wlr_output_schedule_frame` returns nothing.
+    pub fn schedule_frame(&self, id: OutputId) -> Option<()> {
+        let raw = self.output_ptr(id)?;
+        // SAFETY: a present `outputs` entry names an output still linked into
+        // that table (removed synchronously by `forget_output` before wlroots
+        // frees it), so `raw` is live. `wlr_output_schedule_frame` only marks
+        // the output for a frame; it does not dispatch or re-enter this crate.
+        unsafe { sys::wlr_output_schedule_frame(raw.as_ptr()) };
+        Some(())
+    }
+
     /// Add a solid-colour rect to the scene, at the root, in RGBA where each
     /// channel is 0.0–1.0 and the colour is premultiplied.
     ///
