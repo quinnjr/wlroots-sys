@@ -6556,6 +6556,7 @@ mod tests {
                 idle_inhibitors: RefCell::new(HashMap::new()),
                 session_locks: RefCell::new(HashMap::new()),
                 lock_surfaces: RefCell::new(HashMap::new()),
+                scene_buffers: RefCell::new(HashMap::new()),
                 pointer_constraints: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
                 applied_heads: RefCell::new(VecDeque::new()),
