@@ -1884,49 +1884,7 @@ note      = "Output stack completion."
 milestone = "M6"
 
 [[waived]]
-symbol    = "wlr_output_configuration_head_v1"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_configuration_head_v1_create"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_configuration_v1"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
 symbol    = "wlr_output_configuration_v1_build_state"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_configuration_v1_create"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_configuration_v1_destroy"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_configuration_v1_send_failed"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_configuration_v1_send_succeeded"
 reason    = "not-yet"
 note      = "Output stack completion."
 milestone = "M6"
@@ -2058,19 +2016,7 @@ note      = "Output stack completion."
 milestone = "M6"
 
 [[waived]]
-symbol    = "wlr_output_head_v1"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
 symbol    = "wlr_output_head_v1_state"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_head_v1_state_apply"
 reason    = "not-yet"
 note      = "Output stack completion."
 milestone = "M6"
@@ -2238,30 +2184,6 @@ note      = "Output stack completion."
 milestone = "M6"
 
 [[waived]]
-symbol    = "wlr_output_manager_v1"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_manager_v1_create"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_manager_v1_set_configuration"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_mode"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
 symbol    = "wlr_output_mode_aspect_ratio"
 reason    = "not-yet"
 note      = "Output stack completion."
@@ -2370,12 +2292,6 @@ note      = "Output stack completion."
 milestone = "M6"
 
 [[waived]]
-symbol    = "wlr_output_state_set_custom_mode"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
 symbol    = "wlr_output_state_set_damage"
 reason    = "not-yet"
 note      = "Output stack completion."
@@ -2400,12 +2316,6 @@ note      = "Output stack completion."
 milestone = "M6"
 
 [[waived]]
-symbol    = "wlr_output_state_set_scale"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
 symbol    = "wlr_output_state_set_signal_timeline"
 reason    = "not-yet"
 note      = "Output stack completion."
@@ -2413,12 +2323,6 @@ milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_state_set_subpixel"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_state_set_transform"
 reason    = "not-yet"
 note      = "Output stack completion."
 milestone = "M6"
@@ -2461,12 +2365,6 @@ milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_swapchain_manager_prepare"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_test_state"
 reason    = "not-yet"
 note      = "Output stack completion."
 milestone = "M6"
