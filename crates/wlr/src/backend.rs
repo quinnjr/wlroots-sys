@@ -3415,10 +3415,18 @@ unsafe fn handle_output_configuration<S: Handlers>(
         let mut applied: Vec<AppliedHead> = Vec::new();
 
         if apply {
-            // Two-phase apply so a partial success can never leave some outputs
-            // reconfigured while the client is told `failed`: TEST every head
-            // first, and only if EVERY test passes do we commit. On any test
-            // failure nothing is committed and the reply is `failed`.
+            // Two-phase apply: TEST every head first, and only if EVERY test
+            // passes do we begin committing. On any test failure nothing is
+            // committed and the reply is `failed`.
+            //
+            // The guarantee this gives is validation-before-commit, not true
+            // atomicity. wlroots commits one output at a time and offers no way
+            // to roll a committed output back, so if a later head's *commit*
+            // fails after an earlier head's commit already succeeded, the
+            // earlier output stays reconfigured even though the reply becomes
+            // `failed`. Pre-testing every head makes that window small — a
+            // commit that its own test just passed almost always succeeds — but
+            // it cannot be closed here.
             for &head in &heads {
                 if !run_head_state(head, false) {
                     all_ok = false;
@@ -6267,6 +6275,15 @@ mod tests {
         }
     }
 
+    // The output-management `apply`/`test` handlers are generic over the full
+    // `Handlers` bound (not just `OutputHandler`), so `Recorder` must satisfy
+    // every handler trait to stand in for a real consumer there. All methods
+    // are defaulted, so these are empty.
+    impl crate::ToplevelHandler for Recorder {}
+    impl crate::SeatHandler for Recorder {}
+    impl crate::FdHandler for Recorder {}
+    impl LoopHandler for Recorder {}
+
     /// Drive `on_new_output` for `output` exactly as wlroots would, then hand
     /// the resulting session and the output's new id to `body`.
     ///
@@ -6500,6 +6517,194 @@ mod tests {
             "destruction is the one event that needs no object, so it is \
              delivered even though the lookup would miss"
         );
+    }
+
+    /// Drive the output-management `apply`/`test` handler over a real
+    /// `wlr_output_configuration_v1` carrying one head linked to `out`, exactly
+    /// as wlroots emits it, then hand the session and recorder to `body` for
+    /// assertions.
+    ///
+    /// `notify` selects the handler under test — [`on_output_manager_apply`]
+    /// (the commit path) or [`on_output_manager_test`] (the pure-test path).
+    /// `configure` fills in the linked head's requested state before emission.
+    ///
+    /// # Safety
+    ///
+    /// `out` must be a live scratch `wlr_output` (both signals and the addon
+    /// set initialised) that outlives the call.
+    unsafe fn drive_output_config(
+        out: *mut sys::wlr_output,
+        notify: sys::wl_notify_func_t,
+        configure: impl FnOnce(*mut sys::wlr_output_configuration_head_v1),
+        body: impl FnOnce(&Session<'_, Recorder>, *mut Recorder),
+    ) {
+        // SAFETY: mirrors `announce` — `p` is the single provenance for the
+        // recorder, the session is a local whose address is taken and never
+        // moved, and the harness signal plus its flag outlive the registration.
+        unsafe {
+            let mut state = Recorder::default();
+            let p = &raw mut state;
+            let runtime = Runtime::new().expect("runtime");
+            let session = Session {
+                dispatcher: Dispatcher::new(p),
+                outputs: RefCell::new(HashMap::new()),
+                toplevels: RefCell::new(HashMap::new()),
+                decorations: RefCell::new(HashMap::new()),
+                layers: RefCell::new(HashMap::new()),
+                inputs: RefCell::new(HashMap::new()),
+                drags: RefCell::new(HashMap::new()),
+                idle_inhibitors: RefCell::new(HashMap::new()),
+                session_locks: RefCell::new(HashMap::new()),
+                lock_surfaces: RefCell::new(HashMap::new()),
+                pointer_constraints: RefCell::new(HashMap::new()),
+                last_key_consumed: Cell::new(false),
+                applied_heads: RefCell::new(VecDeque::new()),
+                runtime: &runtime,
+                deliver: deliver::<Recorder>,
+            };
+            let mut h = Harness::new();
+            let hp = &raw mut *h;
+
+            // Declared after `session` so it unlinks while the session it names
+            // is still alive — the ordering `run` uses.
+            let _reg = Registration::link_bare(
+                &raw mut (*hp).signal,
+                notify,
+                (&raw const session).cast::<()>(),
+                &raw const (*hp).alive,
+            );
+
+            // A real wlroots configuration with one head linked to `out` — the
+            // exact object wlroots hands the `apply`/`test` signal.
+            // `head_v1_create` pre-fills the head from `out` and links its
+            // `output_destroy` listener into `out.events.destroy`; `configure`
+            // then overrides the requested state.
+            let config = sys::wlr_output_configuration_v1_create();
+            assert!(!config.is_null(), "config allocation failed");
+            let head = sys::wlr_output_configuration_head_v1_create(config, out);
+            assert!(!head.is_null(), "head allocation failed");
+            configure(head);
+
+            assert!(
+                !signal_is_empty(&raw mut (*out).events.destroy),
+                "the config head must have linked its output_destroy listener \
+                 into the output before emission"
+            );
+
+            // Emit exactly as wlroots does: the signal data is the config
+            // pointer, which the handler now owns and must destroy.
+            sys::wl_signal_emit_mutable(&raw mut (*hp).signal, config.cast());
+
+            body(&session, p);
+        }
+    }
+
+    /// A configuration whose single head cannot be applied takes the `failed`
+    /// reply branch and tears everything down cleanly: no `AppliedHead` is
+    /// queued, nothing is delivered to the handler, and the borrowed config —
+    /// together with its head's `output_destroy` listener — is destroyed
+    /// exactly once, leaving the output's `destroy` signal empty again.
+    ///
+    /// The head is enabled with a 0x0 custom mode, which wlroots' own
+    /// `output_basic_test` rejects before it ever consults the output's
+    /// backend `impl`, so the failure is deterministic without a real backend.
+    ///
+    /// Mutation-covering: pushing an `AppliedHead` on the failed path, skipping
+    /// the `wlr_output_configuration_v1_destroy` call, or emitting
+    /// `OutputConfigurationApplied` regardless of `all_ok` each fails an
+    /// assertion here.
+    #[test]
+    fn a_failing_apply_replies_failed_queues_no_head_and_destroys_the_config() {
+        let _serialised = crate::id::id_test_lock();
+        let out = ScratchOutput::new();
+        // SAFETY: `out.0` is a live scratch output that outlives the call.
+        unsafe {
+            drive_output_config(
+                out.0,
+                on_output_manager_apply::<Recorder>,
+                |head| {
+                    // `output_head_v1_state_apply` stages ENABLED|MODE from an
+                    // enabled head with a null mode + 0x0 custom mode;
+                    // `output_basic_test` then rejects the zero-sized mode.
+                    (*head).state.enabled = true;
+                    (*head).state.mode = std::ptr::null_mut();
+                    (*head).state.custom_mode.width = 0;
+                    (*head).state.custom_mode.height = 0;
+                    // `wlr_output_state_set_scale` asserts scale > 0.
+                    (*head).state.scale = 1.0;
+                    (*head).state.transform =
+                        sys::wl_output_transform::WL_OUTPUT_TRANSFORM_NORMAL;
+                },
+                |session, p| {
+                    assert!(
+                        session.applied_heads.borrow().is_empty(),
+                        "a failed apply must queue no AppliedHead"
+                    );
+                    assert!(
+                        (*p).new_outputs.is_empty() && (*p).destroyed.is_empty(),
+                        "a failed apply delivers no output event to the handler"
+                    );
+                    assert!(
+                        signal_is_empty(&raw mut (*out.0).events.destroy),
+                        "the config and its head must be destroyed exactly once, \
+                         unlinking the head's output_destroy listener"
+                    );
+                },
+            );
+        }
+    }
+
+    /// The pure-`test` handler over a valid (disable) head takes the
+    /// `succeeded` reply branch, queues no `AppliedHead` — only a committed
+    /// *apply* produces one — and destroys the config exactly once.
+    ///
+    /// Disabling an output is always testable with no backend `impl`:
+    /// `output_basic_test` passes and `wlr_output_test_state` returns true when
+    /// `impl->test` is null, so the success is deterministic here too.
+    ///
+    /// The complement of the failed-apply test: together they pin the
+    /// reply-once / destroy-once / no-stray-AppliedHead invariants on both
+    /// branches, in-crate rather than only through the out-of-tree harness.
+    /// (A *successful apply* producing a non-empty `AppliedHead` needs a real
+    /// committable backend output and stays covered by that harness.)
+    #[test]
+    fn a_test_request_replies_succeeded_queues_no_head_and_destroys_the_config() {
+        let _serialised = crate::id::id_test_lock();
+        let out = ScratchOutput::new();
+        // A zeroed `wlr_output_impl` — every function pointer `None` — is all
+        // `wlr_output_test_state` needs on the success path: `output_basic_test`
+        // passes for a disable, then `if (!output->impl->test) return true`
+        // reads a *non-null* impl whose `test` is null and returns true. A null
+        // `impl` (the scratch default) would dereference through it and crash.
+        // SAFETY: `wlr_output_impl` is function pointers (`Option`, null-valid)
+        // and a `name` pointer (null-valid), so all-zero is a valid value; the
+        // local outlives the `drive_output_config` call below.
+        let output_impl: sys::wlr_output_impl = unsafe { std::mem::zeroed() };
+        // SAFETY: `out.0` is a live scratch output that outlives the call.
+        unsafe {
+            (*out.0).impl_ = &raw const output_impl;
+            drive_output_config(
+                out.0,
+                on_output_manager_test::<Recorder>,
+                |head| {
+                    (*head).state.enabled = false;
+                },
+                |session, p| {
+                    assert!(
+                        session.applied_heads.borrow().is_empty(),
+                        "the test path never queues an AppliedHead"
+                    );
+                    assert!(
+                        (*p).new_outputs.is_empty() && (*p).destroyed.is_empty(),
+                        "the test path delivers no output event"
+                    );
+                    assert!(
+                        signal_is_empty(&raw mut (*out.0).events.destroy),
+                        "the config and its head must be destroyed exactly once"
+                    );
+                },
+            );
+        }
     }
 
     /// Pins the `wl_seat.capability` bit values this module's own doc
