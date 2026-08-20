@@ -97,10 +97,45 @@ Pointer constraints and relative pointer motion. All additive.
 Errors if either `create_*` is called twice. No existing item's name or
 signature changed.
 
-## Unreleased — M5, render & scene foundations
+## 0.20.22 — output management, M5 render & scene foundations
 
-Work in progress. This section collects everything M5 adds and is renamed to a
-version at release; nothing here has shipped. Purely additive so far.
+Two milestones ship together (0.20.21 predates both). All additive.
+
+### Output management (`zwlr_output_management_v1`)
+
+A compositor can now advertise output management, so any standard tool
+(`wlr-randr`, `kanshi`, `wdisplays`, `nwg-displays`, or a bespoke settings app)
+can enumerate output heads and request an atomic reconfiguration — resolution,
+position, scale, transform, enabled/disabled.
+
+- `Output::modes(&self) -> Vec<Mode>` and the new `Mode { width, height,
+  refresh_mhz, preferred }` — enumerate an output's advertised modes.
+- `Output::set_mode(width, height, refresh_mhz)`, `set_scale(f32)`,
+  `set_transform(Transform)`, `disable()` — output-state setters, each built and
+  committed with the same `wlr_output_state` scaffold as
+  `enable_with_preferred_mode`.
+- `Runtime::create_output_manager(&Display) -> Result<()>` — the
+  `zwlr_output_manager_v1` global. `apply`/`test` requests are handled
+  synchronously: every head is validated (`wlr_output_test_state`) before any is
+  committed, then either all commit and the client is told `succeeded`, or none
+  is changed and it is told `failed`; the configuration is destroyed exactly
+  once. Position, which `wlr_output_head_v1_state_apply` does not apply, is set
+  manually. Errors if called twice.
+- `OutputHandler::output_configuration_applied(&mut self, Vec<AppliedHead>)` — a
+  defaulted, additive notification carrying **owned** `AppliedHead` data (no
+  borrowed protocol object escapes the handler), the compositor's cue to
+  re-derive geometry and persist the layout.
+- `Runtime::update_output_manager_state(&self)` — re-advertise head state after
+  an output is added, removed, or reconfigured.
+- `Runtime::schedule_frame(id: OutputId) -> Option<()>` — schedule a frame for an
+  output by id (the handle-free counterpart of `Output::schedule_frame`, for a
+  re-enabled output whose only identity is its id).
+
+Also fixes a **latent teardown use-after-free** affecting every seat-scoped
+manager global (data-control, virtual-keyboard, relative/locked/confined
+pointer): `Display::drop` now calls `wl_display_destroy_clients` before
+`wl_display_destroy`, so client device resources are torn down while their
+manager globals are still alive — matching what every wlroots compositor does.
 
 ### Geometry, transforms and regions
 
