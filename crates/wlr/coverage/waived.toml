@@ -5173,12 +5173,6 @@ note      = "Xwayland, feature-gated."
 milestone = "M12"
 
 [[waived]]
-symbol    = "wlr_xwayland_surface_restack"
-reason    = "not-yet"
-note      = "Xwayland, feature-gated."
-milestone = "M12"
-
-[[waived]]
 symbol    = "wlr_xwayland_surface_set_above"
 reason    = "not-yet"
 note      = "Xwayland, feature-gated."
@@ -5192,24 +5186,6 @@ milestone = "M12"
 
 [[waived]]
 symbol    = "wlr_xwayland_surface_set_demands_attention"
-reason    = "not-yet"
-note      = "Xwayland, feature-gated."
-milestone = "M12"
-
-[[waived]]
-symbol    = "wlr_xwayland_surface_set_fullscreen"
-reason    = "not-yet"
-note      = "Xwayland, feature-gated."
-milestone = "M12"
-
-[[waived]]
-symbol    = "wlr_xwayland_surface_set_maximized"
-reason    = "not-yet"
-note      = "Xwayland, feature-gated."
-milestone = "M12"
-
-[[waived]]
-symbol    = "wlr_xwayland_surface_set_minimized"
 reason    = "not-yet"
 note      = "Xwayland, feature-gated."
 milestone = "M12"

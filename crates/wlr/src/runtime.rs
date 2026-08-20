@@ -5502,6 +5502,77 @@ impl Runtime {
         unsafe { sys::wlr_xwayland_surface_close(raw.as_ptr()) };
     }
 
+    /// Reflect maximized state back to the X11 window `id` names, updating its
+    /// `_NET_WM_STATE` so the client agrees with the compositor's model. wlroots
+    /// carries horizontal and vertical maximization separately; the WM maximizes
+    /// on both axes together, so this sets both. A miss (unknown id) is a no-op.
+    #[cfg(wlr_has_xwayland)]
+    pub fn set_xwayland_surface_maximized(&self, id: XwaylandSurfaceId, maximized: bool) {
+        let Some(raw) = self.xwayland_surface_ptr(id) else {
+            return;
+        };
+        // SAFETY: `raw` is a live surface (see `configure_xwayland_surface`);
+        // this only updates `_NET_WM_STATE` on the X11 window.
+        unsafe { sys::wlr_xwayland_surface_set_maximized(raw.as_ptr(), maximized, maximized) };
+    }
+
+    /// Reflect fullscreen state back to the X11 window `id` names, updating its
+    /// `_NET_WM_STATE_FULLSCREEN`. A miss (unknown id) is a no-op.
+    #[cfg(wlr_has_xwayland)]
+    pub fn set_xwayland_surface_fullscreen(&self, id: XwaylandSurfaceId, fullscreen: bool) {
+        let Some(raw) = self.xwayland_surface_ptr(id) else {
+            return;
+        };
+        // SAFETY: `raw` is a live surface (see `configure_xwayland_surface`).
+        unsafe { sys::wlr_xwayland_surface_set_fullscreen(raw.as_ptr(), fullscreen) };
+    }
+
+    /// Reflect minimized (iconified) state back to the X11 window `id` names,
+    /// updating its `WM_STATE`/`_NET_WM_STATE_HIDDEN`. A miss (unknown id) is a
+    /// no-op.
+    #[cfg(wlr_has_xwayland)]
+    pub fn set_xwayland_surface_minimized(&self, id: XwaylandSurfaceId, minimized: bool) {
+        let Some(raw) = self.xwayland_surface_ptr(id) else {
+            return;
+        };
+        // SAFETY: `raw` is a live surface (see `configure_xwayland_surface`).
+        unsafe { sys::wlr_xwayland_surface_set_minimized(raw.as_ptr(), minimized) };
+    }
+
+    /// Restack the X11 window `id` names for Z-order parity with the WM's stack.
+    ///
+    /// With `sibling` set, the window is stacked directly above (`above`) or
+    /// below the named sibling; with `sibling` `None` it moves to the top or the
+    /// bottom of the whole stack. This is the X11 counterpart of raising a
+    /// managed window in the scene graph. A miss (unknown id) is a no-op; an
+    /// unknown `sibling` id is treated as `None` (stack to the top/bottom),
+    /// never as a dangling pointer.
+    #[cfg(wlr_has_xwayland)]
+    pub fn restack_xwayland_surface(
+        &self,
+        id: XwaylandSurfaceId,
+        sibling: Option<XwaylandSurfaceId>,
+        above: bool,
+    ) {
+        let Some(raw) = self.xwayland_surface_ptr(id) else {
+            return;
+        };
+        // A sibling we no longer know is resolved to null rather than a stale
+        // pointer, so restack degrades to a plain top/bottom move.
+        let sibling_ptr = sibling
+            .and_then(|s| self.xwayland_surface_ptr(s))
+            .map_or(std::ptr::null_mut(), |s| s.as_ptr());
+        let mode = if above {
+            sys::xcb_stack_mode_t::XCB_STACK_MODE_ABOVE
+        } else {
+            sys::xcb_stack_mode_t::XCB_STACK_MODE_BELOW
+        };
+        // SAFETY: `raw` is a live surface (see `configure_xwayland_surface`);
+        // `sibling_ptr` is either null or another live surface from this same
+        // table, and wlroots accepts null to mean "top/bottom of the stack".
+        unsafe { sys::wlr_xwayland_surface_restack(raw.as_ptr(), sibling_ptr, mode) };
+    }
+
     /// Drop every Xwayland surface this runtime knows of, without touching
     /// wlroots — the Xwayland counterpart of
     /// [`clear_toplevels`](Runtime::clear_toplevels), called by `run_inner`

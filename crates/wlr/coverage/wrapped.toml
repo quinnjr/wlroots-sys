@@ -1979,6 +1979,26 @@ module = "backend"
 item   = "ToplevelHandler::xwayland_request_configure"
 
 [[wrapped]]
+symbol = "wlr_xwayland_surface_restack"
+module = "runtime"
+item   = "Runtime::restack_xwayland_surface"
+
+[[wrapped]]
+symbol = "wlr_xwayland_surface_set_fullscreen"
+module = "runtime"
+item   = "Runtime::set_xwayland_surface_fullscreen"
+
+[[wrapped]]
+symbol = "wlr_xwayland_surface_set_maximized"
+module = "runtime"
+item   = "Runtime::set_xwayland_surface_maximized"
+
+[[wrapped]]
+symbol = "wlr_xwayland_surface_set_minimized"
+module = "runtime"
+item   = "Runtime::set_xwayland_surface_minimized"
+
+[[wrapped]]
 symbol = "wlr_compositor"
 module = "runtime"
 item   = "Runtime::create_xwayland"
