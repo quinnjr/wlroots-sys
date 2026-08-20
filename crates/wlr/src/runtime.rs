@@ -48,6 +48,8 @@ use crate::{
     Output, OutputId, RectId, Region, RendererRef, Result, ToplevelId, Transform, sys,
 };
 use crate::{ColorEncoding, ColorRange, FilterMode, NamedPrimaries, TransferFunction};
+#[cfg(wlr_has_xwayland)]
+use crate::XwaylandSurfaceId;
 
 /// A declared fd source: the descriptor, what it wants, and its id.
 ///
@@ -270,6 +272,36 @@ pub(crate) struct RuntimeInner {
     /// [`create_output_manager`](Runtime::create_output_manager) never
     /// advertises the global, and a second call would advertise a second one.
     pub(crate) output_manager: RefCell<Option<NonNull<sys::wlr_output_manager_v1>>>,
+
+    /// The `wlr_compositor` this runtime created in
+    /// [`Runtime::init_graphics`]. Stored — unlike the renderer/allocator, kept
+    /// inside [`Graphics`] — because [`Runtime::create_xwayland`] needs it after
+    /// the fact and it is the one wlroots object a manager-create call outside
+    /// `init_graphics` reaches for. `None` until graphics is initialised.
+    #[cfg(wlr_has_xwayland)]
+    pub(crate) compositor: RefCell<Option<NonNull<sys::wlr_compositor>>>,
+
+    /// The `wlr_xwayland` manager, once created — advertises the X server and
+    /// bridges X11 windows into the compositor. `Option`, same rationale as the
+    /// other manager globals: a consumer that never calls
+    /// [`Runtime::create_xwayland`] never starts Xwayland, and it is
+    /// display/runtime-owned (no `Drop`, torn down with the display, matching
+    /// the session-lock and idle managers).
+    #[cfg(wlr_has_xwayland)]
+    pub(crate) xwayland: RefCell<Option<NonNull<sys::wlr_xwayland>>>,
+
+    /// Every live Xwayland surface (X11 window): the role object and its scene
+    /// tree once associated. Mirrors [`toplevels`](RuntimeInner::toplevels) in
+    /// shape and lifetime — populated by `backend.rs`'s `on_new_xwayland_surface`,
+    /// the tree filled in on `associate` and cleared on `unassociate`, and the
+    /// whole entry removed by `on_xwayland_surface_destroy` before wlroots frees
+    /// the surface.
+    ///
+    /// Keyed by [`XwaylandSurfaceId`] rather than by a raw pointer for the same
+    /// reason every by-id table here is: a raw pointer can alias a freed-then-
+    /// reused object across a destroy, an id cannot.
+    #[cfg(wlr_has_xwayland)]
+    pub(crate) xwayland_surfaces: RefCell<HashMap<XwaylandSurfaceId, XwaylandSurfaceEntry>>,
 
     /// Whether the session is currently locked. **The security bit.** Set true
     /// the instant a locker takes a lock (`backend.rs`'s
@@ -526,6 +558,24 @@ pub(crate) struct RuntimeInner {
 pub(crate) struct ToplevelEntry {
     pub(crate) raw: NonNull<sys::wlr_xdg_toplevel>,
     pub(crate) tree: NonNull<sys::wlr_scene_tree>,
+}
+
+/// One live Xwayland surface (X11 window) as this crate tracks it.
+///
+/// `tree` is `None` until the surface associates a `wlr_surface` — an X11
+/// window exists before it has content — and returns to `None` on unassociate.
+/// Like [`crate::runtime::LockSurfaceRender`]'s tree, it is created by
+/// `wlr_scene_subsurface_tree_create` and **never destroyed by this crate**:
+/// wlroots owns the subsurface tree and frees it together with the `wlr_surface`
+/// it was built from, so the crate only ever stores and drops the pointer.
+#[cfg(wlr_has_xwayland)]
+pub(crate) struct XwaylandSurfaceEntry {
+    pub(crate) raw: NonNull<sys::wlr_xwayland_surface>,
+    /// The scene tree the surface renders through while associated. Stored, not
+    /// dereferenced — its value is its presence, marking the surface as
+    /// on-screen — and never freed here (wlroots frees it with the surface).
+    #[allow(dead_code)]
+    pub(crate) tree: std::cell::Cell<Option<NonNull<sys::wlr_scene_tree>>>,
 }
 
 /// One current lock surface as this crate tracks it: the scene tree it renders
@@ -970,6 +1020,12 @@ impl Runtime {
                 idle_inhibitors: std::cell::Cell::new(0),
                 session_lock_manager: RefCell::new(None),
                 output_manager: RefCell::new(None),
+                #[cfg(wlr_has_xwayland)]
+                compositor: RefCell::new(None),
+                #[cfg(wlr_has_xwayland)]
+                xwayland: RefCell::new(None),
+                #[cfg(wlr_has_xwayland)]
+                xwayland_surfaces: RefCell::new(HashMap::new()),
                 session_locked: std::cell::Cell::new(false),
                 session_lock: RefCell::new(None),
                 session_unlock_requested: std::cell::Cell::new(false),
@@ -1330,6 +1386,12 @@ impl Runtime {
             let compositor = sys::wlr_compositor_create(display.as_ptr(), 6, renderer.as_ptr());
             if compositor.is_null() {
                 return Err(Error::Create("wlr_compositor_create"));
+            }
+            // Kept for `create_xwayland`, which needs the compositor after the
+            // fact; every other consumer of it lives inside this block.
+            #[cfg(wlr_has_xwayland)]
+            {
+                *self.inner.compositor.borrow_mut() = NonNull::new(compositor);
             }
             if sys::wlr_subcompositor_create(display.as_ptr()).is_null() {
                 return Err(Error::Create("wlr_subcompositor_create"));
@@ -5252,6 +5314,212 @@ impl Runtime {
         &self,
     ) -> Option<NonNull<sys::wlr_session_lock_manager_v1>> {
         *self.inner.session_lock_manager.borrow()
+    }
+
+    /// Start Xwayland, so X11 clients can run on this compositor.
+    ///
+    /// Creates a `wlr_xwayland` over this runtime's own `wlr_compositor` (from
+    /// [`init_graphics`](Runtime::init_graphics), which must have been called —
+    /// this errors otherwise), advertising a `DISPLAY` that X11 clients connect
+    /// to. With `lazy = true` the `Xwayland` process is spawned only when the
+    /// first client connects, so a session with no X11 clients pays nothing.
+    ///
+    /// The manager is display/runtime-owned — no `Drop`, torn down with the
+    /// display, matching the session-lock and idle managers — so this never
+    /// frees it. Errors if called twice, or if graphics is not yet initialised,
+    /// or if `wlr_xwayland_create` fails (the `Xwayland` binary is absent, most
+    /// commonly — the caller is expected to treat that as non-fatal and run
+    /// Wayland-only).
+    ///
+    /// Nothing happens on the wire until a [`Backend::run_all`](crate::Backend::run_all)
+    /// drives the same `display`: that is what links the `ready`/`new_surface`
+    /// listeners, exactly as for the other manager globals. On `ready` the crate
+    /// points Xwayland at this runtime's seat itself (so the clipboard/DND
+    /// bridge comes up), then calls
+    /// [`ToplevelHandler::xwayland_ready`](crate::ToplevelHandler::xwayland_ready).
+    #[cfg(wlr_has_xwayland)]
+    pub fn create_xwayland(&self, display: &Display, lazy: bool) -> Result<()> {
+        if self.inner.xwayland.borrow().is_some() {
+            return Err(Error::Operation("Runtime::create_xwayland called twice"));
+        }
+        let compositor = self
+            .inner
+            .compositor
+            .borrow()
+            .ok_or(Error::Operation(
+                "Runtime::create_xwayland requires init_graphics first",
+            ))?;
+        // SAFETY: `display` is live for the call; `compositor` is this runtime's
+        // own `wlr_compositor`, created by `init_graphics` over the same
+        // display and never freed by this crate. The returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_xwayland_create(display.as_ptr(), compositor.as_ptr(), lazy) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_xwayland_create"))?;
+        *self.inner.xwayland.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// The `wlr_xwayland` manager, once created — read by `backend.rs` to link
+    /// the `ready`/`new_surface` listeners.
+    #[cfg(wlr_has_xwayland)]
+    pub(crate) fn xwayland_ptr(&self) -> Option<NonNull<sys::wlr_xwayland>> {
+        *self.inner.xwayland.borrow()
+    }
+
+    /// The `DISPLAY` name (`:N`) Xwayland advertises, or `None` before it is up
+    /// (or if no Xwayland was created). This is the value a compositor exports
+    /// as `DISPLAY` so X11 children connect here; valid only after
+    /// [`ToplevelHandler::xwayland_ready`](crate::ToplevelHandler::xwayland_ready)
+    /// has fired, since lazy start leaves it unset until then.
+    #[cfg(wlr_has_xwayland)]
+    pub fn xwayland_display_name(&self) -> Option<String> {
+        let xwayland = self.xwayland_ptr()?;
+        // SAFETY: `xwayland` is this runtime's own live manager; `display_name`
+        // is a wlroots-owned C string (or null before the server is up), read
+        // and copied out, never freed here.
+        unsafe {
+            let name = (*xwayland.as_ptr()).display_name;
+            if name.is_null() {
+                return None;
+            }
+            Some(
+                std::ffi::CStr::from_ptr(name)
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        }
+    }
+
+    /// Point Xwayland at this runtime's seat, so wlroots' `xwm` bridges the X11
+    /// CLIPBOARD/PRIMARY selections and XDND to the Wayland seat. Called by the
+    /// crate itself on `ready`; also public so a compositor can re-assert it
+    /// after recreating the seat. A no-op if there is no Xwayland or no seat.
+    #[cfg(wlr_has_xwayland)]
+    pub fn set_xwayland_seat(&self) {
+        let (Some(xwayland), Some(seat)) = (self.xwayland_ptr(), self.seat_ptr()) else {
+            return;
+        };
+        // SAFETY: both are this runtime's own live objects, owned by the
+        // display for as long as this runtime lives.
+        unsafe { sys::wlr_xwayland_set_seat(xwayland.as_ptr(), seat.as_ptr()) };
+    }
+
+    /// Record a freshly-announced Xwayland surface. Called by
+    /// `on_new_xwayland_surface`; the scene tree is filled in later, on
+    /// `associate`.
+    #[cfg(wlr_has_xwayland)]
+    pub(crate) fn record_xwayland_surface(
+        &self,
+        id: XwaylandSurfaceId,
+        raw: NonNull<sys::wlr_xwayland_surface>,
+    ) {
+        self.inner.xwayland_surfaces.borrow_mut().insert(
+            id,
+            XwaylandSurfaceEntry {
+                raw,
+                tree: std::cell::Cell::new(None),
+            },
+        );
+    }
+
+    /// Store (or clear, with `None`) an Xwayland surface's scene tree — set on
+    /// `associate`, cleared on `unassociate`. A miss (unknown id) is a no-op.
+    /// The tree is never destroyed by this crate; see [`XwaylandSurfaceEntry`].
+    #[cfg(wlr_has_xwayland)]
+    pub(crate) fn set_xwayland_surface_tree(
+        &self,
+        id: XwaylandSurfaceId,
+        tree: Option<NonNull<sys::wlr_scene_tree>>,
+    ) {
+        if let Some(entry) = self.inner.xwayland_surfaces.borrow().get(&id) {
+            entry.tree.set(tree);
+        }
+    }
+
+    /// Forget `id`. Called from `on_xwayland_surface_destroy` before the
+    /// surface is freed. Dropping the entry drops the stored (wlroots-owned)
+    /// tree pointer without destroying it.
+    #[cfg(wlr_has_xwayland)]
+    pub(crate) fn forget_xwayland_surface(&self, id: XwaylandSurfaceId) {
+        self.inner.xwayland_surfaces.borrow_mut().remove(&id);
+    }
+
+    /// The raw `wlr_xwayland_surface` `id` names, with the table borrow
+    /// released before returning — the caller re-enters wlroots, which can
+    /// take this same `RefCell`. `None` if this runtime knows no such surface.
+    #[cfg(wlr_has_xwayland)]
+    pub(crate) fn xwayland_surface_ptr(
+        &self,
+        id: XwaylandSurfaceId,
+    ) -> Option<NonNull<sys::wlr_xwayland_surface>> {
+        self.inner
+            .xwayland_surfaces
+            .borrow()
+            .get(&id)
+            .map(|e| e.raw)
+    }
+
+    /// Position and size the X11 window `id` names — the SSD content rect for a
+    /// managed window, or the raw geometry for an override-redirect one. A miss
+    /// (unknown id) is a no-op. Values are clamped into the `i16`/`u16` ranges
+    /// the X11 wire carries.
+    #[cfg(wlr_has_xwayland)]
+    pub fn configure_xwayland_surface(&self, id: XwaylandSurfaceId, geometry: Box2D) {
+        let Some(raw) = self.xwayland_surface_ptr(id) else {
+            return;
+        };
+        let x = geometry.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let y = geometry.y.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        let w = geometry.width.clamp(0, u16::MAX as i32) as u16;
+        let h = geometry.height.clamp(0, u16::MAX as i32) as u16;
+        // SAFETY: `raw` is a live surface — the entry is removed by
+        // `on_xwayland_surface_destroy` before wlroots frees it, so a present
+        // entry names a live one — and this only sends an X11 ConfigureNotify.
+        unsafe { sys::wlr_xwayland_surface_configure(raw.as_ptr(), x, y, w, h) };
+    }
+
+    /// Send X11 focus-in/out to the window `id` names, so the client sees it as
+    /// (de)activated. Paired with the seat's keyboard-enter path, which routes
+    /// the actual keystrokes. A miss (unknown id) is a no-op.
+    #[cfg(wlr_has_xwayland)]
+    pub fn activate_xwayland_surface(&self, id: XwaylandSurfaceId, activated: bool) {
+        let Some(raw) = self.xwayland_surface_ptr(id) else {
+            return;
+        };
+        // SAFETY: `raw` is a live surface (see `configure_xwayland_surface`).
+        unsafe { sys::wlr_xwayland_surface_activate(raw.as_ptr(), activated) };
+    }
+
+    /// Ask the X11 window `id` names to close (`WM_DELETE_WINDOW`, or a kill if
+    /// it does not support the protocol) — backing the compositor's
+    /// close-window action. A miss (unknown id) is a no-op.
+    #[cfg(wlr_has_xwayland)]
+    pub fn close_xwayland_surface(&self, id: XwaylandSurfaceId) {
+        let Some(raw) = self.xwayland_surface_ptr(id) else {
+            return;
+        };
+        // SAFETY: `raw` is a live surface (see `configure_xwayland_surface`).
+        unsafe { sys::wlr_xwayland_surface_close(raw.as_ptr()) };
+    }
+
+    /// Drop every Xwayland surface this runtime knows of, without touching
+    /// wlroots — the Xwayland counterpart of
+    /// [`clear_toplevels`](Runtime::clear_toplevels), called by `run_inner`
+    /// when the run that announced them returns. Ids are only meaningful for
+    /// the run that announced them; the per-surface destroy listeners that
+    /// would otherwise remove a stale entry are torn down with that run's
+    /// `Session`.
+    #[cfg(wlr_has_xwayland)]
+    pub(crate) fn clear_xwayland_surfaces(&self) {
+        self.inner.xwayland_surfaces.borrow_mut().clear();
+    }
+
+    /// Mint the next Xwayland surface id from the crate's process-wide counter.
+    /// Called by `on_new_xwayland_surface`; separate so the counter stays the
+    /// single source in [`crate::id`].
+    #[cfg(wlr_has_xwayland)]
+    pub(crate) fn next_xwayland_surface_id(&self) -> XwaylandSurfaceId {
+        XwaylandSurfaceId(next_id())
     }
 
     /// Whether the session is currently locked.

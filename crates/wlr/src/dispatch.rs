@@ -45,6 +45,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
 use crate::{DecorationMode, Edges, LayerSurfaceId, NodeId, OutputId, SceneOutputId, ToplevelId};
+#[cfg(wlr_has_xwayland)]
+use crate::{Box2D, XwaylandSurfaceId};
 
 /// An event awaiting delivery.
 ///
@@ -176,6 +178,52 @@ pub(crate) enum Event {
     /// level, never from inside a handler — but the queue keeps it sound if it
     /// ever did).
     OutputConfigurationApplied,
+
+    /// Xwayland's X server came up and its `xwm` is running. Carries no
+    /// payload: the `DISPLAY` name is a `String` that cannot ride in a `Copy`,
+    /// `Eq` enum, so delivery reads it back from the live `wlr_xwayland` (the
+    /// same "carry nothing, resolve at delivery" shape `OutputConfigurationApplied`
+    /// and the scene-buffer-outputs events use).
+    #[cfg(wlr_has_xwayland)]
+    XwaylandReady,
+
+    /// A new `wlr_xwayland_surface` (X11 window) was announced. No content
+    /// surface yet — see [`crate::ToplevelHandler::new_xwayland_surface`].
+    #[cfg(wlr_has_xwayland)]
+    NewXwaylandSurface(XwaylandSurfaceId),
+    /// A `wlr_surface` was attached to the X11 window; the crate has built its
+    /// scene node.
+    #[cfg(wlr_has_xwayland)]
+    XwaylandSurfaceAssociate(XwaylandSurfaceId),
+    /// The X11 window's `wlr_surface` went away; the crate tore its scene node
+    /// down. The window may re-associate.
+    #[cfg(wlr_has_xwayland)]
+    XwaylandSurfaceUnassociate(XwaylandSurfaceId),
+    /// The associated surface committed a buffer and should be displayed.
+    #[cfg(wlr_has_xwayland)]
+    XwaylandSurfaceMapped(XwaylandSurfaceId),
+    /// The window's buffer went away; it should not be displayed. Not
+    /// destruction — it may map again.
+    #[cfg(wlr_has_xwayland)]
+    XwaylandSurfaceUnmapped(XwaylandSurfaceId),
+    /// The X11 window was destroyed.
+    #[cfg(wlr_has_xwayland)]
+    XwaylandSurfaceDestroyed(XwaylandSurfaceId),
+    /// The window's `_NET_WM_NAME`/`WM_NAME` changed.
+    #[cfg(wlr_has_xwayland)]
+    XwaylandTitleChanged(XwaylandSurfaceId),
+    /// The window's `WM_CLASS` changed.
+    #[cfg(wlr_has_xwayland)]
+    XwaylandClassChanged(XwaylandSurfaceId),
+    /// The X11 client asked to move/resize itself. The box is the requested
+    /// geometry, read at emission time (an X11 configure request carries its
+    /// x/y/w/h inline), so a deferred delivery still reports what was asked.
+    #[cfg(wlr_has_xwayland)]
+    XwaylandRequestConfigure(XwaylandSurfaceId, Box2D),
+    /// The window flipped its override-redirect flag. The bool is the new
+    /// value, read at emission time.
+    #[cfg(wlr_has_xwayland)]
+    XwaylandOverrideRedirectChanged(XwaylandSurfaceId, bool),
 }
 
 thread_local! {

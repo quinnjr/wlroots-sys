@@ -340,12 +340,6 @@ note      = "Colour-management protocol; layered on M5's render/color.h types."
 milestone = "M12"
 
 [[waived]]
-symbol    = "wlr_compositor"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_compositor_set_renderer"
 reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
@@ -5017,18 +5011,6 @@ note      = "Shell completion: xdg-shell remainder, foreign toplevels, composito
 milestone = "M9"
 
 [[waived]]
-symbol    = "wlr_xwayland"
-reason    = "not-yet"
-note      = "Xwayland, feature-gated."
-milestone = "M12"
-
-[[waived]]
-symbol    = "wlr_xwayland_create"
-reason    = "not-yet"
-note      = "Xwayland, feature-gated."
-milestone = "M12"
-
-[[waived]]
 symbol    = "wlr_xwayland_create_with_server"
 reason    = "not-yet"
 note      = "Xwayland, feature-gated."
@@ -5113,12 +5095,6 @@ note      = "Xwayland, feature-gated."
 milestone = "M12"
 
 [[waived]]
-symbol    = "wlr_xwayland_set_seat"
-reason    = "not-yet"
-note      = "Xwayland, feature-gated."
-milestone = "M12"
-
-[[waived]]
 symbol    = "wlr_xwayland_set_workareas"
 reason    = "not-yet"
 note      = "Xwayland, feature-gated."
@@ -5150,36 +5126,6 @@ milestone = "M12"
 
 [[waived]]
 symbol    = "wlr_xwayland_shell_v1_surface_from_serial"
-reason    = "not-yet"
-note      = "Xwayland, feature-gated."
-milestone = "M12"
-
-[[waived]]
-symbol    = "wlr_xwayland_surface"
-reason    = "not-yet"
-note      = "Xwayland, feature-gated."
-milestone = "M12"
-
-[[waived]]
-symbol    = "wlr_xwayland_surface_activate"
-reason    = "not-yet"
-note      = "Xwayland, feature-gated."
-milestone = "M12"
-
-[[waived]]
-symbol    = "wlr_xwayland_surface_close"
-reason    = "not-yet"
-note      = "Xwayland, feature-gated."
-milestone = "M12"
-
-[[waived]]
-symbol    = "wlr_xwayland_surface_configure"
-reason    = "not-yet"
-note      = "Xwayland, feature-gated."
-milestone = "M12"
-
-[[waived]]
-symbol    = "wlr_xwayland_surface_configure_event"
 reason    = "not-yet"
 note      = "Xwayland, feature-gated."
 milestone = "M12"

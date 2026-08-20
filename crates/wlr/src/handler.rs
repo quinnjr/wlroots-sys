@@ -8,6 +8,8 @@ use crate::{
     DecorationMode, Edges, KeyEvent, LayerSurface, LayerSurfaceId, NodeId, Output, OutputId,
     SceneOutputId, Toplevel, ToplevelId, Transform,
 };
+#[cfg(wlr_has_xwayland)]
+use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
 
 /// One output head as it stands *after* a client's output-management
 /// configuration has been applied and committed.
@@ -580,6 +582,133 @@ pub trait ToplevelHandler {
     /// unknown id is harmless.
     fn layer_surface_destroyed(&mut self, id: LayerSurfaceId) {
         let _ = id;
+    }
+
+    /// Xwayland is up: the X server has started and its window manager (`xwm`)
+    /// is running. `display_name` is the `:N` to export as `DISPLAY` so X11
+    /// children connect to this compositor. The crate has already pointed
+    /// Xwayland at its own seat by the time this runs (so the X11 to Wayland
+    /// clipboard/primary/DND bridge is live); the compositor's job here is to
+    /// publish `DISPLAY` into the environment its session children inherit.
+    ///
+    /// Added on the same additive terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// defaulted, and — like every Xwayland method here — feature-gated behind
+    /// `wlr_has_xwayland`, so a build without the Xwayland subsystem never sees
+    /// it and an `impl ToplevelHandler for MyState {}` still compiles in both
+    /// configurations. These methods live on [`ToplevelHandler`] rather than a
+    /// new `XwaylandHandler` trait for the reason this trait's own doc gives
+    /// for absorbing wlr-layer-shell: one more defaulted method costs an
+    /// implementor nothing, whereas a new supertrait on [`Handlers`] would be a
+    /// breaking change to a frozen list.
+    ///
+    /// `display_name` is `None` on the rare occasion wlroots reports the server
+    /// ready with no name string yet set.
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_ready(&mut self, display_name: Option<&str>) {
+        let _ = display_name;
+    }
+
+    /// A new X11 window appeared. It has **no** content surface yet — an X11
+    /// window is created before a client attaches a `wlr_surface` to it — so
+    /// nothing about its buffer is known, and it is neither mapped nor in the
+    /// scene. Record [`XwaylandSurface::id`] here; the handle is valid only for
+    /// this call.
+    ///
+    /// The lifecycle from here is two-phase and distinct from xdg-shell's:
+    /// [`xwayland_surface_associate`](ToplevelHandler::xwayland_surface_associate)
+    /// when a `wlr_surface` is attached (the crate builds the scene node then),
+    /// [`xwayland_surface_mapped`](ToplevelHandler::xwayland_surface_mapped)
+    /// when that surface first commits a buffer, and the mirror
+    /// `unmapped`/`unassociate`/`destroyed` on the way down. A window may
+    /// unassociate and re-associate while keeping its id.
+    #[cfg(wlr_has_xwayland)]
+    fn new_xwayland_surface(&mut self, surface: &XwaylandSurface<'_>) {
+        let _ = surface;
+    }
+
+    /// A `wlr_surface` was attached to this X11 window. The crate has already
+    /// built the surface's scene node by the time this runs (there is no
+    /// `wlr_scene_xdg_surface_create` analogue for X11, so it is a plain
+    /// subsurface tree). This is the earliest point the window has content to
+    /// size and place.
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_surface_associate(&mut self, surface: &XwaylandSurface<'_>) {
+        let _ = surface;
+    }
+
+    /// The `wlr_surface` went away, but the X11 window lives on and may
+    /// re-associate later. The crate has torn its scene node down. Only the
+    /// id, because there is no content handle to borrow.
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_surface_unassociate(&mut self, id: XwaylandSurfaceId) {
+        let _ = id;
+    }
+
+    /// The associated surface committed a buffer and should be displayed —
+    /// the X11 counterpart of [`mapped`](ToplevelHandler::mapped). The crate
+    /// has already inserted the surface into the scene graph by this point, so
+    /// positioning it here takes effect on the first frame it appears in.
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_surface_mapped(&mut self, surface: &XwaylandSurface<'_>) {
+        let _ = surface;
+    }
+
+    /// The window should not be displayed any more — a null buffer, or the
+    /// surface unassociating. **Not** destruction: a window can unmap and map
+    /// again, keeping its id. Only the id, mirroring
+    /// [`unmapped`](ToplevelHandler::unmapped).
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_surface_unmapped(&mut self, id: XwaylandSurfaceId) {
+        let _ = id;
+    }
+
+    /// The X11 window is gone. Only the id, for the identical reason
+    /// [`toplevel_destroyed`](ToplevelHandler::toplevel_destroyed) documents,
+    /// including that **`id` may be one you were never told about**. Write this
+    /// so an unknown id is harmless — `remove` on a map, never indexing.
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_surface_destroyed(&mut self, id: XwaylandSurfaceId) {
+        let _ = id;
+    }
+
+    /// The window's title (`_NET_WM_NAME`) changed. The whole handle is passed
+    /// so the new [`XwaylandSurface::title`] can be read.
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_title_changed(&mut self, surface: &XwaylandSurface<'_>) {
+        let _ = surface;
+    }
+
+    /// The window's `WM_CLASS` changed. The whole handle is passed so the new
+    /// [`XwaylandSurface::class`]/[`instance`](XwaylandSurface::instance) can
+    /// be read — the values a compositor maps to `app_id`.
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_class_changed(&mut self, surface: &XwaylandSurface<'_>) {
+        let _ = surface;
+    }
+
+    /// The client asked to move and/or resize itself — X11 windows
+    /// self-position. `geometry` is the requested `x`/`y`/`width`/`height`. The
+    /// crate does **not** apply it: a compositor honours it for override-
+    /// redirect surfaces and initial dialog placement, then constrains managed
+    /// windows through its own layout, answering with
+    /// [`Runtime::configure_xwayland_surface`](crate::Runtime::configure_xwayland_surface).
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_request_configure(&mut self, id: XwaylandSurfaceId, geometry: Box2D) {
+        let _ = (id, geometry);
+    }
+
+    /// A surface flipped its override-redirect flag at runtime.
+    /// `override_redirect` is the new value. The compositor must migrate the
+    /// surface between the managed-window model (`false`) and the unmanaged
+    /// pop-up path (`true`).
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_override_redirect_changed(
+        &mut self,
+        id: XwaylandSurfaceId,
+        override_redirect: bool,
+    ) {
+        let _ = (id, override_redirect);
     }
 }
 

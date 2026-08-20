@@ -44,6 +44,8 @@ use crate::{
     LoopHandler, NodeId, Output, OutputHandler, OutputId, Result, Runtime, Toplevel, ToplevelId,
     Transform, sys,
 };
+#[cfg(wlr_has_xwayland)]
+use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
 
 /// `wl_seat.capability` bit values from `wayland.xml`. Not bound by
 /// `wlr-sys`: `wlr_seat_set_capabilities` takes a bare `u32` (see its own
@@ -233,6 +235,19 @@ struct Bound {
     /// the buffer, so `data` could not name the node an event is about even in
     /// principle.
     node: Option<NodeId>,
+
+    /// The Xwayland surface this listener belongs to, for the per-surface
+    /// listeners `on_new_xwayland_surface` links (and the map/unmap pair
+    /// `on_xwayland_surface_associate` adds on the surface once it exists);
+    /// `None` for every other listener in this file.
+    ///
+    /// A sixth id field, for the reason `toplevel`'s own doc gives — `Bound` is
+    /// private to this module. It is load-bearing for the identical reason
+    /// `toplevel` is: an X11 window has no id addon (it exists before it has a
+    /// `wlr_surface` to carry one), so every per-surface callback recovers its
+    /// [`XwaylandSurfaceId`] from here, never from `data`.
+    #[cfg(wlr_has_xwayland)]
+    xwayland: Option<XwaylandSurfaceId>,
 }
 
 // `bound_of`'s cast is sound only while `listener` is `Bound`'s first field, at
@@ -299,12 +314,67 @@ impl Registration {
             toplevel,
             layer,
             node,
+            #[cfg(wlr_has_xwayland)]
+            xwayland: None,
         });
 
         // SAFETY: the caller guarantees `signal` is an initialised `wl_signal`,
         // and the listener is a freshly boxed one that nothing else has linked
         // anywhere. Its address stays put until this `Registration` drops,
         // which unlinks it before the box is freed.
+        unsafe { sys::wl_signal_add(signal, &raw mut bound.listener) };
+
+        Registration { bound }
+    }
+
+    /// Link a per-Xwayland-surface listener, carrying the [`XwaylandSurfaceId`]
+    /// its callback reads back from [`Bound::xwayland`]. Every other id slot is
+    /// `None`.
+    ///
+    /// A dedicated constructor rather than a parameter on [`Registration::link`]
+    /// because that function's slot list is frozen at the five ids the
+    /// non-Xwayland call sites use, and the Xwayland field is feature-gated —
+    /// threading a sixth `Option` through `link` would put a `#[cfg]` on every
+    /// one of its call sites for a value all but these ones leave `None`. This
+    /// builds the boxed [`Bound`] directly, exactly as `link` does, with `alive`
+    /// null (the stronger claim — see [`Registration::drop`]): every one of
+    /// these is dropped either from inside the surface's own destroy emission or
+    /// while the run still stands.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`]: `signal` must point at an initialised
+    /// `wl_signal` whose owner outlives the returned `Registration`, and
+    /// `session` must be a `*const Session<S>` for the `S` `notify` casts it
+    /// back to, valid for as long as the registration lives.
+    #[cfg(wlr_has_xwayland)]
+    unsafe fn link_xwayland(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        xwayland: XwaylandSurfaceId,
+    ) -> Self {
+        let mut bound = Box::new(Bound {
+            listener: sys::wl_listener {
+                link: sys::wl_list {
+                    prev: std::ptr::null_mut(),
+                    next: std::ptr::null_mut(),
+                },
+                notify,
+            },
+            session,
+            alive: std::ptr::null(),
+            flag: std::ptr::null(),
+            id: None,
+            toplevel: None,
+            layer: None,
+            node: None,
+            xwayland: Some(xwayland),
+        });
+
+        // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
+        // caller's contract, and the listener is a freshly boxed one whose
+        // address stays put until this `Registration` drops.
         unsafe { sys::wl_signal_add(signal, &raw mut bound.listener) };
 
         Registration { bound }
@@ -713,6 +783,17 @@ struct Session<'r, S> {
     /// entry it removed was the active one.
     pointer_constraints: RefCell<HashMap<usize, PointerConstraintListeners>>,
 
+    /// This run's per-surface listeners on every live `wlr_xwayland_surface`,
+    /// keyed by [`XwaylandSurfaceId`] — unlike the destroy-addr-keyed tables
+    /// above, an X11 window carries a real crate-minted id (see
+    /// [`Bound::xwayland`]), so it is keyed the way `toplevels` is. Removed —
+    /// and so unlinked — from `on_xwayland_surface_destroy` before wlroots frees
+    /// the surface, and cleared wholesale by [`XwaylandSurfaceTableGuard`] when
+    /// the run returns, the same "an id is only good for the call that announced
+    /// it" rule every other by-id table here follows.
+    #[cfg(wlr_has_xwayland)]
+    xwayland_surfaces: RefCell<HashMap<XwaylandSurfaceId, XwaylandSurfaceListeners>>,
+
     /// Whether the most recently delivered [`Event::Key`] was consumed by the
     /// handler. `on_key` cannot get a return value back through
     /// `Dispatcher::emit` directly — an `extern "C"` callback has no way to
@@ -855,6 +936,36 @@ struct LockSurfaceListeners {
     output: usize,
 }
 
+/// One live Xwayland surface's listeners.
+///
+/// The fixed set is linked by `on_new_xwayland_surface` on the
+/// `wlr_xwayland_surface`'s own signals — those exist for the window's whole
+/// life. The `_map`/`_unmap` pair is different: it lives on the *content*
+/// `wlr_surface`, which only exists between `associate` and `unassociate`, so
+/// `on_xwayland_surface_associate` fills those two slots and
+/// `on_xwayland_surface_dissociate` clears them (dropping, and so unlinking,
+/// the two registrations before wlroots frees that surface). A window that
+/// re-associates gets a fresh pair.
+///
+/// Field order is not load-bearing, as for [`ToplevelListeners`]: nothing here
+/// owns the `Bound` any other recovers its session from — every callback reads
+/// its [`XwaylandSurfaceId`] from its own [`Bound::xwayland`].
+#[cfg(wlr_has_xwayland)]
+struct XwaylandSurfaceListeners {
+    _associate: Registration,
+    _dissociate: Registration,
+    _destroy: Registration,
+    _set_title: Registration,
+    _set_class: Registration,
+    _request_configure: Registration,
+    _set_override_redirect: Registration,
+    /// The content surface's `map`, linked on `associate`, dropped on
+    /// `dissociate`. `None` while the window has no associated surface.
+    _map: Option<Registration>,
+    /// The content surface's `unmap`, paired with `_map`.
+    _unmap: Option<Registration>,
+}
+
 /// Clears `Runtime`'s layer-surface table when the `run_inner` call holding
 /// this guard returns, on every exit path. Mirrors [`ToplevelTableGuard`]
 /// exactly, for the identical reason: see
@@ -878,6 +989,20 @@ struct ToplevelTableGuard<'r>(&'r Runtime);
 impl Drop for ToplevelTableGuard<'_> {
     fn drop(&mut self) {
         self.0.clear_toplevels();
+    }
+}
+
+/// Clears `Runtime`'s Xwayland-surface table when the `run_inner` call holding
+/// this guard returns, on every exit path. Mirrors [`ToplevelTableGuard`]
+/// exactly, for the identical reason: see
+/// `Runtime::clear_xwayland_surfaces`'s own doc.
+#[cfg(wlr_has_xwayland)]
+struct XwaylandSurfaceTableGuard<'r>(&'r Runtime);
+
+#[cfg(wlr_has_xwayland)]
+impl Drop for XwaylandSurfaceTableGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear_xwayland_surfaces();
     }
 }
 
@@ -1320,6 +1445,8 @@ impl<'d> Backend<'d> {
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
             pointer_constraints: RefCell::new(HashMap::new()),
+            #[cfg(wlr_has_xwayland)]
+            xwayland_surfaces: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             applied_heads: RefCell::new(VecDeque::new()),
             runtime,
@@ -1340,6 +1467,10 @@ impl<'d> Backend<'d> {
 
         // Same reasoning, for `layer_surfaces`; see that guard's own doc.
         let _layer_surface_table_guard = LayerSurfaceTableGuard(runtime);
+
+        // Same reasoning, for `xwayland_surfaces`; see that guard's own doc.
+        #[cfg(wlr_has_xwayland)]
+        let _xwayland_surface_table_guard = XwaylandSurfaceTableGuard(runtime);
 
         // Same reasoning, for `outputs`; see that guard's own doc.
         let _output_table_guard = OutputTableGuard(runtime);
@@ -1809,6 +1940,32 @@ impl<'d> Backend<'d> {
             });
         }
 
+        #[cfg(wlr_has_xwayland)]
+        if let Some(xwayland) = runtime.xwayland_ptr() {
+            // SAFETY: `create_xwayland` returned a non-null `wlr_xwayland` owned
+            // by the display, which this call requires to outlive it, exactly
+            // as for the xdg shell above — null liveness is correct. `ready`
+            // fires when the X server and its `xwm` are up; `new_surface`
+            // announces each X11 window. Both handlers are paired with
+            // `session` at the same `S`, as above.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*xwayland.as_ptr()).events.ready,
+                    on_xwayland_ready::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*xwayland.as_ptr()).events.new_surface,
+                    on_new_xwayland_surface::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
         Ok(regs)
     }
 }
@@ -2161,6 +2318,48 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
             let heads = session.applied_heads.borrow_mut().pop_front().unwrap_or_default();
             state.output_configuration_applied(heads);
         }
+        // The `DISPLAY` name is a `String` that cannot ride in the `Copy`/`Eq`
+        // `Event`, so it is read back from the live `wlr_xwayland` here (the
+        // same shape `OutputConfigurationApplied` uses for its owned payload).
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandReady => {
+            let name = session.runtime.xwayland_display_name();
+            state.xwayland_ready(name.as_deref());
+        }
+        #[cfg(wlr_has_xwayland)]
+        Event::NewXwaylandSurface(id) => {
+            with_xwayland_surface(session, id, |s| state.new_xwayland_surface(s))
+        }
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandSurfaceAssociate(id) => {
+            with_xwayland_surface(session, id, |s| state.xwayland_surface_associate(s))
+        }
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandSurfaceUnassociate(id) => state.xwayland_surface_unassociate(id),
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandSurfaceMapped(id) => {
+            with_xwayland_surface(session, id, |s| state.xwayland_surface_mapped(s))
+        }
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandSurfaceUnmapped(id) => state.xwayland_surface_unmapped(id),
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandSurfaceDestroyed(id) => state.xwayland_surface_destroyed(id),
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandTitleChanged(id) => {
+            with_xwayland_surface(session, id, |s| state.xwayland_title_changed(s))
+        }
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandClassChanged(id) => {
+            with_xwayland_surface(session, id, |s| state.xwayland_class_changed(s))
+        }
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandRequestConfigure(id, geometry) => {
+            state.xwayland_request_configure(id, geometry)
+        }
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandOverrideRedirectChanged(id, override_redirect) => {
+            state.xwayland_override_redirect_changed(id, override_redirect)
+        }
     }
 }
 
@@ -2204,6 +2403,413 @@ fn with_layer_surface<S>(
     // exactly as `with_toplevel`'s does.
     let surface = unsafe { LayerSurface::from_raw_with_id(raw.as_ptr(), id) };
     f(&surface);
+}
+
+/// Borrow the Xwayland surface `id` names, if this runtime still knows of one.
+/// Mirrors [`with_toplevel`] exactly, including its obligations on `f`: the
+/// table borrow is released before `f` runs (a handler can re-enter wlroots),
+/// and `f` must not reach anything that frees the surface mid-call.
+/// [`XwaylandSurface`]'s accessors are all reads through the live surface, none
+/// of which can.
+#[cfg(wlr_has_xwayland)]
+fn with_xwayland_surface<S>(
+    session: &Session<'_, S>,
+    id: XwaylandSurfaceId,
+    f: impl FnOnce(&XwaylandSurface<'_>),
+) {
+    let Some(raw) = session.runtime.xwayland_surface_ptr(id) else {
+        return;
+    };
+    // SAFETY: an entry is removed by `on_xwayland_surface_destroy`, which
+    // wlroots runs before it frees the surface, so a present entry names a live
+    // one. The handle is created and dropped inside this call, exactly as
+    // `with_toplevel`'s does.
+    let surface = unsafe { XwaylandSurface::from_raw_with_id(raw.as_ptr(), id) };
+    f(&surface);
+}
+
+/// Xwayland's X server is up and its `xwm` is running. This is the earliest
+/// point `set_seat` is valid, so the crate asserts its own seat here — bringing
+/// up wlroots' clipboard/primary/DND bridge — before telling the handler.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_ready<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `register_toplevel_and_input` into a live
+    // `wlr_xwayland.events.ready`, whose `session` is the paired
+    // `*const Session<'_, S>`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        // The crate owns the seat wiring: point Xwayland at this runtime's seat
+        // so the `xwm` bridges X11 selections/DND to the Wayland seat. Re-entrant
+        // safe — `wlr_xwayland_set_seat` is idempotent — and a no-op if no seat
+        // was created.
+        (*session).runtime.set_xwayland_seat();
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::XwaylandReady, deliver);
+    }
+}
+
+/// A new X11 window appeared. Links the per-surface listeners on the
+/// `wlr_xwayland_surface`'s own signals, records it, and announces it. The
+/// window has no `wlr_surface` yet — that arrives at `associate`, where the
+/// scene node and the map/unmap listeners are built.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_new_xwayland_surface<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked into a live `wlr_xwayland.events.new_surface`, whose
+    // `session` is the paired `*const Session<'_, S>`. The signal carries a
+    // live `*mut wlr_xwayland_surface`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let xsurface = data.cast::<sys::wlr_xwayland_surface>();
+        let Some(raw) = NonNull::new(xsurface) else {
+            return;
+        };
+        let runtime = (*session).runtime;
+        let id = runtime.next_xwayland_surface_id();
+
+        // Seven listeners on the window's own signals — these exist for the
+        // window's whole life (unlike the content surface's map/unmap, added at
+        // `associate`). Each carries `id` in its own `Bound::xwayland`, because
+        // an X11 window has no id addon to recover identity from and several of
+        // these signals emit a null `data`.
+        let associate = Registration::link_xwayland(
+            &raw mut (*xsurface).events.associate,
+            on_xwayland_surface_associate::<S>,
+            (*bound).session,
+            id,
+        );
+        let dissociate = Registration::link_xwayland(
+            &raw mut (*xsurface).events.dissociate,
+            on_xwayland_surface_dissociate::<S>,
+            (*bound).session,
+            id,
+        );
+        let destroy = Registration::link_xwayland(
+            &raw mut (*xsurface).events.destroy,
+            on_xwayland_surface_destroy::<S>,
+            (*bound).session,
+            id,
+        );
+        let set_title = Registration::link_xwayland(
+            &raw mut (*xsurface).events.set_title,
+            on_xwayland_surface_set_title::<S>,
+            (*bound).session,
+            id,
+        );
+        let set_class = Registration::link_xwayland(
+            &raw mut (*xsurface).events.set_class,
+            on_xwayland_surface_set_class::<S>,
+            (*bound).session,
+            id,
+        );
+        let request_configure = Registration::link_xwayland(
+            &raw mut (*xsurface).events.request_configure,
+            on_xwayland_surface_request_configure::<S>,
+            (*bound).session,
+            id,
+        );
+        let set_override_redirect = Registration::link_xwayland(
+            &raw mut (*xsurface).events.set_override_redirect,
+            on_xwayland_surface_set_override_redirect::<S>,
+            (*bound).session,
+            id,
+        );
+
+        let displaced = (*session).xwayland_surfaces.borrow_mut().insert(
+            id,
+            XwaylandSurfaceListeners {
+                _associate: associate,
+                _dissociate: dissociate,
+                _destroy: destroy,
+                _set_title: set_title,
+                _set_class: set_class,
+                _request_configure: request_configure,
+                _set_override_redirect: set_override_redirect,
+                _map: None,
+                _unmap: None,
+            },
+        );
+        drop(displaced);
+
+        runtime.record_xwayland_surface(id, raw);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::NewXwaylandSurface(id), deliver);
+    }
+}
+
+/// A `wlr_surface` was attached to the X11 window. Builds its scene node (a
+/// plain subsurface tree — there is no `wlr_scene_xdg_surface_create` for X11)
+/// and links the content surface's `map`/`unmap`, which only exist while the
+/// surface does.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_associate<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_xwayland_surface` into this window's
+    // `events.associate`; identity comes from `Bound::xwayland`, wlroots emits
+    // this signal with a null `data`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+        let runtime = (*session).runtime;
+        let Some(xsurface) = runtime.xwayland_surface_ptr(id) else {
+            return;
+        };
+        let surface = (*xsurface.as_ptr()).surface;
+        if surface.is_null() {
+            return;
+        }
+
+        // Link map/unmap on the content surface. wlroots emits both with a null
+        // `data` (as for xdg toplevels), so they too carry `id` in their Bound.
+        let map = Registration::link_xwayland(
+            &raw mut (*surface).events.map,
+            on_xwayland_surface_map::<S>,
+            (*bound).session,
+            id,
+        );
+        let unmap = Registration::link_xwayland(
+            &raw mut (*surface).events.unmap,
+            on_xwayland_surface_unmap::<S>,
+            (*bound).session,
+            id,
+        );
+        if let Some(entry) = (*session).xwayland_surfaces.borrow_mut().get_mut(&id) {
+            entry._map = Some(map);
+            entry._unmap = Some(unmap);
+        }
+
+        // Build the scene node so the surface renders. Parented into the
+        // toplevel band (managed-window placement for the spike; override-
+        // redirect banding is M3). Skipped when graphics was never initialised,
+        // the same shape `on_new_toplevel`/`on_session_lock_new_surface` take —
+        // drop the node rather than dereference a null band.
+        if let Some(band) = runtime.toplevel_band_ptr() {
+            let tree = sys::wlr_scene_subsurface_tree_create(band.as_ptr(), surface);
+            if let Some(tree) = NonNull::new(tree) {
+                runtime.set_xwayland_surface_tree(id, Some(tree));
+            }
+        }
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::XwaylandSurfaceAssociate(id), deliver);
+    }
+}
+
+/// The content surface went away. Drops the map/unmap listeners (unlinking them
+/// while the surface is still alive, mid its own destroy emission) and clears
+/// the scene-tree pointer — wlroots frees the subsurface tree together with the
+/// surface, so this crate never destroys it. The window itself lives on.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_dissociate<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_xwayland_surface` into this window's
+    // `events.dissociate` (null `data`); identity from `Bound::xwayland`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+        // Drop the map/unmap registrations here, before wlroots frees the
+        // content surface — the same "unlink from inside the destroy path,
+        // while the object is still alive" discipline the toplevel and lock
+        // paths use.
+        if let Some(entry) = (*session).xwayland_surfaces.borrow_mut().get_mut(&id) {
+            entry._map = None;
+            entry._unmap = None;
+        }
+        (*session).runtime.set_xwayland_surface_tree(id, None);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::XwaylandSurfaceUnassociate(id), deliver);
+    }
+}
+
+/// The associated surface committed a buffer and should be displayed.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_map<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_xwayland_surface_associate` into the content
+    // surface's `events.map` (null `data`); identity from `Bound::xwayland`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::XwaylandSurfaceMapped(id), deliver);
+    }
+}
+
+/// The associated surface's buffer went away; hide it. Not destruction.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_unmap<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as `on_xwayland_surface_map`, for `events.unmap`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::XwaylandSurfaceUnmapped(id), deliver);
+    }
+}
+
+/// The X11 window is about to be freed. Forget it *now*, whatever the handler
+/// does — dropping the `Session` entry unlinks every per-surface registration
+/// (they are still linked into live signals during this emission), and clearing
+/// the runtime entry means a deferred event resolving this id misses rather than
+/// naming freed memory.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_xwayland_surface` into this window's
+    // `events.destroy`; the window is still live for this emission. Identity
+    // from `Bound::xwayland`. `wl_signal_emit_mutable` has advanced past the
+    // firing listener before calling us, which is what makes dropping this
+    // entry — one of whose registrations owns this very `Bound` — sound;
+    // `bound` is dangling from here on and is not touched again.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+
+        (*session).runtime.forget_xwayland_surface(id);
+        let listeners = (*session).xwayland_surfaces.borrow_mut().remove(&id);
+        drop(listeners);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::XwaylandSurfaceDestroyed(id), deliver);
+    }
+}
+
+/// The window's title changed.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_set_title<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_xwayland_surface` into `events.set_title`;
+    // identity from `Bound::xwayland`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::XwaylandTitleChanged(id), deliver);
+    }
+}
+
+/// The window's `WM_CLASS` changed.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_set_class<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_xwayland_surface` into `events.set_class`;
+    // identity from `Bound::xwayland`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::XwaylandClassChanged(id), deliver);
+    }
+}
+
+/// The X11 client asked to move/resize itself. The requested geometry rides in
+/// the event, read at emission time so a deferred delivery still reports it.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_request_configure<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_xwayland_surface` into
+    // `events.request_configure`; identity from `Bound::xwayland`. The signal
+    // carries a live `*mut wlr_xwayland_surface_configure_event` for the
+    // duration of the emission.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+        let ev = data.cast::<sys::wlr_xwayland_surface_configure_event>();
+        if ev.is_null() {
+            return;
+        }
+        let geometry = Box2D::new(
+            (*ev).x as i32,
+            (*ev).y as i32,
+            (*ev).width as i32,
+            (*ev).height as i32,
+        );
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::XwaylandRequestConfigure(id, geometry),
+            deliver,
+        );
+    }
+}
+
+/// The window flipped its override-redirect flag at runtime. The new value is
+/// read from the window at emission time.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_set_override_redirect<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_xwayland_surface` into
+    // `events.set_override_redirect`; identity from `Bound::xwayland`. The
+    // window is live, so reading its `override_redirect` field is sound.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+        let Some(xsurface) = (*session).runtime.xwayland_surface_ptr(id) else {
+            return;
+        };
+        let override_redirect = (*xsurface.as_ptr()).override_redirect;
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::XwaylandOverrideRedirectChanged(id, override_redirect),
+            deliver,
+        );
+    }
 }
 
 /// # Safety
@@ -5896,6 +6502,23 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         // Unreachable: `run` never registers an output manager either, for the
         // same reason — so no `apply` can fire on this path.
         | Event::OutputConfigurationApplied => {}
+        // Unreachable: `run` never creates the Xwayland manager either
+        // (`register_toplevel_and_input` is `run_all`'s hook; `run` uses
+        // `no_extra`), so none of these can be produced on this path. Dropped
+        // rather than `unreachable!()` for the same abort-on-panic reason as
+        // `FdReady` above.
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandReady
+        | Event::NewXwaylandSurface(..)
+        | Event::XwaylandSurfaceAssociate(..)
+        | Event::XwaylandSurfaceUnassociate(..)
+        | Event::XwaylandSurfaceMapped(..)
+        | Event::XwaylandSurfaceUnmapped(..)
+        | Event::XwaylandSurfaceDestroyed(..)
+        | Event::XwaylandTitleChanged(..)
+        | Event::XwaylandClassChanged(..)
+        | Event::XwaylandRequestConfigure(..)
+        | Event::XwaylandOverrideRedirectChanged(..) => {}
     }
 }
 
@@ -6318,6 +6941,8 @@ mod tests {
                 lock_surfaces: RefCell::new(HashMap::new()),
                 scene_buffers: RefCell::new(HashMap::new()),
                 pointer_constraints: RefCell::new(HashMap::new()),
+                #[cfg(wlr_has_xwayland)]
+                xwayland_surfaces: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
             applied_heads: RefCell::new(VecDeque::new()),
                 runtime: &runtime,
@@ -6496,6 +7121,8 @@ mod tests {
             drags: RefCell::new(HashMap::new()),
             scene_buffers: RefCell::new(HashMap::new()),
             pointer_constraints: RefCell::new(HashMap::new()),
+            #[cfg(wlr_has_xwayland)]
+            xwayland_surfaces: RefCell::new(HashMap::new()),
             last_key_consumed: Cell::new(false),
             applied_heads: RefCell::new(VecDeque::new()),
             runtime: &runtime,
@@ -6558,6 +7185,8 @@ mod tests {
                 lock_surfaces: RefCell::new(HashMap::new()),
                 scene_buffers: RefCell::new(HashMap::new()),
                 pointer_constraints: RefCell::new(HashMap::new()),
+                #[cfg(wlr_has_xwayland)]
+                xwayland_surfaces: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
                 applied_heads: RefCell::new(VecDeque::new()),
                 runtime: &runtime,

@@ -95,6 +95,8 @@ mod runtime;
 mod scene;
 mod seat;
 mod toplevel;
+#[cfg(wlr_has_xwayland)]
+mod xwayland;
 
 pub use backend::{Backend, Until};
 pub use buffer::{Buffer, BufferDataAccess, BufferId, DataPtrAccess};
@@ -133,6 +135,8 @@ pub use scene::{
 };
 pub use seat::{KeyEvent, Modifiers};
 pub use toplevel::{Edges, Toplevel, ToplevelId};
+#[cfg(wlr_has_xwayland)]
+pub use xwayland::{XwaylandSurface, XwaylandSurfaceId};
 
 /// The wlroots version this build of `wlr` binds, as `(major, minor)`.
 ///

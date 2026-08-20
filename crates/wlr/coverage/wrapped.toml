@@ -1937,3 +1937,48 @@ item   = "Output::set_transform"
 symbol = "wlr_output_test_state"
 module = "backend"
 item   = "OutputHandler::output_configuration_applied"
+
+[[wrapped]]
+symbol = "wlr_xwayland"
+module = "runtime"
+item   = "Runtime::create_xwayland"
+
+[[wrapped]]
+symbol = "wlr_xwayland_create"
+module = "runtime"
+item   = "Runtime::create_xwayland"
+
+[[wrapped]]
+symbol = "wlr_xwayland_set_seat"
+module = "runtime"
+item   = "Runtime::set_xwayland_seat"
+
+[[wrapped]]
+symbol = "wlr_xwayland_surface"
+module = "xwayland"
+item   = "XwaylandSurface"
+
+[[wrapped]]
+symbol = "wlr_xwayland_surface_activate"
+module = "runtime"
+item   = "Runtime::activate_xwayland_surface"
+
+[[wrapped]]
+symbol = "wlr_xwayland_surface_close"
+module = "runtime"
+item   = "Runtime::close_xwayland_surface"
+
+[[wrapped]]
+symbol = "wlr_xwayland_surface_configure"
+module = "runtime"
+item   = "Runtime::configure_xwayland_surface"
+
+[[wrapped]]
+symbol = "wlr_xwayland_surface_configure_event"
+module = "backend"
+item   = "ToplevelHandler::xwayland_request_configure"
+
+[[wrapped]]
+symbol = "wlr_compositor"
+module = "runtime"
+item   = "Runtime::create_xwayland"
