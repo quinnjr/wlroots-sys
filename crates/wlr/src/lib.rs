@@ -136,7 +136,7 @@ pub use scene::{
 pub use seat::{KeyEvent, Modifiers};
 pub use toplevel::{Edges, Toplevel, ToplevelId};
 #[cfg(wlr_has_xwayland)]
-pub use xwayland::{XwaylandSurface, XwaylandSurfaceId};
+pub use xwayland::{XwaylandSurface, XwaylandSurfaceId, XwaylandWindowType};
 
 /// The wlroots version this build of `wlr` binds, as `(major, minor)`.
 ///

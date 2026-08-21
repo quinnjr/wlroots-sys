@@ -1964,6 +1964,21 @@ module = "runtime"
 item   = "Runtime::activate_xwayland_surface"
 
 [[wrapped]]
+symbol = "wlr_xwayland_net_wm_window_type"
+module = "xwayland"
+item   = "XwaylandSurface::window_type"
+
+[[wrapped]]
+symbol = "wlr_xwayland_surface_has_window_type"
+module = "xwayland"
+item   = "XwaylandSurface::window_type"
+
+[[wrapped]]
+symbol = "wlr_xwayland_surface_override_redirect_wants_focus"
+module = "xwayland"
+item   = "XwaylandSurface::override_redirect_wants_focus"
+
+[[wrapped]]
 symbol = "wlr_xwayland_surface_close"
 module = "runtime"
 item   = "Runtime::close_xwayland_surface"

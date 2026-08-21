@@ -754,17 +754,17 @@ pub trait ToplevelHandler {
         let _ = id;
     }
 
-    /// A surface flipped its override-redirect flag at runtime.
-    /// `override_redirect` is the new value. The compositor must migrate the
-    /// surface between the managed-window model (`false`) and the unmanaged
-    /// pop-up path (`true`).
+    /// A surface flipped its override-redirect flag at runtime. The whole
+    /// handle is passed — mirroring [`xwayland_title_changed`](ToplevelHandler::xwayland_title_changed)
+    /// — so the compositor can read the new
+    /// [`override_redirect`](XwaylandSurface::override_redirect) value **and**
+    /// the identity (class/title/pid/geometry) it needs to re-model the surface
+    /// on the path it is migrating *to*. The compositor must migrate the surface
+    /// between the managed-window model (now `false`) and the unmanaged pop-up
+    /// path (now `true`).
     #[cfg(wlr_has_xwayland)]
-    fn xwayland_override_redirect_changed(
-        &mut self,
-        id: XwaylandSurfaceId,
-        override_redirect: bool,
-    ) {
-        let _ = (id, override_redirect);
+    fn xwayland_override_redirect_changed(&mut self, surface: &XwaylandSurface<'_>) {
+        let _ = surface;
     }
 }
 

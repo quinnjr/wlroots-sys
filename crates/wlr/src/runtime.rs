@@ -5783,6 +5783,142 @@ impl Runtime {
         Some(())
     }
 
+    /// The transient-parent (`WM_TRANSIENT_FOR`) of the Xwayland surface `id`
+    /// names, as one of this runtime's own [`XwaylandSurfaceId`]s — the value a
+    /// compositor centers a managed dialog over.
+    ///
+    /// `None` when `id` is unknown or stale, when the window set no parent, or
+    /// when its parent is a surface this runtime no longer tracks (a stale
+    /// pointer is never followed). The reverse lookup — raw pointer to id — is
+    /// a scan of this runtime's small live-surface table.
+    #[cfg(wlr_has_xwayland)]
+    pub fn xwayland_surface_parent(&self, id: XwaylandSurfaceId) -> Option<XwaylandSurfaceId> {
+        let raw = self.xwayland_surface_ptr(id)?;
+        // SAFETY: a present entry names a live surface (its destroy listener
+        // removes the entry before wlroots frees it); `parent` is a plain
+        // pointer field, null when the window set no `WM_TRANSIENT_FOR`.
+        let parent = unsafe { (*raw.as_ptr()).parent };
+        if parent.is_null() {
+            return None;
+        }
+        // Resolve the parent pointer back to an id we still track, so a caller
+        // never receives an id for a freed surface.
+        self.inner
+            .xwayland_surfaces
+            .borrow()
+            .iter()
+            .find(|(_, entry)| entry.raw.as_ptr() == parent)
+            .map(|(pid, _)| *pid)
+    }
+
+    /// Reparent the Xwayland surface `id`'s scene tree into `band` — the seam a
+    /// compositor drives to lift an override-redirect pop-up above
+    /// [`Band::Toplevel`](crate::Band::Toplevel) (into
+    /// [`Band::Top`](crate::Band::Top)), and to move a surface back down when it
+    /// flips between the managed and unmanaged paths at runtime.
+    ///
+    /// The crate parents every Xwayland surface's tree into
+    /// [`Band::Toplevel`](crate::Band::Toplevel) on `associate` (managed-window
+    /// placement); an override-redirect surface belongs above it, and there is
+    /// no per-surface way to know that at associate time (the flag can even flip
+    /// after map), so band choice is the compositor's, applied through here.
+    ///
+    /// `None` when `id` is unknown or stale, when it has no associated surface
+    /// yet (its tree is created on `associate`), or before
+    /// [`init_graphics`](Runtime::init_graphics). Refused while a scene walk is
+    /// live, for the same reason [`raise_xwayland_surface`](Runtime::raise_xwayland_surface)
+    /// is — a reparent unlinks and reinserts the node, which corrupts wlroots'
+    /// non-`_safe` band walk.
+    #[cfg(wlr_has_xwayland)]
+    pub fn reparent_xwayland_surface_to_band(
+        &self,
+        id: XwaylandSurfaceId,
+        band: Band,
+    ) -> Option<()> {
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        let tree = self.xwayland_surface_tree_ptr(id)?;
+        let band_tree = self.band_ptr(band)?;
+        // SAFETY: `tree` is the surface's own scene node, created on `associate`
+        // and cleared from the entry on `unassociate` before wlroots frees it,
+        // so a present pointer names a live node; `band_tree` is one of the six
+        // band trees created once in `init_graphics` and never destroyed while
+        // this runtime lives.
+        unsafe {
+            sys::wlr_scene_node_reparent(&raw mut (*tree.as_ptr()).node, band_tree.as_ptr())
+        };
+        Some(())
+    }
+
+    /// The Xwayland surface `id`'s scene-node position, relative to its parent
+    /// band — the compositor-side placement last applied by
+    /// [`set_xwayland_surface_position`](Runtime::set_xwayland_surface_position).
+    /// `None` when `id` is unknown, stale, or has no associated surface yet.
+    ///
+    /// Read-only introspection, for tests that prove an override-redirect pop-up
+    /// really landed at its client-requested coordinates.
+    #[cfg(wlr_has_xwayland)]
+    pub fn xwayland_surface_scene_position(&self, id: XwaylandSurfaceId) -> Option<(i32, i32)> {
+        let tree = self.xwayland_surface_tree_ptr(id)?;
+        // SAFETY: as for `set_xwayland_surface_position` — a present tree
+        // pointer names a live node.
+        Some(unsafe { ((*tree.as_ptr()).node.x, (*tree.as_ptr()).node.y) })
+    }
+
+    /// Which [`Band`](crate::Band) the Xwayland surface `id`'s scene tree is
+    /// parented directly under, or `None` when `id` is unknown, stale, has no
+    /// associated surface yet, or its tree is parented somewhere that is not one
+    /// of the six bands.
+    ///
+    /// Read-only introspection, for tests that prove an override-redirect pop-up
+    /// stacks in the band above managed toplevels.
+    #[cfg(wlr_has_xwayland)]
+    pub fn xwayland_surface_scene_parent_band(&self, id: XwaylandSurfaceId) -> Option<Band> {
+        let tree = self.xwayland_surface_tree_ptr(id)?;
+        // SAFETY: a present tree pointer names a live node; `parent` is a live
+        // tree or null (never null here — a band-parented node always has one).
+        let parent = unsafe { (*tree.as_ptr()).node.parent };
+        if parent.is_null() {
+            return None;
+        }
+        let g = self.inner.graphics.borrow();
+        let g = g.as_ref()?;
+        [
+            Band::Background,
+            Band::Bottom,
+            Band::Toplevel,
+            Band::Top,
+            Band::Overlay,
+            Band::Lock,
+        ]
+        .into_iter()
+        .find(|&band| g.band_tree(band).as_ptr() == parent)
+    }
+
+    /// Whether the seat's keyboard is currently focused on the Xwayland surface
+    /// `id` names. `None` when `id` is unknown, stale, or has no associated
+    /// surface yet; `Some(false)` when the seat points elsewhere (or nowhere).
+    ///
+    /// Read-only introspection, for tests that prove a focus-taking
+    /// override-redirect pop-up (a keyboard-navigable menu) actually holds the
+    /// keyboard.
+    #[cfg(wlr_has_xwayland)]
+    pub fn xwayland_surface_has_keyboard_focus(&self, id: XwaylandSurfaceId) -> Option<bool> {
+        let seat = (*self.inner.seat.borrow())?;
+        let xsurface = self.xwayland_surface_ptr(id)?;
+        // SAFETY: a present entry names a live surface; `surface` is null until
+        // `associate`. Reading the seat's focused-surface pointer and comparing
+        // it dereferences neither.
+        unsafe {
+            let surface = (*xsurface.as_ptr()).surface;
+            if surface.is_null() {
+                return None;
+            }
+            Some((*seat.as_ptr()).keyboard_state.focused_surface == surface)
+        }
+    }
+
     /// Drop every Xwayland surface this runtime knows of, without touching
     /// wlroots — the Xwayland counterpart of
     /// [`clear_toplevels`](Runtime::clear_toplevels), called by `run_inner`

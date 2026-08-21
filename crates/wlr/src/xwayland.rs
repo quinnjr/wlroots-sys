@@ -23,6 +23,48 @@ use std::ptr::NonNull;
 use crate::Box2D;
 use crate::sys;
 
+/// The `_NET_WM_WINDOW_TYPE` an X11 window advertises, wrapped over the common
+/// EWMH atoms a compositor keys placement and decoration on.
+///
+/// An X11 window may list several window-type atoms; [`XwaylandSurface::window_type`]
+/// resolves them to the single most specific one it recognises (see that
+/// method's own priority note), defaulting to [`Normal`](Self::Normal) when the
+/// window sets none or only atoms this enum does not model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum XwaylandWindowType {
+    /// `_NET_WM_WINDOW_TYPE_NORMAL`, or no recognised type — an ordinary
+    /// top-level window.
+    Normal,
+    /// `_NET_WM_WINDOW_TYPE_DIALOG` — a dialog, typically centered over its
+    /// parent.
+    Dialog,
+    /// `_NET_WM_WINDOW_TYPE_UTILITY` — a persistent utility/tool window.
+    Utility,
+    /// `_NET_WM_WINDOW_TYPE_SPLASH` — a splash screen, typically centered on
+    /// the output.
+    Splash,
+    /// `_NET_WM_WINDOW_TYPE_TOOLBAR` — a detached toolbar.
+    Toolbar,
+    /// `_NET_WM_WINDOW_TYPE_MENU` — a pinnable (torn-off) menu.
+    Menu,
+    /// `_NET_WM_WINDOW_TYPE_DROPDOWN_MENU` — a menu-bar dropdown.
+    DropdownMenu,
+    /// `_NET_WM_WINDOW_TYPE_POPUP_MENU` — a context (right-click) menu.
+    PopupMenu,
+    /// `_NET_WM_WINDOW_TYPE_TOOLTIP` — a tooltip.
+    Tooltip,
+    /// `_NET_WM_WINDOW_TYPE_COMBO` — a combo-box drop-down list.
+    Combo,
+    /// `_NET_WM_WINDOW_TYPE_NOTIFICATION` — a notification bubble.
+    Notification,
+    /// `_NET_WM_WINDOW_TYPE_DND` — a drag-and-drop feedback window.
+    Dnd,
+    /// `_NET_WM_WINDOW_TYPE_DESKTOP` — the desktop background window.
+    Desktop,
+    /// `_NET_WM_WINDOW_TYPE_DOCK` — a dock/panel.
+    Dock,
+}
+
 /// Identifies an Xwayland surface for as long as the consumer chooses to
 /// remember it.
 ///
@@ -174,6 +216,72 @@ impl<'h> XwaylandSurface<'h> {
         unsafe { (*self.raw.as_ptr()).modal }
     }
 
+    /// The window's `_NET_WM_WINDOW_TYPE`, resolved to the single most specific
+    /// [`XwaylandWindowType`] this crate recognises.
+    ///
+    /// An X11 window may advertise several type atoms at once; this returns the
+    /// first match in a fixed priority that puts the more placement-specific
+    /// kinds first (dialog, then the menu family, tooltip, notification,
+    /// utility/splash, drag-and-drop, desktop/dock, toolbar), falling back to
+    /// [`Normal`](XwaylandWindowType::Normal) when the window sets no type — the
+    /// common case — or only atoms this enum does not model. The atom → type
+    /// mapping is wlroots' own (`wlr_xwayland_surface_has_window_type`, which
+    /// compares against the `xwm`'s interned atoms), so a compositor never
+    /// touches `xcb` to read it.
+    pub fn window_type(&self) -> XwaylandWindowType {
+        // A window with no type atoms is Normal without an FFI call — which
+        // also keeps the accessor sound over a zeroed unit-test surface, whose
+        // `window_type_len` is 0 and whose `xwm` back-pointer is null.
+        // SAFETY: the handle's lifetime guarantees the surface is live;
+        // `window_type_len` is a plain integer field.
+        if unsafe { (*self.raw.as_ptr()).window_type_len } == 0 {
+            return XwaylandWindowType::Normal;
+        }
+        use XwaylandWindowType as T;
+        use sys::wlr_xwayland_net_wm_window_type as Atom;
+        // Priority order: the most placement-specific kinds win when a window
+        // lists several atoms.
+        const TABLE: &[(Atom, T)] = &[
+            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DIALOG, T::Dialog),
+            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_COMBO, T::Combo),
+            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DROPDOWN_MENU, T::DropdownMenu),
+            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_POPUP_MENU, T::PopupMenu),
+            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_MENU, T::Menu),
+            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLTIP, T::Tooltip),
+            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_NOTIFICATION, T::Notification),
+            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_UTILITY, T::Utility),
+            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH, T::Splash),
+            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DND, T::Dnd),
+            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DESKTOP, T::Desktop),
+            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DOCK, T::Dock),
+            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLBAR, T::Toolbar),
+        ];
+        for &(atom, ty) in TABLE {
+            // SAFETY: the handle's lifetime guarantees the surface is live;
+            // `has_window_type` only reads the window's atom list (non-empty
+            // here) and compares against the live `xwm`'s interned atoms.
+            if unsafe { sys::wlr_xwayland_surface_has_window_type(self.raw.as_ptr(), atom) } {
+                return ty;
+            }
+        }
+        XwaylandWindowType::Normal
+    }
+
+    /// A heuristic for whether an override-redirect window wants keyboard focus
+    /// (e.g. a `rofi`/`dmenu`-style launcher or a combo-box list), wrapping
+    /// wlroots' `wlr_xwayland_surface_override_redirect_wants_focus`.
+    ///
+    /// Pure X11 window managers ignore override-redirect windows entirely, but
+    /// some of them (menus that navigate by keyboard) still expect focus. This
+    /// is wlroots' best-effort guess, based on the window type, of which ones a
+    /// compositor should hand the keyboard while they are mapped. Meaningful
+    /// only for [`override_redirect`](Self::override_redirect) surfaces.
+    pub fn override_redirect_wants_focus(&self) -> bool {
+        // SAFETY: the handle's lifetime guarantees the surface is live; this
+        // only reads the window's type to return a bool.
+        unsafe { sys::wlr_xwayland_surface_override_redirect_wants_focus(self.raw.as_ptr()) }
+    }
+
     /// The pid of the X11 client that owns this window, from `_NET_WM_PID`.
     ///
     /// `None` when the client set no pid (the property is optional in X11), in
@@ -299,6 +407,10 @@ mod tests {
             assert!(!s.override_redirect());
             assert!(!s.is_modal());
             assert!(!s.has_surface());
+            // `window_type_len` is 0 on the zeroed surface, so `window_type`
+            // short-circuits to `Normal` without the FFI call that would
+            // dereference the null `xwm` back-pointer.
+            assert_eq!(s.window_type(), super::XwaylandWindowType::Normal);
             assert_eq!(s.id(), XwaylandSurfaceId(7));
         }
     }

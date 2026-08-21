@@ -2363,8 +2363,8 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
             state.xwayland_request_configure(id, geometry)
         }
         #[cfg(wlr_has_xwayland)]
-        Event::XwaylandOverrideRedirectChanged(id, override_redirect) => {
-            state.xwayland_override_redirect_changed(id, override_redirect)
+        Event::XwaylandOverrideRedirectChanged(id, _override_redirect) => {
+            with_xwayland_surface(session, id, |s| state.xwayland_override_redirect_changed(s))
         }
         #[cfg(wlr_has_xwayland)]
         Event::XwaylandRequestMove(id) => state.xwayland_request_move(id),
