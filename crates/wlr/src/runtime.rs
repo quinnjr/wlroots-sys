@@ -571,10 +571,10 @@ pub(crate) struct ToplevelEntry {
 #[cfg(wlr_has_xwayland)]
 pub(crate) struct XwaylandSurfaceEntry {
     pub(crate) raw: NonNull<sys::wlr_xwayland_surface>,
-    /// The scene tree the surface renders through while associated. Stored, not
-    /// dereferenced — its value is its presence, marking the surface as
-    /// on-screen — and never freed here (wlroots frees it with the surface).
-    #[allow(dead_code)]
+    /// The scene tree the surface renders through while associated. Read by
+    /// [`Runtime::set_xwayland_surface_position`]/`_visible`/`raise_xwayland_surface`
+    /// to move, hide or restack what is drawn, but never freed here — wlroots
+    /// owns the subsurface tree and frees it together with the `wlr_surface`.
     pub(crate) tree: std::cell::Cell<Option<NonNull<sys::wlr_scene_tree>>>,
 }
 
@@ -2114,6 +2114,23 @@ impl Runtime {
         Some(())
     }
 
+    /// Raise a rect above its siblings in whatever tree it is parented into —
+    /// the node counterpart of [`raise_toplevel`](Runtime::raise_toplevel), for
+    /// a band-parented decoration rect that has to ride its window's z-order.
+    /// `None` if this runtime never issued `rect`, and (also `None`, raising
+    /// nothing) while a scene walk is live, for the same
+    /// [`raise_toplevel`](Runtime::raise_toplevel) reason.
+    pub fn raise_rect(&self, rect: RectId) -> Option<()> {
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        let raw = self.rect_ptr(rect)?;
+        // SAFETY: as for `set_rect_position` — a resolvable id names a node
+        // wlroots has not destroyed.
+        unsafe { sys::wlr_scene_node_raise_to_top(&raw mut (*raw.as_ptr()).node) };
+        Some(())
+    }
+
     /// Resize a rect. `None` if this runtime never issued `rect`.
     ///
     /// **Known hole, kept for compatibility:** unlike
@@ -2367,6 +2384,66 @@ impl Runtime {
         Some(id)
     }
 
+    /// Add a pixel buffer parented into `band`'s own scene tree, the buffer
+    /// counterpart of [`add_rect_in_band`](Runtime::add_rect_in_band). Like a
+    /// band rect — and unlike [`add_buffer_in_toplevel`](Runtime::add_buffer_in_toplevel) —
+    /// it is a sibling of every toplevel/xwayland/layer-surface tree in that
+    /// band, so it stacks *with* them, and it is **never** purged by a toplevel
+    /// dying: only [`remove_buffer`](Runtime::remove_buffer) or tearing down the
+    /// scene destroys it (its `parent` is recorded as `None`, exactly as a root
+    /// buffer's is, since neither is a descendant of any single toplevel).
+    ///
+    /// This is what lets a compositor paint server-side decorations for an X11
+    /// window, whose scene node lives directly in [`Band::Toplevel`] rather than
+    /// in a per-toplevel tree.
+    ///
+    /// Coordinates given to [`set_buffer_position`](Runtime::set_buffer_position)
+    /// afterward are relative to the band tree's own origin, which for every
+    /// band is the scene root's origin.
+    ///
+    /// `None` on any of [`add_buffer`](Runtime::add_buffer)'s error conditions
+    /// (wrong pixel length, a non-positive or overflow-prone dimension, no
+    /// graphics yet, or wlroots refusing the node), and refused (also `None`)
+    /// while a scene walk is live, for the identical reason
+    /// [`add_buffer_in_toplevel`](Runtime::add_buffer_in_toplevel) is.
+    pub fn add_buffer_in_band(
+        &self,
+        band: Band,
+        width: i32,
+        height: i32,
+        rgba: &[u8],
+    ) -> Option<BufferId> {
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        if !crate::buffer::validate_pixels(width, height, rgba.len()) {
+            return None;
+        }
+        let band_tree = self.band_ptr(band)?;
+        let buf = create_pixel_buffer(width, height, rgba);
+        // SAFETY: the band tree is created by `init_graphics` and lives for the
+        // whole scene's life; the `wlr_buffer_drop` pairing is identical to
+        // `add_buffer`'s — see that method's own comment and `buffer.rs`.
+        let node = unsafe { sys::wlr_scene_buffer_create(band_tree.as_ptr(), buf) };
+        // SAFETY: as for `add_buffer`.
+        unsafe { sys::wlr_buffer_drop(buf) };
+        let node = NonNull::new(node)?;
+        let id = BufferId(next_id());
+        self.inner
+            .buffers
+            .borrow_mut()
+            .insert(id, BufferEntry { node, parent: None });
+        // SAFETY: as in `add_rect` — a freshly created, live node.
+        unsafe {
+            self.record_node(
+                &raw mut (*node.as_ptr()).node,
+                NodeOrigin::Owned,
+                Some(LegacyId::Buffer(id)),
+            );
+        }
+        Some(id)
+    }
+
     /// Replace a buffer node's pixels (and intrinsic size) with a fresh
     /// copy, in the same RGBA shape [`add_buffer`](Runtime::add_buffer)
     /// takes.
@@ -2427,6 +2504,21 @@ impl Runtime {
         let node = self.buffer_ptr(buffer)?;
         // SAFETY: as for `update_buffer`.
         unsafe { sys::wlr_scene_node_set_position(&raw mut (*node.as_ptr()).node, x, y) };
+        Some(())
+    }
+
+    /// Raise a buffer node above its siblings — the buffer counterpart of
+    /// [`raise_rect`](Runtime::raise_rect), for a band-parented decoration
+    /// glyph/title buffer that has to ride its window's z-order. `None` if this
+    /// runtime never issued `buffer`, and (also `None`) while a scene walk is
+    /// live.
+    pub fn raise_buffer(&self, buffer: BufferId) -> Option<()> {
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        let node = self.buffer_ptr(buffer)?;
+        // SAFETY: as for `set_buffer_position`.
+        unsafe { sys::wlr_scene_node_raise_to_top(&raw mut (*node.as_ptr()).node) };
         Some(())
     }
 
@@ -5571,6 +5663,124 @@ impl Runtime {
         // `sibling_ptr` is either null or another live surface from this same
         // table, and wlroots accepts null to mean "top/bottom of the stack".
         unsafe { sys::wlr_xwayland_surface_restack(raw.as_ptr(), sibling_ptr, mode) };
+    }
+
+    /// The scene tree the Xwayland surface `id` renders through, or `None` if
+    /// this runtime knows no such surface or it has no associated surface yet
+    /// (the tree is set on `associate`, cleared on `unassociate`). The `Cell`
+    /// borrow is released before returning, so the caller may re-enter wlroots.
+    #[cfg(wlr_has_xwayland)]
+    pub(crate) fn xwayland_surface_tree_ptr(
+        &self,
+        id: XwaylandSurfaceId,
+    ) -> Option<NonNull<sys::wlr_scene_tree>> {
+        self.inner
+            .xwayland_surfaces
+            .borrow()
+            .get(&id)
+            .and_then(|e| e.tree.get())
+    }
+
+    /// Move the Xwayland surface `id`'s scene node. Coordinates are the scene's,
+    /// which for a single output at the layout origin are the output's own —
+    /// the same space [`set_toplevel_position`](Runtime::set_toplevel_position)
+    /// works in. This is a compositor-side move of what is drawn; the X11 client
+    /// is told its own geometry separately, via
+    /// [`configure_xwayland_surface`](Runtime::configure_xwayland_surface). A
+    /// miss (unknown id, or no associated surface yet) is a no-op.
+    #[cfg(wlr_has_xwayland)]
+    pub fn set_xwayland_surface_position(&self, id: XwaylandSurfaceId, x: i32, y: i32) {
+        let Some(tree) = self.xwayland_surface_tree_ptr(id) else {
+            return;
+        };
+        // SAFETY: the tree is the surface's scene node, created on `associate`
+        // and cleared from the entry on `unassociate` before wlroots frees it,
+        // so a present pointer names a live node.
+        unsafe { sys::wlr_scene_node_set_position(&raw mut (*tree.as_ptr()).node, x, y) };
+    }
+
+    /// Show or hide the Xwayland surface `id`'s scene node — hiding, not
+    /// unmapping, the same distinction
+    /// [`set_toplevel_visible`](Runtime::set_toplevel_visible) draws: a window
+    /// on an inactive workspace keeps its buffer and is simply not drawn. A
+    /// miss is a no-op.
+    #[cfg(wlr_has_xwayland)]
+    pub fn set_xwayland_surface_visible(&self, id: XwaylandSurfaceId, visible: bool) {
+        let Some(tree) = self.xwayland_surface_tree_ptr(id) else {
+            return;
+        };
+        // SAFETY: as for `set_xwayland_surface_position`.
+        unsafe { sys::wlr_scene_node_set_enabled(&raw mut (*tree.as_ptr()).node, visible) };
+    }
+
+    /// Raise the Xwayland surface `id`'s scene node above its siblings in the
+    /// toplevel band — the X11 counterpart of
+    /// [`raise_toplevel`](Runtime::raise_toplevel), and, like it, refused while
+    /// a scene walk is live (wlroots iterates the band with the non-`_safe`
+    /// `wl_list_for_each`, so unlinking and reinserting a node mid-walk would
+    /// silently truncate the iteration). A miss is a no-op.
+    #[cfg(wlr_has_xwayland)]
+    pub fn raise_xwayland_surface(&self, id: XwaylandSurfaceId) {
+        if self.scene_is_being_walked() {
+            return;
+        }
+        let Some(tree) = self.xwayland_surface_tree_ptr(id) else {
+            return;
+        };
+        // SAFETY: as for `set_xwayland_surface_position`.
+        unsafe { sys::wlr_scene_node_raise_to_top(&raw mut (*tree.as_ptr()).node) };
+    }
+
+    /// Point the seat's keyboard at the Xwayland surface `id` names — the X11
+    /// counterpart of [`focus_toplevel_keyboard`](Runtime::focus_toplevel_keyboard),
+    /// and subject to the same lock gate: while the session is locked no normal
+    /// surface may take keyboard focus, so this returns `None`. Also `None` for
+    /// an unknown id, a surface with no `wlr_surface` yet, or one whose surface
+    /// is not mapped. The paired X11 focus-in/out is sent separately by
+    /// [`activate_xwayland_surface`](Runtime::activate_xwayland_surface).
+    #[cfg(wlr_has_xwayland)]
+    pub fn focus_xwayland_surface_keyboard(&self, id: XwaylandSurfaceId) -> Option<()> {
+        // Input isolation while locked — see `focus_toplevel_keyboard`.
+        if self.is_session_locked() {
+            return None;
+        }
+        let seat = (*self.inner.seat.borrow())?;
+        let xsurface = self.xwayland_surface_ptr(id)?;
+        // SAFETY: a present entry names a live surface (its destroy listener
+        // removes the entry before wlroots frees it). `surface` is null until
+        // `associate`; the enter call tolerates a null keyboard by taking no
+        // keycodes.
+        unsafe {
+            let surface = (*xsurface.as_ptr()).surface;
+            if surface.is_null() {
+                return None;
+            }
+            if !(*surface).mapped {
+                return None;
+            }
+            if (*seat.as_ptr()).keyboard_state.focused_surface == surface {
+                return Some(());
+            }
+            let kb = sys::wlr_seat_get_keyboard(seat.as_ptr());
+            if kb.is_null() {
+                sys::wlr_seat_keyboard_notify_enter(
+                    seat.as_ptr(),
+                    surface,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                );
+            } else {
+                sys::wlr_seat_keyboard_notify_enter(
+                    seat.as_ptr(),
+                    surface,
+                    (*kb).keycodes.as_ptr(),
+                    (*kb).num_keycodes,
+                    &raw mut (*kb).modifiers,
+                );
+            }
+        }
+        Some(())
     }
 
     /// Drop every Xwayland surface this runtime knows of, without touching

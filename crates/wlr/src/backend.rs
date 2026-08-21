@@ -958,6 +958,12 @@ struct XwaylandSurfaceListeners {
     _set_title: Registration,
     _set_class: Registration,
     _request_configure: Registration,
+    _request_move: Registration,
+    _request_resize: Registration,
+    _request_maximize: Registration,
+    _request_fullscreen: Registration,
+    _request_minimize: Registration,
+    _request_activate: Registration,
     _set_override_redirect: Registration,
     /// The content surface's `map`, linked on `associate`, dropped on
     /// `dissociate`. `None` while the window has no associated surface.
@@ -2360,6 +2366,24 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         Event::XwaylandOverrideRedirectChanged(id, override_redirect) => {
             state.xwayland_override_redirect_changed(id, override_redirect)
         }
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandRequestMove(id) => state.xwayland_request_move(id),
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandRequestResize(id, edges) => state.xwayland_request_resize(id, edges),
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandRequestMaximize(id, maximized) => {
+            state.xwayland_request_maximize(id, maximized)
+        }
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandRequestFullscreen(id, fullscreen) => {
+            state.xwayland_request_fullscreen(id, fullscreen)
+        }
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandRequestMinimize(id, minimized) => {
+            state.xwayland_request_minimize(id, minimized)
+        }
+        #[cfg(wlr_has_xwayland)]
+        Event::XwaylandRequestActivate(id) => state.xwayland_request_activate(id),
     }
 }
 
@@ -2517,6 +2541,42 @@ unsafe extern "C" fn on_new_xwayland_surface<S: Handlers>(
             (*bound).session,
             id,
         );
+        let request_move = Registration::link_xwayland(
+            &raw mut (*xsurface).events.request_move,
+            on_xwayland_surface_request_move::<S>,
+            (*bound).session,
+            id,
+        );
+        let request_resize = Registration::link_xwayland(
+            &raw mut (*xsurface).events.request_resize,
+            on_xwayland_surface_request_resize::<S>,
+            (*bound).session,
+            id,
+        );
+        let request_maximize = Registration::link_xwayland(
+            &raw mut (*xsurface).events.request_maximize,
+            on_xwayland_surface_request_maximize::<S>,
+            (*bound).session,
+            id,
+        );
+        let request_fullscreen = Registration::link_xwayland(
+            &raw mut (*xsurface).events.request_fullscreen,
+            on_xwayland_surface_request_fullscreen::<S>,
+            (*bound).session,
+            id,
+        );
+        let request_minimize = Registration::link_xwayland(
+            &raw mut (*xsurface).events.request_minimize,
+            on_xwayland_surface_request_minimize::<S>,
+            (*bound).session,
+            id,
+        );
+        let request_activate = Registration::link_xwayland(
+            &raw mut (*xsurface).events.request_activate,
+            on_xwayland_surface_request_activate::<S>,
+            (*bound).session,
+            id,
+        );
         let set_override_redirect = Registration::link_xwayland(
             &raw mut (*xsurface).events.set_override_redirect,
             on_xwayland_surface_set_override_redirect::<S>,
@@ -2533,6 +2593,12 @@ unsafe extern "C" fn on_new_xwayland_surface<S: Handlers>(
                 _set_title: set_title,
                 _set_class: set_class,
                 _request_configure: request_configure,
+                _request_move: request_move,
+                _request_resize: request_resize,
+                _request_maximize: request_maximize,
+                _request_fullscreen: request_fullscreen,
+                _request_minimize: request_minimize,
+                _request_activate: request_activate,
                 _set_override_redirect: set_override_redirect,
                 _map: None,
                 _unmap: None,
@@ -2782,6 +2848,159 @@ unsafe extern "C" fn on_xwayland_surface_request_configure<S: Handlers>(
             Event::XwaylandRequestConfigure(id, geometry),
             deliver,
         );
+    }
+}
+
+/// The X11 client asked to begin an interactive move (`_NET_WM_MOVERESIZE`).
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_request_move<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_xwayland_surface` into `events.request_move`;
+    // identity from `Bound::xwayland`. The move event carries only the surface,
+    // which the id already names.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::XwaylandRequestMove(id), deliver);
+    }
+}
+
+/// The X11 client asked to begin an interactive resize. The dragged edges ride
+/// in the event, read at emission time.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_request_resize<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_xwayland_surface` into `events.request_resize`;
+    // identity from `Bound::xwayland`. `data` is a live
+    // `wlr_xwayland_resize_event` for the duration of the emission; its `edges`
+    // is a `wlr_edges` bitmask with the same bit assignments as xdg-shell's.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+        let ev = data.cast::<sys::wlr_xwayland_resize_event>();
+        let edges = if ev.is_null() {
+            crate::Edges::default()
+        } else {
+            crate::Edges::from_xdg((*ev).edges)
+        };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::XwaylandRequestResize(id, edges), deliver);
+    }
+}
+
+/// The X11 client asked to (un)maximize itself. The requested state is read
+/// from the window's `maximized_horz`/`maximized_vert` fields, which wlroots
+/// has already updated by the time this fires.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_request_maximize<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_xwayland_surface` into `events.request_maximize`;
+    // identity from `Bound::xwayland`. The window is live, so reading its
+    // maximized flags is sound.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+        let Some(xsurface) = (*session).runtime.xwayland_surface_ptr(id) else {
+            return;
+        };
+        // The WM maximizes on both axes together; treat "either axis set" as
+        // the requested-maximized state, mirroring how
+        // `Runtime::set_xwayland_surface_maximized` sets both.
+        let maximized = (*xsurface.as_ptr()).maximized_horz || (*xsurface.as_ptr()).maximized_vert;
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::XwaylandRequestMaximize(id, maximized),
+            deliver,
+        );
+    }
+}
+
+/// The X11 client asked to enter or leave fullscreen. The requested state is
+/// read from the window's `fullscreen` field.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_request_fullscreen<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_xwayland_surface` into
+    // `events.request_fullscreen`; identity from `Bound::xwayland`. The window
+    // is live, so reading its `fullscreen` field is sound.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+        let Some(xsurface) = (*session).runtime.xwayland_surface_ptr(id) else {
+            return;
+        };
+        let fullscreen = (*xsurface.as_ptr()).fullscreen;
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::XwaylandRequestFullscreen(id, fullscreen),
+            deliver,
+        );
+    }
+}
+
+/// The X11 client asked to (un)minimize itself. The requested state rides in
+/// the `wlr_xwayland_minimize_event`.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_request_minimize<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_xwayland_surface` into `events.request_minimize`;
+    // identity from `Bound::xwayland`. `data` is a live
+    // `wlr_xwayland_minimize_event` for the duration of the emission.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+        let ev = data.cast::<sys::wlr_xwayland_minimize_event>();
+        // A null event is treated as "minimize" — the request happened, and the
+        // only field it carries is the direction; defaulting to hide is the
+        // safe reading if wlroots ever emits it without a payload.
+        let minimized = ev.is_null() || (*ev).minimize;
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::XwaylandRequestMinimize(id, minimized),
+            deliver,
+        );
+    }
+}
+
+/// The X11 client asked to be activated (`_NET_ACTIVE_WINDOW`).
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_request_activate<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_xwayland_surface` into `events.request_activate`;
+    // identity from `Bound::xwayland`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::XwaylandRequestActivate(id), deliver);
     }
 }
 
@@ -6518,6 +6737,12 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::XwaylandTitleChanged(..)
         | Event::XwaylandClassChanged(..)
         | Event::XwaylandRequestConfigure(..)
+        | Event::XwaylandRequestMove(..)
+        | Event::XwaylandRequestResize(..)
+        | Event::XwaylandRequestMaximize(..)
+        | Event::XwaylandRequestFullscreen(..)
+        | Event::XwaylandRequestMinimize(..)
+        | Event::XwaylandRequestActivate(..)
         | Event::XwaylandOverrideRedirectChanged(..) => {}
     }
 }

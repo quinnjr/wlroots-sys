@@ -698,6 +698,62 @@ pub trait ToplevelHandler {
         let _ = (id, geometry);
     }
 
+    /// The client asked to begin an interactive move — the X11 counterpart of
+    /// [`request_move`](ToplevelHandler::request_move), carried by
+    /// `_NET_WM_MOVERESIZE`. The compositor drives the same interactive-move
+    /// grab it uses for xdg toplevels, writing the result back through
+    /// [`Runtime::configure_xwayland_surface`](crate::Runtime::configure_xwayland_surface).
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_request_move(&mut self, id: XwaylandSurfaceId) {
+        let _ = id;
+    }
+
+    /// The client asked to begin an interactive resize — the X11 counterpart
+    /// of [`request_resize`](ToplevelHandler::request_resize), carried by
+    /// `_NET_WM_MOVERESIZE`. `edges` names the edge or corner being dragged.
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_request_resize(&mut self, id: XwaylandSurfaceId, edges: Edges) {
+        let _ = (id, edges);
+    }
+
+    /// The client asked to (un)maximize itself, by changing
+    /// `_NET_WM_STATE_MAXIMIZED_{HORZ,VERT}`. `maximized` is the requested
+    /// state, read from the window at emission time. The X11 counterpart of
+    /// [`request_maximize`](ToplevelHandler::request_maximize); the compositor
+    /// reflects the decision back with
+    /// [`Runtime::set_xwayland_surface_maximized`](crate::Runtime::set_xwayland_surface_maximized).
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_request_maximize(&mut self, id: XwaylandSurfaceId, maximized: bool) {
+        let _ = (id, maximized);
+    }
+
+    /// The client asked to enter or leave fullscreen, by changing
+    /// `_NET_WM_STATE_FULLSCREEN`. `fullscreen` is the requested state, read
+    /// from the window at emission time. The X11 counterpart of
+    /// [`request_fullscreen`](ToplevelHandler::request_fullscreen).
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_request_fullscreen(&mut self, id: XwaylandSurfaceId, fullscreen: bool) {
+        let _ = (id, fullscreen);
+    }
+
+    /// The client asked to (un)minimize itself. `minimized` is the requested
+    /// state, carried inline by the X11 `wlr_xwayland_minimize_event`. The
+    /// compositor reflects the decision back with
+    /// [`Runtime::set_xwayland_surface_minimized`](crate::Runtime::set_xwayland_surface_minimized).
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_request_minimize(&mut self, id: XwaylandSurfaceId, minimized: bool) {
+        let _ = (id, minimized);
+    }
+
+    /// The client asked to be activated (`_NET_ACTIVE_WINDOW`) — a focus-steal
+    /// request. The X11 counterpart of the xdg-activation path; A1 policy is
+    /// honour-or-mark-urgent, so a compositor may focus the window or merely
+    /// flag it for attention.
+    #[cfg(wlr_has_xwayland)]
+    fn xwayland_request_activate(&mut self, id: XwaylandSurfaceId) {
+        let _ = id;
+    }
+
     /// A surface flipped its override-redirect flag at runtime.
     /// `override_redirect` is the new value. The compositor must migrate the
     /// surface between the managed-window model (`false`) and the unmanaged

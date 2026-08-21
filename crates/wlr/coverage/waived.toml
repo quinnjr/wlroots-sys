@@ -5035,12 +5035,6 @@ note      = "Xwayland, feature-gated."
 milestone = "M12"
 
 [[waived]]
-symbol    = "wlr_xwayland_minimize_event"
-reason    = "not-yet"
-note      = "Xwayland, feature-gated."
-milestone = "M12"
-
-[[waived]]
 symbol    = "wlr_xwayland_net_wm_window_type"
 reason    = "not-yet"
 note      = "Xwayland, feature-gated."
@@ -5048,12 +5042,6 @@ milestone = "M12"
 
 [[waived]]
 symbol    = "wlr_xwayland_remove_startup_info_event"
-reason    = "not-yet"
-note      = "Xwayland, feature-gated."
-milestone = "M12"
-
-[[waived]]
-symbol    = "wlr_xwayland_resize_event"
 reason    = "not-yet"
 note      = "Xwayland, feature-gated."
 milestone = "M12"

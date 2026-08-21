@@ -220,6 +220,28 @@ pub(crate) enum Event {
     /// x/y/w/h inline), so a deferred delivery still reports what was asked.
     #[cfg(wlr_has_xwayland)]
     XwaylandRequestConfigure(XwaylandSurfaceId, Box2D),
+    /// The X11 client asked to begin an interactive move (`_NET_WM_MOVERESIZE`).
+    #[cfg(wlr_has_xwayland)]
+    XwaylandRequestMove(XwaylandSurfaceId),
+    /// The X11 client asked to begin an interactive resize; the [`Edges`] name
+    /// the edge or corner being dragged.
+    #[cfg(wlr_has_xwayland)]
+    XwaylandRequestResize(XwaylandSurfaceId, crate::Edges),
+    /// The X11 client asked to (un)maximize itself; the bool is the requested
+    /// state, read from the window at emission time.
+    #[cfg(wlr_has_xwayland)]
+    XwaylandRequestMaximize(XwaylandSurfaceId, bool),
+    /// The X11 client asked to enter or leave fullscreen; the bool is the
+    /// requested state, read from the window at emission time.
+    #[cfg(wlr_has_xwayland)]
+    XwaylandRequestFullscreen(XwaylandSurfaceId, bool),
+    /// The X11 client asked to (un)minimize itself; the bool is carried inline
+    /// by the X11 minimize event.
+    #[cfg(wlr_has_xwayland)]
+    XwaylandRequestMinimize(XwaylandSurfaceId, bool),
+    /// The X11 client asked to be activated (`_NET_ACTIVE_WINDOW`).
+    #[cfg(wlr_has_xwayland)]
+    XwaylandRequestActivate(XwaylandSurfaceId),
     /// The window flipped its override-redirect flag. The bool is the new
     /// value, read at emission time.
     #[cfg(wlr_has_xwayland)]

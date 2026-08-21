@@ -1979,6 +1979,16 @@ module = "backend"
 item   = "ToplevelHandler::xwayland_request_configure"
 
 [[wrapped]]
+symbol = "wlr_xwayland_resize_event"
+module = "backend"
+item   = "ToplevelHandler::xwayland_request_resize"
+
+[[wrapped]]
+symbol = "wlr_xwayland_minimize_event"
+module = "backend"
+item   = "ToplevelHandler::xwayland_request_minimize"
+
+[[wrapped]]
 symbol = "wlr_xwayland_surface_restack"
 module = "runtime"
 item   = "Runtime::restack_xwayland_surface"
