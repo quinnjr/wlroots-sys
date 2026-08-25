@@ -970,6 +970,19 @@ struct XwaylandSurfaceListeners {
     _map: Option<Registration>,
     /// The content surface's `unmap`, paired with `_map`.
     _unmap: Option<Registration>,
+    /// The content surface's `commit`, linked on `associate`, dropped on
+    /// `dissociate`. Exists only to keep the output frame clock alive across an
+    /// xwayland window's map handshake: an xwayland surface renders its first
+    /// buffer only once its initial bufferless commit's `wl_surface.frame`
+    /// callback is answered, and that callback is delivered from an output
+    /// commit driven by a scheduled frame. On an undamaged headless output
+    /// nothing re-arms that frame after boot, so under CPU contention the
+    /// callback can starve and the window hangs unmapped. This listener
+    /// schedules a frame on each pre-map commit — bounded to the one or two
+    /// commits of the handshake (Xwayland's own commits drive it, not the
+    /// compositor, so it never busy-loops), and self-limiting: it does nothing
+    /// once the surface is mapped.
+    _commit: Option<Registration>,
 }
 
 /// Clears `Runtime`'s layer-surface table when the `run_inner` call holding
@@ -2602,6 +2615,7 @@ unsafe extern "C" fn on_new_xwayland_surface<S: Handlers>(
                 _set_override_redirect: set_override_redirect,
                 _map: None,
                 _unmap: None,
+                _commit: None,
             },
         );
         drop(displaced);
@@ -2654,9 +2668,16 @@ unsafe extern "C" fn on_xwayland_surface_associate<S: Handlers>(
             (*bound).session,
             id,
         );
+        let commit = Registration::link_xwayland(
+            &raw mut (*surface).events.commit,
+            on_xwayland_surface_commit::<S>,
+            (*bound).session,
+            id,
+        );
         if let Some(entry) = (*session).xwayland_surfaces.borrow_mut().get_mut(&id) {
             entry._map = Some(map);
             entry._unmap = Some(unmap);
+            entry._commit = Some(commit);
         }
 
         // Build the scene node so the surface renders. Parented into the
@@ -2675,6 +2696,25 @@ unsafe extern "C" fn on_xwayland_surface_associate<S: Handlers>(
         (*session)
             .dispatcher
             .emit(&*session, Event::XwaylandSurfaceAssociate(id), deliver);
+
+        // Recover a buffer that was committed *before* this association ran.
+        // wlroots' xwm maps an xwayland surface only from its `surface.commit`
+        // handler (when the surface first has a buffer); it does not map from
+        // the associate path itself. But the X11 `WL_SURFACE_ID` message and the
+        // Wayland `wl_compositor.create_surface`/first commit travel on separate
+        // sockets and can be processed out of order (wlroots documents this race
+        // in `xwm_handle_surface_id_message`). When the buffer commit wins that
+        // race, the surface already holds a buffer by the time we associate, the
+        // map signal has already fired with no listener attached, and — because
+        // a static client sends no further commit — the window would otherwise
+        // hang unmapped forever. Mirror wlroots' own commit handler here: if the
+        // surface is buffered but not yet mapped, map it now so `events.map`
+        // fires (into the listener wired just above) exactly as a post-associate
+        // commit would have. Under CPU contention this was the cause of the
+        // intermittent "the X11 window never entered the model" e2e hangs.
+        if !(*surface).mapped && sys::wlr_surface_has_buffer(surface) {
+            sys::wlr_surface_map(surface);
+        }
     }
 }
 
@@ -2700,6 +2740,7 @@ unsafe extern "C" fn on_xwayland_surface_dissociate<S: Handlers>(
         if let Some(entry) = (*session).xwayland_surfaces.borrow_mut().get_mut(&id) {
             entry._map = None;
             entry._unmap = None;
+            entry._commit = None;
         }
         (*session).runtime.set_xwayland_surface_tree(id, None);
 
@@ -2707,6 +2748,33 @@ unsafe extern "C" fn on_xwayland_surface_dissociate<S: Handlers>(
         (*session)
             .dispatcher
             .emit(&*session, Event::XwaylandSurfaceUnassociate(id), deliver);
+    }
+}
+
+/// A pre-map commit on an associated xwayland content surface. Keeps the output
+/// frame clock alive across the map handshake — see the `_commit` field's doc.
+/// Once the surface is mapped this is a no-op, so it costs a scheduled frame
+/// only for the one or two commits before the first buffer arrives.
+#[cfg(wlr_has_xwayland)]
+unsafe extern "C" fn on_xwayland_surface_commit<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_xwayland_surface_associate` into the content
+    // surface's `events.commit` (null `data`); identity from `Bound::xwayland`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).xwayland else { return };
+        let runtime = (*session).runtime;
+        // Only while the surface is still pre-map: a mapped surface already
+        // damages the scene, which schedules frames on its own.
+        if let Some(xs) = runtime.xwayland_surface_ptr(id) {
+            let surface = (*xs.as_ptr()).surface;
+            if !surface.is_null() && !(*surface).mapped {
+                runtime.schedule_frame_all();
+            }
+        }
     }
 }
 

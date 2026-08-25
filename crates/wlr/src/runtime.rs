@@ -1775,6 +1775,25 @@ impl Runtime {
         Some(())
     }
 
+    /// Schedule a frame on every live output, returning how many were kicked.
+    ///
+    /// The [`schedule_frame`](Runtime::schedule_frame) sibling for the case
+    /// where the caller has no particular output in mind and wants the frame
+    /// clock advanced everywhere — used to flush pending `wl_surface.frame`
+    /// callbacks that would otherwise starve on an undamaged, headless output
+    /// (an xwayland window renders its first buffer only once its initial
+    /// bufferless commit's frame callback is answered).
+    pub fn schedule_frame_all(&self) -> usize {
+        let outputs = self.inner.outputs.borrow();
+        for raw in outputs.values() {
+            // SAFETY: as `schedule_frame` — every value in `outputs` names a
+            // live wlr_output (removed synchronously by `forget_output` before
+            // wlroots frees it); the call only marks the output for a frame.
+            unsafe { sys::wlr_output_schedule_frame(raw.as_ptr()) };
+        }
+        outputs.len()
+    }
+
     /// Add a solid-colour rect to the scene, at the root, in RGBA where each
     /// channel is 0.0–1.0 and the colour is premultiplied.
     ///
