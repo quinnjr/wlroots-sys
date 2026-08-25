@@ -297,14 +297,18 @@ impl<'h> Output<'h> {
         // iterator is outstanding — each entry is copied into an owned
         // `Mode` and the raw pointer is never retained past this loop body.
         unsafe {
-            sys::wl_list_for_each!(&raw mut (*self.raw.as_ptr()).modes, sys::wlr_output_mode, link)
-                .map(|mode| Mode {
-                    width: (*mode).width,
-                    height: (*mode).height,
-                    refresh_mhz: (*mode).refresh,
-                    preferred: (*mode).preferred,
-                })
-                .collect()
+            sys::wl_list_for_each!(
+                &raw mut (*self.raw.as_ptr()).modes,
+                sys::wlr_output_mode,
+                link
+            )
+            .map(|mode| Mode {
+                width: (*mode).width,
+                height: (*mode).height,
+                refresh_mhz: (*mode).refresh,
+                preferred: (*mode).preferred,
+            })
+            .collect()
         }
     }
 
@@ -629,7 +633,10 @@ mod tests {
             (*mode).height = 1080;
             (*mode).refresh = 60_000;
             (*mode).preferred = true;
-            sys::wayland_sys::server::wl_list_insert(&raw mut (*output.0).modes, &raw mut (*mode).link);
+            sys::wayland_sys::server::wl_list_insert(
+                &raw mut (*output.0).modes,
+                &raw mut (*mode).link,
+            );
         }
 
         // SAFETY: `output.0` is live and its `modes` list is initialised and

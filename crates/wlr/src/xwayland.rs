@@ -244,11 +244,20 @@ impl<'h> XwaylandSurface<'h> {
         const TABLE: &[(Atom, T)] = &[
             (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DIALOG, T::Dialog),
             (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_COMBO, T::Combo),
-            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DROPDOWN_MENU, T::DropdownMenu),
-            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_POPUP_MENU, T::PopupMenu),
+            (
+                Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DROPDOWN_MENU,
+                T::DropdownMenu,
+            ),
+            (
+                Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_POPUP_MENU,
+                T::PopupMenu,
+            ),
             (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_MENU, T::Menu),
             (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_TOOLTIP, T::Tooltip),
-            (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_NOTIFICATION, T::Notification),
+            (
+                Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_NOTIFICATION,
+                T::Notification,
+            ),
             (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_UTILITY, T::Utility),
             (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_SPLASH, T::Splash),
             (Atom::WLR_XWAYLAND_NET_WM_WINDOW_TYPE_DND, T::Dnd),
@@ -443,8 +452,9 @@ mod tests {
 
     #[test]
     fn nth_for_test_is_distinguishable_by_n() {
-        let ids: Vec<XwaylandSurfaceId> =
-            (1..=8).map(XwaylandSurfaceId::dangling_nth_for_test).collect();
+        let ids: Vec<XwaylandSurfaceId> = (1..=8)
+            .map(XwaylandSurfaceId::dangling_nth_for_test)
+            .collect();
         for i in 0..ids.len() {
             for j in 0..ids.len() {
                 assert_eq!(i == j, ids[i] == ids[j]);

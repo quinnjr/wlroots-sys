@@ -44,9 +44,9 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
-use crate::{DecorationMode, Edges, LayerSurfaceId, NodeId, OutputId, SceneOutputId, ToplevelId};
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
+use crate::{DecorationMode, Edges, LayerSurfaceId, NodeId, OutputId, SceneOutputId, ToplevelId};
 
 /// An event awaiting delivery.
 ///

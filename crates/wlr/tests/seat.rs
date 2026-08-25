@@ -380,7 +380,9 @@ fn creating_the_single_pixel_buffer_manager_twice_is_refused() {
 fn creating_the_content_type_manager_twice_is_refused() {
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
-    runtime.create_content_type_manager(&display).expect("first");
+    runtime
+        .create_content_type_manager(&display)
+        .expect("first");
     assert!(
         matches!(
             runtime.create_content_type_manager(&display),
@@ -412,9 +414,7 @@ fn creating_the_xdg_output_manager_twice_is_refused() {
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime.init_graphics(&display, &backend).expect("graphics");
-    runtime
-        .create_xdg_output_manager(&display)
-        .expect("first");
+    runtime.create_xdg_output_manager(&display).expect("first");
     assert!(
         matches!(
             runtime.create_xdg_output_manager(&display),

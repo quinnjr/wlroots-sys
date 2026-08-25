@@ -2334,7 +2334,11 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
             // this marker (see `Session::applied_heads`). `unwrap_or_default`
             // rather than `unwrap`: this runs under an `extern "C"` frame where
             // a panic aborts, and an empty configuration is harmless.
-            let heads = session.applied_heads.borrow_mut().pop_front().unwrap_or_default();
+            let heads = session
+                .applied_heads
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or_default();
             state.output_configuration_applied(heads);
         }
         // The `DISPLAY` name is a `String` that cannot ride in the `Copy`/`Eq`
@@ -7237,7 +7241,7 @@ mod tests {
                 #[cfg(wlr_has_xwayland)]
                 xwayland_surfaces: RefCell::new(HashMap::new()),
                 last_key_consumed: Cell::new(false),
-            applied_heads: RefCell::new(VecDeque::new()),
+                applied_heads: RefCell::new(VecDeque::new()),
                 runtime: &runtime,
                 deliver: deliver::<Recorder>,
             };
@@ -7555,8 +7559,7 @@ mod tests {
                     (*head).state.custom_mode.height = 0;
                     // `wlr_output_state_set_scale` asserts scale > 0.
                     (*head).state.scale = 1.0;
-                    (*head).state.transform =
-                        sys::wl_output_transform::WL_OUTPUT_TRANSFORM_NORMAL;
+                    (*head).state.transform = sys::wl_output_transform::WL_OUTPUT_TRANSFORM_NORMAL;
                 },
                 |session, p| {
                     assert!(

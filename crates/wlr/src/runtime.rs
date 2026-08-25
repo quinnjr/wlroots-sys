@@ -33,6 +33,8 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
+#[cfg(wlr_has_xwayland)]
+use crate::XwaylandSurfaceId;
 use crate::buffer::create_pixel_buffer;
 use crate::decoration::{DecorationEntry, DecorationMode};
 use crate::id::{SourceId, next_id};
@@ -48,8 +50,6 @@ use crate::{
     Output, OutputId, RectId, Region, RendererRef, Result, ToplevelId, Transform, sys,
 };
 use crate::{ColorEncoding, ColorRange, FilterMode, NamedPrimaries, TransferFunction};
-#[cfg(wlr_has_xwayland)]
-use crate::XwaylandSurfaceId;
 
 /// A declared fd source: the descriptor, what it wants, and its id.
 ///
@@ -5145,8 +5145,8 @@ impl Runtime {
         }
         // SAFETY: as `create_viewporter`.
         let raw = unsafe { sys::wlr_single_pixel_buffer_manager_v1_create(display.as_ptr()) };
-        let raw = NonNull::new(raw)
-            .ok_or(Error::Create("wlr_single_pixel_buffer_manager_v1_create"))?;
+        let raw =
+            NonNull::new(raw).ok_or(Error::Create("wlr_single_pixel_buffer_manager_v1_create"))?;
         *self.inner.single_pixel_buffer_manager.borrow_mut() = Some(raw);
         Ok(())
     }
@@ -5187,14 +5187,21 @@ impl Runtime {
         // can re-enter this crate, but holding a `RefCell` borrow across an
         // FFI call this crate does not control is the one habit worth never
         // forming.
-        let layout = self.inner.graphics.borrow().as_ref().map(|g| g.layout).ok_or(
-            Error::Operation("Runtime::create_xdg_output_manager before init_graphics"),
-        )?;
+        let layout = self
+            .inner
+            .graphics
+            .borrow()
+            .as_ref()
+            .map(|g| g.layout)
+            .ok_or(Error::Operation(
+                "Runtime::create_xdg_output_manager before init_graphics",
+            ))?;
         // SAFETY: `display` is live for the call; `layout` is this runtime's
         // own, created by `init_graphics` and never freed by this crate (see
         // [`Graphics`]'s own doc). The returned manager is owned by the
         // display and destroyed with it, so this crate never frees it.
-        let raw = unsafe { sys::wlr_xdg_output_manager_v1_create(display.as_ptr(), layout.as_ptr()) };
+        let raw =
+            unsafe { sys::wlr_xdg_output_manager_v1_create(display.as_ptr(), layout.as_ptr()) };
         let raw = NonNull::new(raw).ok_or(Error::Create("wlr_xdg_output_manager_v1_create"))?;
         *self.inner.xdg_output_manager.borrow_mut() = Some(raw);
         Ok(())
@@ -5676,13 +5683,9 @@ impl Runtime {
         if self.inner.xwayland.borrow().is_some() {
             return Err(Error::Operation("Runtime::create_xwayland called twice"));
         }
-        let compositor = self
-            .inner
-            .compositor
-            .borrow()
-            .ok_or(Error::Operation(
-                "Runtime::create_xwayland requires init_graphics first",
-            ))?;
+        let compositor = self.inner.compositor.borrow().ok_or(Error::Operation(
+            "Runtime::create_xwayland requires init_graphics first",
+        ))?;
         // SAFETY: `display` is live for the call; `compositor` is this runtime's
         // own `wlr_compositor`, created by `init_graphics` over the same
         // display and never freed by this crate. The returned manager is owned
@@ -6087,9 +6090,7 @@ impl Runtime {
         // so a present pointer names a live node; `band_tree` is one of the six
         // band trees created once in `init_graphics` and never destroyed while
         // this runtime lives.
-        unsafe {
-            sys::wlr_scene_node_reparent(&raw mut (*tree.as_ptr()).node, band_tree.as_ptr())
-        };
+        unsafe { sys::wlr_scene_node_reparent(&raw mut (*tree.as_ptr()).node, band_tree.as_ptr()) };
         Some(())
     }
 
