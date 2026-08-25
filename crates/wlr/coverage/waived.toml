@@ -346,18 +346,6 @@ note      = "Shell completion: xdg-shell remainder, foreign toplevels, composito
 milestone = "M9"
 
 [[waived]]
-symbol    = "wlr_content_type_manager_v1"
-reason    = "not-yet"
-note      = "Selection, drag-and-drop and the small standalone protocols."
-milestone = "M11"
-
-[[waived]]
-symbol    = "wlr_content_type_manager_v1_create"
-reason    = "not-yet"
-note      = "Selection, drag-and-drop and the small standalone protocols."
-milestone = "M11"
-
-[[waived]]
 symbol    = "wlr_cursor_destroy"
 reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
@@ -1270,24 +1258,6 @@ symbol    = "wlr_foreign_toplevel_manager_v1_create"
 reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
 milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_fractional_scale_manager_v1"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_fractional_scale_manager_v1_create"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_fractional_scale_v1_notify_scale"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_gamma_control_manager_v1"
@@ -2538,18 +2508,6 @@ note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
 
 [[waived]]
-symbol    = "wlr_presentation"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_presentation_create"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
 symbol    = "wlr_presentation_event"
 reason    = "not-yet"
 note      = "Output stack completion."
@@ -3350,18 +3308,6 @@ milestone = "M10"
 
 [[waived]]
 symbol    = "wlr_shm_create_with_renderer"
-reason    = "not-yet"
-note      = "Buffer-sharing, screen capture and DRM lease protocols."
-milestone = "M10"
-
-[[waived]]
-symbol    = "wlr_single_pixel_buffer_manager_v1"
-reason    = "not-yet"
-note      = "Buffer-sharing, screen capture and DRM lease protocols."
-milestone = "M10"
-
-[[waived]]
-symbol    = "wlr_single_pixel_buffer_manager_v1_create"
 reason    = "not-yet"
 note      = "Buffer-sharing, screen capture and DRM lease protocols."
 milestone = "M10"
@@ -4279,18 +4225,6 @@ note      = "Backend-specific construction and the interfaces milestone."
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_viewporter"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_viewporter_create"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
 symbol    = "wlr_virtual_keyboard_v1_from_resource"
 reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
@@ -4601,18 +4535,6 @@ symbol    = "wlr_xdg_imported_v2"
 reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
 milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_output_manager_v1"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_xdg_output_manager_v1_create"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_xdg_output_v1"

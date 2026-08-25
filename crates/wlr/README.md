@@ -474,6 +474,41 @@ pre-map commit listener that calls the new
 `Runtime::schedule_frame_all(&self) -> usize` so XWayland's handshake frame
 callback is answered. Bounded to the handshake commits; never busy-loops.
 
+## 0.20.24 — A2 batch-1 passive compat protocols
+
+Six small, passive globals a compositor turns on once at startup and never
+touches again — no new scene or input surface. All additive.
+
+- `Runtime::create_viewporter(&Display) -> Result<()>` — the `wp_viewporter`
+  global, letting clients scale and crop a surface's buffer independently of
+  its logical size.
+- `Runtime::create_fractional_scale_manager(&Display) -> Result<()>` — the
+  `wp_fractional_scale_manager_v1` global, so clients can render at a
+  non-integer output scale instead of rounding up and downscaling.
+  `Runtime::notify_fractional_scale(...)` is the fallback path: a compositor
+  that has not (yet) wired per-surface scale tracking can still push a scale
+  to a client directly.
+- `Runtime::create_single_pixel_buffer_manager(&Display) -> Result<()>` — the
+  `wp_single_pixel_buffer_manager_v1` global, letting a client hand over a
+  solid-color 1×1 buffer without allocating shared memory for it.
+- `Runtime::create_content_type_manager(&Display) -> Result<()>` — the
+  `wp_content_type_manager_v1` global, so a client can hint the kind of
+  content a surface carries (video, game, …) for presentation tuning.
+- `Runtime::create_presentation(&Display) -> Result<()>` — the
+  `wp_presentation` global; in wlroots 0.20, creating this global *is* the
+  whole presentation-time integration. `Runtime::set_scene_presentation`
+  wraps no `wlr_scene_*` symbol (none exists yet in 0.20) — it only enforces
+  create-before-init ordering against the presentation global, and is a
+  stable extension point for when wlroots grows a scene-level presentation
+  API.
+- `Runtime::create_xdg_output_manager(&Display) -> Result<()>` — the
+  `zxdg_output_manager_v1` global, exposing each output's logical position
+  and size (as distinct from its physical mode) to clients that need it for
+  layout, such as a panel or a screen-locker.
+
+Errors if any `create_*` is called twice. No existing item's name or
+signature changed.
+
 ## 0.20.20
 
 Session locking (`ext-session-lock-v1`) and idle management

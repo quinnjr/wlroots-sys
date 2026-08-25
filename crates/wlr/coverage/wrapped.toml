@@ -269,6 +269,16 @@ module = "runtime"
 item   = "Runtime::init_graphics"
 
 [[wrapped]]
+symbol = "wlr_content_type_manager_v1"
+module = "runtime"
+item   = "Runtime::create_content_type_manager"
+
+[[wrapped]]
+symbol = "wlr_content_type_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_content_type_manager"
+
+[[wrapped]]
 symbol = "wlr_cursor"
 module = "runtime"
 item   = "Runtime::create_seat"
@@ -537,6 +547,21 @@ item   = "FBox::equals"
 symbol = "wlr_fbox_transform"
 module = "geom"
 item   = "FBox::transformed"
+
+[[wrapped]]
+symbol = "wlr_fractional_scale_manager_v1"
+module = "runtime"
+item   = "Runtime::create_fractional_scale_manager"
+
+[[wrapped]]
+symbol = "wlr_fractional_scale_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_fractional_scale_manager"
+
+[[wrapped]]
+symbol = "wlr_fractional_scale_v1_notify_scale"
+module = "runtime"
+item   = "Runtime::notify_fractional_scale"
 
 [[wrapped]]
 symbol = "wlr_gles2_renderer_check_ext"
@@ -827,6 +852,16 @@ item   = "SeatHandler::pointer_motion"
 symbol = "wlr_pointer_motion_event"
 module = "backend"
 item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_presentation"
+module = "runtime"
+item   = "Runtime::create_presentation"
+
+[[wrapped]]
+symbol = "wlr_presentation_create"
+module = "runtime"
+item   = "Runtime::create_presentation"
 
 [[wrapped]]
 symbol = "wlr_primary_selection_v1_device_manager"
@@ -1529,6 +1564,16 @@ module = "render::shm"
 item   = "ShmAttributesRef"
 
 [[wrapped]]
+symbol = "wlr_single_pixel_buffer_manager_v1"
+module = "runtime"
+item   = "Runtime::create_single_pixel_buffer_manager"
+
+[[wrapped]]
+symbol = "wlr_single_pixel_buffer_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_single_pixel_buffer_manager"
+
+[[wrapped]]
 symbol = "wlr_subcompositor_create"
 module = "runtime"
 item   = "Runtime::init_graphics"
@@ -1634,6 +1679,16 @@ module = "backend"
 item   = "Backend::run"
 
 [[wrapped]]
+symbol = "wlr_viewporter"
+module = "runtime"
+item   = "Runtime::create_viewporter"
+
+[[wrapped]]
+symbol = "wlr_viewporter_create"
+module = "runtime"
+item   = "Runtime::create_viewporter"
+
+[[wrapped]]
 symbol = "wlr_virtual_keyboard_manager_v1"
 module = "runtime"
 item   = "Runtime::create_virtual_keyboard_manager"
@@ -1727,6 +1782,16 @@ item   = "Runtime::create_xdg_decoration_manager"
 symbol = "wlr_xdg_decoration_manager_v1_create"
 module = "runtime"
 item   = "Runtime::create_xdg_decoration_manager"
+
+[[wrapped]]
+symbol = "wlr_xdg_output_manager_v1"
+module = "runtime"
+item   = "Runtime::create_xdg_output_manager"
+
+[[wrapped]]
+symbol = "wlr_xdg_output_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_xdg_output_manager"
 
 [[wrapped]]
 symbol = "wlr_xdg_shell"
