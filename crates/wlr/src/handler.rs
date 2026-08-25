@@ -7,8 +7,9 @@
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
 use crate::{
-    DecorationMode, Edges, KeyEvent, LayerSurface, LayerSurfaceId, NodeId, Output, OutputId,
-    SceneOutputId, Toplevel, ToplevelId, Transform,
+    ActivationToken, CursorShape, CursorShapeDevice, DecorationMode, Edges, KeyEvent,
+    LayerSurface, LayerSurfaceId, NodeId, Output, OutputId, SceneOutputId, Toplevel, ToplevelId,
+    Transform,
 };
 
 /// One output head as it stands *after* a client's output-management
@@ -278,6 +279,24 @@ pub trait OutputHandler {
     /// leaves those clients with a stale view until the next output change.
     fn output_configuration_applied(&mut self, heads: Vec<AppliedHead>) {
         let _ = heads;
+    }
+
+    /// A `gamma-control-v1` client set (or wlroots otherwise changed) this
+    /// output's gamma ramp.
+    ///
+    /// Notification only, and defaulted to a no-op. Unlike
+    /// [`SeatHandler::request_set_shape`](crate::SeatHandler::request_set_shape)
+    /// or [`SeatHandler::request_activate`](crate::SeatHandler::request_activate),
+    /// there is nothing to *apply* here: [`Runtime::create_gamma_control_manager`](crate::Runtime::create_gamma_control_manager)
+    /// wires the manager straight into this runtime's scene
+    /// (`wlr_scene_set_gamma_control_manager_v1`), which is wlroots' own
+    /// recommended integration — the scene renderer applies the ramp (or
+    /// signals `failed`) itself, on its own commit path, before this handler
+    /// ever runs. This exists purely for a compositor that wants to react —
+    /// log the change, or keep its own idea of the output's gamma state in
+    /// step.
+    fn gamma_control_changed(&mut self, output: OutputId) {
+        let _ = output;
     }
 }
 
@@ -848,6 +867,36 @@ pub trait SeatHandler {
     /// thing that makes the lock safe.
     fn session_lock_changed(&mut self, locked: bool) {
         let _ = locked;
+    }
+
+    /// A client asked to change the cursor image via `cursor-shape-v1`.
+    /// Defaulted to a no-op: wlroots does not apply the request itself (its
+    /// own doc on `wlr_cursor_shape_manager_v1` says a compositor should
+    /// handle this "in the same way as `wlr_seat.events.request_set_cursor`"),
+    /// so nothing changes on screen unless a compositor overrides this and
+    /// calls [`crate::Runtime::set_cursor_shape`] — typically unconditionally,
+    /// the way `request_set_cursor` implementations usually do, though
+    /// `device`/`serial` are available to a compositor that wants to
+    /// validate against its own idea of which device currently owns the
+    /// cursor.
+    fn request_set_shape(&mut self, device: CursorShapeDevice, serial: u32, shape: CursorShape) {
+        let _ = (device, serial, shape);
+    }
+
+    /// A client asked, via `xdg-activation-v1`, that a surface be given
+    /// focus. `target` is the surface named by the request, mapped to this
+    /// crate's own id — `None` if it names no tracked toplevel. `token`
+    /// carries the wlroots-validated evidence (serial, seat, requesting
+    /// surface) a focus-steal policy decides from.
+    ///
+    /// Defaulted to a no-op: wlroots does not steal focus itself (the
+    /// activation protocol exists precisely so the *compositor* decides
+    /// whether an unfocused client's request to be raised is honored), so a
+    /// compositor that wants `xdg_activation_v1` to do anything overrides
+    /// this and applies its own policy — e.g. focusing `target` only when
+    /// [`ActivationToken::has_seat`] is `true`.
+    fn request_activate(&mut self, target: Option<ToplevelId>, token: ActivationToken) {
+        let _ = (target, token);
     }
 }
 

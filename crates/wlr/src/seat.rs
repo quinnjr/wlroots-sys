@@ -11,6 +11,7 @@
 use std::marker::PhantomData;
 
 use crate::sys;
+use crate::toplevel::ToplevelId;
 
 /// The modifier keys held when a key event was produced.
 ///
@@ -188,6 +189,227 @@ impl KeyEvent<'static> {
     ) -> KeyEvent<'static> {
         KeyEvent::new(keysym, modifiers, pressed, time_msec)
     }
+}
+
+/// Which class of input device raised a `cursor-shape-v1` request.
+///
+/// Mirrors `wlr_cursor_shape_manager_v1_device_type`. A third value
+/// (`WLR_CURSOR_SHAPE_MANAGER_V1_DEVICE_TYPE_POINTER`'s tablet-tool sibling
+/// exhausts the wire enum today) is not expected — `wlr_cursor_shape_manager_v1_request_set_shape_event::device_type`
+/// only ever carries one of these two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CursorShapeDevice {
+    /// A pointer (mouse, touchpad, ...).
+    Pointer,
+    /// A tablet tool.
+    TabletTool,
+}
+
+/// A named cursor image, the way `cursor-shape-v1` names it.
+///
+/// Mirrors `wp_cursor_shape_device_v1.shape` (wlroots' `wp_cursor_shape_device_v1_shape`
+/// C enum) one variant per wire value, including the `dnd_ask`/`all_resize`
+/// pair `cursor-shape-v1` version 2 added — this crate advertises version 2
+/// (see [`crate::Runtime::create_cursor_shape_manager`]), so both are
+/// reachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CursorShape {
+    /// The platform-default pointer.
+    Default,
+    /// A context menu is available.
+    ContextMenu,
+    /// Help is available.
+    Help,
+    /// The platform-default pointer, requested explicitly rather than
+    /// implicitly (distinct wire value from [`CursorShape::Default`]).
+    Pointer,
+    /// A progress indicator.
+    Progress,
+    /// The program is busy.
+    Wait,
+    /// A cell or set of cells may be selected.
+    Cell,
+    /// Crosshair.
+    Crosshair,
+    /// Text may be selected.
+    Text,
+    /// Vertical text may be selected.
+    VerticalText,
+    /// An alias or shortcut is to be created.
+    Alias,
+    /// Something is to be copied.
+    Copy,
+    /// Something is to be moved.
+    Move,
+    /// An item may not be dropped here.
+    NoDrop,
+    /// The requested action is not allowed.
+    NotAllowed,
+    /// Something can be grabbed.
+    Grab,
+    /// Something is being grabbed (e.g. dragged).
+    Grabbing,
+    /// East resize.
+    EResize,
+    /// North resize.
+    NResize,
+    /// North-east resize.
+    NeResize,
+    /// North-west resize.
+    NwResize,
+    /// South resize.
+    SResize,
+    /// South-east resize.
+    SeResize,
+    /// South-west resize.
+    SwResize,
+    /// West resize.
+    WResize,
+    /// Bidirectional east-west resize.
+    EwResize,
+    /// Bidirectional north-south resize.
+    NsResize,
+    /// Bidirectional north-east/south-west resize.
+    NeswResize,
+    /// Bidirectional north-west/south-east resize.
+    NwseResize,
+    /// Column resize.
+    ColResize,
+    /// Row resize.
+    RowResize,
+    /// Something can be scrolled in any direction.
+    AllScroll,
+    /// Something can be zoomed in.
+    ZoomIn,
+    /// Something can be zoomed out.
+    ZoomOut,
+    /// A drag-and-drop action asks the user to choose.
+    DndAsk,
+    /// Something can be resized in any direction.
+    AllResize,
+}
+
+impl CursorShape {
+    /// Decode a `wp_cursor_shape_device_v1_shape` wire value, or `None` for
+    /// one this build's headers do not know (there is no such value today —
+    /// wlroots validates the client's wire value before emitting the event —
+    /// but a `match` this crate does not control over another crate's enum
+    /// should never be a hidden panic).
+    pub(crate) fn from_raw(raw: sys::wp_cursor_shape_device_v1_shape) -> Option<CursorShape> {
+        use sys::wp_cursor_shape_device_v1_shape as W;
+        Some(match raw {
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT => CursorShape::Default,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CONTEXT_MENU => CursorShape::ContextMenu,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_HELP => CursorShape::Help,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER => CursorShape::Pointer,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_PROGRESS => CursorShape::Progress,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_WAIT => CursorShape::Wait,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CELL => CursorShape::Cell,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CROSSHAIR => CursorShape::Crosshair,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT => CursorShape::Text,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_VERTICAL_TEXT => CursorShape::VerticalText,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALIAS => CursorShape::Alias,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_COPY => CursorShape::Copy,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_MOVE => CursorShape::Move,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NO_DROP => CursorShape::NoDrop,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NOT_ALLOWED => CursorShape::NotAllowed,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_GRAB => CursorShape::Grab,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_GRABBING => CursorShape::Grabbing,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_E_RESIZE => CursorShape::EResize,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_N_RESIZE => CursorShape::NResize,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NE_RESIZE => CursorShape::NeResize,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NW_RESIZE => CursorShape::NwResize,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_S_RESIZE => CursorShape::SResize,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SE_RESIZE => CursorShape::SeResize,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SW_RESIZE => CursorShape::SwResize,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_W_RESIZE => CursorShape::WResize,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_EW_RESIZE => CursorShape::EwResize,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NS_RESIZE => CursorShape::NsResize,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NESW_RESIZE => CursorShape::NeswResize,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NWSE_RESIZE => CursorShape::NwseResize,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_COL_RESIZE => CursorShape::ColResize,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ROW_RESIZE => CursorShape::RowResize,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALL_SCROLL => CursorShape::AllScroll,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ZOOM_IN => CursorShape::ZoomIn,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ZOOM_OUT => CursorShape::ZoomOut,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DND_ASK => CursorShape::DndAsk,
+            W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALL_RESIZE => CursorShape::AllResize,
+            _ => return None,
+        })
+    }
+
+    /// Encode back to the `wp_cursor_shape_device_v1_shape` wire value
+    /// [`sys::wlr_cursor_shape_v1_name`] wants, for
+    /// [`crate::Runtime::set_cursor_shape`].
+    pub(crate) fn to_raw(self) -> sys::wp_cursor_shape_device_v1_shape {
+        use sys::wp_cursor_shape_device_v1_shape as W;
+        match self {
+            CursorShape::Default => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DEFAULT,
+            CursorShape::ContextMenu => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CONTEXT_MENU,
+            CursorShape::Help => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_HELP,
+            CursorShape::Pointer => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_POINTER,
+            CursorShape::Progress => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_PROGRESS,
+            CursorShape::Wait => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_WAIT,
+            CursorShape::Cell => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CELL,
+            CursorShape::Crosshair => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_CROSSHAIR,
+            CursorShape::Text => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_TEXT,
+            CursorShape::VerticalText => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_VERTICAL_TEXT,
+            CursorShape::Alias => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALIAS,
+            CursorShape::Copy => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_COPY,
+            CursorShape::Move => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_MOVE,
+            CursorShape::NoDrop => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NO_DROP,
+            CursorShape::NotAllowed => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NOT_ALLOWED,
+            CursorShape::Grab => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_GRAB,
+            CursorShape::Grabbing => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_GRABBING,
+            CursorShape::EResize => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_E_RESIZE,
+            CursorShape::NResize => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_N_RESIZE,
+            CursorShape::NeResize => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NE_RESIZE,
+            CursorShape::NwResize => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NW_RESIZE,
+            CursorShape::SResize => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_S_RESIZE,
+            CursorShape::SeResize => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SE_RESIZE,
+            CursorShape::SwResize => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_SW_RESIZE,
+            CursorShape::WResize => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_W_RESIZE,
+            CursorShape::EwResize => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_EW_RESIZE,
+            CursorShape::NsResize => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NS_RESIZE,
+            CursorShape::NeswResize => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NESW_RESIZE,
+            CursorShape::NwseResize => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_NWSE_RESIZE,
+            CursorShape::ColResize => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_COL_RESIZE,
+            CursorShape::RowResize => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ROW_RESIZE,
+            CursorShape::AllScroll => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALL_SCROLL,
+            CursorShape::ZoomIn => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ZOOM_IN,
+            CursorShape::ZoomOut => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ZOOM_OUT,
+            CursorShape::DndAsk => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_DND_ASK,
+            CursorShape::AllResize => W::WP_CURSOR_SHAPE_DEVICE_V1_SHAPE_ALL_RESIZE,
+        }
+    }
+}
+
+/// Fields wlroots recorded when a client made this activation token, handed
+/// to a compositor's [`crate::SeatHandler::request_activate`] override so it
+/// can apply its own focus-steal policy.
+///
+/// wlroots has already validated the token before this handler runs: it only
+/// reaches `request_activate` for a `set_serial`/`set_surface` a client
+/// actually sent on a token it actually created through
+/// `xdg_activation_v1.get_activation_token`. Nothing here is raw,
+/// unvalidated client input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ActivationToken {
+    /// The serial the token was created with (`set_serial`'s first argument),
+    /// or `0` if the client never called `set_serial` — check
+    /// [`ActivationToken::has_seat`] to tell the two apart, since `0` is
+    /// also a value a client could (pointlessly) supply.
+    pub serial: u32,
+    /// Whether the client supplied a seat (`set_serial`'s second argument).
+    /// `false` means the token carries no evidence of a real user action —
+    /// most commonly a token minted for another process to redeem — which a
+    /// focus-steal policy should usually treat as a reason to refuse.
+    pub has_seat: bool,
+    /// The surface that requested the token (`set_surface`), mapped to this
+    /// crate's own toplevel id when it names a live, tracked toplevel.
+    /// `None` when the token named no surface, or named one this crate does
+    /// not track (a subsurface, or a toplevel already destroyed).
+    pub requesting_toplevel: Option<ToplevelId>,
 }
 
 #[cfg(test)]

@@ -491,3 +491,90 @@ fn set_scene_presentation_before_init_graphics_is_refused() {
         "there is no scene to wire before init_graphics has run"
     );
 }
+
+#[test]
+fn creating_the_cursor_shape_manager_twice_is_refused() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.create_cursor_shape_manager(&display).expect("first");
+    assert!(
+        matches!(
+            runtime.create_cursor_shape_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second cursor-shape global would make the compositor advertise two"
+    );
+}
+
+#[test]
+fn creating_the_xdg_activation_manager_twice_is_refused() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime
+        .create_xdg_activation_manager(&display)
+        .expect("first");
+    assert!(
+        matches!(
+            runtime.create_xdg_activation_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second xdg-activation global would make the compositor advertise two"
+    );
+}
+
+#[test]
+fn creating_the_gamma_control_manager_twice_is_refused() {
+    headless_env();
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime
+        .create_gamma_control_manager(&display)
+        .expect("first");
+    assert!(
+        matches!(
+            runtime.create_gamma_control_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second gamma-control global would make the compositor advertise two"
+    );
+}
+
+#[test]
+fn creating_the_gamma_control_manager_before_init_graphics_is_refused() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    assert!(
+        matches!(
+            runtime.create_gamma_control_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "there is no scene to wire the manager into before init_graphics has run"
+    );
+}
+
+#[test]
+fn an_outputs_gamma_size_is_reachable_on_a_headless_output() {
+    headless_env();
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+
+    #[derive(Default)]
+    struct Recorder {
+        sizes: Vec<usize>,
+    }
+    impl wlr::OutputHandler for Recorder {
+        fn new_output(&mut self, output: &wlr::Output<'_>) {
+            self.sizes.push(output.gamma_size());
+        }
+    }
+
+    let mut app = Recorder::default();
+    backend.run(&mut app, 2).expect("run");
+
+    // The headless backend reports a gamma size of `0` (no gamma support) —
+    // this is not asserting a nonzero size, only that the call is reachable
+    // and returns without dereferencing anything invalid on a real output.
+    assert_eq!(app.sizes, vec![0]);
+}

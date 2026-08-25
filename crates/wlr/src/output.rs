@@ -181,6 +181,22 @@ impl<'h> Output<'h> {
         }
     }
 
+    /// The number of entries the backend's gamma ramp supports, per channel —
+    /// `wlr_output_get_gamma_size`. `0` if the backend has no gamma support
+    /// at all (the headless backend, for instance, reports `0`).
+    ///
+    /// A `gamma-control-v1` client normally never needs this read back
+    /// directly — wlroots' own scene integration (see
+    /// [`crate::Runtime::create_gamma_control_manager`]) handles fitting a
+    /// client's ramp to whatever size the backend supports — but a
+    /// compositor that wants to know whether an output can do gamma
+    /// adjustment at all (to grey out a night-light toggle, say) reads it
+    /// here.
+    pub fn gamma_size(&self) -> usize {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        unsafe { sys::wlr_output_get_gamma_size(self.raw.as_ptr()) }
+    }
+
     /// [`size`](Output::size) with the output's transform applied, as
     /// `(width, height)`.
     ///

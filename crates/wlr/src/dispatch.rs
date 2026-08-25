@@ -46,7 +46,10 @@ use std::collections::VecDeque;
 
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
-use crate::{DecorationMode, Edges, LayerSurfaceId, NodeId, OutputId, SceneOutputId, ToplevelId};
+use crate::{
+    ActivationToken, CursorShape, CursorShapeDevice, DecorationMode, Edges, LayerSurfaceId,
+    NodeId, OutputId, SceneOutputId, ToplevelId,
+};
 
 /// An event awaiting delivery.
 ///
@@ -167,6 +170,31 @@ pub(crate) enum Event {
     /// synchronously by then), so a deferred delivery still reports the
     /// transition that actually happened.
     SessionLockChanged(bool),
+
+    /// A client asked to change the cursor image via
+    /// `wp_cursor_shape_device_v1.set_shape`. Carries the device kind, the
+    /// serial the client supplied, and the requested shape — all read at
+    /// emission time from `wlr_cursor_shape_manager_v1_request_set_shape_event`,
+    /// which does not outlive the callback that receives it, so nothing here
+    /// is re-read at delivery.
+    RequestSetShape(CursorShapeDevice, u32, CursorShape),
+
+    /// A client asked, via `xdg_activation_v1.activate`, that a surface be
+    /// given focus. The `Option<ToplevelId>` is the target surface
+    /// (`wlr_xdg_activation_v1_request_activate_event::surface`), resolved to
+    /// this crate's own id — `None` when it names no tracked toplevel. The
+    /// [`ActivationToken`] is read from the event's own token at emission
+    /// time, not re-read at delivery, since the token may be destroyed
+    /// (`xdg_activation_token_v1.destroy`) before a deferred delivery runs.
+    RequestActivate(Option<ToplevelId>, ActivationToken),
+
+    /// A `zwlr_gamma_control_manager_v1` client set a gamma ramp for an
+    /// output. Notification only — wlroots' own scene integration (wired in
+    /// [`crate::Runtime::create_gamma_control_manager`]) has already applied
+    /// the ramp, or signalled `failed`, by the time this is emitted; see
+    /// [`crate::OutputHandler::gamma_control_changed`]'s own doc for why
+    /// there is nothing left here for a handler to *do*.
+    GammaControlChanged(OutputId),
 
     /// A client's `zwlr_output_manager_v1` configuration was applied. Carries
     /// no data — the owned `Vec<AppliedHead>` payload cannot ride in a `Copy`,

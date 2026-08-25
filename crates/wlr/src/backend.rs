@@ -1932,6 +1932,63 @@ impl<'d> Backend<'d> {
             });
         }
 
+        if let Some(manager) = runtime.cursor_shape_manager_ptr() {
+            // SAFETY: `create_cursor_shape_manager` returned a non-null manager
+            // owned by the display, which this call requires to outlive it,
+            // exactly as for the xdg shell above — null liveness is correct.
+            // This is the `request_set_shape` signal a client raises via
+            // `wp_cursor_shape_device_v1.set_shape`; `on_request_set_shape`
+            // fans it out to the handler, which decides whether and how to
+            // apply it (typically via `Runtime::set_cursor_shape`).
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.request_set_shape,
+                    on_request_set_shape::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
+        if let Some(manager) = runtime.xdg_activation_manager_ptr() {
+            // SAFETY: `create_xdg_activation_manager` returned a non-null
+            // manager owned by the display, which this call requires to
+            // outlive it, exactly as for the xdg shell above — null liveness
+            // is correct. This is the `request_activate` signal a client
+            // raises via `xdg_activation_v1.activate`; `on_request_activate`
+            // fans it out to the handler, which applies its own focus-steal
+            // policy.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.request_activate,
+                    on_request_activate::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
+        if let Some(manager) = runtime.gamma_control_manager_ptr() {
+            // SAFETY: `create_gamma_control_manager` returned a non-null
+            // manager owned by the display, which this call requires to
+            // outlive it, exactly as for the xdg shell above — null liveness
+            // is correct. `create_gamma_control_manager` already wired this
+            // manager into the runtime's scene
+            // (`wlr_scene_set_gamma_control_manager_v1`), which applies every
+            // ramp and signals `failed`/`destroy` on its own; this listener
+            // on the same `set_gamma` signal is purely a notification fan-out
+            // to `on_gamma_control_set_gamma`, which does not touch the
+            // control itself.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.set_gamma,
+                    on_gamma_control_set_gamma::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
         if let Some(manager) = runtime.output_manager_ptr() {
             // SAFETY: `create_output_manager` returned a non-null manager owned
             // by the display, which this call requires to outlive it, exactly
@@ -2328,6 +2385,11 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
             );
         }
         Event::SessionLockChanged(locked) => state.session_lock_changed(locked),
+        Event::RequestSetShape(device, serial, shape) => {
+            state.request_set_shape(device, serial, shape)
+        }
+        Event::RequestActivate(target, token) => state.request_activate(target, token),
+        Event::GammaControlChanged(id) => state.gamma_control_changed(id),
         Event::OutputConfigurationApplied => {
             // Pop the owned payload staged alongside this marker. FIFO, so the
             // `Vec` popped here is the one `on_output_manager_apply` pushed for
@@ -4114,6 +4176,134 @@ unsafe extern "C" fn on_new_pointer_constraint<S: Handlers>(
                 constraint,
             },
         );
+    }
+}
+
+/// A client asked to change the cursor image via
+/// `wp_cursor_shape_device_v1.set_shape`.
+unsafe extern "C" fn on_request_set_shape<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_cursor_shape_manager_v1.events.request_set_shape`, whose `session`
+    // is the `*const Session<'_, S>` paired with this instantiation. The
+    // signal carries a live
+    // `*mut wlr_cursor_shape_manager_v1_request_set_shape_event`, valid only
+    // for this call — every field is copied out before it returns.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_cursor_shape_manager_v1_request_set_shape_event>();
+
+        let device = match (*event).device_type {
+            sys::wlr_cursor_shape_manager_v1_device_type::WLR_CURSOR_SHAPE_MANAGER_V1_DEVICE_TYPE_TABLET_TOOL => {
+                crate::CursorShapeDevice::TabletTool
+            }
+            _ => crate::CursorShapeDevice::Pointer,
+        };
+        let serial = (*event).serial;
+        // An unrecognised wire shape is dropped rather than guessed at — see
+        // `CursorShape::from_raw`'s own doc; wlroots validates the client's
+        // wire value before ever emitting this signal, so this is not
+        // expected to happen in practice.
+        let Some(shape) = crate::CursorShape::from_raw((*event).shape) else {
+            return;
+        };
+
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::RequestSetShape(device, serial, shape),
+            deliver,
+        );
+    }
+}
+
+/// A client asked, via `xdg_activation_v1.activate`, that a surface be given
+/// focus.
+unsafe extern "C" fn on_request_activate<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_xdg_activation_v1.events.request_activate`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_xdg_activation_v1_request_activate_event`,
+    // valid only for this call; both `event.surface` and (if non-null)
+    // `event.token.surface` are live `wlr_surface`s for the same reason. The
+    // `token` field itself may be null per wlroots' own `wlr_xdg_activation_v1`
+    // header doc (a `request_activate` can be delivered with no matching
+    // token, e.g. an unconditional activation), so it is null-checked before
+    // any field of it is read.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_xdg_activation_v1_request_activate_event>();
+
+        let target = if (*event).surface.is_null() {
+            None
+        } else {
+            toplevel_id_of_surface((*event).surface)
+        };
+
+        let token_ptr = (*event).token;
+        let token = if token_ptr.is_null() {
+            crate::ActivationToken {
+                serial: 0,
+                has_seat: false,
+                requesting_toplevel: None,
+            }
+        } else {
+            let surface = (*token_ptr).surface;
+            crate::ActivationToken {
+                serial: (*token_ptr).serial,
+                has_seat: !(*token_ptr).seat.is_null(),
+                requesting_toplevel: if surface.is_null() {
+                    None
+                } else {
+                    toplevel_id_of_surface(surface)
+                },
+            }
+        };
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::RequestActivate(target, token), deliver);
+    }
+}
+
+/// A `gamma-control-v1` client set a gamma ramp for an output. Notification
+/// only — see [`crate::OutputHandler::gamma_control_changed`]'s own doc for
+/// why: the scene this manager was wired into
+/// ([`crate::Runtime::create_gamma_control_manager`]) has already applied the
+/// ramp, or signalled `failed`, by the time this listener runs.
+unsafe extern "C" fn on_gamma_control_set_gamma<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_gamma_control_manager_v1.events.set_gamma`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_gamma_control_manager_v1_set_gamma_event`,
+    // valid only for this call, whose `output` is a live `wlr_output` with an
+    // initialised addon set (every output this crate's `on_new_output`
+    // announces gets one attached immediately).
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_gamma_control_manager_v1_set_gamma_event>();
+        let output = (*event).output;
+        if output.is_null() {
+            return;
+        }
+        let id = OutputId(ensure_id_raw(&raw mut (*output).addons));
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::GammaControlChanged(id), deliver);
     }
 }
 
@@ -6790,6 +6980,12 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         // (`Backend::register_toplevel_and_input` is `run_all`'s hook; `run`
         // uses `no_extra`), so this cannot be produced on this path.
         | Event::SessionLockChanged(..)
+        // Unreachable: `run` never registers a cursor-shape, xdg-activation or
+        // gamma-control manager either, for the same reason as the session
+        // lock manager above — so none of these three can fire on this path.
+        | Event::RequestSetShape(..)
+        | Event::RequestActivate(..)
+        | Event::GammaControlChanged(..)
         // Unreachable: `run` never registers an output manager either, for the
         // same reason — so no `apply` can fire on this path.
         | Event::OutputConfigurationApplied => {}

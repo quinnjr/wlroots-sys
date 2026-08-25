@@ -46,8 +46,9 @@ use crate::scene::{
     find_node_id, timespec_of,
 };
 use crate::{
-    AllocatorRef, Backend, Box2D, Buffer, BufferId, Display, Error, FBox, Interest, LayerSurfaceId,
-    Output, OutputId, RectId, Region, RendererRef, Result, ToplevelId, Transform, sys,
+    AllocatorRef, Backend, Box2D, Buffer, BufferId, CursorShape, Display, Error, FBox, Interest,
+    LayerSurfaceId, Output, OutputId, RectId, Region, RendererRef, Result, ToplevelId, Transform,
+    sys,
 };
 use crate::{ColorEncoding, ColorRange, FilterMode, NamedPrimaries, TransferFunction};
 
@@ -241,6 +242,24 @@ pub(crate) struct RuntimeInner {
     /// rationale as the other manager globals.
     pub(crate) relative_pointer_manager:
         RefCell<Option<NonNull<sys::wlr_relative_pointer_manager_v1>>>,
+
+    /// The cursor-shape (`wp_cursor_shape_manager_v1`) manager, once created —
+    /// lets a client name the cursor image it wants instead of drawing its
+    /// own. `Option`, same rationale as the other manager globals.
+    pub(crate) cursor_shape_manager: RefCell<Option<NonNull<sys::wlr_cursor_shape_manager_v1>>>,
+
+    /// The xdg-activation (`xdg_activation_v1`) manager, once created — lets a
+    /// client request that one of its surfaces be given focus. `Option`, same
+    /// rationale as the other manager globals.
+    pub(crate) xdg_activation_manager: RefCell<Option<NonNull<sys::wlr_xdg_activation_v1>>>,
+
+    /// The gamma-control (`zwlr_gamma_control_manager_v1`) manager, once
+    /// created — lets a client (a night-light tool such as `wlsunset` or
+    /// `gammastep`) set a per-output gamma ramp. `Option`, same rationale as
+    /// the other manager globals. Wired into this runtime's scene the moment
+    /// it is created — see [`Runtime::create_gamma_control_manager`] — so the
+    /// scene applies every ramp and signals `failed`/`destroy` itself.
+    pub(crate) gamma_control_manager: RefCell<Option<NonNull<sys::wlr_gamma_control_manager_v1>>>,
 
     /// The pointer constraint currently activated on the focused surface, or
     /// `None` when the pointer is unconstrained. `backend.rs`'s
@@ -1047,6 +1066,9 @@ impl Runtime {
                 screencopy_manager: RefCell::new(None),
                 pointer_constraints_manager: RefCell::new(None),
                 relative_pointer_manager: RefCell::new(None),
+                cursor_shape_manager: RefCell::new(None),
+                xdg_activation_manager: RefCell::new(None),
+                gamma_control_manager: RefCell::new(None),
                 active_constraint: std::cell::Cell::new(None),
                 idle_notifier: RefCell::new(None),
                 idle_inhibit_manager: RefCell::new(None),
@@ -5030,6 +5052,132 @@ impl Runtime {
         *self.inner.pointer_constraints_manager.borrow()
     }
 
+    /// Create the `wp_cursor_shape_manager_v1` global, letting clients name
+    /// the cursor image they want instead of drawing their own. Errors if
+    /// called twice.
+    ///
+    /// wlroots does not apply the request itself — its own doc on
+    /// `wlr_cursor_shape_manager_v1` says a compositor should handle the
+    /// `request_set_shape` event "in the same way as
+    /// `wlr_seat.events.request_set_cursor`" — so this only advertises the
+    /// global and wires each request through to
+    /// [`crate::SeatHandler::request_set_shape`]; applying it is
+    /// [`Runtime::set_cursor_shape`], called from that handler.
+    pub fn create_cursor_shape_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.cursor_shape_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_cursor_shape_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        // `2` is the newest version this build's headers support —
+        // `wp_cursor_shape_device_v1_shape`'s `DND_ASK`/`ALL_RESIZE` variants
+        // were both added in cursor-shape-v1 version 2, and both are present
+        // in the bound enum (see `CursorShape::from_raw`).
+        let raw = unsafe { sys::wlr_cursor_shape_manager_v1_create(display.as_ptr(), 2) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_cursor_shape_manager_v1_create"))?;
+        *self.inner.cursor_shape_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// The `wp_cursor_shape_manager_v1` manager, once created via
+    /// [`Runtime::create_cursor_shape_manager`] — read by `backend.rs`'s
+    /// `register_toplevel_and_input` to link the `request_set_shape` listener.
+    pub(crate) fn cursor_shape_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_cursor_shape_manager_v1>> {
+        *self.inner.cursor_shape_manager.borrow()
+    }
+
+    /// Create the `xdg_activation_v1` global, letting a client request that
+    /// one of its surfaces be given focus. Errors if called twice.
+    ///
+    /// wlroots validates every request before it reaches
+    /// [`crate::SeatHandler::request_activate`] — see [`crate::ActivationToken`]'s
+    /// own doc — so that handler only ever sees issuance wlroots itself
+    /// accepted. Applying (or refusing) the activation is entirely the
+    /// compositor's own focus-steal policy; this crate neither steals focus
+    /// nor blocks the request on its own.
+    pub fn create_xdg_activation_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.xdg_activation_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_xdg_activation_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        // `wlr_xdg_activation_v1_create` takes no version argument — the
+        // protocol has had exactly one interface version since it was
+        // introduced.
+        let raw = unsafe { sys::wlr_xdg_activation_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_xdg_activation_v1_create"))?;
+        *self.inner.xdg_activation_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// The `xdg_activation_v1` manager, once created via
+    /// [`Runtime::create_xdg_activation_manager`] — read by `backend.rs`'s
+    /// `register_toplevel_and_input` to link the `request_activate` listener.
+    pub(crate) fn xdg_activation_manager_ptr(&self) -> Option<NonNull<sys::wlr_xdg_activation_v1>> {
+        *self.inner.xdg_activation_manager.borrow()
+    }
+
+    /// Create the `zwlr_gamma_control_manager_v1` global, letting a client
+    /// (a night-light tool such as `wlsunset` or `gammastep`) set a per-output
+    /// gamma ramp. Errors if called twice, or if [`Runtime::init_graphics`]
+    /// has not run yet — there is no scene to wire the manager into before
+    /// that.
+    ///
+    /// Wired straight into this runtime's scene via
+    /// `wlr_scene_set_gamma_control_manager_v1` — wlroots' own header
+    /// documents this as *the* way to handle `gamma_control_v1` for a scene
+    /// ("Handles gamma_control_v1 for all outputs in the scene"), and this
+    /// crate always renders through a scene. Nothing here reimplements the
+    /// apply/fail/destroy dance by hand: this wlroots build exposes no public
+    /// `wlr_output_state` gamma-LUT setter to reimplement it *with* — only
+    /// `wlr_gamma_control_v1_apply(control, output_state)`, which the scene
+    /// integration already calls on the compositor's behalf during its own
+    /// commit. A compositor that wants to know when an output's gamma
+    /// changed overrides [`crate::OutputHandler::gamma_control_changed`]; it
+    /// is a notification alongside the scene's automatic apply, not a hook
+    /// this crate expects it to drive the apply through.
+    pub fn create_gamma_control_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.gamma_control_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_gamma_control_manager called twice",
+            ));
+        }
+        let scene = self.scene_ptr().ok_or(Error::Operation(
+            "Runtime::create_gamma_control_manager called before Runtime::init_graphics",
+        ))?;
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_gamma_control_manager_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_gamma_control_manager_v1_create"))?;
+        // SAFETY: `scene` is this runtime's own live scene, created by
+        // `init_graphics` and never freed while `self` lives; `raw` was just
+        // null-checked and is owned by `display`, which outlives `scene`
+        // (both are freed when `display` is). `wlr_scene_set_gamma_control_manager_v1`
+        // asserts a scene has no manager set yet — the double-create guard
+        // above is what makes that true, since this is the only call site.
+        unsafe {
+            sys::wlr_scene_set_gamma_control_manager_v1(scene.as_ptr(), raw.as_ptr());
+        }
+        *self.inner.gamma_control_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// The `zwlr_gamma_control_manager_v1` manager, once created via
+    /// [`Runtime::create_gamma_control_manager`] — read by `backend.rs`'s
+    /// `register_toplevel_and_input` to link the `set_gamma` notification
+    /// listener.
+    pub(crate) fn gamma_control_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_gamma_control_manager_v1>> {
+        *self.inner.gamma_control_manager.borrow()
+    }
+
     /// Create the `zwlr_output_manager_v1` global, letting clients enumerate
     /// output heads and request an atomic reconfiguration. Errors if called
     /// twice.
@@ -8134,6 +8282,34 @@ impl Runtime {
                 self.inner.cursor_image_loaded.set(true);
             }
             sys::wlr_cursor_set_xcursor(cursor.as_ptr(), xcursor.as_ptr(), c"left_ptr".as_ptr());
+        }
+    }
+
+    /// Set the cursor image to the xcursor `wlr_cursor_shape_v1_name(shape)`
+    /// names, loaded from the theme [`Runtime::create_seat`] already set up.
+    /// The intended caller is a compositor's own
+    /// [`crate::SeatHandler::request_set_shape`] override, applying the shape
+    /// a `cursor-shape-v1` client asked for.
+    ///
+    /// A no-op with no seat — mirrors [`Runtime::ensure_cursor_image`]'s own
+    /// "no seat, nothing to set" rule, for the same reason: there is no
+    /// `wlr_cursor`/`wlr_xcursor_manager` pair to set an image on before
+    /// [`Runtime::create_seat`] has run.
+    pub fn set_cursor_shape(&self, shape: CursorShape) {
+        let (Some(cursor), Some(xcursor)) = (self.cursor_ptr(), *self.inner.xcursor.borrow())
+        else {
+            return;
+        };
+        // SAFETY: both pointers were created together by `create_seat` and
+        // live as long as this runtime. `wlr_cursor_shape_v1_name` returns a
+        // pointer into a static, null-terminated table for every shape
+        // `CursorShape::to_raw` can produce — it never returns null for a
+        // value this crate's own enum encodes — and `wlr_cursor_set_xcursor`
+        // is safe to call unconditionally, exactly as in
+        // `ensure_cursor_image` above.
+        unsafe {
+            let name = sys::wlr_cursor_shape_v1_name(shape.to_raw());
+            sys::wlr_cursor_set_xcursor(cursor.as_ptr(), xcursor.as_ptr(), name);
         }
     }
 
