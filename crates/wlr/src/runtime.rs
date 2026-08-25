@@ -273,6 +273,39 @@ pub(crate) struct RuntimeInner {
     /// advertises the global, and a second call would advertise a second one.
     pub(crate) output_manager: RefCell<Option<NonNull<sys::wlr_output_manager_v1>>>,
 
+    /// The `wp_viewporter` global, once created — lets a client crop/scale
+    /// its buffer via a viewport, applied by the scene at render time.
+    /// `Option`, same rationale as the other manager globals.
+    pub(crate) viewporter: RefCell<Option<NonNull<sys::wlr_viewporter>>>,
+
+    /// The `wp_single_pixel_buffer_manager_v1` global, once created — lets a
+    /// client create a cheap solid-colour buffer without a shm/dmabuf pool.
+    /// `Option`, same rationale as the other manager globals.
+    pub(crate) single_pixel_buffer_manager:
+        RefCell<Option<NonNull<sys::wlr_single_pixel_buffer_manager_v1>>>,
+
+    /// The `wp_content_type_manager_v1` global, once created — lets a client
+    /// tag a surface's content type (video, game, ...) as hint metadata.
+    /// `Option`, same rationale as the other manager globals.
+    pub(crate) content_type_manager: RefCell<Option<NonNull<sys::wlr_content_type_manager_v1>>>,
+
+    /// The `zxdg_output_manager_v1` global, once created — advertises
+    /// read-only per-output logical geometry to clients (many panels and
+    /// toolkits read this). `Option`, same rationale as the other manager
+    /// globals.
+    pub(crate) xdg_output_manager: RefCell<Option<NonNull<sys::wlr_xdg_output_manager_v1>>>,
+
+    /// The `wp_fractional_scale_manager_v1` global, once created — lets a
+    /// client learn its preferred fractional output scale so it can render a
+    /// sharp buffer. `Option`, same rationale as the other manager globals.
+    pub(crate) fractional_scale_manager:
+        RefCell<Option<NonNull<sys::wlr_fractional_scale_manager_v1>>>,
+
+    /// The `wp_presentation` global, once created — lets a client request
+    /// presentation feedback (when its buffer was actually presented, and at
+    /// what refresh). `Option`, same rationale as the other manager globals.
+    pub(crate) presentation: RefCell<Option<NonNull<sys::wlr_presentation>>>,
+
     /// The `wlr_compositor` this runtime created in
     /// [`Runtime::init_graphics`]. Stored — unlike the renderer/allocator, kept
     /// inside [`Graphics`] — because [`Runtime::create_xwayland`] needs it after
@@ -1020,6 +1053,12 @@ impl Runtime {
                 idle_inhibitors: std::cell::Cell::new(0),
                 session_lock_manager: RefCell::new(None),
                 output_manager: RefCell::new(None),
+                viewporter: RefCell::new(None),
+                single_pixel_buffer_manager: RefCell::new(None),
+                content_type_manager: RefCell::new(None),
+                xdg_output_manager: RefCell::new(None),
+                fractional_scale_manager: RefCell::new(None),
+                presentation: RefCell::new(None),
                 #[cfg(wlr_has_xwayland)]
                 compositor: RefCell::new(None),
                 #[cfg(wlr_has_xwayland)]
@@ -5076,6 +5115,190 @@ impl Runtime {
             }
             sys::wlr_output_manager_v1_set_configuration(manager.as_ptr(), config);
         }
+    }
+
+    /// Create the `wp_viewporter` global. Clients crop/scale their buffers
+    /// via a viewport; wlroots' scene applies it at render time, so no
+    /// handler is needed. Errors if called twice.
+    pub fn create_viewporter(&self, display: &Display) -> Result<()> {
+        if self.inner.viewporter.borrow().is_some() {
+            return Err(Error::Operation("Runtime::create_viewporter called twice"));
+        }
+        // SAFETY: `display` is live for the call; the returned viewporter is
+        // owned by the display and destroyed with it, so this crate never
+        // frees it.
+        let raw = unsafe { sys::wlr_viewporter_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_viewporter_create"))?;
+        *self.inner.viewporter.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// Create the `wp_single_pixel_buffer_manager_v1` global, letting a
+    /// client create a cheap solid-colour buffer without a shm/dmabuf pool.
+    /// The renderer consumes the buffer type automatically. Errors if called
+    /// twice.
+    pub fn create_single_pixel_buffer_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.single_pixel_buffer_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_single_pixel_buffer_manager called twice",
+            ));
+        }
+        // SAFETY: as `create_viewporter`.
+        let raw = unsafe { sys::wlr_single_pixel_buffer_manager_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw)
+            .ok_or(Error::Create("wlr_single_pixel_buffer_manager_v1_create"))?;
+        *self.inner.single_pixel_buffer_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// Create the `wp_content_type_manager_v1` global, at protocol version 1
+    /// (the only version this wlroots supports). Content-type is surface
+    /// metadata wlroots attaches; no handler is required to make use of it.
+    /// Errors if called twice.
+    pub fn create_content_type_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.content_type_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_content_type_manager called twice",
+            ));
+        }
+        // SAFETY: as `create_viewporter`.
+        let raw = unsafe { sys::wlr_content_type_manager_v1_create(display.as_ptr(), 1) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_content_type_manager_v1_create"))?;
+        *self.inner.content_type_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// Create the `zxdg_output_manager_v1` global — read-only per-output
+    /// logical geometry that many panels and toolkits read. Distinct from
+    /// this crate's `zwlr_output_manager_v1` wrapper
+    /// ([`create_output_manager`](Runtime::create_output_manager)), which is
+    /// the output-*management* (reconfiguration) protocol. Needs the scene's
+    /// output layout, so call after
+    /// [`init_graphics`](Runtime::init_graphics). Errors if called twice or
+    /// before graphics init.
+    pub fn create_xdg_output_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.xdg_output_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_xdg_output_manager called twice",
+            ));
+        }
+        // Copied out and the borrow dropped before the wlroots call below,
+        // matching every other graphics accessor here: nothing in this call
+        // can re-enter this crate, but holding a `RefCell` borrow across an
+        // FFI call this crate does not control is the one habit worth never
+        // forming.
+        let layout = self.inner.graphics.borrow().as_ref().map(|g| g.layout).ok_or(
+            Error::Operation("Runtime::create_xdg_output_manager before init_graphics"),
+        )?;
+        // SAFETY: `display` is live for the call; `layout` is this runtime's
+        // own, created by `init_graphics` and never freed by this crate (see
+        // [`Graphics`]'s own doc). The returned manager is owned by the
+        // display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_xdg_output_manager_v1_create(display.as_ptr(), layout.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_xdg_output_manager_v1_create"))?;
+        *self.inner.xdg_output_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// Create the `wp_fractional_scale_manager_v1` global, at protocol
+    /// version 1 (the only version this wlroots supports). wlroots' scene
+    /// sends each surface its preferred fractional scale on output-enter, so
+    /// a client can render a sharp buffer for a fractional output scale
+    /// (e.g. 1.5). Errors if called twice.
+    pub fn create_fractional_scale_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.fractional_scale_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_fractional_scale_manager called twice",
+            ));
+        }
+        // SAFETY: as `create_viewporter`.
+        let raw = unsafe { sys::wlr_fractional_scale_manager_v1_create(display.as_ptr(), 1) };
+        let raw =
+            NonNull::new(raw).ok_or(Error::Create("wlr_fractional_scale_manager_v1_create"))?;
+        *self.inner.fractional_scale_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// Notify a client of `surface`'s current preferred fractional scale.
+    ///
+    /// wlroots' scene already sends this automatically for every surface it
+    /// draws (`wlr_scene_surface_create`'s own documented behaviour — see
+    /// [`SceneSurface`]'s module doc), so a compositor built entirely on the
+    /// scene never needs to call this. It exists as a fallback for a surface
+    /// this crate did not put in the scene, or for a compositor that wants to
+    /// force an out-of-band update — harmless if called redundantly, since
+    /// `wlr_fractional_scale_v1_notify_scale` only (re)sends the event to
+    /// whatever `wp_fractional_scale_v1` object the client already bound, if
+    /// any.
+    pub fn notify_fractional_scale(&self, surface: &SceneSurface<'_>, scale: f64) {
+        // SAFETY: `surface` borrows a live `wlr_scene_surface` for the
+        // duration of this call (its own lifetime guarantees that), and its
+        // `surface` field is the `wlr_surface` it wraps, non-null for as long
+        // as the scene surface itself is live. `wlr_fractional_scale_v1_notify_scale`
+        // only looks up the client's already-bound `wp_fractional_scale_v1`
+        // resource (if any) and sends an event on it; it takes no ownership
+        // and stores nothing past the call.
+        unsafe {
+            sys::wlr_fractional_scale_v1_notify_scale((*surface.as_ptr()).surface, scale);
+        }
+    }
+
+    /// Create the `wp_presentation` global, letting a client request
+    /// presentation feedback (when its buffer was actually presented, and at
+    /// what refresh), at protocol version 2 (the max this wlroots supports).
+    ///
+    /// Unlike `zwp_linux_dmabuf_v1` feedback, which needs an explicit
+    /// `wlr_scene_set_linux_dmabuf_v1` wiring call, wp_presentation_time has
+    /// none in this wlroots version — `wlr_scene_surface_create`'s own
+    /// documented behaviour lists it as one of the protocols a compositor
+    /// "just needs to enable": every scene surface reports feedback
+    /// automatically once this global exists. See
+    /// [`set_scene_presentation`](Runtime::set_scene_presentation)'s own doc
+    /// for the consequence. Errors if called twice.
+    pub fn create_presentation(&self, display: &Display, backend: &Backend<'_>) -> Result<()> {
+        if self.inner.presentation.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_presentation called twice",
+            ));
+        }
+        // SAFETY: `display` and `backend` are live for the call; the returned
+        // presentation global is owned by the display and destroyed with it,
+        // so this crate never frees it.
+        let raw = unsafe { sys::wlr_presentation_create(display.as_ptr(), backend.as_ptr(), 2) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_presentation_create"))?;
+        *self.inner.presentation.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// Confirm the scene is ready to report `wp_presentation` feedback.
+    ///
+    /// This wlroots version has **no** `wlr_scene_set_presentation` (or
+    /// equivalent) wiring call to make — confirmed against both the
+    /// installed `wlr_scene.h`/`wlr_presentation_time.h` headers and the
+    /// generated bindings: `struct wlr_scene` carries no presentation field,
+    /// and no such symbol exists to bind. wp_presentation_time is one of the
+    /// protocols `wlr_scene_surface_create` documents as needing nothing
+    /// beyond the global existing (see
+    /// [`create_presentation`](Runtime::create_presentation)'s own doc), so
+    /// there is no per-scene registration to perform. This method exists to
+    /// enforce the ordering contract a consumer would otherwise have to track
+    /// by hand — call after both
+    /// [`init_graphics`](Runtime::init_graphics) and
+    /// [`create_presentation`](Runtime::create_presentation) — and to give a
+    /// stable name a future wlroots wiring requirement could grow real work
+    /// under without an API break. Errors if either precondition is missing.
+    pub fn set_scene_presentation(&self) -> Result<()> {
+        if self.inner.presentation.borrow().is_none() {
+            return Err(Error::Operation(
+                "Runtime::set_scene_presentation before create_presentation",
+            ));
+        }
+        if self.scene_ptr().is_none() {
+            return Err(Error::Operation(
+                "Runtime::set_scene_presentation before init_graphics",
+            ));
+        }
+        Ok(())
     }
 
     /// The pointer constraint currently activated on the focused surface, or

@@ -332,3 +332,162 @@ fn a_fresh_runtime_is_not_session_locked() {
         "advertising the manager global must not lock the session by itself"
     );
 }
+
+/// Shared by every test below that needs a real `Backend` — `init_graphics`
+/// and `create_presentation` both require one. `Once`-guarded, mirroring
+/// `output_layout.rs`'s own `headless_env`: `std::env::set_var` is process-
+/// global, so a second call racing a first from another test thread must not
+/// re-touch it mid-read.
+fn headless_env() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        std::env::set_var("WLR_BACKENDS", "headless");
+        std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
+    });
+}
+
+#[test]
+fn creating_the_viewporter_twice_is_refused() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.create_viewporter(&display).expect("first");
+    assert!(
+        matches!(
+            runtime.create_viewporter(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second viewporter global would make the compositor advertise two"
+    );
+}
+
+#[test]
+fn creating_the_single_pixel_buffer_manager_twice_is_refused() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime
+        .create_single_pixel_buffer_manager(&display)
+        .expect("first");
+    assert!(
+        matches!(
+            runtime.create_single_pixel_buffer_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second single-pixel-buffer global would make the compositor advertise two"
+    );
+}
+
+#[test]
+fn creating_the_content_type_manager_twice_is_refused() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.create_content_type_manager(&display).expect("first");
+    assert!(
+        matches!(
+            runtime.create_content_type_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second content-type global would make the compositor advertise two"
+    );
+}
+
+/// xdg-output needs the scene's output layout, which does not exist before
+/// [`init_graphics`](wlr::Runtime::init_graphics) has run.
+#[test]
+fn creating_the_xdg_output_manager_before_init_graphics_is_refused() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    assert!(
+        matches!(
+            runtime.create_xdg_output_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "there is no output layout to read before init_graphics has run"
+    );
+}
+
+#[test]
+fn creating_the_xdg_output_manager_twice_is_refused() {
+    headless_env();
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime
+        .create_xdg_output_manager(&display)
+        .expect("first");
+    assert!(
+        matches!(
+            runtime.create_xdg_output_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second xdg-output global would make the compositor advertise two"
+    );
+}
+
+#[test]
+fn creating_the_fractional_scale_manager_twice_is_refused() {
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime
+        .create_fractional_scale_manager(&display)
+        .expect("first");
+    assert!(
+        matches!(
+            runtime.create_fractional_scale_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second fractional-scale global would make the compositor advertise two"
+    );
+}
+
+#[test]
+fn creating_the_presentation_twice_is_refused() {
+    headless_env();
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime
+        .create_presentation(&display, &backend)
+        .expect("first");
+    assert!(
+        matches!(
+            runtime.create_presentation(&display, &backend),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second presentation global would make the compositor advertise two"
+    );
+}
+
+#[test]
+fn set_scene_presentation_before_create_presentation_is_refused() {
+    headless_env();
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    assert!(
+        matches!(
+            runtime.set_scene_presentation(),
+            Err(wlr::Error::Operation(_))
+        ),
+        "there is no presentation global to wire the scene to yet"
+    );
+}
+
+#[test]
+fn set_scene_presentation_before_init_graphics_is_refused() {
+    headless_env();
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime
+        .create_presentation(&display, &backend)
+        .expect("presentation");
+    assert!(
+        matches!(
+            runtime.set_scene_presentation(),
+            Err(wlr::Error::Operation(_))
+        ),
+        "there is no scene to wire before init_graphics has run"
+    );
+}
