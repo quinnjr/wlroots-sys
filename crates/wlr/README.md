@@ -409,6 +409,71 @@ are bound, and so which of the `wlr_has_*` cfgs are set: building without
   public API change; the existing suite passing unchanged is the acceptance
   criterion.
 
+## 0.20.23 — XWayland
+
+An additive XWayland wrapper: a compositor can host X11 clients as
+first-class windows, place and decorate them, and handle override-redirect
+pop-ups. Gated on the `xwayland` feature (on by default) and the
+`wlr_has_xwayland` cfg, so a build without the wlroots xwayland headers is
+unaffected. All additive — no existing item's name or signature changed.
+
+### Server lifecycle
+
+- `Runtime::create_xwayland(&Display, lazy: bool) -> Result<()>` — start the
+  lazy (or eager) XWayland server. Errors if called twice.
+- `Runtime::xwayland_display_name(&self) -> Option<String>` — the reserved
+  `:N` display, available as soon as `create_xwayland` returns (the lazy
+  manager reserves the socket up front), so `DISPLAY` can be exported before
+  the first client connects.
+- `Runtime::set_xwayland_seat(&self)` — point XWayland at the runtime's seat,
+  wiring the clipboard/primary/DND bridge.
+
+### Surfaces
+
+- `XwaylandSurface<'h>` with read accessors: `id`, `geometry`, `title`,
+  `class`, `instance`, `role`, `pid`, `is_modal`, `override_redirect`,
+  `override_redirect_wants_focus`, `has_surface`, and `window_type` →
+  `XwaylandWindowType` (normal/dialog/splash/utility/…).
+- `XwaylandSurfaceId`, plus `dangling_for_test`/`dangling_nth_for_test`
+  constructors for consumers' unit tests.
+- State setters on `Runtime`, keyed by id:
+  `configure_xwayland_surface(Box2D)`, `set_xwayland_surface_position`,
+  `set_xwayland_surface_visible`, `activate_xwayland_surface`,
+  `set_xwayland_surface_maximized`, `set_xwayland_surface_fullscreen`,
+  `set_xwayland_surface_minimized` (the last writes `_NET_WM_STATE_HIDDEN`),
+  and `close_xwayland_surface`.
+
+### Placement, stacking and focus
+
+- `Runtime::raise_xwayland_surface`, `restack_xwayland_surface`,
+  `reparent_xwayland_surface_to_band(Band)` — move a surface's scene node
+  within/between bands (managed toplevels vs the override-redirect band above
+  them).
+- `focus_xwayland_surface_keyboard`, `xwayland_surface_has_keyboard_focus`,
+  `xwayland_surface_parent` (the transient-parent chain, for dialog
+  centering).
+- Scene observers for tests: `xwayland_surface_scene_parent_band`,
+  `xwayland_surface_scene_position`.
+- `Runtime::add_buffer_in_band`/`raise_buffer`/`raise_rect` — band-scoped
+  scene primitives that let a consumer build server-side decorations as
+  siblings of an X11 window's content.
+
+### Handler callbacks (`ToplevelHandler`, all defaulted)
+
+Additive, defaulted methods so existing implementors compile unchanged:
+`xwayland_surface_associate`, `xwayland_surface_mapped`, and the
+request/configure/activate/minimize seams the xwm drives.
+
+### Map-race fix
+
+Two races could leave a managed X11 window stuck at the map timeout — a
+buffer committed before `associate` (wlroots never maps from that path), and
+frame-callback starvation on an undamaged headless output. The wrapper maps a
+buffered-but-unmapped surface at `associate`, and adds a per-surface
+pre-map commit listener that calls the new
+`Runtime::schedule_frame_all(&self) -> usize` so XWayland's handshake frame
+callback is answered. Bounded to the handshake commits; never busy-loops.
+
 ## 0.20.20
 
 Session locking (`ext-session-lock-v1`) and idle management

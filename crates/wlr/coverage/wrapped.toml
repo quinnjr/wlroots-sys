@@ -1954,6 +1954,16 @@ module = "runtime"
 item   = "Runtime::set_xwayland_seat"
 
 [[wrapped]]
+symbol = "wlr_surface_has_buffer"
+module = "backend"
+item   = "ToplevelHandler::xwayland_surface_mapped"
+
+[[wrapped]]
+symbol = "wlr_surface_map"
+module = "backend"
+item   = "ToplevelHandler::xwayland_surface_mapped"
+
+[[wrapped]]
 symbol = "wlr_xwayland_surface"
 module = "xwayland"
 item   = "XwaylandSurface"
