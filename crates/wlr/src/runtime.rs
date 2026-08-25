@@ -8291,7 +8291,7 @@ impl Runtime {
     /// [`crate::SeatHandler::request_set_shape`] override, applying the shape
     /// a `cursor-shape-v1` client asked for.
     ///
-    /// A no-op with no seat — mirrors [`Runtime::ensure_cursor_image`]'s own
+    /// A no-op with no seat — mirrors `Runtime::ensure_cursor_image`'s own
     /// "no seat, nothing to set" rule, for the same reason: there is no
     /// `wlr_cursor`/`wlr_xcursor_manager` pair to set an image on before
     /// [`Runtime::create_seat`] has run.

@@ -393,35 +393,6 @@ reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
 
-[[waived]]
-symbol    = "wlr_cursor_shape_manager_v1"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_cursor_shape_manager_v1_create"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_cursor_shape_manager_v1_device_type"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_cursor_shape_manager_v1_request_set_shape_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_cursor_shape_v1_name"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_cursor_state"
@@ -1260,25 +1231,7 @@ note      = "Shell completion: xdg-shell remainder, foreign toplevels, composito
 milestone = "M9"
 
 [[waived]]
-symbol    = "wlr_gamma_control_manager_v1"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_gamma_control_manager_v1_create"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
 symbol    = "wlr_gamma_control_manager_v1_get_control"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_gamma_control_manager_v1_set_gamma_event"
 reason    = "not-yet"
 note      = "Output stack completion."
 milestone = "M6"
@@ -1963,12 +1916,6 @@ milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_output_from_resource"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_get_gamma_size"
 reason    = "not-yet"
 note      = "Output stack completion."
 milestone = "M6"
@@ -2695,12 +2642,6 @@ symbol    = "wlr_scene_set_color_manager_v1"
 reason    = "not-yet"
 note      = "Needs a wlr_color_manager_v1 the crate cannot create; color_management_v1 lands in M12. Asserts one is not already set, so it must be a checked once-only setter."
 milestone = "M12"
-
-[[waived]]
-symbol    = "wlr_scene_set_gamma_control_manager_v1"
-reason    = "not-yet"
-note      = "Needs a wlr_gamma_control_manager_v1 from the M6 output stack. Asserts one is not already set (wlr_scene.h:373), so a second call aborts on this NDEBUG-less build."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_scene_set_linux_dmabuf_v1"
@@ -4393,31 +4334,13 @@ note      = "Shell completion: xdg-shell remainder, foreign toplevels, composito
 milestone = "M9"
 
 [[waived]]
-symbol    = "wlr_xdg_activation_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_xdg_activation_v1_add_token"
 reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
 milestone = "M9"
 
 [[waived]]
-symbol    = "wlr_xdg_activation_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_xdg_activation_v1_find_token"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_activation_v1_request_activate_event"
 reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
 milestone = "M9"

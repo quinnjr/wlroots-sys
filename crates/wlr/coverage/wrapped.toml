@@ -2102,3 +2102,68 @@ item   = "Runtime::set_xwayland_surface_minimized"
 symbol = "wlr_compositor"
 module = "runtime"
 item   = "Runtime::create_xwayland"
+
+[[wrapped]]
+symbol = "wlr_cursor_shape_manager_v1"
+module = "runtime"
+item   = "Runtime::create_cursor_shape_manager"
+
+[[wrapped]]
+symbol = "wlr_cursor_shape_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_cursor_shape_manager"
+
+[[wrapped]]
+symbol = "wlr_cursor_shape_manager_v1_device_type"
+module = "backend"
+item   = "SeatHandler::request_set_shape"
+
+[[wrapped]]
+symbol = "wlr_cursor_shape_manager_v1_request_set_shape_event"
+module = "backend"
+item   = "SeatHandler::request_set_shape"
+
+[[wrapped]]
+symbol = "wlr_cursor_shape_v1_name"
+module = "runtime"
+item   = "Runtime::set_cursor_shape"
+
+[[wrapped]]
+symbol = "wlr_gamma_control_manager_v1"
+module = "runtime"
+item   = "Runtime::create_gamma_control_manager"
+
+[[wrapped]]
+symbol = "wlr_gamma_control_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_gamma_control_manager"
+
+[[wrapped]]
+symbol = "wlr_gamma_control_manager_v1_set_gamma_event"
+module = "backend"
+item   = "OutputHandler::gamma_control_changed"
+
+[[wrapped]]
+symbol = "wlr_output_get_gamma_size"
+module = "output"
+item   = "Output::gamma_size"
+
+[[wrapped]]
+symbol = "wlr_scene_set_gamma_control_manager_v1"
+module = "runtime"
+item   = "Runtime::create_gamma_control_manager"
+
+[[wrapped]]
+symbol = "wlr_xdg_activation_v1"
+module = "runtime"
+item   = "Runtime::create_xdg_activation_manager"
+
+[[wrapped]]
+symbol = "wlr_xdg_activation_v1_create"
+module = "runtime"
+item   = "Runtime::create_xdg_activation_manager"
+
+[[wrapped]]
+symbol = "wlr_xdg_activation_v1_request_activate_event"
+module = "backend"
+item   = "SeatHandler::request_activate"

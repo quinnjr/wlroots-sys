@@ -4,13 +4,12 @@
 //! every handler as `&mut S`. Every method is defaulted, so a consumer
 //! implements only what they use.
 
+use crate::{
+    ActivationToken, CursorShape, CursorShapeDevice, DecorationMode, Edges, KeyEvent, LayerSurface,
+    LayerSurfaceId, NodeId, Output, OutputId, SceneOutputId, Toplevel, ToplevelId, Transform,
+};
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
-use crate::{
-    ActivationToken, CursorShape, CursorShapeDevice, DecorationMode, Edges, KeyEvent,
-    LayerSurface, LayerSurfaceId, NodeId, Output, OutputId, SceneOutputId, Toplevel, ToplevelId,
-    Transform,
-};
 
 /// One output head as it stands *after* a client's output-management
 /// configuration has been applied and committed.

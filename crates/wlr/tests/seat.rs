@@ -496,7 +496,9 @@ fn set_scene_presentation_before_init_graphics_is_refused() {
 fn creating_the_cursor_shape_manager_twice_is_refused() {
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
-    runtime.create_cursor_shape_manager(&display).expect("first");
+    runtime
+        .create_cursor_shape_manager(&display)
+        .expect("first");
     assert!(
         matches!(
             runtime.create_cursor_shape_manager(&display),

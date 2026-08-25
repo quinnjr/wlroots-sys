@@ -474,6 +474,43 @@ pre-map commit listener that calls the new
 `Runtime::schedule_frame_all(&self) -> usize` so XWayland's handshake frame
 callback is answered. Bounded to the handshake commits; never busy-loops.
 
+## 0.20.25 — A2 batch-2 request handlers
+
+Three protocols that route a client *request* to a compositor-decided
+outcome, rather than passively announcing a global. All additive; new
+handler methods defaulted.
+
+- `Runtime::create_cursor_shape_manager(&Display) -> Result<()>` — the
+  `wp_cursor_shape_manager_v1` global, letting a client name a cursor by
+  shape (`CursorShape`) instead of uploading pixels.
+  `Runtime::set_cursor_shape(CursorShape)` applies a shape via
+  `wlr_cursor_shape_v1_name`. `SeatHandler::request_set_shape(&mut self,
+  device: CursorShapeDevice, serial: u32, shape: CursorShape)` fires on the
+  client's `wp_cursor_shape_device_v1.set_shape` request; defaulted to a
+  no-op — wlroots does not apply the request itself, so a compositor must
+  override this and call `Runtime::set_cursor_shape` to see it on screen.
+- `Runtime::create_xdg_activation_manager(&Display) -> Result<()>` — the
+  `xdg_activation_v1` global, letting a client request that a surface be
+  given focus, with `ActivationToken` carrying the wlroots-validated
+  evidence (serial, seat, requesting surface) a focus-steal policy decides
+  from. `SeatHandler::request_activate(&mut self, target:
+  Option<ToplevelId>, token: ActivationToken)` fires on the client's
+  `xdg_activation_v1.activate` request; defaulted to a no-op — wlroots does
+  not steal focus itself, so a compositor overrides this to apply its own
+  policy.
+- `Runtime::create_gamma_control_manager(&Display) -> Result<()>` — the
+  `zwlr_gamma_control_manager_v1` global. Unlike the other two, gamma is
+  *applied* by wlroots itself: `wlr_scene_set_gamma_control_manager_v1`
+  hands the manager to the scene, which handles every output's gamma ramp
+  on its own — there is nothing for a compositor to apply.
+  `OutputHandler::gamma_control_changed(&mut self, output: OutputId)` is a
+  notification only, defaulted to a no-op. `Output::gamma_size(&self) ->
+  usize` wraps `wlr_output_get_gamma_size`, returning `0` if the backend has
+  no gamma support.
+
+Errors if any `create_*` is called twice. No existing item's name or
+signature changed.
+
 ## 0.20.24 — A2 batch-1 passive compat protocols
 
 Six small, passive globals a compositor turns on once at startup and never
