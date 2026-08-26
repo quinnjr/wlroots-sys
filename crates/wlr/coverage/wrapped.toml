@@ -2124,6 +2124,16 @@ module = "backend"
 item   = "SeatHandler::request_set_shape"
 
 [[wrapped]]
+symbol = "wlr_seat_client"
+module = "backend"
+item   = "SeatHandler::request_set_shape"
+
+[[wrapped]]
+symbol = "wlr_seat_pointer_focus_change_event"
+module = "backend"
+item   = "backend::on_pointer_focus_change"
+
+[[wrapped]]
 symbol = "wlr_cursor_shape_v1_name"
 module = "runtime"
 item   = "Runtime::set_cursor_shape"

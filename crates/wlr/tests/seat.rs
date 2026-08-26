@@ -580,3 +580,49 @@ fn an_outputs_gamma_size_is_reachable_on_a_headless_output() {
     // and returns without dereferencing anything invalid on a real output.
     assert_eq!(app.sizes, vec![0]);
 }
+
+/// The public half of 0.20.26's cursor-shape work: a named shape is
+/// readable, and `CursorShape::Default` un-names it.
+///
+/// The *persistence* half (a named shape surviving pointer motion) is proved
+/// in `runtime.rs`'s own `mod tests`, which can reach the `pub(crate)`
+/// `ensure_cursor_image` every pointer callback calls; this crate exposes no
+/// way to synthesise a pointer motion from an integration test, for the same
+/// reason this file's header note gives about key presses.
+#[test]
+fn a_named_cursor_shape_reads_back_and_the_default_shape_clears_it() {
+    headless_env();
+    let display = wlr::Display::new().expect("display");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.create_seat(&display, "seat0").expect("seat");
+
+    assert_eq!(
+        runtime.cursor_shape(),
+        None,
+        "a fresh seat shows the default image, which is not a named shape"
+    );
+
+    runtime.set_cursor_shape(wlr::CursorShape::Text);
+    assert_eq!(runtime.cursor_shape(), Some(wlr::CursorShape::Text));
+
+    // Idempotent: naming the shape already in force changes nothing.
+    runtime.set_cursor_shape(wlr::CursorShape::Text);
+    assert_eq!(runtime.cursor_shape(), Some(wlr::CursorShape::Text));
+
+    runtime.set_cursor_shape(wlr::CursorShape::Default);
+    assert_eq!(
+        runtime.cursor_shape(),
+        None,
+        "Default un-names the cursor rather than becoming the named shape"
+    );
+}
+
+/// With no seat there is no cursor to name, so `set_cursor_shape` stays the
+/// no-op it has always been and `cursor_shape` reports nothing — the same
+/// "no seat, nothing to set" rule every other cursor entry point follows.
+#[test]
+fn naming_a_cursor_shape_without_a_seat_is_a_no_op() {
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.set_cursor_shape(wlr::CursorShape::Text);
+    assert_eq!(runtime.cursor_shape(), None);
+}
