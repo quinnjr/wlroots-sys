@@ -474,6 +474,45 @@ pre-map commit listener that calls the new
 `Runtime::schedule_frame_all(&self) -> usize` so XWayland's handshake frame
 callback is answered. Bounded to the handshake commits; never busy-loops.
 
+## 0.20.26 — cursor-shape focus gating + named-cursor persistence
+
+Fixes what 0.20.25's cursor-shape support forced on every consumer: a
+fragile, model-level reconstruction of pointer focus. All additive; the one
+behaviour change is that `SeatHandler::request_set_shape` is now delivered
+only for the pointer-focused client.
+
+- **Focus gating.** `request_set_shape` compares the request's
+  `seat_client` against `wlr_seat.pointer_state.focused_client` and drops
+  anything else, which is the check `wlr_cursor_shape_manager_v1`'s own doc
+  asks for when it says to handle the event "in the same way as
+  `wlr_seat.events.request_set_cursor`". Without it any client bound to the
+  global — a surfaceless daemon included — could name the shared cursor. A
+  handler may now honour every delivered request unconditionally.
+- **A named shape persists.** `ensure_cursor_image` no longer forces
+  `left_ptr` from all three pointer callbacks, so a shape set through
+  `Runtime::set_cursor_shape` survives the next motion instead of being
+  stomped by it — which is what that method's own doc always claimed
+  ("whenever the cursor has none"). It also stops latching its
+  theme-loaded flag when `wlr_xcursor_manager_load` returns `false`, so a
+  themeless system retries instead of ending up with no image at all.
+- **The crate resets it on focus change.** A listener on
+  `wlr_seat.pointer_state.events.focus_change` clears the named shape and
+  restores the default whenever the pointer enters a different surface or
+  none — including when the naming client dies, since wlroots clears
+  pointer focus while tearing its surfaces down. Consumers no longer
+  hit-test their own model geometry to guess "leave".
+  `Runtime::cursor_shape(&self) -> Option<CursorShape>` reads the state
+  back (`None` = the default `left_ptr`).
+- **`set_cursor_shape` short-circuits.** Naming the shape already in force
+  is a no-op, and `CursorShape::Default` *clears* the named cursor rather
+  than becoming it — so a consumer that never names anything else sees
+  exactly the pre-0.20.26 behaviour. `CursorShape::Pointer` is a distinct
+  shape (the link/hand cursor), not an alias for `Default`, so it persists;
+  its own doc, which called it an explicit spelling of the platform default,
+  is corrected to match `cursor-shape-v1`.
+
+No existing item's name or signature changed.
+
 ## 0.20.25 — A2 batch-2 request handlers
 
 Three protocols that route a client *request* to a compositor-decided
