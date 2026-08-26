@@ -836,6 +836,28 @@ pub trait SeatHandler {
     /// pointer focus before this is called, so an implementor is free to do
     /// nothing at all; this exists for compositors that track the pointer
     /// themselves (for a drag, or a snap preview).
+    ///
+    /// # The implicit pointer grab
+    ///
+    /// Since 0.20.27, "updated the client-side pointer focus" has one
+    /// exception, and it is the one Wayland requires: **while a pointer
+    /// button is held, focus does not move**. The surface the press landed
+    /// on keeps receiving every motion — at surface-local coordinates that
+    /// follow the cursor's own delta, so they run outside the surface's
+    /// extent once the cursor leaves it — and no other surface is entered
+    /// until the last button comes back up. That is what lets a client
+    /// finish a drag it started (a scrollbar, a slider, a text selection),
+    /// and it is the compositor's job: `wlr_seat_pointer_notify_*` defers
+    /// only to *explicit* seat grabs.
+    ///
+    /// This method is called for every motion regardless, with the cursor's
+    /// real scene position — the grab changes what clients see, not what an
+    /// implementor is told.
+    ///
+    /// An explicit grab (an xdg-popup grab, a drag-and-drop grab) takes
+    /// precedence and is left entirely to wlroots, as before. A surface
+    /// that moves during the press is not tracked: coordinates stay
+    /// relative to where it was when the button went down.
     fn pointer_motion(&mut self, x: f64, y: f64, time_msec: u32) {
         let _ = (x, y, time_msec);
     }
@@ -848,6 +870,20 @@ pub trait SeatHandler {
     /// returns, unconditionally: unlike keys there is no interception,
     /// because a compositor that wants to swallow a click does it by not
     /// having a client under the pointer, not by filtering.
+    ///
+    /// # The implicit pointer grab
+    ///
+    /// Since 0.20.27 the button also drives the implicit pointer grab
+    /// described on [`pointer_motion`](SeatHandler::pointer_motion). The
+    /// press that takes the seat's button count from zero focuses the
+    /// surface under the cursor and then *pins* focus there; the release
+    /// that returns it to zero delivers to that same surface first and only
+    /// then re-evaluates focus, which is what gives whatever the cursor now
+    /// sits over its `enter`. Buttons pressed and released in between move
+    /// nothing.
+    ///
+    /// The practical consequence: a client always sees the release for a
+    /// press it saw, wherever the cursor ended up.
     fn pointer_button(&mut self, x: f64, y: f64, button: u32, pressed: bool, time_msec: u32) {
         let _ = (x, y, button, pressed, time_msec);
     }

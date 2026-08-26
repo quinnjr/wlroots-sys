@@ -52,6 +52,59 @@ use crate::{
 };
 use crate::{ColorEncoding, ColorRange, FilterMode, NamedPrimaries, TransferFunction};
 
+/// The Wayland **implicit pointer grab**: the surface that owns pointer
+/// input for as long as a button is held, and the reference frame its
+/// surface-local coordinates are measured from.
+///
+/// While this is set, `backend.rs`'s motion paths stop asking the scene
+/// graph what the cursor is over and send every motion to `surface`
+/// instead. The coordinates come from the same delta model sway's
+/// `seatop_down` uses: whatever surface-local point the `enter` established
+/// (`ref_sx`, `ref_sy`), displaced by however far the cursor has travelled
+/// in layout coordinates since (`ref_lx`, `ref_ly`).
+///
+/// The model deliberately does **not** track the surface moving underneath
+/// the held pointer: a window dragged, resized or reordered mid-press keeps
+/// reporting coordinates relative to where it was when the button went
+/// down. sway has the same limitation, and the alternative — re-deriving
+/// the offset from the surface's live scene position every motion — would
+/// make an interactive move (which moves the window *because* the pointer
+/// moved) feed back on itself.
+///
+/// `surface` is a borrowed wlroots pointer, never owned. It is only ever
+/// dereferenced after being compared equal to the seat's *current*
+/// `focused_surface`, which wlroots itself nulls when the surface is
+/// destroyed — so a grab left behind by a destroyed surface fails that
+/// comparison and is dropped rather than followed.
+#[derive(Clone, Copy)]
+pub(crate) struct PointerGrab {
+    /// The surface the press landed on and every subsequent event goes to.
+    pub(crate) surface: *mut sys::wlr_surface,
+    /// The cursor's layout position when the button went down.
+    pub(crate) ref_lx: f64,
+    /// The cursor's layout position when the button went down.
+    pub(crate) ref_ly: f64,
+    /// The surface-local coordinates the enter established at that point.
+    pub(crate) ref_sx: f64,
+    /// The surface-local coordinates the enter established at that point.
+    pub(crate) ref_sy: f64,
+}
+
+impl PointerGrab {
+    /// The surface-local coordinates to report for a cursor now at layout
+    /// position `(x, y)`.
+    ///
+    /// Pure, and the whole of the grab's coordinate model — which is why it
+    /// is a function rather than three lines inlined into two nearly
+    /// identical motion handlers.
+    pub(crate) fn surface_coords(&self, x: f64, y: f64) -> (f64, f64) {
+        (
+            self.ref_sx + (x - self.ref_lx),
+            self.ref_sy + (y - self.ref_ly),
+        )
+    }
+}
+
 /// A declared fd source: the descriptor, what it wants, and its id.
 ///
 /// Owns the `OwnedFd` so the descriptor cannot be closed while a run has it
@@ -268,6 +321,14 @@ pub(crate) struct RuntimeInner {
     /// which constraint becomes active on a focus change — lands in a follow-up
     /// task. Init `None`.
     pub(crate) active_constraint: std::cell::Cell<Option<NonNull<sys::wlr_pointer_constraint_v1>>>,
+
+    /// The implicit pointer grab in force, or `None` when no button is
+    /// held. Written only by `backend.rs`'s button handler (set on the
+    /// press that takes the button count from zero, cleared on the release
+    /// that returns it to zero) and by the motion paths when the grab stops
+    /// applying. `Cell`, like `active_constraint`: it is read from
+    /// `extern "C"` frames that must not be able to fail on a borrow.
+    pub(crate) pointer_grab: std::cell::Cell<Option<PointerGrab>>,
 
     /// The number of currently live `wlr_idle_inhibitor_v1` objects, tracked
     /// so [`Runtime::refresh_idle_inhibited`] knows whether to gate the idle
@@ -1087,6 +1148,7 @@ impl Runtime {
                 xdg_activation_manager: RefCell::new(None),
                 gamma_control_manager: RefCell::new(None),
                 active_constraint: std::cell::Cell::new(None),
+                pointer_grab: std::cell::Cell::new(None),
                 idle_notifier: RefCell::new(None),
                 idle_inhibit_manager: RefCell::new(None),
                 idle_inhibitors: std::cell::Cell::new(0),
@@ -5481,6 +5543,19 @@ impl Runtime {
     /// the active constraint is destroyed.
     pub(crate) fn active_constraint(&self) -> Option<NonNull<sys::wlr_pointer_constraint_v1>> {
         self.inner.active_constraint.get()
+    }
+
+    /// The implicit pointer grab in force, or `None` when no button is held.
+    ///
+    /// See [`PointerGrab`] for the model. Read by `backend.rs`'s motion and
+    /// button paths, which are also its only writers.
+    pub(crate) fn pointer_grab(&self) -> Option<PointerGrab> {
+        self.inner.pointer_grab.get()
+    }
+
+    /// Install or clear the implicit pointer grab.
+    pub(crate) fn set_pointer_grab(&self, grab: Option<PointerGrab>) {
+        self.inner.pointer_grab.set(grab);
     }
 
     /// The cursor's current position in layout coordinates, or `(0.0, 0.0)`

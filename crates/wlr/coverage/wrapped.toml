@@ -1424,6 +1424,11 @@ module = "backend"
 item   = "SeatHandler::key"
 
 [[wrapped]]
+symbol = "wlr_seat_pointer_has_grab"
+module = "backend"
+item   = "SeatHandler::pointer_button"
+
+[[wrapped]]
 symbol = "wlr_seat_pointer_notify_button"
 module = "backend"
 item   = "SeatHandler::pointer_button"
@@ -1445,6 +1450,11 @@ item   = "SeatHandler::pointer_motion"
 
 [[wrapped]]
 symbol = "wlr_seat_pointer_notify_motion"
+module = "backend"
+item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_seat_pointer_state"
 module = "backend"
 item   = "SeatHandler::pointer_motion"
 

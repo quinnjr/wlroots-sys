@@ -2794,12 +2794,6 @@ note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
 
 [[waived]]
-symbol    = "wlr_seat_pointer_has_grab"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
 symbol    = "wlr_seat_pointer_notify_axis"
 reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
@@ -2837,12 +2831,6 @@ milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_seat_pointer_start_grab"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_seat_pointer_state"
 reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
