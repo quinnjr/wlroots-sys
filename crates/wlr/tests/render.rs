@@ -251,8 +251,8 @@ fn an_allocator_hands_out_buffers_a_pass_can_draw_into() {
     let mut options = ReadPixels::new(&mut read_back, FourCc::ARGB8888, 8 * 4);
     texture.read_pixels(&mut options).expect("read pixels");
 
-    for pixel in read_back.chunks_exact(4) {
-        assert_eq!(pixel, RED, "the whole buffer should be the rect's colour");
+    for pixel in read_back.as_chunks::<4>().0 {
+        assert_eq!(*pixel, RED, "the whole buffer should be the rect's colour");
     }
 }
 
@@ -288,7 +288,7 @@ fn a_clipped_rect_leaves_the_rest_of_the_buffer_alone() {
     let mut options = ReadPixels::new(&mut read_back, FourCc::ARGB8888, 4 * 4);
     texture.read_pixels(&mut options).expect("read pixels");
 
-    for row in read_back.chunks_exact(4 * 4) {
+    for row in read_back.as_chunks::<{ 4 * 4 }>().0 {
         assert_eq!(&row[0..4], RED, "left half is inside the clip");
         assert_eq!(&row[8..12], BLUE, "right half is outside it");
     }

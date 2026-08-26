@@ -1855,6 +1855,20 @@ impl<'d> Backend<'d> {
                     std::ptr::null(),
                 )
             });
+            // `pointer_state.events.focus_change`: wlroots telling us the
+            // pointer entered a different surface, or none. Same liveness
+            // reasoning as the seat signals just above — `pointer_state` is
+            // an inline field of the display-owned seat, so a null liveness
+            // flag is correct. `on_pointer_focus_change` drops any cursor
+            // shape the previously-focused client had named.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*seat.as_ptr()).pointer_state.events.focus_change,
+                    on_pointer_focus_change::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
         }
 
         if let Some(manager) = runtime.virtual_keyboard_manager_ptr() {
@@ -4179,6 +4193,63 @@ unsafe extern "C" fn on_new_pointer_constraint<S: Handlers>(
     }
 }
 
+/// Whether a `cursor-shape-v1` request coming from `seat_client` is entitled
+/// to name the shared cursor image: only the client that currently holds
+/// `seat`'s *pointer* focus is.
+///
+/// A null `seat_client` (which wlroots does not produce, but which a
+/// zero-initialised event would) is never entitled, and never compares equal
+/// to a null `focused_client` — "nobody has pointer focus" must not read as
+/// "everybody does".
+///
+/// # Safety
+///
+/// `seat` must be a live `wlr_seat`. `seat_client` is only compared, never
+/// dereferenced, so it may be any value.
+unsafe fn shape_request_is_focused(
+    seat: *mut sys::wlr_seat,
+    seat_client: *mut sys::wlr_seat_client,
+) -> bool {
+    if seat_client.is_null() {
+        return false;
+    }
+    // SAFETY: `seat` is live per this function's contract, and
+    // `pointer_state` is an inline field of it.
+    unsafe { (*seat).pointer_state.focused_client == seat_client }
+}
+
+/// wlroots' pointer focus moved to a different surface (or to none).
+///
+/// This is what makes a named cursor shape self-limiting: the shape a client
+/// set through `cursor-shape-v1` applies only while that client is under the
+/// pointer, so the moment focus moves the crate drops it and restores the
+/// default image. Without this every consumer would have to hit-test its own
+/// model geometry on every motion to work out when to un-set a shape.
+///
+/// A client disconnecting is covered by the same hook: wlroots clears pointer
+/// focus while tearing that client's surfaces down, which emits this signal
+/// with a null `new_surface`.
+unsafe extern "C" fn on_pointer_focus_change<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_seat.pointer_state.events.focus_change`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_seat_pointer_focus_change_event`, valid only
+    // for this call; only its two surface pointers are read, and they are
+    // compared rather than dereferenced (either may legitimately be null).
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_seat_pointer_focus_change_event>();
+        if (*event).old_surface == (*event).new_surface {
+            return;
+        }
+        (*session).runtime.reset_named_cursor();
+    }
+}
+
 /// A client asked to change the cursor image via
 /// `wp_cursor_shape_device_v1.set_shape`.
 unsafe extern "C" fn on_request_set_shape<S: Handlers>(
@@ -4195,6 +4266,37 @@ unsafe extern "C" fn on_request_set_shape<S: Handlers>(
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let event = data.cast::<sys::wlr_cursor_shape_manager_v1_request_set_shape_event>();
+
+        // The security gate wlroots leaves to the compositor: any client
+        // bound to the cursor-shape global can send `set_shape`, including
+        // one with no surface on screen at all, so a request from a client
+        // that does not currently hold the seat's pointer focus is dropped
+        // here rather than handed to the handler. This is the check
+        // `wlr_cursor_shape_manager_v1`'s own doc asks for when it says to
+        // handle the event "in the same way as
+        // `wlr_seat.events.request_set_cursor`" (whose canonical
+        // implementation compares `event->seat_client` against
+        // `seat->pointer_state.focused_client`), and doing it in the crate
+        // is what lets every handler honour a delivered request
+        // unconditionally.
+        //
+        // Dropped silently: this crate binds no Rust-side logging symbol
+        // (see `Runtime::apply_cursor`), and an unfocused client naming the
+        // cursor is ordinary racing traffic, not an error — the same reason
+        // the unrecognised-shape arm below simply returns.
+        let seat = (*session).runtime.seat_ptr();
+        let focused = match seat {
+            // SAFETY: `seat_ptr` hands back this runtime's own live
+            // `wlr_seat`, owned by the display, which outlives this
+            // callback; `pointer_state` is an inline field of it.
+            Some(seat) => shape_request_is_focused(seat.as_ptr(), (*event).seat_client),
+            // No seat at all: nothing holds pointer focus, so nothing is
+            // entitled to name the cursor.
+            None => false,
+        };
+        if !focused {
+            return;
+        }
 
         let device = match (*event).device_type {
             sys::wlr_cursor_shape_manager_v1_device_type::WLR_CURSOR_SHAPE_MANAGER_V1_DEVICE_TYPE_TABLET_TOOL => {
@@ -8097,5 +8199,90 @@ mod tests {
             app.lost, 1,
             "the lost signal reached the handler exactly once"
         );
+    }
+
+    /// The cursor-shape focus gate, in isolation.
+    ///
+    /// `shape_request_is_focused` reads exactly two pointer fields and
+    /// compares them, so a zeroed scratch `wlr_seat` with
+    /// `pointer_state.focused_client` written by hand exercises the real
+    /// code path — no display, no client and no protocol object needed.
+    /// Allocated rather than `mem::zeroed`-ed for the reason
+    /// `ScratchOutput`'s own doc gives: `wlr_seat` embeds `wl_listener`s.
+    struct ScratchSeat(*mut sys::wlr_seat);
+
+    impl ScratchSeat {
+        fn new() -> Self {
+            let layout = Layout::new::<sys::wlr_seat>();
+            // SAFETY: `wlr_seat` has fields, so the layout is non-zero-sized
+            // and `alloc_zeroed` returns either null (checked) or a suitably
+            // aligned, zeroed allocation of exactly that size. Nothing here
+            // initialises a signal or a list, because the function under
+            // test reads neither.
+            let ptr = unsafe { alloc_zeroed(layout) }.cast::<sys::wlr_seat>();
+            assert!(!ptr.is_null(), "allocation failed");
+            Self(ptr)
+        }
+
+        /// Plant `pointer_state.focused_client`.
+        fn focus(&self, client: *mut sys::wlr_seat_client) {
+            // SAFETY: `self.0` is a live, exclusively-owned allocation sized
+            // for a whole `wlr_seat`, so this field is in bounds; the value
+            // written is a plain pointer, never dereferenced by anything in
+            // this test.
+            unsafe { (*self.0).pointer_state.focused_client = client };
+        }
+    }
+
+    impl Drop for ScratchSeat {
+        fn drop(&mut self) {
+            // SAFETY: allocated by `alloc_zeroed` with this same layout in
+            // `new`, and not used again after this point. Nothing was
+            // initialised, so nothing needs finishing.
+            unsafe { dealloc(self.0.cast::<u8>(), Layout::new::<sys::wlr_seat>()) };
+        }
+    }
+
+    /// Two distinct, never-dereferenced `wlr_seat_client` addresses.
+    fn scratch_clients() -> (*mut sys::wlr_seat_client, *mut sys::wlr_seat_client) {
+        let a = std::ptr::NonNull::<sys::wlr_seat_client>::dangling().as_ptr();
+        // `dangling()` is the alignment, so `+1` is a different address with
+        // the same alignment. Neither is ever read.
+        (a, a.wrapping_add(1))
+    }
+
+    #[test]
+    fn the_pointer_focused_client_may_name_the_cursor() {
+        let seat = ScratchSeat::new();
+        let (focused, _other) = scratch_clients();
+        seat.focus(focused);
+        // SAFETY: `seat.0` points at a live scratch `wlr_seat`.
+        assert!(unsafe { shape_request_is_focused(seat.0, focused) });
+    }
+
+    /// The whole point of the gate: any *other* client — including a
+    /// surfaceless daemon that merely bound the cursor-shape global — must
+    /// not be able to name the shared cursor image.
+    #[test]
+    fn an_unfocused_client_may_not_name_the_cursor() {
+        let seat = ScratchSeat::new();
+        let (focused, other) = scratch_clients();
+        seat.focus(focused);
+        // SAFETY: as above.
+        assert!(!unsafe { shape_request_is_focused(seat.0, other) });
+    }
+
+    /// "Nobody has pointer focus" must not read as "everybody does": a null
+    /// `focused_client` compared against a null `seat_client` would be equal
+    /// without the explicit null check.
+    #[test]
+    fn nothing_is_entitled_when_no_client_holds_pointer_focus() {
+        let seat = ScratchSeat::new();
+        let (client, _other) = scratch_clients();
+        // `focused_client` is still the zeroed null from `alloc_zeroed`.
+        // SAFETY: as above.
+        assert!(!unsafe { shape_request_is_focused(seat.0, client) });
+        // SAFETY: as above; `seat_client` is only compared, never read.
+        assert!(!unsafe { shape_request_is_focused(seat.0, std::ptr::null_mut()) });
     }
 }

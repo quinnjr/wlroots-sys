@@ -873,11 +873,24 @@ pub trait SeatHandler {
     /// own doc on `wlr_cursor_shape_manager_v1` says a compositor should
     /// handle this "in the same way as `wlr_seat.events.request_set_cursor`"),
     /// so nothing changes on screen unless a compositor overrides this and
-    /// calls [`crate::Runtime::set_cursor_shape`] — typically unconditionally,
-    /// the way `request_set_cursor` implementations usually do, though
-    /// `device`/`serial` are available to a compositor that wants to
-    /// validate against its own idea of which device currently owns the
-    /// cursor.
+    /// calls [`crate::Runtime::set_cursor_shape`].
+    ///
+    /// **The crate has already checked who is asking.** Since 0.20.26 this
+    /// is delivered only for the client that currently holds the seat's
+    /// pointer focus — the check
+    /// `wlr_cursor_shape_manager_v1`'s own doc asks for when it says to
+    /// handle this "in the same way as `wlr_seat.events.request_set_cursor`"
+    /// — so a handler may honour the request unconditionally, and does not
+    /// need to hit-test its own model geometry to decide whether the asking
+    /// client is really under the pointer. A request from any other client
+    /// (including a surfaceless daemon bound to the global) is dropped
+    /// before it reaches here. `device`/`serial` remain available to a
+    /// compositor with a further policy of its own.
+    ///
+    /// The shape a handler applies with
+    /// [`crate::Runtime::set_cursor_shape`] then *persists* across pointer
+    /// motion and is reset by the crate when pointer focus moves away; see
+    /// that method's own doc.
     fn request_set_shape(&mut self, device: CursorShapeDevice, serial: u32, shape: CursorShape) {
         let _ = (device, serial, shape);
     }

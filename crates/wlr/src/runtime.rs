@@ -479,6 +479,23 @@ pub(crate) struct RuntimeInner {
     /// since loading a theme touches the filesystem and a consumer that
     /// never gets a pointer device should not pay for it.
     pub(crate) cursor_image_loaded: std::cell::Cell<bool>,
+    /// The shape a `cursor-shape-v1` client named through
+    /// [`Runtime::set_cursor_shape`], and which
+    /// [`Runtime::ensure_cursor_image`] must therefore *not* stomp back to
+    /// `left_ptr` on the next pointer motion. `None` means "no shape is
+    /// named" — the default `left_ptr` image — which is both the initial
+    /// state and what a pointer-focus change resets to (see `backend.rs`'s
+    /// `on_pointer_focus_change`).
+    pub(crate) named_cursor: std::cell::Cell<Option<CursorShape>>,
+    /// What was last handed to `wlr_cursor_set_xcursor`, in the same
+    /// encoding as `named_cursor` (`Some(None)` = the default `left_ptr`).
+    /// The outer `None` means nothing has been applied yet, so the very
+    /// first call always reaches wlroots. Purely an FFI short-circuit:
+    /// wlroots' own `wlr_cursor_set_xcursor` already early-returns on an
+    /// unchanged manager+name pair, so this only saves the call itself —
+    /// but it is also what makes "the image was not stomped" observable to
+    /// this crate's own tests.
+    pub(crate) applied_cursor: std::cell::Cell<Option<Option<CursorShape>>>,
 
     /// Every live keyboard the backend has announced, so capabilities can be
     /// recomputed as devices arrive and leave.
@@ -1102,6 +1119,8 @@ impl Runtime {
                 cursor: RefCell::new(None),
                 xcursor: RefCell::new(None),
                 cursor_image_loaded: std::cell::Cell::new(false),
+                named_cursor: std::cell::Cell::new(None),
+                applied_cursor: std::cell::Cell::new(None),
                 keyboards: RefCell::new(Vec::new()),
                 pointers: RefCell::new(Vec::new()),
                 test_touch_enabled: std::cell::Cell::new(false),
@@ -8258,6 +8277,68 @@ impl Runtime {
         *self.inner.cursor.borrow()
     }
 
+    /// Push `shape` at the `wlr_cursor`, where `None` means the crate's
+    /// default `left_ptr` image and `Some(s)` the xcursor
+    /// `wlr_cursor_shape_v1_name(s)` names.
+    ///
+    /// Loads the theme on the first call — lazily, from a pointer event
+    /// rather than eagerly in `create_seat`, so a consumer that never gets a
+    /// pointer device never touches the filesystem for a theme it does not
+    /// need — and then short-circuits when the same value is already
+    /// applied.
+    ///
+    /// The theme load is deliberately *above* the short-circuit: a load that
+    /// failed must be retried on the next pointer event, and with nothing
+    /// named `applied_cursor` reaches its steady state after one call, so a
+    /// short-circuit placed first would make the retry unreachable and leave
+    /// a themeless system with no cursor image forever.
+    ///
+    /// A no-op with no seat: there is no `wlr_cursor`/`wlr_xcursor_manager`
+    /// pair to set an image on before [`Runtime::create_seat`] has run.
+    fn apply_cursor(&self, shape: Option<CursorShape>) {
+        let (Some(cursor), Some(xcursor)) = (self.cursor_ptr(), *self.inner.xcursor.borrow())
+        else {
+            return;
+        };
+        if !self.inner.cursor_image_loaded.get() {
+            // The `bool` is the load's own success. Latching `true`
+            // regardless would turn a themeless system (no cursor theme
+            // installed, or `XCURSOR_THEME` naming one that is not there)
+            // into a permanent no-image cursor, because no later call would
+            // ever retry the load.
+            //
+            // No log on failure: this crate binds no Rust-side logging
+            // symbol (wlroots' own `wlr_log` is a `static inline` macro over
+            // an unbound `_wlr_log`, and the crate deliberately has no
+            // `log`/`tracing` dependency), so the retry *is* the report — a
+            // theme that appears later is picked up.
+            //
+            // SAFETY: `xcursor` was created by `create_seat` and lives as
+            // long as this runtime; `wlr_xcursor_manager_load` is safe to
+            // call more than once (idempotent per its own header doc).
+            if unsafe { sys::wlr_xcursor_manager_load(xcursor.as_ptr(), 1.0) } {
+                self.inner.cursor_image_loaded.set(true);
+            }
+        }
+        if self.inner.applied_cursor.get() == Some(shape) {
+            return;
+        }
+        // SAFETY: both pointers were created together by `create_seat` and
+        // live as long as this runtime. `wlr_cursor_shape_v1_name` returns a
+        // pointer into a static, null-terminated table for every shape
+        // `CursorShape::to_raw` can produce — it never returns null for a
+        // value this crate's own enum encodes. `wlr_cursor_set_xcursor` is
+        // safe to call unconditionally.
+        unsafe {
+            let name = match shape {
+                Some(shape) => sys::wlr_cursor_shape_v1_name(shape.to_raw()),
+                None => c"left_ptr".as_ptr(),
+            };
+            sys::wlr_cursor_set_xcursor(cursor.as_ptr(), xcursor.as_ptr(), name);
+        }
+        self.inner.applied_cursor.set(Some(shape));
+    }
+
     /// Make sure the cursor has an image, loading the default xcursor theme
     /// on the first call and setting the `left_ptr` image whenever the
     /// cursor has none. Called from every pointer motion/button callback in
@@ -8265,24 +8346,16 @@ impl Runtime {
     /// that never gets a pointer device pays nothing for a theme it never
     /// needed.
     ///
+    /// "Whenever the cursor has none" is load-bearing: a shape named through
+    /// [`Runtime::set_cursor_shape`] survives every pointer motion until the
+    /// pointer focus changes (`backend.rs`'s `on_pointer_focus_change`) or
+    /// the consumer names [`CursorShape::Default`]. Before 0.20.26 this
+    /// forced `left_ptr` unconditionally, so a named shape lived exactly
+    /// until the client's next motion event.
+    ///
     /// A no-op with no seat.
     pub(crate) fn ensure_cursor_image(&self) {
-        let (Some(cursor), Some(xcursor)) = (self.cursor_ptr(), *self.inner.xcursor.borrow())
-        else {
-            return;
-        };
-        // SAFETY: both pointers were created together by `create_seat` and
-        // live as long as this runtime. `wlr_xcursor_manager_load` is safe
-        // to call more than once (idempotent per its own header doc); this
-        // crate calls it at most once per process via the `Cell` guard, and
-        // `wlr_cursor_set_xcursor` is safe to call unconditionally.
-        unsafe {
-            if !self.inner.cursor_image_loaded.get() {
-                sys::wlr_xcursor_manager_load(xcursor.as_ptr(), 1.0);
-                self.inner.cursor_image_loaded.set(true);
-            }
-            sys::wlr_cursor_set_xcursor(cursor.as_ptr(), xcursor.as_ptr(), c"left_ptr".as_ptr());
-        }
+        self.apply_cursor(self.inner.named_cursor.get());
     }
 
     /// Set the cursor image to the xcursor `wlr_cursor_shape_v1_name(shape)`
@@ -8291,26 +8364,99 @@ impl Runtime {
     /// [`crate::SeatHandler::request_set_shape`] override, applying the shape
     /// a `cursor-shape-v1` client asked for.
     ///
+    /// The shape *persists*: it survives every subsequent pointer motion and
+    /// button event, and is reset — to the default `left_ptr` — only when
+    /// wlroots' pointer focus moves to a different surface (or to none at
+    /// all, which is what a client disconnecting produces), or when a caller
+    /// names [`CursorShape::Default`] here. A consumer therefore never has
+    /// to hit-test its own model geometry to work out when to "un-set" a
+    /// client's cursor. Read the current state back with
+    /// [`Runtime::cursor_shape`].
+    ///
+    /// [`CursorShape::Default`] is the one shape that does not become the
+    /// named cursor: it *clears* the named cursor, restoring exactly the
+    /// pre-0.20.26 behaviour for a consumer that never names anything else.
+    /// `CursorShape::Pointer` is a distinct shape — `cursor-shape-v1`
+    /// defines it as "pointer that indicates a link or another interactive
+    /// element", i.e. the hand cursor — not an alias for
+    /// [`CursorShape::Default`], so it persists like any other named shape.
+    ///
+    /// Naming the shape that is already the named cursor is a no-op.
+    ///
+    /// The focus-change reset described above is installed only if
+    /// [`Runtime::create_seat`] ran *before* the backend registered this
+    /// run's listeners; a seat created later gets shape persistence but no
+    /// reset, and its consumer is back to deciding for itself when a named
+    /// shape stops applying. This is the same pre-existing ordering
+    /// constraint the seat's other signals live under —
+    /// `request_set_cursor`, `request_set_selection` and `start_drag` are
+    /// likewise only wired for a seat that already exists at registration
+    /// time — so a compositor that creates its seat in `main` before running
+    /// the backend, which is the documented shape of a consumer, is
+    /// unaffected.
+    ///
     /// A no-op with no seat — mirrors `Runtime::ensure_cursor_image`'s own
     /// "no seat, nothing to set" rule, for the same reason: there is no
     /// `wlr_cursor`/`wlr_xcursor_manager` pair to set an image on before
     /// [`Runtime::create_seat`] has run.
     pub fn set_cursor_shape(&self, shape: CursorShape) {
-        let (Some(cursor), Some(xcursor)) = (self.cursor_ptr(), *self.inner.xcursor.borrow())
-        else {
+        if self.cursor_ptr().is_none() {
             return;
-        };
-        // SAFETY: both pointers were created together by `create_seat` and
-        // live as long as this runtime. `wlr_cursor_shape_v1_name` returns a
-        // pointer into a static, null-terminated table for every shape
-        // `CursorShape::to_raw` can produce — it never returns null for a
-        // value this crate's own enum encodes — and `wlr_cursor_set_xcursor`
-        // is safe to call unconditionally, exactly as in
-        // `ensure_cursor_image` above.
-        unsafe {
-            let name = sys::wlr_cursor_shape_v1_name(shape.to_raw());
-            sys::wlr_cursor_set_xcursor(cursor.as_ptr(), xcursor.as_ptr(), name);
         }
+        let named = match shape {
+            CursorShape::Default => None,
+            shape => Some(shape),
+        };
+        if self.inner.named_cursor.get() == named && self.inner.applied_cursor.get().is_some() {
+            return;
+        }
+        self.inner.named_cursor.set(named);
+        self.apply_cursor(named);
+    }
+
+    /// The shape a `cursor-shape-v1` client named through
+    /// [`Runtime::set_cursor_shape`] and that is still in force, or `None`
+    /// when the cursor is showing the default `left_ptr` image.
+    ///
+    /// This is the crate's own record of the state described on
+    /// [`Runtime::set_cursor_shape`]: it goes back to `None` on a
+    /// pointer-focus change and on [`CursorShape::Default`], so a consumer
+    /// can render or assert on "is a client naming the cursor right now?"
+    /// without tracking focus itself.
+    pub fn cursor_shape(&self) -> Option<CursorShape> {
+        self.inner.named_cursor.get()
+    }
+
+    /// Drop any named cursor and go back to the default `left_ptr` image.
+    ///
+    /// Called from `backend.rs`'s `on_pointer_focus_change` — wlroots emits
+    /// `wlr_seat.pointer_state.events.focus_change` both when the pointer
+    /// enters a different surface and when it leaves for none at all
+    /// (including when the naming client dies, since wlroots clears pointer
+    /// focus as part of tearing a client's surfaces down), so this one hook
+    /// covers every way the shape a client named stops applying.
+    pub(crate) fn reset_named_cursor(&self) {
+        if self.inner.named_cursor.get().is_none() {
+            return;
+        }
+        self.inner.named_cursor.set(None);
+        self.apply_cursor(None);
+    }
+
+    /// Test-only: what was last handed to `wlr_cursor_set_xcursor`, in
+    /// `named_cursor`'s encoding (`Some(None)` = the default `left_ptr`,
+    /// outer `None` = nothing applied yet).
+    ///
+    /// `#[cfg(test)]` rather than exported: the image actually on the cursor
+    /// is wlroots' private state (`wlr_cursor.state` is `WLR_PRIVATE`), so
+    /// this is the only way for a test to distinguish "`ensure_cursor_image`
+    /// left the named shape alone" from "it stomped it back to `left_ptr`",
+    /// which is the whole point of the 0.20.26 change. Consumers get
+    /// [`Runtime::cursor_shape`], which is about intent rather than about
+    /// which FFI calls were made.
+    #[cfg(test)]
+    pub(crate) fn applied_cursor(&self) -> Option<Option<CursorShape>> {
+        self.inner.applied_cursor.get()
     }
 
     /// Record a keyboard the backend announced, for
@@ -10003,5 +10149,168 @@ mod tests {
             Some(()),
             "but hiding it is allowed on every origin"
         );
+    }
+
+    /// A runtime with a real seat — and so a real `wlr_cursor` and
+    /// `wlr_xcursor_manager` — for the cursor-shape tests below. The
+    /// `Display` is leaked for exactly the reason `headless_runtime`'s own
+    /// doc gives.
+    fn seated_runtime() -> Runtime {
+        headless_env();
+        let display: &'static crate::Display =
+            Box::leak(Box::new(crate::Display::new().expect("display")));
+        let rt = Runtime::new().expect("runtime");
+        rt.create_seat(display, "seat0").expect("seat");
+        rt
+    }
+
+    /// The bug this release exists for: before 0.20.26 `ensure_cursor_image`
+    /// pushed `left_ptr` unconditionally from all three pointer callbacks,
+    /// so a shape a `cursor-shape-v1` client named survived exactly until
+    /// that client's next motion event. It must now leave a named shape
+    /// alone — its own doc always claimed it only set an image "whenever the
+    /// cursor has none".
+    ///
+    /// Asserted through `applied_cursor` rather than by reading the image
+    /// off the cursor: `wlr_cursor.state` is `WLR_PRIVATE`, so what was last
+    /// handed to `wlr_cursor_set_xcursor` is the only observable proxy.
+    #[test]
+    fn ensure_cursor_image_does_not_stomp_a_named_shape() {
+        let rt = seated_runtime();
+        rt.set_cursor_shape(CursorShape::Text);
+        assert_eq!(rt.cursor_shape(), Some(CursorShape::Text));
+        assert_eq!(rt.applied_cursor(), Some(Some(CursorShape::Text)));
+
+        // Three motions' worth of the call every pointer callback makes.
+        rt.ensure_cursor_image();
+        rt.ensure_cursor_image();
+        rt.ensure_cursor_image();
+
+        assert_eq!(
+            rt.cursor_shape(),
+            Some(CursorShape::Text),
+            "a named shape must survive pointer motion"
+        );
+        assert_eq!(
+            rt.applied_cursor(),
+            Some(Some(CursorShape::Text)),
+            "ensure_cursor_image must not push left_ptr over a named shape"
+        );
+    }
+
+    /// With nothing named, `ensure_cursor_image` still does what it always
+    /// did: give the cursor the default `left_ptr` image.
+    #[test]
+    fn ensure_cursor_image_still_applies_the_default_when_nothing_is_named() {
+        let rt = seated_runtime();
+        assert_eq!(rt.cursor_shape(), None);
+        rt.ensure_cursor_image();
+        assert_eq!(rt.applied_cursor(), Some(None));
+    }
+
+    /// A failed theme load must be retried on the next pointer event.
+    ///
+    /// The trap this pins: with nothing named, `applied_cursor` reaches its
+    /// steady state (`Some(None)`) after one call, so an `apply_cursor` that
+    /// short-circuited on it *before* attempting the load would never retry
+    /// — and a machine with no cursor theme at the moment the compositor
+    /// starts would keep a blank cursor for the rest of the session.
+    ///
+    /// The two `Cell`s are set by hand to exactly the state a first call
+    /// whose load failed leaves behind (`cursor_image_loaded == false`,
+    /// `applied_cursor == Some(None)`); a second `ensure_cursor_image` must
+    /// then still reach the load and latch it.
+    ///
+    /// Self-gating: the assertion only means anything where a cursor theme
+    /// is actually installed, so a control runtime establishes that first
+    /// and the test returns early where it is not (a bare CI container).
+    #[test]
+    fn a_failed_theme_load_is_retried_on_the_next_pointer_event() {
+        let control = seated_runtime();
+        control.ensure_cursor_image();
+        if !control.inner.cursor_image_loaded.get() {
+            // No cursor theme on this machine: `wlr_xcursor_manager_load`
+            // cannot succeed, so "the retry latched it" is unobservable.
+            return;
+        }
+
+        let rt = seated_runtime();
+        rt.ensure_cursor_image();
+        assert_eq!(rt.applied_cursor(), Some(None));
+
+        // Rewind to "the first call's load failed".
+        rt.inner.cursor_image_loaded.set(false);
+        assert_eq!(
+            rt.applied_cursor(),
+            Some(None),
+            "the short-circuit's condition is satisfied, which is the point"
+        );
+
+        rt.ensure_cursor_image();
+        assert!(
+            rt.inner.cursor_image_loaded.get(),
+            "a second pointer event must re-attempt the theme load even \
+             though the image it would apply is already applied"
+        );
+    }
+
+    /// What `backend.rs`'s `on_pointer_focus_change` calls: the named shape
+    /// goes away and the default image comes back, so a consumer never has
+    /// to hit-test its own geometry to decide when a client's cursor stops
+    /// applying.
+    #[test]
+    fn resetting_the_named_cursor_restores_the_default_image() {
+        let rt = seated_runtime();
+        rt.set_cursor_shape(CursorShape::Text);
+        rt.reset_named_cursor();
+        assert_eq!(rt.cursor_shape(), None);
+        assert_eq!(rt.applied_cursor(), Some(None));
+        // And a later motion keeps it there rather than resurrecting Text.
+        rt.ensure_cursor_image();
+        assert_eq!(rt.applied_cursor(), Some(None));
+    }
+
+    /// Naming the shape that is already in force must not reach wlroots at
+    /// all. Observed by planting a different value in `applied_cursor` and
+    /// checking the second `set_cursor_shape` leaves it there: an
+    /// un-short-circuited call would overwrite it with `Some(Some(Text))`.
+    #[test]
+    fn naming_the_shape_already_in_force_is_a_no_op() {
+        let rt = seated_runtime();
+        rt.set_cursor_shape(CursorShape::Text);
+        assert_eq!(rt.applied_cursor(), Some(Some(CursorShape::Text)));
+
+        rt.inner.applied_cursor.set(Some(None));
+        rt.set_cursor_shape(CursorShape::Text);
+        assert_eq!(
+            rt.applied_cursor(),
+            Some(None),
+            "the equality short-circuit must skip the wlroots call entirely"
+        );
+    }
+
+    /// `CursorShape::Default` is the "un-name it" value: it clears the named
+    /// cursor rather than becoming it, so a consumer that never names
+    /// anything else sees exactly the pre-0.20.26 behaviour.
+    #[test]
+    fn naming_the_default_shape_clears_the_named_cursor() {
+        let rt = seated_runtime();
+        rt.set_cursor_shape(CursorShape::Text);
+        rt.set_cursor_shape(CursorShape::Default);
+        assert_eq!(rt.cursor_shape(), None);
+        assert_eq!(rt.applied_cursor(), Some(None));
+    }
+
+    /// `CursorShape::Pointer` is a distinct shape (`cursor-shape-v1`'s
+    /// "pointer that indicates a link or another interactive element" — the
+    /// hand cursor), not an alias for `CursorShape::Default`, so unlike
+    /// `Default` it is a real named shape and must persist.
+    #[test]
+    fn the_explicit_pointer_shape_is_named_rather_than_clearing() {
+        let rt = seated_runtime();
+        rt.set_cursor_shape(CursorShape::Pointer);
+        assert_eq!(rt.cursor_shape(), Some(CursorShape::Pointer));
+        rt.ensure_cursor_image();
+        assert_eq!(rt.applied_cursor(), Some(Some(CursorShape::Pointer)));
     }
 }

@@ -220,8 +220,10 @@ pub enum CursorShape {
     ContextMenu,
     /// Help is available.
     Help,
-    /// The platform-default pointer, requested explicitly rather than
-    /// implicitly (distinct wire value from [`CursorShape::Default`]).
+    /// A pointer indicating a link or another interactive element — the
+    /// hand cursor. A distinct shape, not an "explicit" spelling of
+    /// [`CursorShape::Default`]; `cursor-shape-v1` summarises it as
+    /// "pointer that indicates a link or another interactive element".
     Pointer,
     /// A progress indicator.
     Progress,
