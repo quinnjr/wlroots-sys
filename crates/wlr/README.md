@@ -474,6 +474,50 @@ pre-map commit listener that calls the new
 `Runtime::schedule_frame_all(&self) -> usize` so XWayland's handshake frame
 callback is answered. Bounded to the handshake commits; never busy-loops.
 
+## 0.20.27 — implicit pointer grab
+
+Fixes a protocol-level bug every consumer inherited: the crate re-evaluated
+pointer focus on **every** motion and **every** button, so a press on one
+surface followed by a drag off it delivered the release to whatever happened
+to be under the cursor. The pressed client never learned the button came back
+up and was left with a stuck press — no scrollbar, slider, text selection or
+drag handle could work.
+
+wlroots is not the layer that fixes this. `wlr_seat_pointer_notify_enter` and
+friends defer only to *explicit* seat grabs (an xdg-popup grab, a
+drag-and-drop grab); the **implicit** grab — while any button is held, keep
+delivering to the pressed surface and do not change focus — is the
+compositor's job, and is what sway spells `seatop_down`. It now lives here,
+so every consumer gets it.
+
+- **The grab.** The press that takes the seat's button count from zero
+  focuses the surface under the cursor as before, then pins focus to it.
+  Every motion until the last button comes up goes to that surface, at
+  surface-local coordinates equal to the ones its `enter` established plus
+  the cursor's layout-space delta since — so they run past the surface's own
+  extent once the cursor leaves it, which is exactly what a client dragging a
+  slider needs. No other surface is entered meanwhile.
+- **The release.** Delivered to the grabbed surface first; focus is
+  re-evaluated only afterwards, which is what gives the surface the cursor
+  now sits over its `enter`.
+- **Explicit grabs are untouched.** While `wlr_seat_pointer_has_grab` is
+  true the pre-0.20.27 path runs verbatim, ordering included. A drag needs
+  the enter — that is how drag focus moves — and a popup grab needs its own
+  filtering.
+- **Pointer constraints are untouched.** Constraint activation follows the
+  focused surface, and the focused surface is precisely what does not change
+  during a grab. Locked/confined enforcement, relative-pointer forwarding and
+  drag-icon repositioning all still run on every motion.
+- **Limits.** A surface that moves during the press is not tracked;
+  coordinates stay relative to where it was when the button went down. sway
+  has the same limitation, and the alternative would make an interactive
+  move — which moves the window *because* the pointer moved — feed back on
+  itself.
+
+No API change: `SeatHandler::pointer_motion` and
+`SeatHandler::pointer_button` are still called for every event with the
+cursor's real scene position. The grab changes what *clients* see.
+
 ## 0.20.26 — cursor-shape focus gating + named-cursor persistence
 
 Fixes what 0.20.25's cursor-shape support forced on every consumer: a

@@ -37,7 +37,7 @@ use std::rc::Rc;
 use crate::dispatch::{Dispatcher, DisplayPinGuard, Event};
 use crate::id::{SourceId, attach_id, find_id};
 use crate::layer::Layer;
-use crate::runtime::SceneObserver;
+use crate::runtime::{PointerGrab, SceneObserver};
 use crate::seat::{KeyEvent, Modifiers};
 use crate::{
     AppliedHead, Band, Display, Error, EventLoop, Handlers, LayerSurface, LayerSurfaceId,
@@ -4452,10 +4452,20 @@ unsafe extern "C" fn on_pointer_constraint_set_region<S: Handlers>(
 
         // Restore the confine invariant. If the cursor moved, re-notify the
         // surface under its new position so pointer focus stays correct.
+        //
+        // Through `pointer_motion_to_focus`, not `enter_surface_under_cursor`
+        // directly, so a re-anchor that happens while a button is held obeys
+        // the implicit grab like any other motion. Routing it is trivially
+        // correct rather than merely safe: a confine re-anchor lands inside
+        // the constrained surface's own region, and a constraint only
+        // activates on the focused surface, so the surface under the cursor
+        // *is* the grabbed one either way — the only difference is that the
+        // client now gets coordinates on the same delta model as every other
+        // motion of the gesture, instead of a one-off leaf-relative pair.
         if let Some((x, y)) = runtime.reanchor_cursor_into_region(constraint)
             && let Some(seat) = runtime.seat_ptr()
         {
-            enter_surface_under_cursor(session, seat.as_ptr(), x, y, 0);
+            pointer_motion_to_focus(session, seat.as_ptr(), x, y, 0);
         }
     }
 }
@@ -6736,6 +6746,182 @@ unsafe fn enter_surface_under_cursor<S: Handlers>(
     unsafe { update_pointer_constraint_activation(session, focused, seat) };
 }
 
+/// How many pointer buttons the seat currently considers held.
+///
+/// Read *before* handing wlroots a button event, so a press sees 0 exactly
+/// when it is the first of a chord and a release sees 1 exactly when it is
+/// the last.
+///
+/// # Safety
+///
+/// `seat` must be a live `wlr_seat`.
+unsafe fn pointer_button_count(seat: *mut sys::wlr_seat) -> usize {
+    // SAFETY: `pointer_state` is an inline field of a live `wlr_seat`, so
+    // the pointer is valid for the read; wlroots maintains `button_count`
+    // itself.
+    unsafe {
+        let state: *const sys::wlr_seat_pointer_state = &raw const (*seat).pointer_state;
+        (*state).button_count
+    }
+}
+
+/// The surface the seat currently holds pointer focus on, or null.
+///
+/// # Safety
+///
+/// `seat` must be a live `wlr_seat`.
+unsafe fn pointer_focused_surface(seat: *mut sys::wlr_seat) -> *mut sys::wlr_surface {
+    // SAFETY: as `pointer_button_count`. wlroots nulls this field itself
+    // when the focused surface is destroyed, which is what makes comparing
+    // a stored grab against it a safe liveness check.
+    unsafe {
+        let state: *const sys::wlr_seat_pointer_state = &raw const (*seat).pointer_state;
+        (*state).focused_surface
+    }
+}
+
+/// What a button event means for the implicit grab, decided purely from
+/// whether it is a press and how many buttons were held *before* it.
+///
+/// Split out as a pure function because it is the whole of the grab's state
+/// machine, and the alternative — inline `if pressed && count == 0` chains
+/// inside an `extern "C"` frame — is exactly the shape that cannot be unit
+/// tested.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ButtonAction {
+    /// The first button of a chord went down: take the grab.
+    Begin,
+    /// A button changed while others stay held: the grab is unaffected.
+    Hold,
+    /// The last held button came up: release the grab.
+    End,
+}
+
+/// Classify a button event. `held_before` is [`pointer_button_count`] read
+/// before wlroots is told about the event.
+fn button_action(pressed: bool, held_before: usize) -> ButtonAction {
+    match (pressed, held_before) {
+        (true, 0) => ButtonAction::Begin,
+        (true, _) => ButtonAction::Hold,
+        // A release with at most one button outstanding ends the grab. The
+        // `0` case cannot arise from a well-behaved device, but a release
+        // wlroots never saw a press for must not be classified as `Hold`,
+        // which would wedge a grab that nothing would ever clear.
+        (false, 0 | 1) => ButtonAction::End,
+        (false, _) => ButtonAction::Hold,
+    }
+}
+
+/// Whether a recorded implicit grab still governs pointer delivery.
+///
+/// Pure, and the other half of the grab's state machine. Three ways it stops
+/// applying, and the first is the subtle one:
+///
+/// * `explicit` — an **explicit** seat grab (an xdg-popup grab, a
+///   drag-and-drop grab) started while the button was down. wlroots owns
+///   routing from then on, and the implicit grab must be *dropped*, not
+///   merely bypassed: a drag that ends mid-chord frees its surface, and a
+///   later allocation can hand the same address back. Keeping the record
+///   around would leave that recycled address able to compare equal to a
+///   surface the user never pressed.
+/// * `held == 0` — no button is down, so there is nothing to grab for.
+///   Cannot normally arise (the release clears the grab), but a release
+///   wlroots never saw would otherwise wedge one.
+/// * `!focus_matches` — the seat's focus is null (wlroots nulls it when the
+///   focused surface is destroyed) or has moved elsewhere. Either way the
+///   record no longer describes reality.
+fn grab_still_applies(explicit: bool, held: usize, focus_matches: bool) -> bool {
+    !explicit && held > 0 && focus_matches
+}
+
+/// Record the implicit grab for the press that just landed, reading the
+/// surface and surface-local coordinates back off the seat.
+///
+/// Deliberately reads the seat rather than taking the values
+/// [`enter_surface_under_cursor`] computed: whether the enter actually took
+/// effect is wlroots' decision (an explicit grab can refuse it), and the
+/// seat is where that decision is recorded.
+///
+/// # Safety
+///
+/// `seat` must be a live `wlr_seat`, and the enter for this press must
+/// already have been notified.
+unsafe fn record_pointer_grab(runtime: &Runtime, seat: *mut sys::wlr_seat, x: f64, y: f64) {
+    // SAFETY: `seat` is live per this function's contract.
+    let (surface, sx, sy) = unsafe {
+        let state: *const sys::wlr_seat_pointer_state = &raw const (*seat).pointer_state;
+        ((*state).focused_surface, (*state).sx, (*state).sy)
+    };
+    // A press over nothing grabs nothing: there is no surface to keep
+    // delivering to, and the ordinary re-focus path stays in charge.
+    if surface.is_null() {
+        runtime.set_pointer_grab(None);
+        return;
+    }
+    runtime.set_pointer_grab(Some(PointerGrab {
+        surface,
+        ref_lx: x,
+        ref_ly: y,
+        ref_sx: sx,
+        ref_sy: sy,
+    }));
+}
+
+/// Deliver a motion for a cursor now at layout `(x, y)`: to the surface
+/// holding the implicit grab if one is in force, and otherwise to whatever
+/// the cursor is over, re-focusing as it goes.
+///
+/// This is the one place the implicit grab diverges from the pre-0.20.27
+/// behaviour, and the divergence is narrow by design:
+///
+/// * An **explicit** seat grab (an xdg-popup grab, a drag-and-drop grab)
+///   keeps the old path verbatim. `wlr_seat_pointer_notify_enter` already
+///   routes to such a grab, and a drag in particular *needs* the enter —
+///   that is how the drag focus moves to the surface being dragged over.
+/// * With no explicit grab and a button held, the pressed surface keeps
+///   pointer focus and receives motion at coordinates derived from the
+///   cursor delta. No `enter`, no `leave`, and so no re-evaluation of
+///   pointer-constraint activation either — which is correct, because
+///   activation follows the focused surface and the focused surface is
+///   exactly what does not change here.
+/// * If the grab no longer applies — the surface was destroyed (wlroots
+///   nulls the seat's focus) or focus moved out from under it — the grab is
+///   dropped and the ordinary path runs.
+///
+/// # Safety
+///
+/// `session` must be this callback's own live `Session` and `seat` a live
+/// `wlr_seat`.
+unsafe fn pointer_motion_to_focus<S: Handlers>(
+    session: *const Session<'_, S>,
+    seat: *mut sys::wlr_seat,
+    x: f64,
+    y: f64,
+    time_msec: u32,
+) {
+    // SAFETY: `session` is live per this function's contract; `runtime`
+    // outlives the call.
+    let runtime = unsafe { (*session).runtime };
+    // SAFETY: `seat` is live per this function's contract.
+    let explicit = unsafe { sys::wlr_seat_pointer_has_grab(seat) };
+    if let Some(grab) = runtime.pointer_grab() {
+        // SAFETY: as above.
+        let (held, focused) =
+            unsafe { (pointer_button_count(seat), pointer_focused_surface(seat)) };
+        let focus_matches = !focused.is_null() && focused == grab.surface;
+        if grab_still_applies(explicit, held, focus_matches) {
+            let (sx, sy) = grab.surface_coords(x, y);
+            // SAFETY: as above; `sx`/`sy` are plain doubles.
+            unsafe { sys::wlr_seat_pointer_notify_motion(seat, time_msec, sx, sy) };
+            return;
+        }
+        // Dropped, never merely skipped — see `grab_still_applies`.
+        runtime.set_pointer_grab(None);
+    }
+    // SAFETY: as above.
+    unsafe { enter_surface_under_cursor(session, seat, x, y, time_msec) };
+}
+
 unsafe extern "C" fn on_pointer_motion<S: Handlers>(
     l: *mut sys::wl_listener,
     data: *mut std::ffi::c_void,
@@ -6830,7 +7016,7 @@ unsafe extern "C" fn on_pointer_motion<S: Handlers>(
         );
 
         if let Some(seat) = runtime.seat_ptr() {
-            enter_surface_under_cursor(session, seat.as_ptr(), x, y, time_msec);
+            pointer_motion_to_focus(session, seat.as_ptr(), x, y, time_msec);
             sys::wlr_seat_pointer_notify_frame(seat.as_ptr());
         }
     }
@@ -6926,7 +7112,7 @@ unsafe extern "C" fn on_pointer_motion_absolute<S: Handlers>(
         );
 
         if let Some(seat) = runtime.seat_ptr() {
-            enter_surface_under_cursor(session, seat.as_ptr(), x, y, time_msec);
+            pointer_motion_to_focus(session, seat.as_ptr(), x, y, time_msec);
             sys::wlr_seat_pointer_notify_frame(seat.as_ptr());
         }
     }
@@ -6969,18 +7155,58 @@ unsafe extern "C" fn on_pointer_button<S: Handlers>(
         // button, so this always runs after the handler has had its say —
         // see `SeatHandler::pointer_button`'s own doc for why.
         if let Some(seat) = runtime.seat_ptr() {
-            // Enter/focus the surface under the cursor first, exactly as a
-            // motion would, so a click on a window that never got a prior
-            // motion event (the pointer warped there, say) still has pointer
-            // focus before the button reaches it.
-            enter_surface_under_cursor(session, seat.as_ptr(), x, y, (*ev).time_msec);
-            sys::wlr_seat_pointer_notify_button(
-                seat.as_ptr(),
-                (*ev).time_msec,
-                (*ev).button,
-                (*ev).state,
-            );
-            sys::wlr_seat_pointer_notify_frame(seat.as_ptr());
+            let seat = seat.as_ptr();
+            let time_msec = (*ev).time_msec;
+            let notify = |seat: *mut sys::wlr_seat| {
+                // The serial the notify returns is of no use here: nothing
+                // in this crate cites it, and a client that needs it reads
+                // it off its own `wl_pointer.button`.
+                let _ =
+                    sys::wlr_seat_pointer_notify_button(seat, time_msec, (*ev).button, (*ev).state);
+            };
+            // An explicit seat grab (an xdg-popup grab, a drag) owns the
+            // routing of both the enter and the button; leave that path
+            // exactly as it was, including its ordering, and only make sure
+            // no implicit grab outlives the chord.
+            if sys::wlr_seat_pointer_has_grab(seat) {
+                // Unconditionally, not just on the last release: an explicit
+                // grab that starts mid-chord invalidates the record, and a
+                // stale one must not outlive the surface it names. Same
+                // reasoning as `grab_still_applies`'s `explicit` arm.
+                runtime.set_pointer_grab(None);
+                enter_surface_under_cursor(session, seat, x, y, time_msec);
+                notify(seat);
+            } else {
+                match button_action(pressed, pointer_button_count(seat)) {
+                    // The press that starts the chord. Enter/focus the
+                    // surface under the cursor first, exactly as a motion
+                    // would, so a click on a window that never got a prior
+                    // motion event (the pointer warped there, say) still has
+                    // pointer focus before the button reaches it — then take
+                    // the grab from whatever that left focused.
+                    ButtonAction::Begin => {
+                        enter_surface_under_cursor(session, seat, x, y, time_msec);
+                        notify(seat);
+                        record_pointer_grab(runtime, seat, x, y);
+                    }
+                    // A further button while the chord is held: the grabbed
+                    // surface already has focus and must keep it, so no
+                    // enter. With no grab recorded (a chord that began over
+                    // empty space) the enter is equally pointless — focus is
+                    // wherever the ordinary path last put it.
+                    ButtonAction::Hold => notify(seat),
+                    // The last button comes up. Notify first, so the release
+                    // still reaches the surface that was pressed, and only
+                    // then re-evaluate focus — which is what gives the
+                    // surface the cursor now sits over its `enter`.
+                    ButtonAction::End => {
+                        notify(seat);
+                        runtime.set_pointer_grab(None);
+                        enter_surface_under_cursor(session, seat, x, y, time_msec);
+                    }
+                }
+            }
+            sys::wlr_seat_pointer_notify_frame(seat);
         }
     }
 }
@@ -8284,5 +8510,111 @@ mod tests {
         assert!(!unsafe { shape_request_is_focused(seat.0, client) });
         // SAFETY: as above; `seat_client` is only compared, never read.
         assert!(!unsafe { shape_request_is_focused(seat.0, std::ptr::null_mut()) });
+    }
+}
+
+#[cfg(test)]
+mod implicit_grab_tests {
+    use super::*;
+
+    /// A grab anchored at layout `(lx, ly)` reporting surface-local
+    /// `(sx, sy)` there.
+    fn grab(lx: f64, ly: f64, sx: f64, sy: f64) -> PointerGrab {
+        PointerGrab {
+            surface: std::ptr::dangling_mut(),
+            ref_lx: lx,
+            ref_ly: ly,
+            ref_sx: sx,
+            ref_sy: sy,
+        }
+    }
+
+    #[test]
+    fn the_grab_reports_the_anchor_coordinates_at_the_anchor() {
+        assert_eq!(
+            grab(100.0, 50.0, 8.0, 4.0).surface_coords(100.0, 50.0),
+            (8.0, 4.0)
+        );
+    }
+
+    /// The whole point of the delta model: the cursor leaving the surface
+    /// keeps reporting, at coordinates that run past the surface's own
+    /// extent rather than clamping to its edge.
+    #[test]
+    fn the_grab_carries_the_cursor_delta_past_the_surface_edge() {
+        let g = grab(100.0, 50.0, 8.0, 4.0);
+        assert_eq!(g.surface_coords(340.0, 50.0), (248.0, 4.0));
+        assert_eq!(g.surface_coords(100.0, 250.0), (8.0, 204.0));
+        // Negative, too: a cursor dragged above and left of the surface.
+        assert_eq!(g.surface_coords(60.0, 20.0), (-32.0, -26.0));
+    }
+
+    /// Sub-pixel cursor positions pass through untouched — the surface-local
+    /// coordinates a `wl_pointer.motion` carries are fixed-point, and
+    /// rounding them here would lose precision wlroots is about to encode
+    /// properly.
+    #[test]
+    fn the_grab_preserves_sub_pixel_deltas() {
+        let (sx, sy) = grab(10.0, 10.0, 0.0, 0.0).surface_coords(10.5, 11.25);
+        assert_eq!((sx, sy), (0.5, 1.25));
+    }
+
+    #[test]
+    fn a_held_grab_on_its_own_focused_surface_applies() {
+        assert!(grab_still_applies(false, 1, true));
+        assert!(grab_still_applies(false, 3, true));
+    }
+
+    /// The ABA guard: an explicit seat grab (an xdg-popup grab, a drag)
+    /// starting mid-chord drops the implicit grab outright. Merely
+    /// bypassing it would leave a recorded surface address that a later
+    /// allocation could hand back, letting a surface the user never
+    /// pressed compare equal to the grab.
+    #[test]
+    fn an_explicit_grab_drops_the_implicit_one() {
+        assert!(!grab_still_applies(true, 1, true));
+        // ...even with everything else still nominally in order.
+        assert!(!grab_still_applies(true, 3, true));
+    }
+
+    #[test]
+    fn a_grab_with_nothing_held_no_longer_applies() {
+        assert!(!grab_still_applies(false, 0, true));
+    }
+
+    /// Focus null (wlroots nulls it when the focused surface is destroyed)
+    /// or moved elsewhere: the record no longer describes reality.
+    #[test]
+    fn a_grab_whose_surface_lost_focus_no_longer_applies() {
+        assert!(!grab_still_applies(false, 1, false));
+    }
+
+    #[test]
+    fn the_first_press_of_a_chord_begins_the_grab() {
+        assert_eq!(button_action(true, 0), ButtonAction::Begin);
+    }
+
+    #[test]
+    fn a_further_press_while_held_leaves_the_grab_alone() {
+        assert_eq!(button_action(true, 1), ButtonAction::Hold);
+        assert_eq!(button_action(true, 3), ButtonAction::Hold);
+    }
+
+    #[test]
+    fn the_last_release_of_a_chord_ends_the_grab() {
+        assert_eq!(button_action(false, 1), ButtonAction::End);
+    }
+
+    #[test]
+    fn a_release_with_others_still_held_leaves_the_grab_alone() {
+        assert_eq!(button_action(false, 2), ButtonAction::Hold);
+    }
+
+    /// A release wlroots never saw a press for must still end the grab:
+    /// classifying it as `Hold` would leave a grab nothing ever clears,
+    /// which is a wedged pointer for the rest of the session.
+    #[test]
+    fn a_release_with_nothing_held_ends_the_grab() {
+        assert_eq!(button_action(false, 0), ButtonAction::End);
     }
 }
