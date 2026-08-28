@@ -7217,10 +7217,20 @@ impl Runtime {
     /// `on_popup_destroy`, which is what actually removes the row. Nothing here
     /// touches a scene tree.
     pub fn dismiss_popup(&self, id: PopupId) -> usize {
-        let mut order = self.popup_chain(PopupParent::Popup(id));
-        order.push(id);
+        // `id` goes at the *front*, not the back: `popup_chain` is
+        // shallow-first over the descendants only, so the whole subtree
+        // shallow-first is `[id]` followed by that chain. Pushing `id` last
+        // and reversing would have put `id` first in the destroy order —
+        // parent before children, the protocol error this method exists to
+        // avoid — and it would under-count, because destroying the parent
+        // sweeps every descendant row before the loop reaches it. Caught by
+        // `icedtea`'s `compositor/tests/popups.rs`
+        // `destroying_a_parent_destroys_its_popup_chain_without_a_double_free`,
+        // which is the only place a real chain can be built.
+        let mut order = vec![id];
+        order.extend(self.popup_chain(PopupParent::Popup(id)));
         let mut destroyed = 0;
-        // Reversed: `popup_chain` is shallow-first, and destroying a parent
+        // Reversed: `order` is shallow-first, and destroying a parent
         // before its children is the protocol error above.
         for victim in order.into_iter().rev() {
             let Some(popup) = self.popup(victim) else {
