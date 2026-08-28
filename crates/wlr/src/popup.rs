@@ -115,6 +115,30 @@ impl PopupParent {
     pub fn is_popup(self) -> bool {
         matches!(self, PopupParent::Popup(_))
     }
+
+    /// The chain root: walks `Popup(_)` links down to the [`Toplevel`] or
+    /// [`Layer`] at the bottom.
+    ///
+    /// `Some(self)` when `self` is already a root. `None` when a link is
+    /// already dead — the by-id miss this crate promises everywhere — and also
+    /// `None` if the walk exceeds
+    /// [`Runtime::MAX_POPUP_DEPTH`](crate::Runtime), which cannot happen with a
+    /// table wlroots produced but is what keeps a corrupted one from hanging
+    /// the compositor's input path.
+    ///
+    /// [`Toplevel`]: PopupParent::Toplevel
+    /// [`Layer`]: PopupParent::Layer
+    #[must_use]
+    pub fn root(self, rt: &crate::Runtime) -> Option<PopupParent> {
+        let mut cursor = self;
+        for _ in 0..crate::Runtime::MAX_POPUP_DEPTH {
+            match cursor {
+                PopupParent::Popup(id) => cursor = rt.popup_parent(id)?,
+                root => return Some(root),
+            }
+        }
+        None
+    }
 }
 
 /// `xdg_positioner.set_anchor` — which point of the anchor rectangle the popup
@@ -509,7 +533,7 @@ pub struct Popup<'h> {
     _scope: PhantomData<&'h ()>,
 }
 
-/// Hand-written rather than derived, for the same reason [`Toplevel`]'s is: the
+/// Hand-written rather than derived, for the same reason [`Toplevel`](crate::Toplevel)'s is: the
 /// `PhantomData` scope marker has no value to print, and a raw pointer printed
 /// by a derive is neither useful nor stable across runs. Named fields only:
 /// `id`, `parent`, `geometry`.
@@ -604,7 +628,7 @@ impl Popup<'_> {
     /// whenever its parent moves.
     ///
     /// A compositor honouring this re-runs
-    /// [`Runtime::configure_popup`](crate::Runtime::configure_popup) from
+    /// `Runtime::configure_popup` (wired up by a later task in this part) from
     /// wherever it moves a window or re-arranges its layers.
     #[must_use]
     pub fn is_reactive(&self) -> bool {
@@ -633,7 +657,7 @@ impl Popup<'_> {
     /// system**, not layout or output space — wlroots' own header says so, and
     /// the compositor is what translates. Sends nothing; pair it with
     /// [`send_configure`](Self::send_configure), which is what
-    /// [`Runtime::configure_popup`](crate::Runtime::configure_popup) does.
+    /// `Runtime::configure_popup` (wired up by a later task in this part) does.
     #[allow(dead_code)] // wired up by a later task in this part
     pub fn unconstrain(&self, constraint: &Box2D) {
         // SAFETY: the handle's lifetime guarantees the popup is live;
@@ -732,9 +756,9 @@ impl Popup<'_> {
     /// Does **not** touch the scene tree: the popup's subtree is a child of its
     /// parent's, and wlroots frees a tree's children recursively with the tree.
     /// Destroying it here would be the double free `Runtime::forget_toplevel`
-    /// documents. Prefer
-    /// [`Runtime::dismiss_popup`](crate::Runtime::dismiss_popup), which
-    /// destroys a whole chain deepest-first — the order xdg-shell requires.
+    /// documents. Prefer `Runtime::dismiss_popup` (wired up by a later task in
+    /// this part), which destroys a whole chain deepest-first — the order
+    /// xdg-shell requires.
     #[allow(dead_code)] // wired up by a later task in this part
     pub fn destroy(&self) {
         // SAFETY: the handle's lifetime guarantees the popup is live. wlroots
