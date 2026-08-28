@@ -10963,10 +10963,16 @@ mod tests {
     /// A popup whose surface is not yet `initialized` cannot be configured:
     /// `Popup::send_configure` skips the call (see its own doc — this
     /// distribution's wlroots asserts on that flag and aborts), so
-    /// `configure_popup` must report `false` rather than claiming success. The
-    /// unconstrain half still runs, which is harmless and is what leaves
-    /// `scheduled.geometry` correct for the configure the initial commit will
-    /// trigger moments later.
+    /// `configure_popup` must report `false` rather than claiming success.
+    ///
+    /// `configure_popup` checks `initialized` itself and returns `false`
+    /// *before* ever calling `popup.unconstrain(constraint)` — unlike
+    /// `send_configure`, `wlr_xdg_popup_unconstrain_from_box` has no
+    /// `initialized` guard of its own and segfaults on an uninitialized
+    /// surface (it walks into `wlr_xdg_popup_get_toplevel_coords`, which
+    /// dereferences the popup's not-yet-live base/client state). So for this
+    /// test the unconstrain half never runs at all; skipping it here is what
+    /// keeps this call safe rather than merely making it report failure.
     #[test]
     fn configuring_an_uninitialized_popup_reports_false() {
         let rt = Runtime::new().expect("runtime");
