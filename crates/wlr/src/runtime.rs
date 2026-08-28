@@ -759,8 +759,6 @@ pub(crate) struct LockSurfaceRender {
 /// [`Runtime::forget_toplevel`]'s own comment).
 pub(crate) struct PopupEntry {
     pub(crate) raw: NonNull<sys::wlr_xdg_popup>,
-    // wired up by a later task in this part (`popup_tree`'s only reader)
-    #[allow(dead_code)]
     pub(crate) tree: NonNull<sys::wlr_scene_tree>,
     /// The parent recorded at announcement time. A layer popup's
     /// `(*popup).parent` is NULL then, so this is the only place the answer
@@ -771,9 +769,6 @@ pub(crate) struct PopupEntry {
     /// reactive-reposition pass needs to tell "never placed" from "placed and
     /// due a re-place", and it is cheaper to record here, at the one site that
     /// knows, than to reconstruct downstream.
-    // wired up by a later task in this part (`mark_popup_configured`'s only
-    // reader, itself unused until `configure_popup` lands)
-    #[allow(dead_code)]
     pub(crate) configured: std::cell::Cell<bool>,
 }
 
@@ -7006,9 +7001,6 @@ impl Runtime {
     ///
     /// Called from `backend.rs`'s `on_new_popup`, before the handler is told,
     /// mirroring [`record_toplevel`](Runtime::record_toplevel).
-    // `backend.rs`'s `on_new_popup` is wired up by a later task in this
-    // part; only this module's own tests call this until then.
-    #[allow(dead_code)]
     pub(crate) fn record_popup(
         &self,
         id: PopupId,
@@ -7039,9 +7031,6 @@ impl Runtime {
     /// popup's own children first and emits a `destroy` for each, so each child
     /// removes itself through this same path; sweeping them here would race
     /// that and drop rows a still-pending emission is about to use.
-    // `on_popup_destroy` is wired up by a later task in this part; only
-    // this module's own tests call this until then.
-    #[allow(dead_code)]
     pub(crate) fn forget_popup(&self, id: PopupId) {
         self.inner.popups.borrow_mut().remove(&id);
     }
@@ -7054,13 +7043,11 @@ impl Runtime {
     }
 
     /// This id's recorded scene subtree, as [`popup_raw`](Runtime::popup_raw).
-    #[allow(dead_code)] // wired up by a later task in this part
     pub(crate) fn popup_tree(&self, id: PopupId) -> Option<NonNull<sys::wlr_scene_tree>> {
         self.inner.popups.borrow().get(&id).map(|e| e.tree)
     }
 
     /// Mark this popup as having been configured at least once.
-    #[allow(dead_code)] // wired up by a later task in this part
     pub(crate) fn mark_popup_configured(&self, id: PopupId) {
         if let Some(entry) = self.inner.popups.borrow().get(&id) {
             entry.configured.set(true);
@@ -7173,21 +7160,21 @@ impl Runtime {
     /// `false` when the popup is gone, or when its surface is not yet
     /// `initialized`.
     ///
-    /// Unlike [`Popup::send_configure`](crate::Popup::send_configure), which
-    /// guards its own call, `wlr_xdg_popup_unconstrain_from_box` in this
-    /// distribution's wlroots reaches into `wlr_xdg_surface_schedule_configure`
-    /// **itself**, unconditionally — there is no equivalent guard inside it. On
-    /// an uninitialized surface (`base->surface` naming no live client yet)
-    /// that dereferences dead state and crashes the process; it is not the
-    /// "costs nothing, touches no wire" no-op an earlier draft of this method
-    /// assumed. So this checks `initialized` itself, first, and skips
-    /// `unconstrain` entirely rather than merely skipping `send_configure`, as
-    /// the original two-call design here intended. A real popup announced over
-    /// the wire always has this become true well before a caller could reach
-    /// this method from a live event, so nothing a compositor does with an
-    /// already-mapped popup changes; it is this crate's own scratch fixtures —
-    /// and any other caller reaching for `configure_popup` a tick too early —
-    /// that this now turns away instead of aborting.
+    /// The C function `wlr_xdg_popup_unconstrain_from_box` reaches into
+    /// `wlr_xdg_surface_schedule_configure` **itself**, unconditionally, with
+    /// no guard of its own; that function asserts `surface->initialized` and
+    /// this distribution ships wlroots **without `NDEBUG`**, so on an
+    /// uninitialized surface it `abort()`s the process. It is not the "costs
+    /// nothing, touches no wire" no-op an earlier draft of this method assumed.
+    /// Both [`Popup::unconstrain`](crate::Popup::unconstrain) and
+    /// [`Popup::send_configure`](crate::Popup::send_configure) therefore carry
+    /// the `initialized` guard, and this method checks it a third time so it
+    /// can report `false` instead of silently doing nothing. A real popup
+    /// announced over the wire has the flag set well before a caller could
+    /// reach this method from a live event, so nothing a compositor does with
+    /// an already-mapped popup changes; it is this crate's own scratch
+    /// fixtures — and any other caller reaching for `configure_popup` a tick
+    /// too early — that this turns away instead of aborting.
     pub fn configure_popup(&self, id: PopupId, constraint: &Box2D) -> bool {
         // SAFETY: `raw` names a live `wlr_xdg_popup` (see `popup_raw`'s own
         // doc); `base` is only compared against null and, if non-null, only
@@ -10963,19 +10950,49 @@ mod tests {
     /// `configure_popup` must report `false` rather than claiming success.
     ///
     /// `configure_popup` checks `initialized` itself and returns `false`
-    /// *before* ever calling `popup.unconstrain(constraint)` — unlike
-    /// `send_configure`, `wlr_xdg_popup_unconstrain_from_box` has no
-    /// `initialized` guard of its own and segfaults on an uninitialized
-    /// surface (it walks into `wlr_xdg_popup_get_toplevel_coords`, which
-    /// dereferences the popup's not-yet-live base/client state). So for this
-    /// test the unconstrain half never runs at all; skipping it here is what
-    /// keeps this call safe rather than merely making it report failure.
+    /// *before* ever calling `popup.unconstrain(constraint)`. The C function
+    /// `wlr_xdg_popup_unconstrain_from_box` has no `initialized` guard of its
+    /// own and calls `wlr_xdg_surface_schedule_configure` unconditionally,
+    /// which asserts that flag and aborts on this NDEBUG-less build. So for
+    /// this test the unconstrain half never runs at all; skipping it here is
+    /// what keeps this call safe rather than merely making it report failure.
+    /// `Popup::unconstrain` carries the same guard for callers who reach it
+    /// directly — pinned by
+    /// `unconstraining_an_uninitialized_popup_is_a_no_op_rather_than_an_abort`.
     #[test]
     fn configuring_an_uninitialized_popup_reports_false() {
         let rt = Runtime::new().expect("runtime");
         let window = PopupParent::Toplevel(ToplevelId::dangling_for_test());
         let id = record_scratch_popup(&rt, window, false);
         assert!(!rt.configure_popup(id, &Box2D::new(0, 0, 800, 600)));
+    }
+
+    /// `Popup::unconstrain` is safe, public, and reachable from inside
+    /// `ToplevelHandler::new_popup` — which is precisely where `initialized` is
+    /// still false, because the popup has not committed yet. Without its own
+    /// guard this call would run `wlr_xdg_popup_unconstrain_from_box`, which
+    /// unconditionally calls `wlr_xdg_surface_schedule_configure`, whose
+    /// `assert(surface->initialized)` is live on this NDEBUG-less wlroots: the
+    /// whole compositor process dies. Reaching the assertions below at all is
+    /// the real assertion — mutation-verified by deleting the guard, which
+    /// turns this test into a `SIGSEGV` of the whole test binary (the scratch
+    /// fixture's zeroed parent surface faults inside the unconstrain walk a
+    /// step before the `initialized` assert a live popup would hit).
+    #[test]
+    fn unconstraining_an_uninitialized_popup_is_a_no_op_rather_than_an_abort() {
+        let rt = Runtime::new().expect("runtime");
+        let window = PopupParent::Toplevel(ToplevelId::dangling_for_test());
+        let id = record_scratch_popup(&rt, window, false);
+        let popup = rt.popup(id).expect("just recorded");
+
+        popup.unconstrain(&Box2D::new(0, 0, 800, 600));
+
+        assert_eq!(
+            popup.geometry(),
+            Box2D::default(),
+            "the skipped call leaves the zeroed scheduled/current state alone"
+        );
+        assert_eq!(popup.send_configure(), 0, "and still nothing was sent");
     }
 
     #[test]

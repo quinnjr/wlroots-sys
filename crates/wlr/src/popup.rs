@@ -24,20 +24,9 @@
 //! [`Popup::grab_requested`] (`popup->seat != NULL`) and
 //! [`Runtime::seat_has_explicit_grab`](crate::Runtime::seat_has_explicit_grab).
 
-// This task lands the ids, the parent enum and the positioner enums only;
-// nothing in the rest of the crate references them yet (`lib.rs` gains its
-// `pub use popup::{…}` re-export, and `runtime.rs`/`backend.rs` their callers,
-// in later tasks of this same part). Outside `#[cfg(test)]` — which is the
-// only consumer so far — every item below is therefore unreachable, exactly
-// the situation `Output::from_raw` documents its own
-// `#[cfg_attr(not(test), allow(dead_code))]` for. Remove this once a
-// non-test caller exists.
-#![cfg_attr(not(test), allow(dead_code, unused_imports))]
-
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-use crate::id::next_id;
 use crate::{Box2D, LayerSurfaceId, ToplevelId, sys};
 
 /// Identifies one live `wlr_xdg_popup` for as long as the consumer chooses to
@@ -76,16 +65,6 @@ impl PopupId {
     /// [`dangling_for_test`](Self::dangling_for_test).
     pub fn dangling_nth_for_test(n: u64) -> PopupId {
         PopupId(u64::MAX - (n % (1u64 << 32)))
-    }
-
-    /// Mint a fresh id from the crate-wide counter, for the tables' own tests.
-    ///
-    /// Not public: a real popup's id comes from its surface's addon set, which
-    /// is what makes wlroots release it at exactly the right moment.
-    #[cfg(test)]
-    #[allow(dead_code)] // wired up by a later task in this part
-    pub(crate) fn next_for_test() -> PopupId {
-        PopupId(next_id())
     }
 }
 
@@ -186,7 +165,6 @@ impl PositionerAnchor {
     /// constants, and the mapping is pinned by
     /// `the_anchor_values_are_the_ones_the_protocol_declares` — the same
     /// discipline `DataPtrAccess`'s own test applies.
-    #[allow(dead_code)] // wired up by a later task in this part
     pub(crate) fn from_raw(raw: u32) -> PositionerAnchor {
         match raw {
             1 => PositionerAnchor::Top,
@@ -236,7 +214,6 @@ impl PositionerGravity {
     /// Convert from `enum xdg_positioner_gravity`; unknown values yield
     /// [`PositionerGravity::None`]. See [`PositionerAnchor::from_raw`] for the
     /// full argument, which applies here verbatim.
-    #[allow(dead_code)] // wired up by a later task in this part
     pub(crate) fn from_raw(raw: u32) -> PositionerGravity {
         match raw {
             1 => PositionerGravity::Top,
@@ -302,7 +279,6 @@ impl ConstraintAdjustment {
     /// it, and silently clearing a bit here would change the client's request
     /// rather than merely failing to describe it. Nothing can panic — it is one
     /// integer.
-    #[allow(dead_code)] // wired up by a later task in this part
     pub(crate) fn from_raw(raw: u32) -> ConstraintAdjustment {
         ConstraintAdjustment(raw)
     }
@@ -571,7 +547,6 @@ impl<'h> Popup<'h> {
 impl Popup<'_> {
     /// This popup's stable identity, safe to store beyond the handler.
     #[must_use]
-    #[allow(dead_code)] // wired up by a later task in this part
     pub fn id(&self) -> PopupId {
         self.id
     }
@@ -628,7 +603,7 @@ impl Popup<'_> {
     /// whenever its parent moves.
     ///
     /// A compositor honouring this re-runs
-    /// `Runtime::configure_popup` (wired up by a later task in this part) from
+    /// [`Runtime::configure_popup`](crate::Runtime::configure_popup) from
     /// wherever it moves a window or re-arranges its layers.
     #[must_use]
     pub fn is_reactive(&self) -> bool {
@@ -655,21 +630,43 @@ impl Popup<'_> {
     ///
     /// **`constraint` is in the ROOT TOPLEVEL PARENT surface's coordinate
     /// system**, not layout or output space — wlroots' own header says so, and
-    /// the compositor is what translates. Sends nothing; pair it with
-    /// [`send_configure`](Self::send_configure), which is what
-    /// `Runtime::configure_popup` (wired up by a later task in this part) does.
-    #[allow(dead_code)] // wired up by a later task in this part
+    /// the compositor is what translates.
+    ///
+    /// **This does not merely reposition — it sends.** Contrary to what an
+    /// earlier draft of this doc claimed, `wlr_xdg_popup_unconstrain_from_box`
+    /// in this distribution's wlroots calls
+    /// `wlr_xdg_surface_schedule_configure` itself, unconditionally, after
+    /// applying the rules. That function asserts `surface->initialized`, and
+    /// this distribution ships wlroots **without `NDEBUG`**, so reaching it
+    /// before the popup's first commit is a hard `abort()` of the whole
+    /// compositor process — exactly the hazard
+    /// [`send_configure`](Self::send_configure) guards, and exactly the window a
+    /// consumer sits in inside `ToplevelHandler::new_popup`. So this method
+    /// carries the identical `initialized` guard and **does nothing at all**
+    /// on a not-yet-initialized popup, rather than aborting.
+    ///
+    /// Pair it with [`send_configure`](Self::send_configure) anyway — the
+    /// configure wlroots schedules from inside is the one a compositor wants,
+    /// and the second call is a cheap no-op when nothing further changed. That
+    /// pairing is what [`Runtime::configure_popup`](crate::Runtime::configure_popup)
+    /// does.
     pub fn unconstrain(&self, constraint: &Box2D) {
-        // SAFETY: the handle's lifetime guarantees the popup is live;
+        // SAFETY: the handle's lifetime guarantees the popup is live, so `base`
+        // is a live `wlr_xdg_surface`; `initialized` is a plain bool.
         // `constraint.as_c()` points at the caller's live `Box2D`, whose layout
         // is pinned to `wlr_box`, and wlroots only reads it.
-        unsafe { sys::wlr_xdg_popup_unconstrain_from_box(self.raw.as_ptr(), constraint.as_c()) };
+        unsafe {
+            let base = (*self.raw.as_ptr()).base;
+            if base.is_null() || !(*base).initialized {
+                return;
+            }
+            sys::wlr_xdg_popup_unconstrain_from_box(self.raw.as_ptr(), constraint.as_c());
+        }
     }
 
     /// `wlr_xdg_popup_get_position` — this popup's position in the **parent
     /// surface's** coordinates.
     #[must_use]
-    #[allow(dead_code)] // wired up by a later task in this part
     pub fn position(&self) -> (f64, f64) {
         let mut sx = 0.0;
         let mut sy = 0.0;
@@ -687,7 +684,6 @@ impl Popup<'_> {
     /// space [`unconstrain`](Self::unconstrain)'s constraint box is expressed
     /// in.
     #[must_use]
-    #[allow(dead_code)] // wired up by a later task in this part
     pub fn toplevel_coords(&self, popup_sx: i32, popup_sy: i32) -> (i32, i32) {
         let mut tx = 0;
         let mut ty = 0;
@@ -756,10 +752,9 @@ impl Popup<'_> {
     /// Does **not** touch the scene tree: the popup's subtree is a child of its
     /// parent's, and wlroots frees a tree's children recursively with the tree.
     /// Destroying it here would be the double free `Runtime::forget_toplevel`
-    /// documents. Prefer `Runtime::dismiss_popup` (wired up by a later task in
-    /// this part), which destroys a whole chain deepest-first — the order
-    /// xdg-shell requires.
-    #[allow(dead_code)] // wired up by a later task in this part
+    /// documents. Prefer
+    /// [`Runtime::dismiss_popup`](crate::Runtime::dismiss_popup), which
+    /// destroys a whole chain deepest-first — the order xdg-shell requires.
     pub fn destroy(&self) {
         // SAFETY: the handle's lifetime guarantees the popup is live. wlroots
         // emits `events.destroy` from inside this call, which runs
