@@ -34,6 +34,9 @@
 // non-test caller exists.
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
+use std::marker::PhantomData;
+use std::ptr::NonNull;
+
 use crate::id::next_id;
 use crate::{Box2D, LayerSurfaceId, ToplevelId, sys};
 
@@ -492,6 +495,257 @@ fn gravity_to_raw(gravity: PositionerGravity) -> u32 {
     }
 }
 
+/// An xdg popup, borrowed for the duration of a handler call.
+///
+/// Same shape as [`Toplevel`](crate::Toplevel) and for the same reason: a
+/// `wlr_xdg_popup` is freed whenever its client says so, so a handle that
+/// escapes the handler it was passed to is a use-after-free. The lifetime and
+/// the private constructor make that a compile error rather than a documented
+/// rule. What you store instead is [`PopupId`].
+pub struct Popup<'h> {
+    raw: NonNull<sys::wlr_xdg_popup>,
+    id: PopupId,
+    parent: PopupParent,
+    _scope: PhantomData<&'h ()>,
+}
+
+/// Hand-written rather than derived, for the same reason [`Toplevel`]'s is: the
+/// `PhantomData` scope marker has no value to print, and a raw pointer printed
+/// by a derive is neither useful nor stable across runs. Named fields only:
+/// `id`, `parent`, `geometry`.
+impl std::fmt::Debug for Popup<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Popup")
+            .field("id", &self.id)
+            .field("parent", &self.parent)
+            .field("geometry", &self.geometry())
+            .finish()
+    }
+}
+
+impl<'h> Popup<'h> {
+    /// # Safety
+    ///
+    /// `raw` must be a live `wlr_xdg_popup` whose `base->surface` carries the id
+    /// addon that produced `id`, `parent` must be the parent recorded when the
+    /// popup was announced, and the returned handle must not outlive the
+    /// callback it was created for.
+    pub(crate) unsafe fn from_raw_with_id(
+        raw: *mut sys::wlr_xdg_popup,
+        id: PopupId,
+        parent: PopupParent,
+    ) -> Popup<'h> {
+        Popup {
+            raw: NonNull::new(raw).expect("wlroots handed us a null popup"),
+            id,
+            parent,
+            _scope: PhantomData,
+        }
+    }
+}
+
+impl Popup<'_> {
+    /// This popup's stable identity, safe to store beyond the handler.
+    #[must_use]
+    #[allow(dead_code)] // wired up by a later task in this part
+    pub fn id(&self) -> PopupId {
+        self.id
+    }
+
+    /// The parent recorded when this popup was created.
+    ///
+    /// **Never re-derived from `(*popup).parent` at call time.** A layer-shell
+    /// popup's xdg parent is NULL at creation — the client sets it with
+    /// `zwlr_layer_surface_v1.get_popup` afterwards — so reading the struct
+    /// would report "no parent" for exactly the case this enum exists to
+    /// distinguish.
+    #[must_use]
+    pub fn parent(&self) -> PopupParent {
+        self.parent
+    }
+
+    /// `scheduled.rules.anchor_rect` — the rectangle the client anchored
+    /// against, in the parent's window-geometry space.
+    #[must_use]
+    pub fn anchor_rect(&self) -> Box2D {
+        self.positioner_rules().anchor_rect
+    }
+
+    /// The client's full positioner, copied out.
+    ///
+    /// Reads `scheduled.rules` — what the client last asked for — not `current`.
+    /// See [`PositionerRules`] for why the copy is not negotiable.
+    #[must_use]
+    pub fn positioner_rules(&self) -> PositionerRules {
+        // SAFETY: the handle's lifetime guarantees the popup is live;
+        // `scheduled` is a plain embedded struct, not a pointer.
+        unsafe { PositionerRules::from_c(&(*self.raw.as_ptr()).scheduled.rules) }
+    }
+
+    /// `current.geometry` — where the popup actually is, once configured, in the
+    /// parent's window-geometry coordinates.
+    ///
+    /// Zero-sized before the first configure has been acked, which is what
+    /// wlroots' own zeroed `wlr_xdg_popup_state` starts at.
+    #[must_use]
+    pub fn geometry(&self) -> Box2D {
+        // SAFETY: the handle's lifetime guarantees the popup is live; `current`
+        // is a plain embedded `wlr_xdg_popup_state`.
+        let state: &sys::wlr_xdg_popup_state = unsafe { &(*self.raw.as_ptr()).current };
+        Box2D::new(
+            state.geometry.x,
+            state.geometry.y,
+            state.geometry.width,
+            state.geometry.height,
+        )
+    }
+
+    /// `current.reactive`: the client wants this popup re-unconstrained
+    /// whenever its parent moves.
+    ///
+    /// A compositor honouring this re-runs
+    /// [`Runtime::configure_popup`](crate::Runtime::configure_popup) from
+    /// wherever it moves a window or re-arranges its layers.
+    #[must_use]
+    pub fn is_reactive(&self) -> bool {
+        // SAFETY: as for `geometry`.
+        let state: &sys::wlr_xdg_popup_state = unsafe { &(*self.raw.as_ptr()).current };
+        state.reactive
+    }
+
+    /// `(*popup).seat != NULL` — the client sent `xdg_popup.grab`.
+    ///
+    /// **wlroots owns the grab's lifetime**; this crate only observes it. See
+    /// this module's own doc for what that rules out. A `true` here means
+    /// wlroots has installed pointer, keyboard and touch grabs for this popup's
+    /// chain and will dismiss the chain itself on a press outside it.
+    #[must_use]
+    pub fn grab_requested(&self) -> bool {
+        // SAFETY: the handle's lifetime guarantees the popup is live; the field
+        // is only compared against null, never dereferenced.
+        unsafe { !(*self.raw.as_ptr()).seat.is_null() }
+    }
+
+    /// `wlr_xdg_popup_unconstrain_from_box`: rewrite `scheduled.geometry` from
+    /// the rules, fitted into `constraint`.
+    ///
+    /// **`constraint` is in the ROOT TOPLEVEL PARENT surface's coordinate
+    /// system**, not layout or output space — wlroots' own header says so, and
+    /// the compositor is what translates. Sends nothing; pair it with
+    /// [`send_configure`](Self::send_configure), which is what
+    /// [`Runtime::configure_popup`](crate::Runtime::configure_popup) does.
+    #[allow(dead_code)] // wired up by a later task in this part
+    pub fn unconstrain(&self, constraint: &Box2D) {
+        // SAFETY: the handle's lifetime guarantees the popup is live;
+        // `constraint.as_c()` points at the caller's live `Box2D`, whose layout
+        // is pinned to `wlr_box`, and wlroots only reads it.
+        unsafe { sys::wlr_xdg_popup_unconstrain_from_box(self.raw.as_ptr(), constraint.as_c()) };
+    }
+
+    /// `wlr_xdg_popup_get_position` — this popup's position in the **parent
+    /// surface's** coordinates.
+    #[must_use]
+    #[allow(dead_code)] // wired up by a later task in this part
+    pub fn position(&self) -> (f64, f64) {
+        let mut sx = 0.0;
+        let mut sy = 0.0;
+        // SAFETY: the handle's lifetime guarantees the popup is live; both
+        // out-parameters point at live locals that outlive the call.
+        unsafe { sys::wlr_xdg_popup_get_position(self.raw.as_ptr(), &raw mut sx, &raw mut sy) };
+        (sx, sy)
+    }
+
+    /// `wlr_xdg_popup_get_toplevel_coords` — a surface-local point mapped into
+    /// the **root toplevel's** surface coordinates, walking the whole popup
+    /// chain.
+    ///
+    /// This is what turns a hit inside a nested submenu into the coordinate
+    /// space [`unconstrain`](Self::unconstrain)'s constraint box is expressed
+    /// in.
+    #[must_use]
+    #[allow(dead_code)] // wired up by a later task in this part
+    pub fn toplevel_coords(&self, popup_sx: i32, popup_sy: i32) -> (i32, i32) {
+        let mut tx = 0;
+        let mut ty = 0;
+        // SAFETY: the handle's lifetime guarantees the popup is live; both
+        // out-parameters point at live `c_int` locals. The C signature takes
+        // `int`, not `int32_t`, which is the same type on every target this
+        // crate builds for.
+        unsafe {
+            sys::wlr_xdg_popup_get_toplevel_coords(
+                self.raw.as_ptr(),
+                popup_sx,
+                popup_sy,
+                &raw mut tx,
+                &raw mut ty,
+            );
+        }
+        (tx, ty)
+    }
+
+    /// `wlr_xdg_surface_schedule_configure(base)`. Returns the configure serial,
+    /// or `0` when the surface is not `initialized` yet — **in which case the
+    /// call is skipped entirely**.
+    ///
+    /// That skip is not a convenience. `wlr_xdg_surface_schedule_configure`
+    /// asserts `surface->initialized`, and this distribution ships wlroots
+    /// **without `NDEBUG`**, so calling it before the popup's first commit is a
+    /// hard `abort()` of the whole compositor process — the identical,
+    /// confirmed hazard `layer.rs`'s module doc documents at length for
+    /// `wlr_layer_surface_v1_configure`. The guard must never be simplified
+    /// away to an unconditional send.
+    pub fn send_configure(&self) -> u32 {
+        // SAFETY: the handle's lifetime guarantees the popup is live, so `base`
+        // is a live `wlr_xdg_surface`; `initialized` is a plain bool.
+        unsafe {
+            let base = (*self.raw.as_ptr()).base;
+            if base.is_null() || !(*base).initialized {
+                return 0;
+            }
+            sys::wlr_xdg_surface_schedule_configure(base)
+        }
+    }
+
+    /// `scheduled.reposition_token`, but only when
+    /// `scheduled.fields & WLR_XDG_POPUP_CONFIGURE_REPOSITION_TOKEN` is set.
+    ///
+    /// `None` on an ordinary configure. wlroots sends the
+    /// `xdg_popup.repositioned` event itself off that field; **never forge
+    /// one** — this accessor exists so a compositor can *observe* the token,
+    /// for logging or for correlating its own state, not so it can echo it.
+    #[must_use]
+    pub fn reposition_token(&self) -> Option<u32> {
+        // SAFETY: the handle's lifetime guarantees the popup is live;
+        // `scheduled` is a plain embedded `wlr_xdg_popup_configure`.
+        let scheduled: &sys::wlr_xdg_popup_configure = unsafe { &(*self.raw.as_ptr()).scheduled };
+        let bit = sys::wlr_xdg_popup_configure_field::WLR_XDG_POPUP_CONFIGURE_REPOSITION_TOKEN.0;
+        if scheduled.fields & bit == 0 {
+            None
+        } else {
+            Some(scheduled.reposition_token)
+        }
+    }
+
+    /// `wlr_xdg_popup_destroy` — sends `xdg_popup.popup_done`, destroys the role
+    /// object and makes the resource inert.
+    ///
+    /// Does **not** touch the scene tree: the popup's subtree is a child of its
+    /// parent's, and wlroots frees a tree's children recursively with the tree.
+    /// Destroying it here would be the double free `Runtime::forget_toplevel`
+    /// documents. Prefer
+    /// [`Runtime::dismiss_popup`](crate::Runtime::dismiss_popup), which
+    /// destroys a whole chain deepest-first — the order xdg-shell requires.
+    #[allow(dead_code)] // wired up by a later task in this part
+    pub fn destroy(&self) {
+        // SAFETY: the handle's lifetime guarantees the popup is live. wlroots
+        // emits `events.destroy` from inside this call, which runs
+        // `on_popup_destroy`, which removes this popup's entry and listeners
+        // before wlroots frees anything — the same ordering `on_toplevel_destroy`
+        // relies on.
+        unsafe { sys::wlr_xdg_popup_destroy(self.raw.as_ptr()) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -803,5 +1057,176 @@ mod tests {
         let rules = unsafe { PositionerRules::from_c(&raw_rules((0, 0, 1, 1), (10, 10), 0, 0, 0)) };
         assert_eq!(rules.parent_size, None);
         assert_eq!(rules.parent_configure_serial, None);
+    }
+
+    /// Allocate a zeroed `wlr_xdg_popup` with a zeroed `wlr_xdg_surface` behind
+    /// its `base`, and leak both.
+    ///
+    /// `alloc_zeroed` behind a raw pointer rather than `Box::new(zeroed())`,
+    /// for the reason `runtime.rs`'s `record_toplevel_with_surface` documents:
+    /// both structs embed `wl_listener`s whose bare function pointers are UB to
+    /// *materialise* as a zero value, so the bytes are only ever touched
+    /// through a pointer. Deliberately leaked — these tests never enter
+    /// wlroots' own lifecycle, so nothing frees them, and a reclaimed
+    /// allocation would leave a dangling `base` for any later assertion.
+    fn scratch_popup(initialized: bool) -> *mut sys::wlr_xdg_popup {
+        use std::alloc::{Layout, alloc_zeroed};
+
+        // SAFETY: both layouts are non-zero-sized, so `alloc_zeroed` returns
+        // either null (checked) or a suitably aligned zeroed allocation.
+        let base = unsafe { alloc_zeroed(Layout::new::<sys::wlr_xdg_surface>()) }
+            .cast::<sys::wlr_xdg_surface>();
+        assert!(!base.is_null(), "allocation failed");
+        let popup = unsafe { alloc_zeroed(Layout::new::<sys::wlr_xdg_popup>()) }
+            .cast::<sys::wlr_xdg_popup>();
+        assert!(!popup.is_null(), "allocation failed");
+        // SAFETY: both allocations are freshly zeroed and exclusively owned;
+        // every field written below is in bounds.
+        unsafe {
+            (*base).initialized = initialized;
+            (*popup).base = base;
+        }
+        popup
+    }
+
+    /// A handle over a scratch popup with the given parent.
+    ///
+    /// # Safety
+    ///
+    /// The handle must not outlive `raw`; these tests leak `raw`, so it does
+    /// not.
+    unsafe fn handle(raw: *mut sys::wlr_xdg_popup, parent: PopupParent) -> Popup<'static> {
+        unsafe { Popup::from_raw_with_id(raw, PopupId::dangling_for_test(), parent) }
+    }
+
+    #[test]
+    fn a_handle_reports_the_parent_it_was_built_with_not_the_null_in_the_struct() {
+        let raw = scratch_popup(false);
+        let parent = PopupParent::Layer(LayerSurfaceId::dangling_for_test());
+        // SAFETY: `raw` is leaked, so it outlives the handle.
+        let popup = unsafe { handle(raw, parent) };
+        assert_eq!(popup.parent(), parent);
+        assert!(!popup.parent().is_popup());
+        // `(*raw).parent` is the zeroed null a layer popup really does carry at
+        // creation. If `parent()` ever started reading it, this test is the one
+        // that notices.
+        // SAFETY: `raw` is a live, exclusively-owned allocation.
+        assert!(unsafe { (*raw).parent.is_null() });
+    }
+
+    /// `send_configure` must **skip the call** — not merely return zero — when
+    /// the surface is not yet `initialized`. `wlr_xdg_surface_schedule_configure`
+    /// contains `assert(surface->initialized)`, and this distribution ships
+    /// wlroots without `NDEBUG`, so an early call is a hard `abort()` of the
+    /// whole compositor process (the hazard `layer.rs`'s module doc documents
+    /// in full for `wlr_layer_surface_v1_configure`). This test would *abort*
+    /// rather than fail if the guard were removed, which is exactly the point:
+    /// an aborting test binary is a louder failure than a red assertion.
+    #[test]
+    fn send_configure_is_skipped_entirely_before_the_surface_is_initialized() {
+        let raw = scratch_popup(false);
+        // SAFETY: `raw` is leaked, so it outlives the handle.
+        let popup = unsafe { handle(raw, PopupParent::Toplevel(ToplevelId::dangling_for_test())) };
+        assert_eq!(popup.send_configure(), 0);
+    }
+
+    /// `grab_requested` is `(*popup).seat != NULL` — wlroots fills that field
+    /// only when the client sends `xdg_popup.grab`. It is the only observable
+    /// this crate has for a popup grab: the export table has no
+    /// `wlr_xdg_popup_grab_*` symbol at all.
+    #[test]
+    fn grab_requested_reads_the_seat_pointer_wlroots_fills_on_the_grab_request() {
+        let raw = scratch_popup(false);
+        // SAFETY: `raw` is leaked and exclusively owned.
+        let popup = unsafe { handle(raw, PopupParent::Toplevel(ToplevelId::dangling_for_test())) };
+        assert!(!popup.grab_requested(), "a zeroed seat is no grab");
+
+        // SAFETY: writing a non-null sentinel into a field this crate only ever
+        // null-checks. The pointer is never dereferenced by `grab_requested`.
+        unsafe { (*raw).seat = std::ptr::dangling_mut() };
+        assert!(popup.grab_requested());
+    }
+
+    /// The reposition token is present only when wlroots has set the
+    /// `WLR_XDG_POPUP_CONFIGURE_REPOSITION_TOKEN` bit in `scheduled.fields`.
+    /// Reading the token without checking the mask would report a stale token
+    /// from a previous reposition on every ordinary configure.
+    #[test]
+    fn the_reposition_token_is_none_until_wlroots_sets_its_field_bit() {
+        let raw = scratch_popup(false);
+        // SAFETY: `raw` is leaked and exclusively owned.
+        let popup = unsafe { handle(raw, PopupParent::Toplevel(ToplevelId::dangling_for_test())) };
+        assert_eq!(popup.reposition_token(), None);
+
+        // SAFETY: as above; both fields are plain integers in bounds.
+        unsafe { (*raw).scheduled.reposition_token = 77 };
+        assert_eq!(
+            popup.reposition_token(),
+            None,
+            "a token with the field bit clear is stale, not current"
+        );
+
+        // SAFETY: as above.
+        unsafe {
+            (*raw).scheduled.fields =
+                sys::wlr_xdg_popup_configure_field::WLR_XDG_POPUP_CONFIGURE_REPOSITION_TOKEN.0;
+        }
+        assert_eq!(popup.reposition_token(), Some(77));
+    }
+
+    /// `geometry` reads `current`, `anchor_rect`/`positioner_rules` read
+    /// `scheduled.rules` — the distinction between "where it actually is" and
+    /// "what the client last asked for", which a compositor deciding a
+    /// reposition needs both halves of.
+    #[test]
+    fn geometry_reads_current_while_the_rules_read_what_was_scheduled() {
+        let raw = scratch_popup(false);
+        // SAFETY: `raw` is leaked and exclusively owned; every field written is
+        // plain data in bounds.
+        unsafe {
+            (*raw).current.geometry = sys::wlr_box {
+                x: 1,
+                y: 2,
+                width: 3,
+                height: 4,
+            };
+            (*raw).current.reactive = true;
+            (*raw).scheduled.rules.anchor_rect = sys::wlr_box {
+                x: 10,
+                y: 20,
+                width: 30,
+                height: 40,
+            };
+            (*raw).scheduled.rules.size.width = 64;
+            (*raw).scheduled.rules.size.height = 48;
+        }
+        let popup = unsafe { handle(raw, PopupParent::Toplevel(ToplevelId::dangling_for_test())) };
+
+        assert_eq!(popup.geometry(), Box2D::new(1, 2, 3, 4));
+        assert!(popup.is_reactive());
+        assert_eq!(popup.anchor_rect(), Box2D::new(10, 20, 30, 40));
+        assert_eq!(popup.positioner_rules().size, (64, 48));
+        assert_eq!(
+            popup.positioner_rules().anchor_rect,
+            Box2D::new(10, 20, 30, 40)
+        );
+    }
+
+    /// The `Debug` impl is hand-written and prints named fields only. A derive
+    /// would print the raw pointer, which is neither useful nor stable across
+    /// runs — the reason `Toplevel`'s own `Debug` is hand-written.
+    #[test]
+    fn the_debug_impl_prints_named_fields_and_no_pointer() {
+        let raw = scratch_popup(false);
+        // SAFETY: `raw` is leaked and exclusively owned.
+        let popup = unsafe { handle(raw, PopupParent::Toplevel(ToplevelId::dangling_for_test())) };
+        let text = format!("{popup:?}");
+        assert!(text.starts_with("Popup {"), "got {text}");
+        assert!(text.contains("id: PopupId("), "got {text}");
+        assert!(text.contains("parent: Toplevel("), "got {text}");
+        assert!(
+            !text.contains("0x"),
+            "a raw pointer leaked into Debug: {text}"
+        );
     }
 }

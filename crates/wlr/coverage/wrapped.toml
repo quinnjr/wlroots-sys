@@ -2204,3 +2204,43 @@ item   = "PositionerRules::geometry"
 symbol = "wlr_xdg_positioner_rules_unconstrain_box"
 module = "popup"
 item   = "PositionerRules::unconstrain_box"
+
+[[wrapped]]
+symbol = "wlr_xdg_popup"
+module = "popup"
+item   = "Popup"
+
+[[wrapped]]
+symbol = "wlr_xdg_popup_configure"
+module = "popup"
+item   = "Popup::reposition_token"
+
+[[wrapped]]
+symbol = "wlr_xdg_popup_configure_field"
+module = "popup"
+item   = "Popup::reposition_token"
+
+[[wrapped]]
+symbol = "wlr_xdg_popup_destroy"
+module = "popup"
+item   = "Popup::destroy"
+
+[[wrapped]]
+symbol = "wlr_xdg_popup_get_position"
+module = "popup"
+item   = "Popup::position"
+
+[[wrapped]]
+symbol = "wlr_xdg_popup_get_toplevel_coords"
+module = "popup"
+item   = "Popup::toplevel_coords"
+
+[[wrapped]]
+symbol = "wlr_xdg_popup_state"
+module = "popup"
+item   = "Popup::geometry"
+
+[[wrapped]]
+symbol = "wlr_xdg_popup_unconstrain_from_box"
+module = "popup"
+item   = "Popup::unconstrain"
