@@ -4448,12 +4448,6 @@ note      = "Shell completion: xdg-shell remainder, foreign toplevels, composito
 milestone = "M9"
 
 [[waived]]
-symbol    = "wlr_xdg_popup_try_from_wlr_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_xdg_positioner"
 reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."

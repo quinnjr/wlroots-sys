@@ -1113,6 +1113,19 @@ impl Drop for ToplevelTableGuard<'_> {
     }
 }
 
+/// Clears `Runtime`'s popup table when the `run_inner` call holding this guard
+/// returns, on every exit path. Mirrors [`ToplevelTableGuard`] exactly, for the
+/// identical reason: see `Runtime::clear_popups`'s own doc — the per-popup
+/// destroy listener that would otherwise remove a stale row is itself torn
+/// down with this call's `Session`.
+struct PopupTableGuard<'r>(&'r Runtime);
+
+impl Drop for PopupTableGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear_popups();
+    }
+}
+
 /// Clears `Runtime`'s Xwayland-surface table when the `run_inner` call holding
 /// this guard returns, on every exit path. Mirrors [`ToplevelTableGuard`]
 /// exactly, for the identical reason: see
@@ -1586,6 +1599,14 @@ impl<'d> Backend<'d> {
         // here depends on that relative order — clearing the table touches
         // no signal and nothing any `Registration::drop` reads.
         let _toplevel_table_guard = ToplevelTableGuard(runtime);
+
+        // Popup ids are only meaningful for the call that announced them, for
+        // the reason `clear_toplevels` documents at length: the per-popup
+        // destroy listener that would remove a stale row is torn down with
+        // this call's `Session`. Purged on every exit path, including an
+        // early `?` and a panic — this sits with `_toplevel_table_guard` so
+        // the two cannot drift apart.
+        let _popup_table_guard = PopupTableGuard(runtime);
 
         // Same reasoning, for `layer_surfaces`; see that guard's own doc.
         let _layer_surface_table_guard = LayerSurfaceTableGuard(runtime);
@@ -5354,14 +5375,37 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
     }
 }
 
-/// Recover the [`ToplevelId`] a surface's id addon carries, if any.
+/// The decision `toplevel_id_of_surface` makes, separated from the FFI so it can
+/// be tested without a live `wlr_surface`.
+///
+/// An id addon on a popup's surface is a real id — it is just not a
+/// **toplevel's**. Returning `None` is the honest answer; returning the id
+/// anyway would be a `ToplevelId` naming a popup, and the only thing standing
+/// between that and a wrong-window bug would be the table miss that happens to
+/// follow at every current call site.
+fn toplevel_id_if_not_a_popup(id: Option<ToplevelId>, is_popup: bool) -> Option<ToplevelId> {
+    if is_popup { None } else { id }
+}
+
+/// Recover the [`ToplevelId`] a surface's id addon carries, if any — and if the
+/// surface is not in fact a popup's.
+///
+/// The role check is not cosmetic. Since 0.20.28 a popup's `wlr_surface`
+/// carries an id addon of its own (that is where `PopupId` lives, for the same
+/// reason `ToplevelId` does), and `find_id` cannot tell the two apart: they come
+/// from one process-wide counter, so they never collide, but without this check
+/// they are freely mislabelled.
 ///
 /// # Safety
 ///
 /// `surface` must be a live `wlr_surface` with an initialised addon set.
 unsafe fn toplevel_id_of_surface(surface: *mut sys::wlr_surface) -> Option<ToplevelId> {
     // SAFETY: the caller guarantees the surface is live.
-    unsafe { find_id(&raw const (*surface).addons).map(ToplevelId) }
+    unsafe {
+        let id = find_id(&raw const (*surface).addons).map(ToplevelId);
+        let is_popup = !sys::wlr_xdg_popup_try_from_wlr_surface(surface).is_null();
+        toplevel_id_if_not_a_popup(id, is_popup)
+    }
 }
 
 /// Which parent a `new_popup` listener's `Bound` names.
@@ -9195,5 +9239,23 @@ mod popup_bound_tests {
             parent_from_slots(Some(t), Some(l), None),
             Some(PopupParent::Layer(l))
         );
+    }
+
+    /// `toplevel_id_of_surface` must not hand back a `ToplevelId` for a surface
+    /// that is actually a popup's. Both id kinds come from one counter, so they
+    /// never collide — but before the role check they were freely
+    /// *mislabelled*, and every caller's safety rested on the table miss that
+    /// followed rather than on the id being right.
+    ///
+    /// A real `wlr_surface` cannot be built here (it needs a compositor), so
+    /// this exercises the decision function the callback delegates to, with the
+    /// role probe's answer supplied directly.
+    #[test]
+    fn a_surface_that_is_a_popup_yields_no_toplevel_id() {
+        let id = ToplevelId::dangling_for_test();
+        assert_eq!(toplevel_id_if_not_a_popup(Some(id), false), Some(id));
+        assert_eq!(toplevel_id_if_not_a_popup(Some(id), true), None);
+        assert_eq!(toplevel_id_if_not_a_popup(None, false), None);
+        assert_eq!(toplevel_id_if_not_a_popup(None, true), None);
     }
 }

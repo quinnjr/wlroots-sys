@@ -7077,9 +7077,6 @@ impl Runtime {
     /// stale row is itself torn down with that call's `Session`. Without this, a
     /// consumer who kept a `Runtime` clone could resolve a stale id and hand
     /// wlroots memory it had already freed.
-    // `run_inner`'s call site is wired up by a later task in this part;
-    // only this module's own tests call this until then.
-    #[allow(dead_code)]
     pub(crate) fn clear_popups(&self) {
         self.inner.popups.borrow_mut().clear();
     }

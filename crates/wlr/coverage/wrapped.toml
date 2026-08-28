@@ -2254,3 +2254,8 @@ item   = "Popup::geometry"
 symbol = "wlr_xdg_popup_unconstrain_from_box"
 module = "popup"
 item   = "Popup::unconstrain"
+
+[[wrapped]]
+symbol = "wlr_xdg_popup_try_from_wlr_surface"
+module = "backend"
+item   = "toplevel_id_of_surface"
