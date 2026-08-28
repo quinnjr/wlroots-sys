@@ -89,6 +89,7 @@ mod interest;
 mod layer;
 mod log;
 mod output;
+mod popup;
 mod region;
 mod render;
 mod runtime;
