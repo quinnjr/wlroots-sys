@@ -474,6 +474,31 @@ pre-map commit listener that calls the new
 `Runtime::schedule_frame_all(&self) -> usize` so XWayland's handshake frame
 callback is answered. Bounded to the handshake commits; never busy-loops.
 
+## 0.20.28 — xdg-popup
+
+### Chains
+
+`Runtime::popups_of(parent)` lists direct children in creation order (which is
+the sibling z-order tiebreak); `Runtime::popup_chain(parent)` is the whole
+subtree, parents before children. `Runtime::dismiss_popup(id)` destroys a popup
+and everything under it **deepest-first**, which is the order xdg-shell requires,
+and returns how many it destroyed. `PopupParent::root(&runtime)` walks a nested
+chain down to the window or layer surface at the bottom.
+
+That deepest-first dismissal ordering is **verified end-to-end in the compositor
+suite**, not in this crate's unit tests: destroying a popup runs real
+`wlr_xdg_popup_destroy` FFI, which needs a live `wl_resource` and `wlr_surface`
+that no in-crate fixture can fabricate. `compositor/tests/popups.rs`'s
+nested-chain dismissal tests
+(`a_grabbing_popup_chain_is_dismissed_whole_by_a_click_outside_it`,
+`destroying_a_parent_destroys_its_popup_chain_without_a_double_free`) are the
+executable proof; `runtime.rs`'s three `#[ignore]`d `dismiss*` tests are the
+readable spec they discharge.
+
+All of these are depth-capped and de-duplicated. wlroots cannot produce a cycle,
+but every one of them runs on your input path, where an unbounded walk over a
+corrupted table is a session freeze.
+
 ## 0.20.27 — implicit pointer grab
 
 Fixes a protocol-level bug every consumer inherited: the crate re-evaluated

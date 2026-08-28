@@ -11013,6 +11013,11 @@ mod tests {
     /// but only the harness-driven `compositor/tests/popups.rs` (P2), which
     /// runs a genuine client against a genuine xdg-shell, can actually exercise
     /// `Popup::destroy`'s FFI without crashing the test process.
+    ///
+    /// **Replaced by** `compositor/tests/popups.rs`'s
+    /// `a_grabbing_popup_chain_is_dismissed_whole_by_a_click_outside_it`
+    /// (contract §2.4), which asserts the same "the popup and its whole subtree,
+    /// counted once" property against a live chain.
     #[test]
     #[ignore = "needs a live wl_resource/wlr_surface chain a scratch popup can't fake; see compositor/tests/popups.rs (P2)"]
     fn dismissing_a_popup_counts_itself_and_its_whole_subtree() {
@@ -11048,6 +11053,11 @@ mod tests {
     /// See [`dismissing_a_popup_counts_itself_and_its_whole_subtree`]'s doc:
     /// same real-FFI-destroy hazard, since this also bottoms out in
     /// `dismiss_popup`.
+    ///
+    /// **Replaced by** `compositor/tests/popups.rs`'s
+    /// `destroying_a_parent_destroys_its_popup_chain_without_a_double_free`
+    /// (contract §2.4), which drives every chain under one parent through a real
+    /// destroy.
     #[test]
     #[ignore = "needs a live wl_resource/wlr_surface chain a scratch popup can't fake; see compositor/tests/popups.rs (P2)"]
     fn dismissing_a_parents_popups_covers_every_chain_under_it() {
@@ -11069,6 +11079,13 @@ mod tests {
     ///
     /// See [`dismissing_a_popup_counts_itself_and_its_whole_subtree`]'s doc:
     /// same real-FFI-destroy hazard.
+    ///
+    /// **Replaced by** `compositor/tests/popups.rs`'s nested-chain dismissal
+    /// test `destroying_a_parent_destroys_its_popup_chain_without_a_double_free`
+    /// (contract §2.4), which is the test that must fail when `dismiss_popup`'s
+    /// `.rev()` is dropped — a shallow-first destroy is a live xdg-shell
+    /// protocol error there, which is exactly what this order assertion stands
+    /// in for and cannot prove here.
     #[test]
     #[ignore = "needs a live wl_resource/wlr_surface chain a scratch popup can't fake; see compositor/tests/popups.rs (P2)"]
     fn dismissal_is_deepest_first() {
