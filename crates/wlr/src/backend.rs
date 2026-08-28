@@ -41,8 +41,8 @@ use crate::runtime::{PointerGrab, SceneObserver};
 use crate::seat::{KeyEvent, Modifiers};
 use crate::{
     AppliedHead, Band, Display, Error, EventLoop, Handlers, LayerSurface, LayerSurfaceId,
-    LoopHandler, NodeId, Output, OutputHandler, OutputId, Result, Runtime, Toplevel, ToplevelId,
-    Transform, sys,
+    LoopHandler, NodeId, Output, OutputHandler, OutputId, Popup, PopupId, Result, Runtime,
+    Toplevel, ToplevelId, Transform, sys,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -2341,6 +2341,30 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         Event::LayerSurfaceMapped(id) => state.layer_surface_mapped(id),
         Event::LayerSurfaceUnmapped(id) => state.layer_surface_unmapped(id),
         Event::LayerSurfaceDestroyed(id) => state.layer_surface_destroyed(id),
+        Event::NewPopup(id) => with_popup(session, id, |p| state.new_popup(p)),
+        Event::PopupInitialCommit(id) => {
+            with_popup(session, id, |p| state.popup_initial_commit(p));
+            // xdg-shell requires an answer to a popup's first commit or it
+            // never maps, and the trait default has no `Runtime` to send one
+            // with — so this is the dispatch layer discharging that guarantee,
+            // exactly as `RequestMaximize`'s unconditional `configure_toplevel`
+            // does for its own. Unconditional, not "only if the handler staged
+            // nothing": wlroots coalesces a second scheduled configure into
+            // whatever `Runtime::configure_popup` already sent, so scheduling
+            // again is harmless, and harmless-every-time is simpler and no less
+            // correct than probing.
+            //
+            // `send_configure` is what skips the call if the surface somehow is
+            // not `initialized` — see its own doc for why that guard is a
+            // process-abort question and not a tidiness one.
+            if let Some(popup) = session.runtime.popup(id) {
+                popup.send_configure();
+            }
+        }
+        Event::PopupMapped(id) => state.popup_mapped(id),
+        Event::PopupUnmapped(id) => state.popup_unmapped(id),
+        Event::PopupReposition(id) => with_popup(session, id, |p| state.popup_reposition(p)),
+        Event::PopupDestroyed(id) => state.popup_destroyed(id),
         // The four scene-buffer events that name a scene output resolve
         // nothing here: both ids were resolved at emission time, and a handler
         // that gets one for a node or output since destroyed sees every by-id
@@ -2502,6 +2526,22 @@ fn with_toplevel<S>(session: &Session<'_, S>, id: ToplevelId, f: impl FnOnce(&To
     // dispatcher's handler flag is set for exactly this window).
     let toplevel = unsafe { Toplevel::from_raw_with_id(entry.raw.as_ptr(), id) };
     f(&toplevel);
+}
+
+/// Borrow the popup `id` names, if this runtime still knows of one.
+/// Mirrors [`with_toplevel`] exactly, including its obligations on `f`: the
+/// table borrow is released before `f` runs (a handler can re-enter wlroots,
+/// which can emit a signal, which can take the borrow mutably), and `f` must not
+/// reach anything that frees the popup mid-call.
+///
+/// [`Runtime::popup`] is what releases the borrow — it copies `raw` and `parent`
+/// out and drops the guard before building the handle, so this function is a
+/// thin wrapper rather than a second implementation of that discipline.
+fn with_popup<S>(session: &Session<'_, S>, id: PopupId, f: impl FnOnce(&Popup<'_>)) {
+    let Some(popup) = session.runtime.popup(id) else {
+        return;
+    };
+    f(&popup);
 }
 
 /// Borrow the layer surface `id` names, if this runtime still knows of one.
@@ -7293,6 +7333,16 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::LayerSurfaceMapped(..)
         | Event::LayerSurfaceUnmapped(..)
         | Event::LayerSurfaceDestroyed(..)
+        // Unreachable for the same reason the layer-surface events above are:
+        // `run` never registers an xdg shell, so no popup can be announced on
+        // this path. Dropped rather than `unreachable!()` because this is on
+        // the path from an `extern "C"` frame, where a panic aborts.
+        | Event::NewPopup(..)
+        | Event::PopupInitialCommit(..)
+        | Event::PopupMapped(..)
+        | Event::PopupUnmapped(..)
+        | Event::PopupReposition(..)
+        | Event::PopupDestroyed(..)
         // And for the five scene-buffer observations: `run` installs no scene
         // observer (`no_scene_observer`), so nothing can ever have linked the
         // listeners that produce these.

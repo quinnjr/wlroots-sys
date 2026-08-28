@@ -46,7 +46,7 @@ use std::collections::VecDeque;
 
 use crate::{
     ActivationToken, CursorShape, CursorShapeDevice, DecorationMode, Edges, LayerSurfaceId, NodeId,
-    OutputId, SceneOutputId, ToplevelId,
+    OutputId, PopupId, SceneOutputId, ToplevelId,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -113,6 +113,31 @@ pub(crate) enum Event {
     LayerSurfaceMapped(LayerSurfaceId),
     LayerSurfaceUnmapped(LayerSurfaceId),
     LayerSurfaceDestroyed(LayerSurfaceId),
+
+    /// A client created an `xdg_popup`. The parent is not carried: it is
+    /// recorded in the runtime's own table at announcement time and read back
+    /// through [`Runtime::popup`](crate::Runtime::popup), for the reason this
+    /// enum carries ids and never handles — a deferred event may name an object
+    /// that no longer exists by the time it is delivered.
+    ///
+    /// `#[allow(dead_code)]` on this group is temporary: Task 7 (this task)
+    /// wires both match sites, but nothing constructs these variants until
+    /// Task 8 adds the `wlr_xdg_popup` listeners that `.emit` them. Remove the
+    /// attribute once that lands.
+    #[allow(dead_code)]
+    NewPopup(PopupId),
+    /// The popup's first commit, where xdg-shell requires an answer.
+    #[allow(dead_code)]
+    PopupInitialCommit(PopupId),
+    #[allow(dead_code)]
+    PopupMapped(PopupId),
+    #[allow(dead_code)]
+    PopupUnmapped(PopupId),
+    /// The client sent `xdg_popup.reposition`.
+    #[allow(dead_code)]
+    PopupReposition(PopupId),
+    #[allow(dead_code)]
+    PopupDestroyed(PopupId),
 
     /// An observed scene buffer node is now displayed on a scene output.
     SceneBufferOutputEnter(NodeId, SceneOutputId),
