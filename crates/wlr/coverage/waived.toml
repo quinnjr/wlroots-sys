@@ -4525,23 +4525,6 @@ reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
 milestone = "M9"
 
-[[waived]]
-symbol    = "wlr_xdg_positioner_rules"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_positioner_rules_get_geometry"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_positioner_rules_unconstrain_box"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_xdg_surface_configure"

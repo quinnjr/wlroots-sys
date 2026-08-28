@@ -2189,3 +2189,18 @@ item   = "Runtime::create_xdg_activation_manager"
 symbol = "wlr_xdg_activation_v1_request_activate_event"
 module = "backend"
 item   = "SeatHandler::request_activate"
+
+[[wrapped]]
+symbol = "wlr_xdg_positioner_rules"
+module = "popup"
+item   = "PositionerRules"
+
+[[wrapped]]
+symbol = "wlr_xdg_positioner_rules_get_geometry"
+module = "popup"
+item   = "PositionerRules::geometry"
+
+[[wrapped]]
+symbol = "wlr_xdg_positioner_rules_unconstrain_box"
+module = "popup"
+item   = "PositionerRules::unconstrain_box"

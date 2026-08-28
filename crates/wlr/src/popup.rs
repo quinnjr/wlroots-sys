@@ -35,7 +35,7 @@
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 use crate::id::next_id;
-use crate::{LayerSurfaceId, ToplevelId, sys};
+use crate::{Box2D, LayerSurfaceId, ToplevelId, sys};
 
 /// Identifies one live `wlr_xdg_popup` for as long as the consumer chooses to
 /// remember it.
@@ -295,6 +295,203 @@ impl std::ops::BitOrAssign for ConstraintAdjustment {
     }
 }
 
+/// A snapshot of the client's `xdg_positioner`, copied out of
+/// `wlr_xdg_positioner_rules`.
+///
+/// **Copied, never borrowed.** Every accessor that hands one of these back
+/// releases wlroots' memory before returning, because the caller will re-enter
+/// wlroots — configuring, dismissing, positioning — which can emit a signal,
+/// which can destroy the very popup the rules were read from. A borrowed view
+/// would be a use-after-free the borrow checker could not see, since the
+/// lifetime would be tied to the handle rather than to wlroots' own decisions.
+///
+/// The two methods are FFI calls into wlroots rather than the placement algebra
+/// they look like, for the reason [`geom`](crate::Box2D)'s module doc gives
+/// about `wlr_box` predicates: xdg-shell's anchor/gravity/adjustment rules have
+/// edge cases whose answers are not the obvious ones, and a reimplementation is
+/// free to drift from wlroots' answer, silently, in a patch release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PositionerRules {
+    /// `xdg_positioner.set_anchor_rect`, in the parent's window-geometry space.
+    pub anchor_rect: Box2D,
+    /// `xdg_positioner.set_anchor`.
+    pub anchor: PositionerAnchor,
+    /// `xdg_positioner.set_gravity`.
+    pub gravity: PositionerGravity,
+    /// `xdg_positioner.set_constraint_adjustment`.
+    pub constraint_adjustment: ConstraintAdjustment,
+    /// `xdg_positioner.set_size`, as `(width, height)`.
+    pub size: (i32, i32),
+    /// `xdg_positioner.set_parent_size` (protocol v3+). `Some` only when the
+    /// client actually sent one — see this type's own round-trip test for why
+    /// a zero cannot be reported as `Some((0, 0))`.
+    pub parent_size: Option<(i32, i32)>,
+    /// `xdg_positioner.set_offset`.
+    pub offset: (i32, i32),
+    /// `xdg_positioner.set_reactive`: the client wants the popup
+    /// re-unconstrained whenever its parent moves.
+    pub reactive: bool,
+    /// `xdg_positioner.set_parent_configure`. `Some` only when the client sent
+    /// one, which wlroots flags with `has_parent_configure_serial`.
+    pub parent_configure_serial: Option<u32>,
+}
+
+impl PositionerRules {
+    /// `wlr_xdg_positioner_rules_get_geometry` — the **unconstrained** geometry
+    /// these rules describe, in the parent surface's coordinate system.
+    #[must_use]
+    pub fn geometry(&self) -> Box2D {
+        let rules = self.to_c();
+        let mut out = Box2D::default();
+        // SAFETY: `rules` is a live, exclusively-owned local of exactly the C
+        // type; `out` is a live local whose layout is pinned to `wlr_box` by
+        // `geom.rs`'s compile-time asserts. wlroots only reads the first and
+        // only writes the second.
+        unsafe {
+            sys::wlr_xdg_positioner_rules_get_geometry(
+                &raw const rules,
+                (&raw mut out).cast::<sys::wlr_box>(),
+            );
+        }
+        out
+    }
+
+    /// `wlr_xdg_positioner_rules_unconstrain_box` — these rules applied against
+    /// a constraint box, **without touching any live popup**.
+    ///
+    /// The answer is whatever wlroots' own algorithm produces given the
+    /// adjustment bits the client permitted: with none permitted the result is
+    /// [`geometry`](Self::geometry) unchanged, however far outside the
+    /// constraint that falls. This crate invents no clamp of its own.
+    #[must_use]
+    pub fn unconstrain_box(&self, constraint: &Box2D) -> Box2D {
+        let rules = self.to_c();
+        let mut out = self.geometry();
+        // SAFETY: as for `geometry`, plus `constraint.as_c()` which points at
+        // the caller's live `Box2D` and is only read.
+        unsafe {
+            sys::wlr_xdg_positioner_rules_unconstrain_box(
+                &raw const rules,
+                constraint.as_c(),
+                (&raw mut out).cast::<sys::wlr_box>(),
+            );
+        }
+        out
+    }
+
+    /// Copy the rules out of wlroots' own struct.
+    ///
+    /// # Safety
+    ///
+    /// `rules` must point at a live, initialised `wlr_xdg_positioner_rules`.
+    /// Only reads; nothing is retained.
+    pub(crate) unsafe fn from_c(rules: &sys::wlr_xdg_positioner_rules) -> PositionerRules {
+        PositionerRules {
+            anchor_rect: Box2D::new(
+                rules.anchor_rect.x,
+                rules.anchor_rect.y,
+                rules.anchor_rect.width,
+                rules.anchor_rect.height,
+            ),
+            anchor: PositionerAnchor::from_raw(rules.anchor.0),
+            gravity: PositionerGravity::from_raw(rules.gravity.0),
+            constraint_adjustment: ConstraintAdjustment::from_raw(rules.constraint_adjustment.0),
+            size: (rules.size.width, rules.size.height),
+            // A parent size the client never sent is left zeroed by wlroots,
+            // and "the client asked for 0x0" is not a thing xdg-shell permits,
+            // so the zero is a usable sentinel. The serial has a real flag and
+            // uses it.
+            parent_size: if rules.parent_size.width == 0 && rules.parent_size.height == 0 {
+                None
+            } else {
+                Some((rules.parent_size.width, rules.parent_size.height))
+            },
+            offset: (rules.offset.x, rules.offset.y),
+            reactive: rules.reactive,
+            parent_configure_serial: if rules.has_parent_configure_serial {
+                Some(rules.parent_configure_serial)
+            } else {
+                None
+            },
+        }
+    }
+
+    /// Rebuild wlroots' own struct from this copy, so the two `rules_*`
+    /// functions have something to point at.
+    ///
+    /// Zeroed first rather than field-by-field constructed: the struct is plain
+    /// data (boxes, sizes, offsets, three enums and two bools — no pointers, no
+    /// `wl_listener`), so materialising a zero value is sound, unlike the
+    /// role-object structs `runtime.rs`'s tests must only ever touch through a
+    /// raw pointer.
+    ///
+    /// Takes `&self` rather than `self` despite `PositionerRules: Copy` (which
+    /// is what clippy's `wrong_self_convention` wants for a `to_*` name):
+    /// `geometry`/`unconstrain_box` both need to call it without giving up
+    /// their own `&self`, and every call site here already has a reference in
+    /// hand, so a by-value signature would only add copies at the caller.
+    #[allow(clippy::wrong_self_convention)]
+    pub(crate) fn to_c(&self) -> sys::wlr_xdg_positioner_rules {
+        // SAFETY: every field of `wlr_xdg_positioner_rules` is an integer, a
+        // bool, or a `#[repr(C)]` struct of those; none has a validity
+        // requirement an all-zero pattern violates, and every field is
+        // overwritten below except the padding.
+        let mut rules: sys::wlr_xdg_positioner_rules = unsafe { std::mem::zeroed() };
+        rules.anchor_rect = sys::wlr_box {
+            x: self.anchor_rect.x,
+            y: self.anchor_rect.y,
+            width: self.anchor_rect.width,
+            height: self.anchor_rect.height,
+        };
+        rules.anchor = sys::xdg_positioner_anchor(anchor_to_raw(self.anchor));
+        rules.gravity = sys::xdg_positioner_gravity(gravity_to_raw(self.gravity));
+        rules.constraint_adjustment =
+            sys::xdg_positioner_constraint_adjustment(self.constraint_adjustment.bits());
+        rules.size.width = self.size.0;
+        rules.size.height = self.size.1;
+        let (pw, ph) = self.parent_size.unwrap_or((0, 0));
+        rules.parent_size.width = pw;
+        rules.parent_size.height = ph;
+        rules.offset.x = self.offset.0;
+        rules.offset.y = self.offset.1;
+        rules.reactive = self.reactive;
+        rules.has_parent_configure_serial = self.parent_configure_serial.is_some();
+        rules.parent_configure_serial = self.parent_configure_serial.unwrap_or(0);
+        rules
+    }
+}
+
+/// The inverse of [`PositionerAnchor::from_raw`]. Total, and pinned by the same
+/// test: a variant added to the enum without a number here would not compile.
+fn anchor_to_raw(anchor: PositionerAnchor) -> u32 {
+    match anchor {
+        PositionerAnchor::None => 0,
+        PositionerAnchor::Top => 1,
+        PositionerAnchor::Bottom => 2,
+        PositionerAnchor::Left => 3,
+        PositionerAnchor::Right => 4,
+        PositionerAnchor::TopLeft => 5,
+        PositionerAnchor::BottomLeft => 6,
+        PositionerAnchor::TopRight => 7,
+        PositionerAnchor::BottomRight => 8,
+    }
+}
+
+/// The inverse of [`PositionerGravity::from_raw`]; see [`anchor_to_raw`].
+fn gravity_to_raw(gravity: PositionerGravity) -> u32 {
+    match gravity {
+        PositionerGravity::None => 0,
+        PositionerGravity::Top => 1,
+        PositionerGravity::Bottom => 2,
+        PositionerGravity::Left => 3,
+        PositionerGravity::Right => 4,
+        PositionerGravity::TopLeft => 5,
+        PositionerGravity::BottomLeft => 6,
+        PositionerGravity::TopRight => 7,
+        PositionerGravity::BottomRight => 8,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,5 +622,186 @@ mod tests {
             PositionerGravity::from_raw(G::XDG_POSITIONER_GRAVITY_TOP_RIGHT.0),
             PositionerGravity::TopRight
         );
+    }
+
+    /// Build a `wlr_xdg_positioner_rules` by hand. The struct is plain data —
+    /// four `wlr_box`/size/offset groups, three enums and two bools, no
+    /// pointers and no `wl_listener` — so `Default`-zeroing it and filling
+    /// fields is sound, unlike the toplevel/decoration structs `runtime.rs`'s
+    /// tests must `alloc_zeroed` behind a raw pointer.
+    fn raw_rules(
+        anchor_rect: (i32, i32, i32, i32),
+        size: (i32, i32),
+        anchor: u32,
+        gravity: u32,
+        adjustment: u32,
+    ) -> sys::wlr_xdg_positioner_rules {
+        let mut r: sys::wlr_xdg_positioner_rules = unsafe { std::mem::zeroed() };
+        r.anchor_rect = sys::wlr_box {
+            x: anchor_rect.0,
+            y: anchor_rect.1,
+            width: anchor_rect.2,
+            height: anchor_rect.3,
+        };
+        r.size.width = size.0;
+        r.size.height = size.1;
+        r.anchor = sys::xdg_positioner_anchor(anchor);
+        r.gravity = sys::xdg_positioner_gravity(gravity);
+        r.constraint_adjustment = sys::xdg_positioner_constraint_adjustment(adjustment);
+        r
+    }
+
+    /// The plain case: anchor the popup's top-left at the anchor rect's
+    /// bottom-left and let it extend down-right. wlroots' own
+    /// `wlr_xdg_positioner_rules_get_geometry` is what computes this — the
+    /// crate deliberately does not reimplement the placement algebra, for the
+    /// reason `geom.rs`'s module doc gives about `wlr_box` predicates: a
+    /// reimplementation is free to drift, silently, in a patch release.
+    #[test]
+    fn the_geometry_anchors_and_gravitates_the_way_wlroots_does() {
+        // anchor rect (10, 20, 100, 40); anchor = BOTTOM_LEFT (6);
+        // gravity = BOTTOM_RIGHT (8); size 30x20.
+        let rules =
+            unsafe { PositionerRules::from_c(&raw_rules((10, 20, 100, 40), (30, 20), 6, 8, 0)) };
+        let g = rules.geometry();
+        assert_eq!((g.width, g.height), (30, 20), "the size is the client's");
+        assert_eq!(
+            (g.x, g.y),
+            (10, 60),
+            "bottom-left of (10,20,100,40) is (10,60), and BOTTOM_RIGHT gravity \
+             puts the popup's top-left there"
+        );
+    }
+
+    /// `unconstrain_box` is a pure function of the rules and a box: it touches
+    /// no live popup, which is what makes it usable from a compositor deciding
+    /// placement before anything is configured.
+    #[test]
+    fn unconstraining_slides_a_popup_back_inside_when_sliding_is_permitted() {
+        // The popup would start at x = 190 and be 100 wide, running to 290 in a
+        // 200-wide constraint. SLIDE_X (1) is permitted.
+        let rules =
+            unsafe { PositionerRules::from_c(&raw_rules((190, 0, 1, 1), (100, 20), 6, 8, 1)) };
+        let free = rules.geometry();
+        assert_eq!(
+            free.x, 190,
+            "unconstrained, it starts where it was asked to"
+        );
+
+        let fitted = rules.unconstrain_box(&Box2D::new(0, 0, 200, 200));
+        assert!(
+            fitted.x + fitted.width <= 200,
+            "with SLIDE_X permitted the popup must end up inside the constraint; \
+             got x={} width={}",
+            fitted.x,
+            fitted.width
+        );
+        assert_eq!(fitted.width, 100, "sliding must not resize");
+    }
+
+    /// Without a permitted adjustment there is nothing wlroots may do, and the
+    /// answer is the unconstrained geometry — *not* a clamp this crate invents.
+    /// A compositor that wants a clamp asks for one through the adjustment
+    /// bits, which is the protocol's own design.
+    #[test]
+    fn unconstraining_with_no_adjustment_permitted_changes_nothing() {
+        let rules =
+            unsafe { PositionerRules::from_c(&raw_rules((190, 0, 1, 1), (100, 20), 6, 8, 0)) };
+        assert_eq!(
+            rules.unconstrain_box(&Box2D::new(0, 0, 200, 200)),
+            rules.geometry()
+        );
+    }
+
+    /// Untrusted input never panics (spec §7). Every anchor/gravity value a
+    /// 32-bit client could possibly send — including the whole u32 range at the
+    /// boundaries — is converted, round-tripped through C and asked for its
+    /// geometry, and none of it may abort, panic or produce a NaN-shaped box.
+    #[test]
+    fn a_positioner_with_nonsense_enum_values_never_panics() {
+        for raw in [
+            0u32,
+            8,
+            9,
+            10,
+            255,
+            1000,
+            u32::MAX / 2,
+            u32::MAX - 1,
+            u32::MAX,
+        ] {
+            let rules = unsafe {
+                PositionerRules::from_c(&raw_rules((0, 0, 1, 1), (10, 10), raw, raw, raw))
+            };
+            // Unknown anchors and gravities land on the protocol's initial
+            // value; unknown *constraint* bits are kept verbatim, because that
+            // mask goes straight back to wlroots (see `from_raw`'s doc).
+            if raw > 8 {
+                assert_eq!(rules.anchor, PositionerAnchor::None);
+                assert_eq!(rules.gravity, PositionerGravity::None);
+            }
+            assert_eq!(rules.constraint_adjustment.bits(), raw);
+            let _ = rules.geometry();
+            let _ = rules.unconstrain_box(&Box2D::new(0, 0, 100, 100));
+        }
+    }
+
+    /// Degenerate geometry from a client — zero and negative sizes, an empty
+    /// anchor rect, an empty constraint — must come back as a value, never as
+    /// an abort. `Box2D`'s own contract already calls a non-positive extent
+    /// "empty", so an empty answer is a legitimate answer here.
+    #[test]
+    fn a_positioner_with_degenerate_sizes_never_panics() {
+        for size in [(0, 0), (-1, -1), (i32::MIN, i32::MIN), (i32::MAX, i32::MAX)] {
+            for rect in [(0, 0, 0, 0), (0, 0, -5, -5), (i32::MIN, i32::MIN, 1, 1)] {
+                let rules = unsafe { PositionerRules::from_c(&raw_rules(rect, size, 6, 8, 63)) };
+                let _ = rules.geometry();
+                let _ = rules.unconstrain_box(&Box2D::default());
+                let _ = rules.unconstrain_box(&Box2D::new(0, 0, 100, 100));
+            }
+        }
+    }
+
+    /// The copy is a *copy*: `to_c` then `from_c` must land back on the same
+    /// value, or a rules snapshot handed to wlroots would not describe what the
+    /// consumer read. This is also what keeps the `wlr_xdg_positioner_rules`
+    /// coverage row honest.
+    #[test]
+    fn the_rules_round_trip_through_the_c_representation() {
+        let mut raw = raw_rules((3, 4, 5, 6), (7, 8), 5, 3, 0b101010);
+        raw.offset.x = -2;
+        raw.offset.y = 9;
+        raw.reactive = true;
+        raw.has_parent_configure_serial = true;
+        raw.parent_configure_serial = 4242;
+        raw.parent_size.width = 800;
+        raw.parent_size.height = 600;
+
+        let rules = unsafe { PositionerRules::from_c(&raw) };
+        assert_eq!(rules.anchor_rect, Box2D::new(3, 4, 5, 6));
+        assert_eq!(rules.size, (7, 8));
+        assert_eq!(rules.anchor, PositionerAnchor::TopLeft);
+        assert_eq!(rules.gravity, PositionerGravity::Left);
+        assert_eq!(rules.constraint_adjustment.bits(), 0b101010);
+        assert_eq!(rules.offset, (-2, 9));
+        assert!(rules.reactive);
+        assert_eq!(rules.parent_configure_serial, Some(4242));
+        assert_eq!(rules.parent_size, Some((800, 600)));
+
+        let back = unsafe { PositionerRules::from_c(&rules.to_c()) };
+        assert_eq!(back, rules);
+    }
+
+    /// `parent_size` and `parent_configure_serial` are `Option` on purpose: a
+    /// client that never sent `set_parent_size`/`set_parent_configure` leaves
+    /// zeroes there, and reporting `Some((0, 0))` would be indistinguishable
+    /// from a client that really did send a zero size. wlroots flags the serial
+    /// with `has_parent_configure_serial`; for the size, the zero *is* the
+    /// sentinel wlroots itself uses.
+    #[test]
+    fn an_unsent_parent_size_and_serial_read_as_none() {
+        let rules = unsafe { PositionerRules::from_c(&raw_rules((0, 0, 1, 1), (10, 10), 0, 0, 0)) };
+        assert_eq!(rules.parent_size, None);
+        assert_eq!(rules.parent_configure_serial, None);
     }
 }
