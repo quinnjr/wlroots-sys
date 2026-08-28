@@ -476,6 +476,86 @@ callback is answered. Bounded to the handshake commits; never busy-loops.
 
 ## 0.20.28 — xdg-popup
 
+Menus, tooltips, dropdowns and popovers. A popup can hang off a toplevel, off a
+wlr-layer-shell surface (a panel's menu), or off another popup (a submenu), and
+[`Popup::parent`] tells you which.
+
+### Listeners are parent-scoped, and that is not a detail
+
+This crate listens on `wlr_xdg_surface.events.new_popup` (on each toplevel's
+`base`, and on each popup's own `base`) and on
+`wlr_layer_surface_v1.events.new_popup`. It deliberately does **not** listen on
+`wlr_xdg_shell.events.new_popup`.
+
+A layer-shell popup is created by the client as `xdg_surface.get_popup` with
+**parent = NULL** and only then reparented by `zwlr_layer_surface_v1.get_popup`,
+which the layer-shell protocol requires to happen before the popup's initial
+commit. So at shell level a layer popup has no parent at all, and the one case
+that most needs classifying is the one case that cannot be classified. The
+parent-scoped signals know the answer by construction.
+
+The consequence for you: `ToplevelHandler::new_popup` is the only place the
+parent is knowable, `Popup::parent` returns what was recorded there, and neither
+this crate nor your compositor should ever read `(*popup).parent`.
+
+### wlroots owns the grab — do not fight it
+
+When a client sends `xdg_popup.grab`, wlroots builds a `wlr_xdg_popup_grab`,
+installs pointer, keyboard **and** touch grabs on the seat, routes all three to
+the popup chain, dismisses the chain (`xdg_popup.popup_done`) on a press outside
+it, and restores the pre-grab keyboard focus when the grab ends. There is no API
+to create, inspect or end one — the export table has no `wlr_xdg_popup_grab_*`
+symbol.
+
+So this crate observes rather than drives, and your compositor should too:
+
+- `Popup::grab_requested()` / `Runtime::popup_is_grabbing(id)` — this popup's
+  client asked for a grab.
+- `Runtime::seat_has_explicit_grab()` — *some* explicit grab (a popup's, a
+  drag's) is in force right now. **Return early from your focus synchronisation
+  while this is true.** Moving keyboard focus yourself during a popup grab
+  fights wlroots' own routing and breaks chain dismissal.
+- Do **not** call `wlr_seat_pointer_start_grab` / `_keyboard_start_grab` /
+  `_end_grab` for a popup. A second `start_grab` displaces wlroots' own.
+- Do **not** add a "focus the popup" call. `wlr_seat_keyboard_notify_enter`
+  routes *through* the active keyboard grab, so `Runtime::focus_toplevel_keyboard`
+  already does the right thing by construction.
+
+An explicit popup grab supersedes the implicit pointer grab 0.20.27 added. That
+is not new code: the implicit grab drops itself the moment
+`wlr_seat_pointer_has_grab` becomes true, which is precisely what a popup grab
+makes true.
+
+Non-grabbing popups — tooltips, non-modal popovers — get no grab and no focus
+restore. Their focus is your compositor's decision, explicitly.
+
+### Placement is two calls, and the box is in an unusual space
+
+There is no `wlr_xdg_popup_set_size` or `_configure`. Placing a popup is
+`wlr_xdg_popup_unconstrain_from_box` (which rewrites the scheduled geometry from
+the client's positioner rules) followed by a scheduled configure, and
+`Runtime::configure_popup(id, &constraint)` is that pair.
+
+**`constraint` is in the ROOT TOPLEVEL PARENT surface's coordinate system** — not
+layout space, not output space. wlroots' own header says so. Translating your
+output's usable area into that space is your compositor's job; getting it wrong
+offsets every popup rather than failing loudly.
+
+`Popup::positioner_rules()` hands you the client's whole positioner, copied out,
+and `PositionerRules::{geometry, unconstrain_box}` answer placement questions
+without touching a live popup at all — which is what a compositor deciding where
+a menu *would* go needs.
+
+### The scene graph does the stacking and the hit-testing for you
+
+Each popup gets its subtree from `wlr_scene_xdg_surface_create(parent_tree,
+popup->base)`, where `parent_tree` is its parent's. So a popup stacks with its
+parent automatically, `Runtime::leaf_surface_at` resolves clicks on it, and the
+session-lock isolation gate covers it — all without a line of compositor code.
+
+This crate never destroys a popup's scene tree. wlroots frees a tree's children
+recursively with the tree, and a popup's tree is a child of its parent's.
+
 ### Chains
 
 `Runtime::popups_of(parent)` lists direct children in creation order (which is
@@ -498,6 +578,23 @@ readable spec they discharge.
 All of these are depth-capped and de-duplicated. wlroots cannot produce a cycle,
 but every one of them runs on your input path, where an unbounded walk over a
 corrupted table is a session freeze.
+
+### Handler methods (`ToplevelHandler`, all defaulted)
+
+`new_popup`, `popup_initial_commit`, `popup_mapped`, `popup_unmapped`,
+`popup_reposition`, `popup_destroyed`. All defaulted, so
+`impl ToplevelHandler for S {}` written against 0.20.27 still compiles.
+
+If you implement none of them, popups still map: the dispatch layer answers a
+popup's initial commit unconditionally, because xdg-shell requires an answer and
+a defaulted method has no `Runtime` to send one with. They map where the client's
+own positioner asked, unconstrained.
+
+`popup_destroyed`'s id may be one you were never told about — a popup created and
+destroyed while another handler was running produces a destroy with no preceding
+`new_popup`. `remove` from a map; never index.
+
+[`Popup::parent`]: https://docs.rs/wlr/latest/wlr/struct.Popup.html#method.parent
 
 ## 0.20.27 — implicit pointer grab
 
