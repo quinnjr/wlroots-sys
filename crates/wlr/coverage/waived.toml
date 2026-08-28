@@ -4443,9 +4443,8 @@ milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_xdg_popup_grab"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots constructs and destroys this itself on xdg_popup.grab and installs three seat grabs from it; the export table has no wlr_xdg_popup_grab_* function at all, so a consumer can never hold one. The observables this crate offers instead are Popup::grab_requested (popup->seat) and Runtime::seat_has_explicit_grab (wlr_seat_pointer_has_grab / wlr_seat_keyboard_has_grab)."
 
 [[waived]]
 symbol    = "wlr_xdg_positioner"
