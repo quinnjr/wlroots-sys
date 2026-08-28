@@ -6,7 +6,8 @@
 
 use crate::{
     ActivationToken, CursorShape, CursorShapeDevice, DecorationMode, Edges, KeyEvent, LayerSurface,
-    LayerSurfaceId, NodeId, Output, OutputId, SceneOutputId, Toplevel, ToplevelId, Transform,
+    LayerSurfaceId, NodeId, Output, OutputId, Popup, PopupId, SceneOutputId, Toplevel, ToplevelId,
+    Transform,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -599,6 +600,86 @@ pub trait ToplevelHandler {
     /// the same "queued behind a running handler" grounds. Write this so an
     /// unknown id is harmless.
     fn layer_surface_destroyed(&mut self, id: LayerSurfaceId) {
+        let _ = id;
+    }
+
+    /// A client created an `xdg_popup` — a menu, tooltip, dropdown or popover —
+    /// on one of your toplevels, on one of your layer surfaces, or on another
+    /// popup.
+    ///
+    /// [`Popup::parent`](crate::Popup::parent) tells you which, and it is the
+    /// **only** way to find out: a layer-shell popup is created with a NULL xdg
+    /// parent and reparented by `zwlr_layer_surface_v1.get_popup` afterwards, so
+    /// the popup's own `parent` field is null at exactly the moment the question
+    /// is asked. This crate records the answer at announcement time.
+    ///
+    /// The popup is **not** mapped yet and has no buffer. The crate has already
+    /// inserted it into the scene graph, as a subtree of its parent's, so it
+    /// stacks with its parent and hit-tests correctly without anything further.
+    ///
+    /// Place it here — compute a constraint box in the **root toplevel parent
+    /// surface's** coordinate system and call
+    /// [`Runtime::configure_popup`](crate::Runtime::configure_popup). If you do
+    /// nothing, the dispatch layer still answers the popup's initial commit
+    /// (xdg-shell requires an answer or the popup never maps), and the client
+    /// gets the geometry its own positioner asked for, unconstrained.
+    ///
+    /// Record [`Popup::id`](crate::Popup::id); the handle is valid only for
+    /// this call.
+    fn new_popup(&mut self, popup: &Popup<'_>) {
+        let _ = popup;
+    }
+
+    /// The popup committed for the first time, which is where xdg-shell
+    /// requires the compositor to answer with a configure.
+    ///
+    /// The crate schedules that configure unconditionally right after this
+    /// method returns, so a handler that does nothing still produces a popup
+    /// that maps. Re-place it here if the placement depends on something only
+    /// the first commit revealed.
+    fn popup_initial_commit(&mut self, popup: &Popup<'_>) {
+        let _ = popup;
+    }
+
+    /// The popup has a buffer and should be displayed.
+    fn popup_mapped(&mut self, id: PopupId) {
+        let _ = id;
+    }
+
+    /// The popup should not be displayed any more — a null buffer, or the role
+    /// object going away.
+    ///
+    /// **Not** the same as destruction: a popup can be unmapped and mapped
+    /// again, keeping its id.
+    fn popup_unmapped(&mut self, id: PopupId) {
+        let _ = id;
+    }
+
+    /// The client sent `xdg_popup.reposition` with a new positioner.
+    ///
+    /// wlroots has already written the new rules into the popup's scheduled
+    /// state; re-run your constraint computation and call
+    /// [`Runtime::configure_popup`](crate::Runtime::configure_popup) again.
+    /// wlroots sends the `xdg_popup.repositioned` event itself off its own token
+    /// field — [`Popup::reposition_token`](crate::Popup::reposition_token) lets
+    /// you observe it, but **never forge one**.
+    fn popup_reposition(&mut self, popup: &Popup<'_>) {
+        let _ = popup;
+    }
+
+    /// The popup is gone. Only the id is passed, because there is no longer an
+    /// object to borrow.
+    ///
+    /// **`id` may be one you were never told about**, for the same reason
+    /// [`OutputHandler::destroyed`] documents: an announcement that arrived
+    /// while another handler was running is queued, and a popup created and
+    /// destroyed inside that window produces a destroy with no preceding
+    /// `new_popup`. Write this so an unknown id is harmless — `remove` on a map,
+    /// never indexing.
+    ///
+    /// wlroots destroys a popup's own children before the popup itself and
+    /// emits one of these for each, so a chain arrives here deepest-first.
+    fn popup_destroyed(&mut self, id: PopupId) {
         let _ = id;
     }
 
