@@ -546,6 +546,26 @@ and `PositionerRules::{geometry, unconstrain_box}` answer placement questions
 without touching a live popup at all — which is what a compositor deciding where
 a menu *would* go needs.
 
+**Re-placing is the same call, and it is safe to repeat.** A reactive popup
+(`xdg_positioner.set_reactive`, read back as `Popup::is_reactive()`) wants to be
+re-unconstrained whenever its parent moves or the usable area changes; call
+`Runtime::configure_popup` again with the new box and the client gets a new
+`xdg_popup.configure`.
+
+That repeat only works because this crate reseeds the popup's scheduled geometry
+from its positioner rules first. Bare `wlr_xdg_popup_unconstrain_from_box` is
+**incremental**, not idempotent: it passes `popup->scheduled.geometry` to
+`wlr_xdg_positioner_rules_unconstrain_box` as an in/out parameter, and that
+function returns immediately when the box it is handed already fits. So a second
+call against a different constraint measures the *first* call's flipped or slid
+box, finds it fits, and sends a byte-identical configure — a reactive popup that
+never moves. wlroots itself resets that field from the rules only at popup
+creation and on `xdg_popup.reposition`, which is why a client-driven reposition
+worked and compositor-driven re-placement did not. `Popup::unconstrain` does the
+same reset (it is a pure function of rules nothing else mutates), so the first
+call after creation or a reposition is unchanged and every later one starts from
+the rules.
+
 ### The scene graph does the stacking and the hit-testing for you
 
 Each popup gets its subtree from `wlr_scene_xdg_surface_create(parent_tree,

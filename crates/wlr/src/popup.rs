@@ -650,6 +650,38 @@ impl Popup<'_> {
     /// and the second call is a cheap no-op when nothing further changed. That
     /// pairing is what [`Runtime::configure_popup`](crate::Runtime::configure_popup)
     /// does.
+    ///
+    /// # Why the geometry is reset first
+    ///
+    /// `wlr_xdg_popup_unconstrain_from_box` does **not** re-derive the geometry
+    /// from the rules, despite its name and its header's wording. It hands
+    /// `&popup->scheduled.geometry` to
+    /// `wlr_xdg_positioner_rules_unconstrain_box` as an *in/out* parameter, and
+    /// that function's very first act is
+    ///
+    /// ```text
+    /// get_constrained_box_offsets(constraint, box, &offsets);
+    /// if (is_unconstrained(&offsets)) return;   // "Already unconstrained"
+    /// ```
+    ///
+    /// — so once a first call has flipped or slid the popup, the *slid* box is
+    /// what the next call is measured against. A second call with a roomier or
+    /// merely different constraint finds the already-adjusted box fits, returns
+    /// without touching it, and the client is sent a byte-identical configure.
+    /// That is precisely the "a reactive popup is never re-placed when its
+    /// parent moves" symptom: wlroots itself only ever resets
+    /// `scheduled.geometry` from the rules at popup creation and on
+    /// `xdg_popup.reposition`, which is why a client-driven reposition works
+    /// and a compositor-driven re-unconstrain did not.
+    ///
+    /// So this method reseeds `scheduled.geometry` with
+    /// `wlr_xdg_positioner_rules_get_geometry(&scheduled.rules, ...)` — exactly
+    /// what wlroots' own reposition path does, and a pure function of rules
+    /// this crate does not otherwise mutate — before calling through. That
+    /// makes `unconstrain` idempotent and makes it mean what its first line
+    /// says: place from the rules, fitted into `constraint`. On the first call
+    /// after creation or a reposition the reseed is a no-op, because wlroots
+    /// has just written the identical value.
     pub fn unconstrain(&self, constraint: &Box2D) {
         // SAFETY: the handle's lifetime guarantees the popup is live, so `base`
         // is a live `wlr_xdg_surface`; `initialized` is a plain bool.
@@ -660,7 +692,26 @@ impl Popup<'_> {
             if base.is_null() || !(*base).initialized {
                 return;
             }
+            Self::reseed_scheduled_geometry(self.raw.as_ptr());
             sys::wlr_xdg_popup_unconstrain_from_box(self.raw.as_ptr(), constraint.as_c());
+        }
+    }
+
+    /// Rewrite `popup->scheduled.geometry` from `popup->scheduled.rules`,
+    /// undoing any flip/slide/resize a previous [`unconstrain`](Self::unconstrain)
+    /// baked into it. See that method's doc for why this is necessary.
+    ///
+    /// # Safety
+    ///
+    /// `popup` must point at a live `wlr_xdg_popup`. Both fields are plain
+    /// embedded structs; `wlr_xdg_positioner_rules_get_geometry` only reads the
+    /// first and only writes the second, and takes no reference to either.
+    unsafe fn reseed_scheduled_geometry(popup: *mut sys::wlr_xdg_popup) {
+        unsafe {
+            sys::wlr_xdg_positioner_rules_get_geometry(
+                &raw const (*popup).scheduled.rules,
+                &raw mut (*popup).scheduled.geometry,
+            );
         }
     }
 
@@ -1247,5 +1298,106 @@ mod tests {
             !text.contains("0x"),
             "a raw pointer leaked into Debug: {text}"
         );
+    }
+
+    /// The rules a reactive bottom-anchored popup carries: 64x200, hung under a
+    /// 40x20 button near the bottom of an 800x600 parent, sliding vertically
+    /// when it does not fit. Shared by the two reseed tests below so they
+    /// describe the same popup.
+    fn slidey_rules() -> PositionerRules {
+        PositionerRules {
+            anchor_rect: Box2D::new(0, 480, 40, 20),
+            anchor: PositionerAnchor::Bottom,
+            gravity: PositionerGravity::Bottom,
+            constraint_adjustment: ConstraintAdjustment::SLIDE_Y,
+            size: (64, 200),
+            parent_size: None,
+            offset: (0, 0),
+            reactive: true,
+            parent_configure_serial: None,
+        }
+    }
+
+    /// The bug [`Popup::unconstrain`]'s doc explains, pinned against the real C
+    /// so it cannot be argued away: `wlr_xdg_positioner_rules_unconstrain_box`
+    /// takes its `box` as an **in/out** parameter and returns early when that
+    /// box already fits, so calling it twice on the same storage — which is
+    /// exactly what `wlr_xdg_popup_unconstrain_from_box` does with
+    /// `popup->scheduled.geometry` — leaves the first call's slide in place and
+    /// silently ignores the second constraint.
+    ///
+    /// If a future wlroots makes the call idempotent on its own, this test
+    /// fails, and the reseed in `unconstrain` becomes removable.
+    #[test]
+    fn unconstraining_the_same_box_twice_ignores_the_second_constraint() {
+        let rules = slidey_rules();
+        let c = rules.to_c();
+        let pristine = rules.geometry();
+        assert_eq!(pristine, Box2D::new(-12, 500, 64, 200));
+
+        // The parent's usable area before it moves, and after a 20px move.
+        let before = Box2D::new(0, -28, 800, 600);
+        let after = Box2D::new(0, -8, 800, 600);
+
+        let mut carried = pristine;
+        for constraint in [before, after] {
+            // SAFETY: `c` is a live, exclusively-owned local of exactly the C
+            // type; `constraint.as_c()` points at a live `Box2D`; `carried`'s
+            // layout is pinned to `wlr_box` by `geom.rs`. wlroots reads the
+            // first two and writes the third.
+            unsafe {
+                sys::wlr_xdg_positioner_rules_unconstrain_box(
+                    &raw const c,
+                    constraint.as_c(),
+                    (&raw mut carried).cast::<sys::wlr_box>(),
+                );
+            }
+        }
+
+        // Carried forward: the second call saw an already-fitting box and did
+        // nothing, so the answer is still the *first* constraint's.
+        assert_eq!(carried, Box2D::new(-12, 372, 64, 200));
+        // Started afresh from the rules: the second constraint's real answer,
+        // 20px lower, exactly tracking the parent's move.
+        assert_eq!(rules.unconstrain_box(&after), Box2D::new(-12, 392, 64, 200));
+        assert_eq!(rules.unconstrain_box(&before), carried);
+    }
+
+    /// `unconstrain`'s reseed step, in isolation: whatever a previous
+    /// unconstrain baked into `scheduled.geometry` is replaced by the rules'
+    /// own answer, so the next `wlr_xdg_popup_unconstrain_from_box` measures a
+    /// pristine box. Delete the `reseed_scheduled_geometry` call from
+    /// `unconstrain` and the reactive re-placement this restores goes away
+    /// again; delete the reseed's body and this test fails.
+    #[test]
+    fn reseeding_replaces_a_slid_geometry_with_the_rules_own_answer() {
+        let rules = slidey_rules();
+        let raw = scratch_popup(true);
+        // SAFETY: `raw` is a freshly zeroed, leaked, exclusively-owned
+        // allocation; both fields are plain embedded structs in bounds.
+        unsafe {
+            (*raw).scheduled.rules = rules.to_c();
+            (*raw).scheduled.geometry = sys::wlr_box {
+                x: -12,
+                y: 372,
+                width: 64,
+                height: 200,
+            };
+            Popup::reseed_scheduled_geometry(raw);
+        }
+
+        // SAFETY: as above; only read.
+        let seeded = unsafe { (*raw).scheduled.geometry };
+        assert_eq!(
+            (seeded.x, seeded.y, seeded.width, seeded.height),
+            (-12, 500, 64, 200),
+            "the slid geometry must be replaced by the rules\' unconstrained answer"
+        );
+
+        // And a handle over the same popup reports the rules unchanged: the
+        // reseed reads them, it must never rewrite them.
+        // SAFETY: `raw` is leaked, so it outlives the handle.
+        let popup = unsafe { handle(raw, PopupParent::Toplevel(ToplevelId::dangling_for_test())) };
+        assert_eq!(popup.positioner_rules(), rules);
     }
 }
