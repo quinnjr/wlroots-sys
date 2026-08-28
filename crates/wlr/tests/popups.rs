@@ -115,3 +115,114 @@ fn a_run_with_a_popup_handler_starts_and_stops_cleanly() {
         .run_all(&display, &mut app, &runtime, wlr::Until::Turns(4))
         .expect("run_all");
 }
+
+#[test]
+fn every_by_id_popup_operation_misses_on_an_id_no_popup_was_given() {
+    headless_env();
+    let runtime = wlr::Runtime::new().expect("runtime");
+    let dead = wlr::PopupId::dangling_for_test();
+
+    assert!(runtime.popup(dead).is_none());
+    assert_eq!(runtime.popup_parent(dead), None);
+    assert_eq!(runtime.popup_position(dead), None);
+    assert!(!runtime.popup_is_grabbing(dead));
+    assert!(!runtime.configure_popup(dead, &wlr::Box2D::new(0, 0, 800, 600)));
+    assert_eq!(runtime.dismiss_popup(dead), 0);
+    assert!(runtime.popups_of(wlr::PopupParent::Popup(dead)).is_empty());
+    assert!(
+        runtime
+            .popup_chain(wlr::PopupParent::Popup(dead))
+            .is_empty()
+    );
+    assert_eq!(wlr::PopupParent::Popup(dead).root(&runtime), None);
+}
+
+/// Every distinct dangling id must miss, not just the canonical one — a
+/// compositor's own tests drive several popups at once and need more than one
+/// id that resolves to nothing.
+#[test]
+fn several_dangling_popup_ids_all_miss_and_stay_distinct() {
+    headless_env();
+    let runtime = wlr::Runtime::new().expect("runtime");
+    let ids: Vec<_> = (1..=4).map(wlr::PopupId::dangling_nth_for_test).collect();
+    for (i, a) in ids.iter().enumerate() {
+        assert!(runtime.popup(*a).is_none());
+        for b in &ids[i + 1..] {
+            assert_ne!(a, b);
+        }
+    }
+}
+
+/// A parent that is a live window with no popups reports an empty chain rather
+/// than an error — the shape a compositor's "dismiss everything under this
+/// window" path calls on every unmap.
+#[test]
+fn a_parent_with_no_popups_has_an_empty_chain_and_dismisses_nothing() {
+    headless_env();
+    let runtime = wlr::Runtime::new().expect("runtime");
+    let window = wlr::PopupParent::Toplevel(wlr::ToplevelId::dangling_for_test());
+    assert!(runtime.popups_of(window).is_empty());
+    assert!(runtime.popup_chain(window).is_empty());
+    assert_eq!(runtime.dismiss_popups_of(window), 0);
+    assert_eq!(window.root(&runtime), Some(window));
+}
+
+/// `seat_has_explicit_grab` is called from focus paths that run before a seat
+/// exists. It must answer, not dereference.
+#[test]
+fn asking_about_an_explicit_grab_before_there_is_a_seat_is_false() {
+    headless_env();
+    let runtime = wlr::Runtime::new().expect("runtime");
+    assert!(!runtime.seat_has_explicit_grab());
+}
+
+/// The positioner types are usable from outside the crate: a consumer building
+/// its own placement policy needs to construct a `PositionerRules`-shaped
+/// question and read the answer. This also pins that the public field set is
+/// what the contract froze — a renamed or removed field fails to compile here.
+#[test]
+fn the_positioner_types_are_usable_from_outside_the_crate() {
+    let c = wlr::ConstraintAdjustment::FLIP_X | wlr::ConstraintAdjustment::SLIDE_Y;
+    assert!(c.contains(wlr::ConstraintAdjustment::FLIP_X));
+    assert!(!c.contains(wlr::ConstraintAdjustment::FLIP_Y));
+
+    // Every public field, named. If the contract's shape changes, this stops
+    // compiling, which is the point.
+    fn describe(r: &wlr::PositionerRules) -> (i32, i32, bool) {
+        let _ = (
+            r.anchor,
+            r.gravity,
+            r.constraint_adjustment,
+            r.offset,
+            r.parent_size,
+            r.parent_configure_serial,
+            r.anchor_rect,
+        );
+        (r.size.0, r.size.1, r.reactive)
+    }
+    let _ = describe as fn(&wlr::PositionerRules) -> (i32, i32, bool);
+
+    assert_eq!(
+        wlr::PositionerAnchor::BottomLeft,
+        wlr::PositionerAnchor::BottomLeft
+    );
+    assert_ne!(wlr::PositionerGravity::Top, wlr::PositionerGravity::Bottom);
+}
+
+/// `PopupParent` is `Hash` + `Eq` because a compositor keys its own popup
+/// registry by it. Pinning that here keeps a derive from being dropped.
+#[test]
+fn popup_parent_is_usable_as_a_map_key() {
+    use std::collections::HashMap;
+    let mut m: HashMap<wlr::PopupParent, u32> = HashMap::new();
+    let w = wlr::PopupParent::Toplevel(wlr::ToplevelId::dangling_for_test());
+    let l = wlr::PopupParent::Layer(wlr::LayerSurfaceId::dangling_for_test());
+    let p = wlr::PopupParent::Popup(wlr::PopupId::dangling_for_test());
+    m.insert(w, 1);
+    m.insert(l, 2);
+    m.insert(p, 3);
+    assert_eq!(m.len(), 3);
+    assert_eq!(m.get(&w), Some(&1));
+    assert!(p.is_popup());
+    assert!(!w.is_popup() && !l.is_popup());
+}
