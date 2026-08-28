@@ -41,8 +41,8 @@ use crate::runtime::{PointerGrab, SceneObserver};
 use crate::seat::{KeyEvent, Modifiers};
 use crate::{
     AppliedHead, Band, Display, Error, EventLoop, Handlers, LayerSurface, LayerSurfaceId,
-    LoopHandler, NodeId, Output, OutputHandler, OutputId, Result, Runtime, Toplevel, ToplevelId,
-    Transform, sys,
+    LoopHandler, NodeId, Output, OutputHandler, OutputId, Popup, PopupId, PopupParent, Result,
+    Runtime, Toplevel, ToplevelId, Transform, sys,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -236,6 +236,26 @@ struct Bound {
     /// principle.
     node: Option<NodeId>,
 
+    /// The popup this listener belongs to, for the six per-popup listeners
+    /// `on_new_popup` links (commit/map/unmap on the base `wlr_surface`, the
+    /// popup's own destroy/reposition, and the nested `new_popup`); `None` for
+    /// every other listener in this file.
+    ///
+    /// A sixth id field alongside `id`/`toplevel`/`layer`/`node` rather than a
+    /// shared enum, for the identical reason `toplevel`'s own doc gives:
+    /// `Bound` is private to this module, so widening it costs nothing outside
+    /// it, and every other call site wants its own exact type.
+    ///
+    /// Load-bearing in the same way `toplevel` is, and one way further.
+    /// wlroots emits `wlr_surface.events.map`/`.unmap` with a **null** `data`,
+    /// so map/unmap could not read an id out of the signal even in principle;
+    /// and whether `wlr_xdg_popup.events.{destroy,reposition}` carry a non-null
+    /// `data` was not verifiable from the shipped artefacts (the emitting
+    /// functions are `static`, so they are not in the export table, and the C
+    /// sources are not installed). Carrying the id here makes that question
+    /// stop mattering, which is the crate's standing rule anyway.
+    popup: Option<PopupId>,
+
     /// The Xwayland surface this listener belongs to, for the per-surface
     /// listeners `on_new_xwayland_surface` links (and the map/unmap pair
     /// `on_xwayland_surface_associate` adds on the surface once it exists);
@@ -314,6 +334,7 @@ impl Registration {
             toplevel,
             layer,
             node,
+            popup: None,
             #[cfg(wlr_has_xwayland)]
             xwayland: None,
         });
@@ -369,6 +390,7 @@ impl Registration {
             toplevel: None,
             layer: None,
             node: None,
+            popup: None,
             xwayland: Some(xwayland),
         });
 
@@ -586,6 +608,62 @@ impl Registration {
             )
         }
     }
+
+    /// Link a per-popup listener, carrying the [`PopupId`] its callback reads
+    /// back from [`Bound::popup`]. Every other id slot is `None`.
+    ///
+    /// A dedicated constructor rather than a parameter on
+    /// [`Registration::link`], following `link_xwayland`'s precedent and for
+    /// the reason that function's own doc gives: `link`'s slot list "is frozen
+    /// at the five ids the non-Xwayland call sites use", and threading a sixth
+    /// `Option` through it would put an extra `None` on every one of its call
+    /// sites for a value all but these leave empty. This builds the boxed
+    /// [`Bound`] directly, exactly as `link` does.
+    ///
+    /// `alive` is null, which is the **stronger** claim (see
+    /// [`Registration::drop`]): every one of these is dropped from inside the
+    /// popup's own destroy emission, while the popup is still alive, or while
+    /// the run — and so the whole session table — still stands.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`]: `signal` must point at an initialised
+    /// `wl_signal` whose owner outlives the returned `Registration`, and
+    /// `session` must be a `*const Session<S>` for the `S` `notify` casts it
+    /// back to, valid for as long as the registration lives.
+    unsafe fn link_popup(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        popup: PopupId,
+    ) -> Self {
+        let mut bound = Box::new(Bound {
+            listener: sys::wl_listener {
+                link: sys::wl_list {
+                    prev: std::ptr::null_mut(),
+                    next: std::ptr::null_mut(),
+                },
+                notify,
+            },
+            session,
+            alive: std::ptr::null(),
+            flag: std::ptr::null(),
+            id: None,
+            toplevel: None,
+            layer: None,
+            node: None,
+            popup: Some(popup),
+            #[cfg(wlr_has_xwayland)]
+            xwayland: None,
+        });
+
+        // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
+        // caller's contract, and the listener is a freshly boxed one whose
+        // address stays put until this `Registration` drops.
+        unsafe { sys::wl_signal_add(signal, &raw mut bound.listener) };
+
+        Registration { bound }
+    }
 }
 
 impl Drop for Registration {
@@ -691,6 +769,11 @@ struct Session<'r, S> {
     /// unlinked, from `on_layer_surface_destroy` — before the layer surface
     /// is freed, mirroring `toplevels` above.
     layers: RefCell<HashMap<LayerSurfaceId, LayerSurfaceListeners>>,
+
+    /// This run's listeners on every live popup. Removed, and so unlinked, from
+    /// `on_popup_destroy` — before the popup is freed, mirroring `toplevels`
+    /// and `layers` above.
+    popups: RefCell<HashMap<PopupId, PopupListeners>>,
 
     /// This run's listeners on every live input device, one [`InputDevice`]
     /// per device, keyed by the device's own `*mut wlr_input_device` address
@@ -838,10 +921,11 @@ struct OutputEntry {
 }
 
 /// One live toplevel's listeners: the surface's commit/map/unmap, the
-/// toplevel's own set_title/destroy, and its four client-request signals
-/// (maximize/fullscreen/move/resize). Field order is not load-bearing here —
+/// toplevel's own set_title/destroy, its four client-request signals
+/// (maximize/fullscreen/move/resize), and the `new_popup` that announces a
+/// popup created on it. Field order is not load-bearing here —
 /// unlike [`OutputEntry`], nothing here owns the `Bound` any of the others
-/// recover their session from — but all nine must drop, and so unlink, as
+/// recover their session from — but all ten must drop, and so unlink, as
 /// part of removing the entry, which happens while the toplevel is still
 /// alive.
 struct ToplevelListeners {
@@ -854,6 +938,7 @@ struct ToplevelListeners {
     _request_fullscreen: Registration,
     _request_move: Registration,
     _request_resize: Registration,
+    _new_popup: Registration,
 }
 
 /// One observed scene buffer node's listeners: the buffer's five observation
@@ -879,13 +964,30 @@ struct DecorationListeners {
 }
 
 /// One live layer surface's listeners: the base surface's commit/map/unmap,
-/// and the layer surface's own `destroy`. Field order is not load-bearing,
-/// as for [`ToplevelListeners`].
+/// the layer surface's own `destroy`, and the `new_popup` that announces a
+/// popup created on it. Field order is not load-bearing, as for
+/// [`ToplevelListeners`]; all five must drop, and so unlink, as part of
+/// removing the entry.
 struct LayerSurfaceListeners {
     _commit: Registration,
     _map: Registration,
     _unmap: Registration,
     _destroy: Registration,
+    _new_popup: Registration,
+}
+
+/// One live popup's listeners: the base surface's commit/map/unmap, the popup's
+/// own destroy and reposition, and the `new_popup` that catches a nested child.
+/// Field order is not load-bearing, as for [`ToplevelListeners`], but all six
+/// must drop — and so unlink — as part of removing the entry, which happens from
+/// inside the popup's own destroy emission, while it is still alive.
+struct PopupListeners {
+    _commit: Registration,
+    _map: Registration,
+    _unmap: Registration,
+    _destroy: Registration,
+    _reposition: Registration,
+    _new_popup: Registration,
 }
 
 /// One live `wlr_session_lock_v1`'s three listeners: `new_surface`, `unlock`,
@@ -1008,6 +1110,19 @@ struct ToplevelTableGuard<'r>(&'r Runtime);
 impl Drop for ToplevelTableGuard<'_> {
     fn drop(&mut self) {
         self.0.clear_toplevels();
+    }
+}
+
+/// Clears `Runtime`'s popup table when the `run_inner` call holding this guard
+/// returns, on every exit path. Mirrors [`ToplevelTableGuard`] exactly, for the
+/// identical reason: see `Runtime::clear_popups`'s own doc — the per-popup
+/// destroy listener that would otherwise remove a stale row is itself torn
+/// down with this call's `Session`.
+struct PopupTableGuard<'r>(&'r Runtime);
+
+impl Drop for PopupTableGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear_popups();
     }
 }
 
@@ -1457,6 +1572,7 @@ impl<'d> Backend<'d> {
             toplevels: RefCell::new(HashMap::new()),
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
+            popups: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
             scene_buffers: RefCell::new(HashMap::new()),
@@ -1483,6 +1599,14 @@ impl<'d> Backend<'d> {
         // here depends on that relative order — clearing the table touches
         // no signal and nothing any `Registration::drop` reads.
         let _toplevel_table_guard = ToplevelTableGuard(runtime);
+
+        // Popup ids are only meaningful for the call that announced them, for
+        // the reason `clear_toplevels` documents at length: the per-popup
+        // destroy listener that would remove a stale row is torn down with
+        // this call's `Session`. Purged on every exit path, including an
+        // early `?` and a panic — this sits with `_toplevel_table_guard` so
+        // the two cannot drift apart.
+        let _popup_table_guard = PopupTableGuard(runtime);
 
         // Same reasoning, for `layer_surfaces`; see that guard's own doc.
         let _layer_surface_table_guard = LayerSurfaceTableGuard(runtime);
@@ -2341,6 +2465,30 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         Event::LayerSurfaceMapped(id) => state.layer_surface_mapped(id),
         Event::LayerSurfaceUnmapped(id) => state.layer_surface_unmapped(id),
         Event::LayerSurfaceDestroyed(id) => state.layer_surface_destroyed(id),
+        Event::NewPopup(id) => with_popup(session, id, |p| state.new_popup(p)),
+        Event::PopupInitialCommit(id) => {
+            with_popup(session, id, |p| state.popup_initial_commit(p));
+            // xdg-shell requires an answer to a popup's first commit or it
+            // never maps, and the trait default has no `Runtime` to send one
+            // with — so this is the dispatch layer discharging that guarantee,
+            // exactly as `RequestMaximize`'s unconditional `configure_toplevel`
+            // does for its own. Unconditional, not "only if the handler staged
+            // nothing": wlroots coalesces a second scheduled configure into
+            // whatever `Runtime::configure_popup` already sent, so scheduling
+            // again is harmless, and harmless-every-time is simpler and no less
+            // correct than probing.
+            //
+            // `send_configure` is what skips the call if the surface somehow is
+            // not `initialized` — see its own doc for why that guard is a
+            // process-abort question and not a tidiness one.
+            if let Some(popup) = session.runtime.popup(id) {
+                popup.send_configure();
+            }
+        }
+        Event::PopupMapped(id) => state.popup_mapped(id),
+        Event::PopupUnmapped(id) => state.popup_unmapped(id),
+        Event::PopupReposition(id) => with_popup(session, id, |p| state.popup_reposition(p)),
+        Event::PopupDestroyed(id) => state.popup_destroyed(id),
         // The four scene-buffer events that name a scene output resolve
         // nothing here: both ids were resolved at emission time, and a handler
         // that gets one for a node or output since destroyed sees every by-id
@@ -2502,6 +2650,22 @@ fn with_toplevel<S>(session: &Session<'_, S>, id: ToplevelId, f: impl FnOnce(&To
     // dispatcher's handler flag is set for exactly this window).
     let toplevel = unsafe { Toplevel::from_raw_with_id(entry.raw.as_ptr(), id) };
     f(&toplevel);
+}
+
+/// Borrow the popup `id` names, if this runtime still knows of one.
+/// Mirrors [`with_toplevel`] exactly, including its obligations on `f`: the
+/// table borrow is released before `f` runs (a handler can re-enter wlroots,
+/// which can emit a signal, which can take the borrow mutably), and `f` must not
+/// reach anything that frees the popup mid-call.
+///
+/// [`Runtime::popup`] is what releases the borrow — it copies `raw` and `parent`
+/// out and drops the guard before building the handle, so this function is a
+/// thin wrapper rather than a second implementation of that discipline.
+fn with_popup<S>(session: &Session<'_, S>, id: PopupId, f: impl FnOnce(&Popup<'_>)) {
+    let Some(popup) = session.runtime.popup(id) else {
+        return;
+    };
+    f(&popup);
 }
 
 /// Borrow the layer surface `id` names, if this runtime still knows of one.
@@ -5168,6 +5332,16 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             std::ptr::null(),
             id,
         );
+        // The tenth listener: popups created on this toplevel. Linked on the
+        // toplevel's `base` rather than on `wlr_xdg_shell` so the parent is
+        // knowable — see `on_new_popup`'s own doc.
+        let new_popup = Registration::link_toplevel(
+            &raw mut (*base).events.new_popup,
+            on_new_popup::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
 
         // The registrations own the callbacks' backing memory, so they live in
         // the session's table alongside the entry, and are dropped when it is
@@ -5187,6 +5361,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
                 _request_fullscreen: request_fullscreen,
                 _request_move: request_move,
                 _request_resize: request_resize,
+                _new_popup: new_popup,
             },
         );
         drop(displaced);
@@ -5200,14 +5375,64 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
     }
 }
 
-/// Recover the [`ToplevelId`] a surface's id addon carries, if any.
+/// The decision `toplevel_id_of_surface` makes, separated from the FFI so it can
+/// be tested without a live `wlr_surface`.
+///
+/// An id addon on a popup's surface is a real id — it is just not a
+/// **toplevel's**. Returning `None` is the honest answer; returning the id
+/// anyway would be a `ToplevelId` naming a popup, and the only thing standing
+/// between that and a wrong-window bug would be the table miss that happens to
+/// follow at every current call site.
+fn toplevel_id_if_not_a_popup(id: Option<ToplevelId>, is_popup: bool) -> Option<ToplevelId> {
+    if is_popup { None } else { id }
+}
+
+/// Recover the [`ToplevelId`] a surface's id addon carries, if any — and if the
+/// surface is not in fact a popup's.
+///
+/// The role check is not cosmetic. Since 0.20.28 a popup's `wlr_surface`
+/// carries an id addon of its own (that is where `PopupId` lives, for the same
+/// reason `ToplevelId` does), and `find_id` cannot tell the two apart: they come
+/// from one process-wide counter, so they never collide, but without this check
+/// they are freely mislabelled.
 ///
 /// # Safety
 ///
 /// `surface` must be a live `wlr_surface` with an initialised addon set.
 unsafe fn toplevel_id_of_surface(surface: *mut sys::wlr_surface) -> Option<ToplevelId> {
     // SAFETY: the caller guarantees the surface is live.
-    unsafe { find_id(&raw const (*surface).addons).map(ToplevelId) }
+    unsafe {
+        let id = find_id(&raw const (*surface).addons).map(ToplevelId);
+        let is_popup = !sys::wlr_xdg_popup_try_from_wlr_surface(surface).is_null();
+        toplevel_id_if_not_a_popup(id, is_popup)
+    }
+}
+
+/// Which parent a `new_popup` listener's `Bound` names.
+///
+/// `on_new_popup` is linked into three different signals — a toplevel's base, a
+/// layer surface's own, and a popup's base — and each site fills exactly one id
+/// slot. The slot is the *only* source of this answer: the signal's `data` is
+/// the new popup, and `(*popup).parent` is NULL for a layer-shell popup, which
+/// is precisely the case that has to be distinguished.
+///
+/// `None` when no slot is set, which cannot happen from the three sites above.
+/// The announcement is dropped in that case rather than guessed at: attaching a
+/// popup to the wrong window is worse than not attaching it, and `unreachable!()`
+/// is not available on a path reached from an `extern "C"` frame, where a panic
+/// aborts the process.
+fn popup_parent_from_slots(
+    toplevel: Option<ToplevelId>,
+    layer: Option<LayerSurfaceId>,
+    popup: Option<PopupId>,
+) -> Option<PopupParent> {
+    if let Some(p) = popup {
+        return Some(PopupParent::Popup(p));
+    }
+    if let Some(l) = layer {
+        return Some(PopupParent::Layer(l));
+    }
+    toplevel.map(PopupParent::Toplevel)
 }
 
 unsafe extern "C" fn on_surface_commit<S: Handlers>(
@@ -5749,6 +5974,18 @@ unsafe extern "C" fn on_new_layer_surface<S: Handlers>(
             std::ptr::null(),
             id,
         );
+        // The fifth listener: popups created on this layer surface — a panel's
+        // menu. This is the *only* place a layer popup's parent is knowable:
+        // the client creates it with `xdg_surface.get_popup(parent = NULL)` and
+        // reparents it with `zwlr_layer_surface_v1.get_popup` afterwards, so at
+        // shell level it has no parent at all.
+        let new_popup = Registration::link_layer(
+            &raw mut (*ls).events.new_popup,
+            on_new_popup::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
 
         let displaced = (*session).layers.borrow_mut().insert(
             id,
@@ -5757,6 +5994,7 @@ unsafe extern "C" fn on_new_layer_surface<S: Handlers>(
                 _map: map,
                 _unmap: unmap,
                 _destroy: destroy,
+                _new_popup: new_popup,
             },
         );
         drop(displaced);
@@ -5913,6 +6151,304 @@ unsafe extern "C" fn on_layer_surface_destroy<S: Handlers>(
         (*session)
             .dispatcher
             .emit(&*session, Event::LayerSurfaceDestroyed(id), deliver);
+    }
+}
+
+/// A client created an `xdg_popup` on a toplevel, on a layer surface, or on
+/// another popup. Give it an id and a scene subtree before anyone is told about
+/// it — mirrors `on_new_toplevel` exactly, with the parent's own tree in place
+/// of the toplevel band.
+///
+/// Linked into three signals, never into `wlr_xdg_shell.events.new_popup`: at
+/// shell level a layer-shell popup still has `parent == NULL` (the client sets
+/// it with `zwlr_layer_surface_v1.get_popup` after `xdg_surface.get_popup`), so
+/// the parent is knowable only from the parent-scoped signal. Which of the three
+/// this emission came from is read out of the `Bound`'s id slots — see
+/// [`popup_parent_from_slots`].
+unsafe extern "C" fn on_new_popup<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for listeners this file linked into a
+    // parent's `events.new_popup`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal carries
+    // a `*mut wlr_xdg_popup`, live and fully initialised — its `base` and
+    // `base->surface` included — at the point wlroots announces it.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let popup = data.cast::<sys::wlr_xdg_popup>();
+        if popup.is_null() {
+            return;
+        }
+        let base = (*popup).base;
+        if base.is_null() {
+            return;
+        }
+        let surface = (*base).surface;
+        if surface.is_null() {
+            return;
+        }
+
+        // Which parent this listener belongs to. Never `(*popup).parent`: it is
+        // NULL for a layer-shell popup at exactly this moment.
+        let Some(parent) =
+            popup_parent_from_slots((*bound).toplevel, (*bound).layer, (*bound).popup)
+        else {
+            return;
+        };
+
+        // The id lives on the surface's addon set, which is the only one that
+        // exists here and the one that dies with the popup — the identical
+        // choice `on_new_toplevel` and `on_new_layer_surface` make, and for the
+        // identical reason: the role object carries no addon set of its own.
+        let id = PopupId(ensure_id_raw(&raw mut (*surface).addons));
+
+        // The parent's scene tree is this popup's parent tree, which is what
+        // makes a popup stack with its parent for free and what makes
+        // `Runtime::leaf_surface_at` resolve clicks on it — including the
+        // session-lock isolation gate — without a line of new code here. No
+        // parent tree means the parent is gone or graphics were never
+        // initialised; drop the announcement rather than dereference a null,
+        // the same choice `on_new_toplevel` makes for the same situation.
+        let parent_tree = match parent {
+            PopupParent::Toplevel(t) => (*session).runtime.toplevel_entry(t).map(|e| e.tree),
+            PopupParent::Layer(ls) => (*session).runtime.layer_surface_scene_ptr(ls),
+            PopupParent::Popup(p) => (*session).runtime.popup_tree(p),
+        };
+        let Some(parent_tree) = parent_tree else {
+            return;
+        };
+
+        let tree = sys::wlr_scene_xdg_surface_create(parent_tree.as_ptr(), base);
+        let Some(tree) = NonNull::new(tree) else {
+            return;
+        };
+        let Some(raw) = NonNull::new(popup) else {
+            return;
+        };
+
+        // Six listeners, all with a null liveness flag: each is dropped from
+        // inside the popup's own destroy emission, while the object is still
+        // alive, which is a stronger guarantee than any flag (see
+        // `Registration::drop`).
+        //
+        // Every one of them carries `id` in its own `Bound::popup` rather than
+        // recovering it from `data` at callback time — see `Bound::popup`'s own
+        // doc for the argument, which is the one `Bound::toplevel` already
+        // makes plus one unverifiable case more.
+        let commit = Registration::link_popup(
+            &raw mut (*surface).events.commit,
+            on_popup_commit::<S>,
+            (*bound).session,
+            id,
+        );
+        let map = Registration::link_popup(
+            &raw mut (*surface).events.map,
+            on_popup_map::<S>,
+            (*bound).session,
+            id,
+        );
+        let unmap = Registration::link_popup(
+            &raw mut (*surface).events.unmap,
+            on_popup_unmap::<S>,
+            (*bound).session,
+            id,
+        );
+        let destroy = Registration::link_popup(
+            &raw mut (*popup).events.destroy,
+            on_popup_destroy::<S>,
+            (*bound).session,
+            id,
+        );
+        let reposition = Registration::link_popup(
+            &raw mut (*popup).events.reposition,
+            on_popup_reposition::<S>,
+            (*bound).session,
+            id,
+        );
+        // Nested chains: a submenu is a popup whose parent is this popup, and
+        // this is the signal that announces it with *this* popup's id in the
+        // `Bound`.
+        let new_popup = Registration::link_popup(
+            &raw mut (*base).events.new_popup,
+            on_new_popup::<S>,
+            (*bound).session,
+            id,
+        );
+
+        let displaced = (*session).popups.borrow_mut().insert(
+            id,
+            PopupListeners {
+                _commit: commit,
+                _map: map,
+                _unmap: unmap,
+                _destroy: destroy,
+                _reposition: reposition,
+                _new_popup: new_popup,
+            },
+        );
+        drop(displaced);
+
+        (*session).runtime.record_popup(id, raw, tree, parent);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::NewPopup(id), deliver);
+    }
+}
+
+/// A popup's surface committed. Answer its **first** commit, which xdg-shell
+/// requires or the popup never maps.
+///
+/// A near-copy of `on_surface_commit`'s skeleton, minus the decoration
+/// synthesis (a popup has no decoration): gate on `initial_commit`, emit, then
+/// schedule a configure unconditionally. The schedule goes through
+/// `Popup::send_configure`, which is what refuses to call
+/// `wlr_xdg_surface_schedule_configure` before `initialized` — this
+/// distribution ships wlroots without `NDEBUG`, so an early call aborts the
+/// process (see `layer.rs`'s module doc for the confirmed hazard).
+unsafe extern "C" fn on_popup_commit<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_popup` into this surface's `events.commit`, and
+    // unlinked (from `on_popup_destroy`) before the surface is freed. `_data` is
+    // deliberately unused: the id comes from `Bound::popup`, the same
+    // resolve-by-the-id-carried-at-link-time discipline
+    // `on_layer_surface_commit` follows.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).popup else { return };
+        let Some(raw) = (*session).runtime.popup_raw(id) else {
+            return;
+        };
+        let base = (*raw.as_ptr()).base;
+        if base.is_null() || !(*base).initial_commit {
+            return;
+        }
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::PopupInitialCommit(id), deliver);
+
+        // The unconditional answer. `deliver_all`'s own arm also schedules one
+        // after the handler runs; wlroots coalesces the two into a single
+        // configure, so this is the belt to that arm's braces — and it is what
+        // answers the commit at all when the event was *deferred* (queued behind
+        // an outer handler), where the arm has not run yet.
+        if let Some(popup) = (*session).runtime.popup(id) {
+            popup.send_configure();
+        }
+    }
+}
+
+/// The popup has a buffer.
+unsafe extern "C" fn on_popup_map<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_popup` into this surface's `events.map`.
+    // `_data` is deliberately unused: wlroots emits `wlr_surface.events.map`
+    // with a **null** `data`, so the id must come from `Bound::popup` — the
+    // identical argument `on_toplevel_map` makes.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).popup else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::PopupMapped(id), deliver);
+    }
+}
+
+/// The popup's buffer went away.
+unsafe extern "C" fn on_popup_unmap<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_popup_map` — `wlr_surface.events.unmap` is the other
+    // signal wlroots emits with a null `data`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).popup else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::PopupUnmapped(id), deliver);
+    }
+}
+
+/// The client sent `xdg_popup.reposition`.
+///
+/// wlroots has already written the new rules into `scheduled.rules` and set its
+/// own reposition-token field; all this crate does is tell the handler, so it
+/// can re-run its constraint computation. wlroots sends the
+/// `xdg_popup.repositioned` event itself — nothing here forges one.
+unsafe extern "C" fn on_popup_reposition<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_popup` into `wlr_xdg_popup.events.reposition`;
+    // the popup is alive for the duration of the emission. `_data` is
+    // deliberately unused: whether this signal carries a non-null `data` was not
+    // verifiable from the shipped artefacts, and `Bound::popup` makes the
+    // question moot — see that field's own doc.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).popup else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::PopupReposition(id), deliver);
+    }
+}
+
+/// A popup is about to be freed. Forget it *now*, whatever the handler does.
+unsafe extern "C" fn on_popup_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_popup` into `wlr_xdg_popup.events.destroy`; the
+    // popup is still alive for the duration of the emission. `_data` unused for
+    // the reason `on_popup_reposition` gives.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).popup else { return };
+
+        // Both tables are cleared before the event is emitted, and that ordering
+        // is the whole soundness argument for deferral: a destroy queued behind
+        // a running handler is delivered long after wlroots freed the object, so
+        // a lookup at delivery time would resolve the id to freed memory.
+        // Clearing here means it simply misses — the identical argument
+        // `on_toplevel_destroy` makes.
+        //
+        // Removing the entry drops every registration it holds, one of which
+        // owns this very `Bound`. `wl_signal_emit_mutable` advances past the
+        // firing listener before calling us, so that is exactly what it exists
+        // to tolerate; `bound` is dangling from here on and is not touched
+        // again.
+        //
+        // The scene subtree is **not** destroyed. It is a child of the parent's
+        // tree, and wlroots frees a tree's children recursively — calling
+        // `wlr_scene_node_destroy` here would be the double free
+        // `Runtime::forget_toplevel`'s own comment describes. `forget_popup`
+        // drops the pointer and nothing more.
+        (*session).runtime.forget_popup(id);
+        let listeners = (*session).popups.borrow_mut().remove(&id);
+        drop(listeners);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::PopupDestroyed(id), deliver);
     }
 }
 
@@ -7293,6 +7829,16 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::LayerSurfaceMapped(..)
         | Event::LayerSurfaceUnmapped(..)
         | Event::LayerSurfaceDestroyed(..)
+        // Unreachable for the same reason the layer-surface events above are:
+        // `run` never registers an xdg shell, so no popup can be announced on
+        // this path. Dropped rather than `unreachable!()` because this is on
+        // the path from an `extern "C"` frame, where a panic aborts.
+        | Event::NewPopup(..)
+        | Event::PopupInitialCommit(..)
+        | Event::PopupMapped(..)
+        | Event::PopupUnmapped(..)
+        | Event::PopupReposition(..)
+        | Event::PopupDestroyed(..)
         // And for the five scene-buffer observations: `run` installs no scene
         // observer (`no_scene_observer`), so nothing can ever have linked the
         // listeners that produce these.
@@ -7755,6 +8301,7 @@ mod tests {
                 toplevels: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
                 layers: RefCell::new(HashMap::new()),
+                popups: RefCell::new(HashMap::new()),
                 inputs: RefCell::new(HashMap::new()),
                 drags: RefCell::new(HashMap::new()),
                 idle_inhibitors: RefCell::new(HashMap::new()),
@@ -7935,6 +8482,7 @@ mod tests {
             toplevels: RefCell::new(HashMap::new()),
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
+            popups: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
@@ -7999,6 +8547,7 @@ mod tests {
                 toplevels: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
                 layers: RefCell::new(HashMap::new()),
+                popups: RefCell::new(HashMap::new()),
                 inputs: RefCell::new(HashMap::new()),
                 drags: RefCell::new(HashMap::new()),
                 idle_inhibitors: RefCell::new(HashMap::new()),
@@ -8616,5 +9165,97 @@ mod implicit_grab_tests {
     #[test]
     fn a_release_with_nothing_held_ends_the_grab() {
         assert_eq!(button_action(false, 0), ButtonAction::End);
+    }
+}
+
+#[cfg(test)]
+mod popup_bound_tests {
+    use super::*;
+
+    /// The id slot a `new_popup` listener carries is what decides the parent
+    /// kind, because the signal's own `data` cannot: a layer-shell popup's
+    /// `popup->parent` is NULL at announcement time. This pins the mapping
+    /// `on_new_popup` performs, without needing a live signal to fire.
+    fn parent_from_slots(
+        toplevel: Option<ToplevelId>,
+        layer: Option<LayerSurfaceId>,
+        popup: Option<PopupId>,
+    ) -> Option<PopupParent> {
+        popup_parent_from_slots(toplevel, layer, popup)
+    }
+
+    #[test]
+    fn a_toplevel_slot_names_a_toplevel_parent() {
+        let t = ToplevelId::dangling_for_test();
+        assert_eq!(
+            parent_from_slots(Some(t), None, None),
+            Some(PopupParent::Toplevel(t))
+        );
+    }
+
+    #[test]
+    fn a_layer_slot_names_a_layer_parent() {
+        let l = LayerSurfaceId::dangling_for_test();
+        assert_eq!(
+            parent_from_slots(None, Some(l), None),
+            Some(PopupParent::Layer(l))
+        );
+    }
+
+    #[test]
+    fn a_popup_slot_names_a_nested_parent() {
+        let p = PopupId::dangling_for_test();
+        assert_eq!(
+            parent_from_slots(None, None, Some(p)),
+            Some(PopupParent::Popup(p))
+        );
+    }
+
+    /// A `Bound` with no id slot set cannot have come from any of the three
+    /// sites `on_new_popup` is linked at. Returning `None` (and so dropping the
+    /// announcement) rather than guessing is the only safe answer: guessing
+    /// would attach a popup to the wrong window, and `unreachable!()` is
+    /// forbidden here because this runs under an `extern "C"` frame where a
+    /// panic aborts the process.
+    #[test]
+    fn no_slot_at_all_resolves_to_nothing_rather_than_guessing() {
+        assert_eq!(parent_from_slots(None, None, None), None);
+    }
+
+    /// Precedence is popup, then layer, then toplevel. No real `Bound` ever has
+    /// two set — each of the three link sites fills exactly one — but the
+    /// function is total, and a deterministic answer beats an arbitrary one if
+    /// the invariant is ever broken by a future link site.
+    #[test]
+    fn the_deepest_slot_wins_if_two_are_somehow_set() {
+        let t = ToplevelId::dangling_for_test();
+        let l = LayerSurfaceId::dangling_for_test();
+        let p = PopupId::dangling_for_test();
+        assert_eq!(
+            parent_from_slots(Some(t), Some(l), Some(p)),
+            Some(PopupParent::Popup(p))
+        );
+        assert_eq!(
+            parent_from_slots(Some(t), Some(l), None),
+            Some(PopupParent::Layer(l))
+        );
+    }
+
+    /// `toplevel_id_of_surface` must not hand back a `ToplevelId` for a surface
+    /// that is actually a popup's. Both id kinds come from one counter, so they
+    /// never collide — but before the role check they were freely
+    /// *mislabelled*, and every caller's safety rested on the table miss that
+    /// followed rather than on the id being right.
+    ///
+    /// A real `wlr_surface` cannot be built here (it needs a compositor), so
+    /// this exercises the decision function the callback delegates to, with the
+    /// role probe's answer supplied directly.
+    #[test]
+    fn a_surface_that_is_a_popup_yields_no_toplevel_id() {
+        let id = ToplevelId::dangling_for_test();
+        assert_eq!(toplevel_id_if_not_a_popup(Some(id), false), Some(id));
+        assert_eq!(toplevel_id_if_not_a_popup(Some(id), true), None);
+        assert_eq!(toplevel_id_if_not_a_popup(None, false), None);
+        assert_eq!(toplevel_id_if_not_a_popup(None, true), None);
     }
 }

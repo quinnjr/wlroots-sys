@@ -47,8 +47,8 @@ use crate::scene::{
 };
 use crate::{
     AllocatorRef, Backend, Box2D, Buffer, BufferId, CursorShape, Display, Error, FBox, Interest,
-    LayerSurfaceId, Output, OutputId, RectId, Region, RendererRef, Result, ToplevelId, Transform,
-    sys,
+    LayerSurfaceId, Output, OutputId, Popup, PopupId, PopupParent, RectId, Region, RendererRef,
+    Result, ToplevelId, Transform, sys,
 };
 use crate::{ColorEncoding, ColorRange, FilterMode, NamedPrimaries, TransferFunction};
 
@@ -480,6 +480,16 @@ pub(crate) struct RuntimeInner {
     /// its id addon lives on.
     pub(crate) toplevels: RefCell<HashMap<ToplevelId, ToplevelEntry>>,
 
+    /// Every live popup: the role object, its scene subtree, and the parent it
+    /// was announced under.
+    ///
+    /// Purged per-popup by [`Runtime::forget_popup`] (from
+    /// `on_popup_destroy`, before wlroots frees the popup) and wholesale by
+    /// [`Runtime::clear_popups`] when the `run_all` call that announced them
+    /// returns — the identical two-level discipline `toplevels` has, and for
+    /// the identical reason.
+    pub(crate) popups: RefCell<HashMap<PopupId, PopupEntry>>,
+
     /// Every live decoration object, keyed by the toplevel it was created
     /// for. At most one entry per [`ToplevelId`] — a client can only ever
     /// hold one `zxdg_toplevel_decoration_v1` per toplevel, since wlroots
@@ -732,6 +742,36 @@ pub(crate) struct LockSurfaceRender {
 /// `wlr_scene_layer_surface_v1_create` created for it, and any configure
 /// size waiting for this surface's initial commit to become safe to send.
 ///
+/// One live popup as this crate tracks it.
+///
+/// Not `Copy`, unlike [`ToplevelEntry`]: `configured` is a `Cell`, and `Cell` is
+/// never `Copy` regardless of what it holds. Every accessor that needs `raw` or
+/// `tree` outside a held borrow copies just that field out —
+/// [`Runtime::popup_raw`]/[`Runtime::popup_tree`] — the same narrowing
+/// `LayerSurfaceEntry`'s accessors do for the identical reason.
+///
+/// `tree` is the subtree `wlr_scene_xdg_surface_create` built **under the
+/// parent's tree**, which is what makes a popup stack with its parent for free
+/// and what makes `leaf_surface_at` resolve clicks on it — including the
+/// session-lock isolation gate — without a line of new code. It is stored and
+/// dropped, **never destroyed**: wlroots frees a tree's children recursively
+/// with the tree, so destroying a child of a dying parent is a double free (see
+/// [`Runtime::forget_toplevel`]'s own comment).
+pub(crate) struct PopupEntry {
+    pub(crate) raw: NonNull<sys::wlr_xdg_popup>,
+    pub(crate) tree: NonNull<sys::wlr_scene_tree>,
+    /// The parent recorded at announcement time. A layer popup's
+    /// `(*popup).parent` is NULL then, so this is the only place the answer
+    /// exists — see [`PopupParent`]'s own doc.
+    pub(crate) parent: PopupParent,
+    /// Whether [`Runtime::configure_popup`] has ever sent a configure for this
+    /// popup. Read by nothing in P1's own logic; it is the flag a compositor's
+    /// reactive-reposition pass needs to tell "never placed" from "placed and
+    /// due a re-place", and it is cheaper to record here, at the one site that
+    /// knows, than to reconstruct downstream.
+    pub(crate) configured: std::cell::Cell<bool>,
+}
+
 /// Not `Copy`, unlike [`ToplevelEntry`]: `staged_configure` is a `Cell`, and
 /// `Cell` is never `Copy` regardless of what it holds. Every accessor that
 /// needs to read `raw`/`scene_tree` outside a held borrow copies just that
@@ -1173,6 +1213,7 @@ impl Runtime {
                 lock_surface_trees: RefCell::new(HashMap::new()),
                 session_lock_fill: std::cell::Cell::new(None),
                 toplevels: RefCell::new(HashMap::new()),
+                popups: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
                 layer_shell: RefCell::new(None),
                 layer_surfaces: RefCell::new(HashMap::new()),
@@ -6944,6 +6985,318 @@ impl Runtime {
         self.inner.decorations.borrow_mut().clear();
     }
 
+    /// The maximum popup nesting this crate will walk.
+    ///
+    /// wlroots cannot produce a cycle — a popup's parent is fixed when the role
+    /// object is created and a client cannot re-parent one — and no real menu
+    /// is anywhere near this deep. The cap is not about correctness of the
+    /// happy path; it is about the failure mode. Every walk here runs on the
+    /// compositor's input path, and an unbounded walk over a corrupted table
+    /// would hang the session, which a user cannot distinguish from a freeze. A
+    /// bounded walk returns a wrong-but-finite answer instead, and the tests
+    /// that forge a cycle pin that it does.
+    pub(crate) const MAX_POPUP_DEPTH: usize = 64;
+
+    /// Record a newly-announced popup under `id`.
+    ///
+    /// Called from `backend.rs`'s `on_new_popup`, before the handler is told,
+    /// mirroring [`record_toplevel`](Runtime::record_toplevel).
+    pub(crate) fn record_popup(
+        &self,
+        id: PopupId,
+        raw: NonNull<sys::wlr_xdg_popup>,
+        tree: NonNull<sys::wlr_scene_tree>,
+        parent: PopupParent,
+    ) {
+        self.inner.popups.borrow_mut().insert(
+            id,
+            PopupEntry {
+                raw,
+                tree,
+                parent,
+                configured: std::cell::Cell::new(false),
+            },
+        );
+    }
+
+    /// Remove `id`'s entry. Called from `on_popup_destroy` before the popup is
+    /// freed, mirroring [`forget_toplevel`](Runtime::forget_toplevel).
+    ///
+    /// **Does not destroy the scene tree**, and must never grow that: a popup's
+    /// tree is a child of its parent's, wlroots frees a tree's children
+    /// recursively, and this runs while the parent may already be dying. See
+    /// [`PopupEntry`]'s own doc.
+    ///
+    /// Children of this popup are **not** removed here. wlroots destroys a
+    /// popup's own children first and emits a `destroy` for each, so each child
+    /// removes itself through this same path; sweeping them here would race
+    /// that and drop rows a still-pending emission is about to use.
+    pub(crate) fn forget_popup(&self, id: PopupId) {
+        self.inner.popups.borrow_mut().remove(&id);
+    }
+
+    /// This id's recorded raw popup, with the borrow released before returning
+    /// — see [`toplevel_entry`](Runtime::toplevel_entry)'s own doc for why that
+    /// is not optional.
+    pub(crate) fn popup_raw(&self, id: PopupId) -> Option<NonNull<sys::wlr_xdg_popup>> {
+        self.inner.popups.borrow().get(&id).map(|e| e.raw)
+    }
+
+    /// This id's recorded scene subtree, as [`popup_raw`](Runtime::popup_raw).
+    pub(crate) fn popup_tree(&self, id: PopupId) -> Option<NonNull<sys::wlr_scene_tree>> {
+        self.inner.popups.borrow().get(&id).map(|e| e.tree)
+    }
+
+    /// Mark this popup as having been configured at least once.
+    pub(crate) fn mark_popup_configured(&self, id: PopupId) {
+        if let Some(entry) = self.inner.popups.borrow().get(&id) {
+            entry.configured.set(true);
+        }
+    }
+
+    /// Drop every popup this runtime knows of, without touching wlroots.
+    ///
+    /// Called once by `backend.rs`'s `run_inner` when the `run_all` call that
+    /// populated the table returns, on every exit path — mirroring
+    /// [`clear_toplevels`](Runtime::clear_toplevels) exactly, and for the
+    /// identical reason: a popup id is only meaningful for the call that
+    /// announced it, because the per-popup destroy listener that would remove a
+    /// stale row is itself torn down with that call's `Session`. Without this, a
+    /// consumer who kept a `Runtime` clone could resolve a stale id and hand
+    /// wlroots memory it had already freed.
+    pub(crate) fn clear_popups(&self) {
+        self.inner.popups.borrow_mut().clear();
+    }
+
+    /// Borrow the popup `id` names, for as long as the borrow lasts.
+    ///
+    /// `None` once the popup is gone — the by-id miss every id type in this
+    /// crate promises.
+    pub fn popup(&self, id: PopupId) -> Option<Popup<'_>> {
+        let (raw, parent) = {
+            let popups = self.inner.popups.borrow();
+            let entry = popups.get(&id)?;
+            (entry.raw, entry.parent)
+        };
+        // SAFETY: an entry is removed by `on_popup_destroy`, which wlroots runs
+        // before it frees the popup, so a present entry names a live one. The
+        // borrow above is released before the handle is built, because the
+        // caller will re-enter wlroots, which can emit a signal, which can take
+        // the same `RefCell` mutably.
+        Some(unsafe { Popup::from_raw_with_id(raw.as_ptr(), id, parent) })
+    }
+
+    /// What this popup hangs off, or `None` if it is gone.
+    pub fn popup_parent(&self, id: PopupId) -> Option<PopupParent> {
+        self.inner.popups.borrow().get(&id).map(|e| e.parent)
+    }
+
+    /// The **direct** children of `parent`, in creation order.
+    ///
+    /// Creation order is the z-order tiebreak among siblings, so this is the
+    /// order a compositor's own popup stack should record them in.
+    pub fn popups_of(&self, parent: PopupParent) -> Vec<PopupId> {
+        let popups = self.inner.popups.borrow();
+        let mut out: Vec<PopupId> = popups
+            .iter()
+            .filter(|(_, entry)| entry.parent == parent)
+            .map(|(id, _)| *id)
+            .collect();
+        // The table is a `HashMap`, so iteration order is arbitrary; ids come
+        // from a monotonic counter, so sorting by the id *is* sorting by
+        // creation order. This is the one place in the crate that orders ids,
+        // and it does so through the raw `u64` rather than an `Ord` impl on
+        // `PopupId` precisely so the public type keeps promising nothing about
+        // ordering (see `ToplevelId`'s own doc).
+        out.sort_unstable_by_key(|id| id.0);
+        out
+    }
+
+    /// Every popup in the subtree under `parent`, parents before their own
+    /// children, deepest last.
+    ///
+    /// Breadth-first over [`popups_of`](Runtime::popups_of), capped at
+    /// `Runtime::MAX_POPUP_DEPTH` levels (private, so not linked here) and
+    /// de-duplicated,
+    /// so a corrupted table yields a finite list with no id twice rather than a
+    /// hang or a double destroy. Reverse this for the order xdg-shell requires
+    /// popups to be destroyed in.
+    pub fn popup_chain(&self, parent: PopupParent) -> Vec<PopupId> {
+        let mut out: Vec<PopupId> = Vec::new();
+        let mut frontier = vec![parent];
+        for _ in 0..Self::MAX_POPUP_DEPTH {
+            if frontier.is_empty() {
+                break;
+            }
+            let mut next = Vec::new();
+            for p in frontier.drain(..) {
+                for child in self.popups_of(p) {
+                    if out.contains(&child) {
+                        continue;
+                    }
+                    out.push(child);
+                    next.push(PopupParent::Popup(child));
+                }
+            }
+            frontier = next;
+        }
+        out
+    }
+
+    /// Place `id` inside `constraint` and answer its configure.
+    ///
+    /// Two wlroots calls in sequence — `wlr_xdg_popup_unconstrain_from_box`,
+    /// which rewrites `scheduled.geometry` from the client's rules, then
+    /// `wlr_xdg_surface_schedule_configure`, which is the only way to actually
+    /// send it. There is no `wlr_xdg_popup_set_size`/`_configure`; this pair is
+    /// the whole placement API.
+    ///
+    /// **`constraint` is in the root toplevel/layer parent surface's coordinate
+    /// system**, not layout or output space. wlroots' own header says so, and
+    /// getting it wrong places every popup at an offset rather than failing
+    /// loudly. The compositor is what translates its output's usable area into
+    /// that space.
+    ///
+    /// `false` when the popup is gone, or when its surface is not yet
+    /// `initialized`.
+    ///
+    /// The C function `wlr_xdg_popup_unconstrain_from_box` reaches into
+    /// `wlr_xdg_surface_schedule_configure` **itself**, unconditionally, with
+    /// no guard of its own; that function asserts `surface->initialized` and
+    /// this distribution ships wlroots **without `NDEBUG`**, so on an
+    /// uninitialized surface it `abort()`s the process. It is not the "costs
+    /// nothing, touches no wire" no-op an earlier draft of this method assumed.
+    /// Both [`Popup::unconstrain`](crate::Popup::unconstrain) and
+    /// [`Popup::send_configure`](crate::Popup::send_configure) therefore carry
+    /// the `initialized` guard, and this method checks it a third time so it
+    /// can report `false` instead of silently doing nothing. A real popup
+    /// announced over the wire has the flag set well before a caller could
+    /// reach this method from a live event, so nothing a compositor does with
+    /// an already-mapped popup changes; it is this crate's own scratch
+    /// fixtures — and any other caller reaching for `configure_popup` a tick
+    /// too early — that this turns away instead of aborting.
+    pub fn configure_popup(&self, id: PopupId, constraint: &Box2D) -> bool {
+        // SAFETY: `raw` names a live `wlr_xdg_popup` (see `popup_raw`'s own
+        // doc); `base` is only compared against null and, if non-null, only
+        // has its plain `bool` field read — no call into wlroots yet.
+        let initialized = match self.popup_raw(id) {
+            Some(raw) => unsafe {
+                let base = (*raw.as_ptr()).base;
+                !base.is_null() && (*base).initialized
+            },
+            None => return false,
+        };
+        if !initialized {
+            return false;
+        }
+        let Some(popup) = self.popup(id) else {
+            return false;
+        };
+        popup.unconstrain(constraint);
+        if popup.send_configure() == 0 {
+            return false;
+        }
+        self.mark_popup_configured(id);
+        true
+    }
+
+    /// This popup's position in its **parent surface's** coordinates, or `None`
+    /// if it is gone.
+    pub fn popup_position(&self, id: PopupId) -> Option<(f64, f64)> {
+        Some(self.popup(id)?.position())
+    }
+
+    /// Destroy `id` and every popup under it, **deepest first**, and report how
+    /// many were destroyed.
+    ///
+    /// Deepest-first is not a preference: `xdg_popup.destroy` on a popup that
+    /// still has live children is a protocol error, and wlroots enforces it.
+    ///
+    /// Each destroy sends `xdg_popup.popup_done` and makes the resource inert;
+    /// wlroots emits `events.destroy` from inside the call, which runs
+    /// `on_popup_destroy`, which is what actually removes the row. Nothing here
+    /// touches a scene tree.
+    pub fn dismiss_popup(&self, id: PopupId) -> usize {
+        // `id` goes at the *front*, not the back: `popup_chain` is
+        // shallow-first over the descendants only, so the whole subtree
+        // shallow-first is `[id]` followed by that chain. Pushing `id` last
+        // and reversing would have put `id` first in the destroy order —
+        // parent before children, the protocol error this method exists to
+        // avoid — and it would under-count, because destroying the parent
+        // sweeps every descendant row before the loop reaches it. Caught by
+        // `icedtea`'s `compositor/tests/popups.rs`
+        // `destroying_a_parent_destroys_its_popup_chain_without_a_double_free`,
+        // which is the only place a real chain can be built.
+        let mut order = vec![id];
+        order.extend(self.popup_chain(PopupParent::Popup(id)));
+        let mut destroyed = 0;
+        // Reversed: `order` is shallow-first, and destroying a parent
+        // before its children is the protocol error above.
+        for victim in order.into_iter().rev() {
+            let Some(popup) = self.popup(victim) else {
+                // Already gone — wlroots destroys a popup's children with it,
+                // so a deeper row may have been swept by an earlier iteration's
+                // own destroy emission. A miss here is expected, not an error.
+                continue;
+            };
+            popup.destroy();
+            destroyed += 1;
+        }
+        destroyed
+    }
+
+    /// Destroy every popup hanging off `parent`, chains and all, deepest first.
+    /// Returns how many were destroyed.
+    ///
+    /// This is what a compositor calls when the window or layer surface a menu
+    /// belongs to goes away, and what P2's "a click outside dismisses the whole
+    /// chain" path falls back to for **non-grabbing** popups (a grabbing chain
+    /// is wlroots' own to dismiss — see [`Popup::grab_requested`]).
+    pub fn dismiss_popups_of(&self, parent: PopupParent) -> usize {
+        let mut destroyed = 0;
+        for child in self.popups_of(parent) {
+            destroyed += self.dismiss_popup(child);
+        }
+        destroyed
+    }
+
+    /// `(*popup).seat != NULL` — whether this popup's client sent
+    /// `xdg_popup.grab`.
+    ///
+    /// `false` for an unknown id. See [`Popup::grab_requested`], and this
+    /// crate's `popup` module doc, for what a `true` means the compositor must
+    /// **not** do.
+    pub fn popup_is_grabbing(&self, id: PopupId) -> bool {
+        self.popup(id).is_some_and(|p| p.grab_requested())
+    }
+
+    /// Whether *some* explicit seat grab is in force right now —
+    /// `wlr_seat_pointer_has_grab(seat) || wlr_seat_keyboard_has_grab(seat)`.
+    ///
+    /// An xdg-popup grab is one; a drag-and-drop grab is another. This is the
+    /// single fact a compositor's focus synchronisation needs: while it is
+    /// `true`, wlroots is routing pointer, keyboard and touch itself, will
+    /// dismiss the popup chain on a press outside it, and will restore the
+    /// pre-grab keyboard focus when the grab ends — so a compositor that also
+    /// moves focus is fighting it. P2's `sync_seat_focus` returns early on this.
+    ///
+    /// `false` with no seat: this is called from focus paths that run before
+    /// [`create_seat`](Runtime::create_seat) has, and answering "no grab" there
+    /// is both true and safe.
+    pub fn seat_has_explicit_grab(&self) -> bool {
+        let seat = *self.inner.seat.borrow();
+        let Some(seat) = seat else {
+            return false;
+        };
+        // SAFETY: `seat` is this runtime's own `wlr_seat`, created by
+        // `create_seat` and live for as long as the runtime; both predicates
+        // only read `seat->{pointer,keyboard}_state.grab`.
+        unsafe {
+            sys::wlr_seat_pointer_has_grab(seat.as_ptr())
+                || sys::wlr_seat_keyboard_has_grab(seat.as_ptr())
+        }
+    }
+
     /// Record a newly-announced output's raw pointer under `id`.
     ///
     /// Called from `backend.rs`'s `on_new_output`, before the handler is
@@ -10387,5 +10740,401 @@ mod tests {
         assert_eq!(rt.cursor_shape(), Some(CursorShape::Pointer));
         rt.ensure_cursor_image();
         assert_eq!(rt.applied_cursor(), Some(Some(CursorShape::Pointer)));
+    }
+
+    /// Record a popup with a heap-allocated `wlr_xdg_popup`/`wlr_xdg_surface`
+    /// pair, and return the id.
+    ///
+    /// `alloc_zeroed` behind a raw pointer and deliberately leaked, for the
+    /// reasons `record_toplevel_with_surface` above already documents in full:
+    /// the structs embed `wl_listener`s whose function pointers are UB to
+    /// materialise as zero, and these tests never enter wlroots' lifecycle so
+    /// nothing frees them.
+    fn record_scratch_popup(rt: &Runtime, parent: PopupParent, initialized: bool) -> PopupId {
+        use std::alloc::{Layout, alloc_zeroed};
+
+        let id = PopupId(next_id());
+        // SAFETY: both layouts are non-zero-sized, so `alloc_zeroed` returns
+        // either null (checked) or a suitably aligned zeroed allocation.
+        let base = unsafe { alloc_zeroed(Layout::new::<sys::wlr_xdg_surface>()) }
+            .cast::<sys::wlr_xdg_surface>();
+        assert!(!base.is_null(), "allocation failed");
+        let popup = unsafe { alloc_zeroed(Layout::new::<sys::wlr_xdg_popup>()) }
+            .cast::<sys::wlr_xdg_popup>();
+        assert!(!popup.is_null(), "allocation failed");
+        // A zeroed `wlr_surface` with a null `role` is a real, if roleless,
+        // surface — `wlr_xdg_surface_try_from_wlr_surface` reads `role` and
+        // returns `NULL` when it does not match, so this stops
+        // `wlr_xdg_popup_get_toplevel_coords`'s parent walk cleanly instead of
+        // dereferencing a null `parent`, which `wlr_xdg_popup_unconstrain_from_box`
+        // (called by `configure_popup` even on an uninitialized surface) reaches
+        // into unconditionally — a real popup always has `parent` set at
+        // creation, before `initialized` is ever true, so this only patches the
+        // scratch fixture up to that same invariant.
+        let parent_surface =
+            unsafe { alloc_zeroed(Layout::new::<sys::wlr_surface>()) }.cast::<sys::wlr_surface>();
+        assert!(!parent_surface.is_null(), "allocation failed");
+        // SAFETY: both allocations are freshly zeroed and exclusively owned.
+        unsafe {
+            (*base).initialized = initialized;
+            (*popup).base = base;
+            (*popup).parent = parent_surface;
+        }
+        rt.record_popup(
+            id,
+            NonNull::new(popup).expect("allocation succeeded"),
+            NonNull::<sys::wlr_scene_tree>::dangling(),
+            parent,
+        );
+        id
+    }
+
+    #[test]
+    fn an_unknown_popup_id_misses_rather_than_dereferencing() {
+        let rt = Runtime::new().expect("runtime");
+        let dead = PopupId::dangling_for_test();
+        assert!(rt.popup(dead).is_none());
+        assert_eq!(rt.popup_parent(dead), None);
+        assert!(rt.popup_chain(PopupParent::Popup(dead)).is_empty());
+        assert!(rt.popups_of(PopupParent::Popup(dead)).is_empty());
+    }
+
+    /// Direct children only, in creation order — which is also the z-order
+    /// tiebreak the compositor's own stack relies on.
+    #[test]
+    fn popups_of_lists_direct_children_in_creation_order() {
+        let rt = Runtime::new().expect("runtime");
+        let window = PopupParent::Toplevel(ToplevelId::dangling_for_test());
+        let a = record_scratch_popup(&rt, window, false);
+        let b = record_scratch_popup(&rt, window, false);
+        let nested = record_scratch_popup(&rt, PopupParent::Popup(a), false);
+
+        assert_eq!(rt.popups_of(window), vec![a, b]);
+        assert_eq!(rt.popups_of(PopupParent::Popup(a)), vec![nested]);
+        assert!(rt.popups_of(PopupParent::Popup(b)).is_empty());
+    }
+
+    /// The whole subtree, deepest last — the order a caller iterates to paint,
+    /// and the *reverse* of the order it must destroy in.
+    #[test]
+    fn popup_chain_walks_the_whole_subtree_deepest_last() {
+        let rt = Runtime::new().expect("runtime");
+        let window = PopupParent::Toplevel(ToplevelId::dangling_for_test());
+        let menu = record_scratch_popup(&rt, window, false);
+        let submenu = record_scratch_popup(&rt, PopupParent::Popup(menu), false);
+        let subsub = record_scratch_popup(&rt, PopupParent::Popup(submenu), false);
+        let sibling = record_scratch_popup(&rt, window, false);
+
+        let chain = rt.popup_chain(window);
+        assert_eq!(chain.len(), 4, "every popup under the window: {chain:?}");
+        assert_eq!(
+            chain[0], menu,
+            "a direct child comes before its own children"
+        );
+        assert!(
+            chain.iter().position(|p| *p == submenu) < chain.iter().position(|p| *p == subsub),
+            "a parent must precede its child: {chain:?}"
+        );
+        assert!(chain.contains(&sibling));
+
+        assert_eq!(
+            rt.popup_chain(PopupParent::Popup(menu)),
+            vec![submenu, subsub]
+        );
+        assert!(rt.popup_chain(PopupParent::Popup(subsub)).is_empty());
+    }
+
+    /// `root` walks `Popup(_)` links down to the window or layer at the bottom.
+    #[test]
+    fn a_popup_parent_resolves_to_the_window_or_layer_at_the_root() {
+        let rt = Runtime::new().expect("runtime");
+        let window = PopupParent::Toplevel(ToplevelId::dangling_for_test());
+        let menu = record_scratch_popup(&rt, window, false);
+        let submenu = record_scratch_popup(&rt, PopupParent::Popup(menu), false);
+
+        assert_eq!(window.root(&rt), Some(window));
+        assert_eq!(PopupParent::Popup(menu).root(&rt), Some(window));
+        assert_eq!(PopupParent::Popup(submenu).root(&rt), Some(window));
+
+        let layer = PopupParent::Layer(LayerSurfaceId::dangling_for_test());
+        let panel_menu = record_scratch_popup(&rt, layer, false);
+        assert_eq!(PopupParent::Popup(panel_menu).root(&rt), Some(layer));
+    }
+
+    /// A link already dead resolves to nothing rather than to a wrong window —
+    /// the by-id contract every other accessor in this crate carries.
+    #[test]
+    fn a_root_walk_through_a_dead_link_is_none() {
+        let rt = Runtime::new().expect("runtime");
+        assert_eq!(
+            PopupParent::Popup(PopupId::dangling_for_test()).root(&rt),
+            None
+        );
+    }
+
+    /// A cycle cannot arise from wlroots — a popup's parent is fixed at
+    /// creation and a client cannot re-parent one — but `root` must terminate
+    /// on a corrupted table anyway, because a hang in a compositor's input path
+    /// is indistinguishable from a freeze to the user. The depth cap is what
+    /// guarantees it.
+    #[test]
+    fn a_root_walk_terminates_even_on_a_cyclic_table() {
+        let rt = Runtime::new().expect("runtime");
+        let a = record_scratch_popup(
+            &rt,
+            PopupParent::Toplevel(ToplevelId::dangling_for_test()),
+            false,
+        );
+        let b = record_scratch_popup(&rt, PopupParent::Popup(a), false);
+        // Forge the cycle a -> b -> a directly in the table.
+        rt.inner
+            .popups
+            .borrow_mut()
+            .get_mut(&a)
+            .expect("recorded")
+            .parent = PopupParent::Popup(b);
+
+        assert_eq!(PopupParent::Popup(a).root(&rt), None, "cap, not hang");
+    }
+
+    /// A chain walk over the same cyclic table must terminate too, and must not
+    /// return the same id twice — a caller destroying what it returns would
+    /// double-destroy.
+    #[test]
+    fn a_chain_walk_terminates_and_never_repeats_an_id_on_a_cyclic_table() {
+        let rt = Runtime::new().expect("runtime");
+        let window = PopupParent::Toplevel(ToplevelId::dangling_for_test());
+        let a = record_scratch_popup(&rt, window, false);
+        let b = record_scratch_popup(&rt, PopupParent::Popup(a), false);
+        rt.inner
+            .popups
+            .borrow_mut()
+            .get_mut(&a)
+            .expect("recorded")
+            .parent = PopupParent::Popup(b);
+
+        let chain = rt.popup_chain(PopupParent::Popup(a));
+        let mut seen = chain.clone();
+        seen.sort_unstable_by_key(|p| p.0);
+        seen.dedup();
+        assert_eq!(seen.len(), chain.len(), "no id twice: {chain:?}");
+    }
+
+    /// Forgetting one popup leaves its siblings and its parent alone, and does
+    /// **not** touch the scene tree: a popup's tree is a child of its parent's,
+    /// and wlroots frees a tree's children recursively — the double free
+    /// `forget_toplevel`'s own comment spells out.
+    #[test]
+    fn forgetting_a_popup_removes_only_that_row() {
+        let rt = Runtime::new().expect("runtime");
+        let window = PopupParent::Toplevel(ToplevelId::dangling_for_test());
+        let a = record_scratch_popup(&rt, window, false);
+        let b = record_scratch_popup(&rt, window, false);
+
+        rt.forget_popup(a);
+        assert!(rt.popup(a).is_none());
+        assert_eq!(rt.popups_of(window), vec![b]);
+        assert_eq!(rt.popup_parent(b), Some(window));
+    }
+
+    /// `clear_popups` is the run-granularity purge `run_inner` calls when
+    /// `run_all` returns, mirroring `clear_toplevels`: popup ids are only
+    /// meaningful for the call that announced them, because the per-popup
+    /// destroy listener that would otherwise remove a stale row is torn down
+    /// with that call's `Session`.
+    #[test]
+    fn clear_popups_empties_the_table() {
+        let rt = Runtime::new().expect("runtime");
+        let window = PopupParent::Toplevel(ToplevelId::dangling_for_test());
+        let a = record_scratch_popup(&rt, window, false);
+        record_scratch_popup(&rt, PopupParent::Popup(a), false);
+
+        rt.clear_popups();
+        assert!(rt.popups_of(window).is_empty());
+        assert!(rt.popup(a).is_none());
+    }
+
+    /// A popup whose surface is not yet `initialized` cannot be configured:
+    /// `Popup::send_configure` skips the call (see its own doc — this
+    /// distribution's wlroots asserts on that flag and aborts), so
+    /// `configure_popup` must report `false` rather than claiming success.
+    ///
+    /// `configure_popup` checks `initialized` itself and returns `false`
+    /// *before* ever calling `popup.unconstrain(constraint)`. The C function
+    /// `wlr_xdg_popup_unconstrain_from_box` has no `initialized` guard of its
+    /// own and calls `wlr_xdg_surface_schedule_configure` unconditionally,
+    /// which asserts that flag and aborts on this NDEBUG-less build. So for
+    /// this test the unconstrain half never runs at all; skipping it here is
+    /// what keeps this call safe rather than merely making it report failure.
+    /// `Popup::unconstrain` carries the same guard for callers who reach it
+    /// directly — pinned by
+    /// `unconstraining_an_uninitialized_popup_is_a_no_op_rather_than_an_abort`.
+    #[test]
+    fn configuring_an_uninitialized_popup_reports_false() {
+        let rt = Runtime::new().expect("runtime");
+        let window = PopupParent::Toplevel(ToplevelId::dangling_for_test());
+        let id = record_scratch_popup(&rt, window, false);
+        assert!(!rt.configure_popup(id, &Box2D::new(0, 0, 800, 600)));
+    }
+
+    /// `Popup::unconstrain` is safe, public, and reachable from inside
+    /// `ToplevelHandler::new_popup` — which is precisely where `initialized` is
+    /// still false, because the popup has not committed yet. Without its own
+    /// guard this call would run `wlr_xdg_popup_unconstrain_from_box`, which
+    /// unconditionally calls `wlr_xdg_surface_schedule_configure`, whose
+    /// `assert(surface->initialized)` is live on this NDEBUG-less wlroots: the
+    /// whole compositor process dies. Reaching the assertions below at all is
+    /// the real assertion — mutation-verified by deleting the guard, which
+    /// turns this test into a `SIGSEGV` of the whole test binary (the scratch
+    /// fixture's zeroed parent surface faults inside the unconstrain walk a
+    /// step before the `initialized` assert a live popup would hit).
+    #[test]
+    fn unconstraining_an_uninitialized_popup_is_a_no_op_rather_than_an_abort() {
+        let rt = Runtime::new().expect("runtime");
+        let window = PopupParent::Toplevel(ToplevelId::dangling_for_test());
+        let id = record_scratch_popup(&rt, window, false);
+        let popup = rt.popup(id).expect("just recorded");
+
+        popup.unconstrain(&Box2D::new(0, 0, 800, 600));
+
+        assert_eq!(
+            popup.geometry(),
+            Box2D::default(),
+            "the skipped call leaves the zeroed scheduled/current state alone"
+        );
+        assert_eq!(popup.send_configure(), 0, "and still nothing was sent");
+    }
+
+    #[test]
+    fn configuring_an_unknown_popup_reports_false_rather_than_dereferencing() {
+        let rt = Runtime::new().expect("runtime");
+        assert!(!rt.configure_popup(PopupId::dangling_for_test(), &Box2D::new(0, 0, 800, 600)));
+        assert_eq!(rt.popup_position(PopupId::dangling_for_test()), None);
+        assert!(!rt.popup_is_grabbing(PopupId::dangling_for_test()));
+    }
+
+    /// `dismiss_popup` returns how many popups it destroyed, and destroys the
+    /// whole subtree under `id` as well as `id` itself.
+    ///
+    /// **Cannot run against this crate's scratch popups.** An earlier draft of
+    /// this test assumed `Popup::destroy` on an unwired scratch popup was a
+    /// harmless no-op ("nothing is actually freed and no destroy signal
+    /// fires"); it is not. Traced by disassembling `libwlroots-0.20.so`:
+    /// `wlr_xdg_popup_destroy` walks `base->popups` (a real `wl_list`, which a
+    /// zeroed scratch struct does not have — the first crash this hits), then
+    /// unconditionally calls `wl_resource_post_event(popup->resource, ...)` to
+    /// send `xdg_popup.popup_done`, then `destroy_xdg_popup` goes on to touch
+    /// `base->surface` and `wl_resource_set_user_data(popup->resource, NULL)`.
+    /// Every one of those needs a genuine, wire-created object: `wl_resource`
+    /// is opaque even to this crate's own bindings (no `struct` definition to
+    /// fake), and a `wlr_surface` can only be produced by wlroots' own
+    /// `wlr_compositor` global answering a real client's `wl_surface` request
+    /// — there is no public `wlr_surface_create`. None of that is
+    /// constructible from a bare unit test.
+    ///
+    /// So this is `#[ignore]`d rather than passing or being deleted: the
+    /// *count and order* logic it describes is real and still needs coverage,
+    /// but only the harness-driven `compositor/tests/popups.rs` (P2), which
+    /// runs a genuine client against a genuine xdg-shell, can actually exercise
+    /// `Popup::destroy`'s FFI without crashing the test process.
+    ///
+    /// **Replaced by** `compositor/tests/popups.rs`'s
+    /// `a_grabbing_popup_chain_is_dismissed_whole_by_a_click_outside_it`
+    /// (contract §2.4), which asserts the same "the popup and its whole subtree,
+    /// counted once" property against a live chain.
+    #[test]
+    #[ignore = "needs a live wl_resource/wlr_surface chain a scratch popup can't fake; see compositor/tests/popups.rs (P2)"]
+    fn dismissing_a_popup_counts_itself_and_its_whole_subtree() {
+        let rt = Runtime::new().expect("runtime");
+        let window = PopupParent::Toplevel(ToplevelId::dangling_for_test());
+        let menu = record_scratch_popup(&rt, window, false);
+        let submenu = record_scratch_popup(&rt, PopupParent::Popup(menu), false);
+        record_scratch_popup(&rt, PopupParent::Popup(submenu), false);
+        let sibling = record_scratch_popup(&rt, window, false);
+
+        assert_eq!(
+            rt.dismiss_popup(menu),
+            3,
+            "the menu and its two descendants"
+        );
+        assert_eq!(
+            rt.popups_of(window),
+            vec![sibling],
+            "a sibling chain is untouched"
+        );
+    }
+
+    #[test]
+    fn dismissing_an_unknown_popup_destroys_nothing() {
+        let rt = Runtime::new().expect("runtime");
+        assert_eq!(rt.dismiss_popup(PopupId::dangling_for_test()), 0);
+        assert_eq!(
+            rt.dismiss_popups_of(PopupParent::Popup(PopupId::dangling_for_test())),
+            0
+        );
+    }
+
+    /// See [`dismissing_a_popup_counts_itself_and_its_whole_subtree`]'s doc:
+    /// same real-FFI-destroy hazard, since this also bottoms out in
+    /// `dismiss_popup`.
+    ///
+    /// **Replaced by** `compositor/tests/popups.rs`'s
+    /// `destroying_a_parent_destroys_its_popup_chain_without_a_double_free`
+    /// (contract §2.4), which drives every chain under one parent through a real
+    /// destroy.
+    #[test]
+    #[ignore = "needs a live wl_resource/wlr_surface chain a scratch popup can't fake; see compositor/tests/popups.rs (P2)"]
+    fn dismissing_a_parents_popups_covers_every_chain_under_it() {
+        let rt = Runtime::new().expect("runtime");
+        let window = PopupParent::Toplevel(ToplevelId::dangling_for_test());
+        let a = record_scratch_popup(&rt, window, false);
+        record_scratch_popup(&rt, PopupParent::Popup(a), false);
+        record_scratch_popup(&rt, window, false);
+
+        assert_eq!(rt.dismiss_popups_of(window), 3);
+        assert!(rt.popups_of(window).is_empty());
+    }
+
+    /// The destruction order is deepest-first, which is what xdg-shell requires
+    /// (`xdg_popup.destroy` on a popup with live children is a protocol error).
+    /// The order is observable here because `dismiss_popup` forgets each row as
+    /// it goes: a shallow-first implementation would find the deeper rows
+    /// already unreachable and under-count.
+    ///
+    /// See [`dismissing_a_popup_counts_itself_and_its_whole_subtree`]'s doc:
+    /// same real-FFI-destroy hazard.
+    ///
+    /// **Replaced by** `compositor/tests/popups.rs`'s nested-chain dismissal
+    /// test `destroying_a_parent_destroys_its_popup_chain_without_a_double_free`
+    /// (contract §2.4), which is the test that must fail when `dismiss_popup`'s
+    /// `.rev()` is dropped — a shallow-first destroy is a live xdg-shell
+    /// protocol error there, which is exactly what this order assertion stands
+    /// in for and cannot prove here.
+    #[test]
+    #[ignore = "needs a live wl_resource/wlr_surface chain a scratch popup can't fake; see compositor/tests/popups.rs (P2)"]
+    fn dismissal_is_deepest_first() {
+        let rt = Runtime::new().expect("runtime");
+        let window = PopupParent::Toplevel(ToplevelId::dangling_for_test());
+        let a = record_scratch_popup(&rt, window, false);
+        let b = record_scratch_popup(&rt, PopupParent::Popup(a), false);
+        let c = record_scratch_popup(&rt, PopupParent::Popup(b), false);
+
+        let order = rt.popup_chain(PopupParent::Popup(a));
+        assert_eq!(order, vec![b, c], "chain order is shallow-first…");
+        assert_eq!(
+            rt.dismiss_popup(a),
+            3,
+            "…and dismissal reverses it, so every row is still present when its \
+             own destroy runs"
+        );
+    }
+
+    /// With no seat created there is no grab to observe, and asking must be a
+    /// plain `false` rather than a null dereference — a compositor calls this
+    /// from `sync_seat_focus`, which runs before a seat exists during startup.
+    #[test]
+    fn a_runtime_without_a_seat_has_no_explicit_grab() {
+        let rt = Runtime::new().expect("runtime");
+        assert!(!rt.seat_has_explicit_grab());
     }
 }

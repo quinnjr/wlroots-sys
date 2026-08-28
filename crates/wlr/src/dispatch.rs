@@ -46,7 +46,7 @@ use std::collections::VecDeque;
 
 use crate::{
     ActivationToken, CursorShape, CursorShapeDevice, DecorationMode, Edges, LayerSurfaceId, NodeId,
-    OutputId, SceneOutputId, ToplevelId,
+    OutputId, PopupId, SceneOutputId, ToplevelId,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -113,6 +113,20 @@ pub(crate) enum Event {
     LayerSurfaceMapped(LayerSurfaceId),
     LayerSurfaceUnmapped(LayerSurfaceId),
     LayerSurfaceDestroyed(LayerSurfaceId),
+
+    /// A client created an `xdg_popup`. The parent is not carried: it is
+    /// recorded in the runtime's own table at announcement time and read back
+    /// through [`Runtime::popup`](crate::Runtime::popup), for the reason this
+    /// enum carries ids and never handles — a deferred event may name an object
+    /// that no longer exists by the time it is delivered.
+    NewPopup(PopupId),
+    /// The popup's first commit, where xdg-shell requires an answer.
+    PopupInitialCommit(PopupId),
+    PopupMapped(PopupId),
+    PopupUnmapped(PopupId),
+    /// The client sent `xdg_popup.reposition`.
+    PopupReposition(PopupId),
+    PopupDestroyed(PopupId),
 
     /// An observed scene buffer node is now displayed on a scene output.
     SceneBufferOutputEnter(NodeId, SceneOutputId),

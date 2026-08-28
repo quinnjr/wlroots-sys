@@ -89,6 +89,7 @@ mod interest;
 mod layer;
 mod log;
 mod output;
+mod popup;
 mod region;
 mod render;
 mod runtime;
@@ -112,6 +113,10 @@ pub use interest::{Interest, Readiness};
 pub use layer::{Anchor, Layer, LayerSurface, LayerSurfaceId};
 pub use log::{LogLevel, init_logging, log_verbosity};
 pub use output::{Mode, Output};
+pub use popup::{
+    ConstraintAdjustment, Popup, PopupId, PopupParent, PositionerAnchor, PositionerGravity,
+    PositionerRules,
+};
 pub use region::{Region, RegionRef};
 pub use render::{
     Allocator, AllocatorRef, AlphaMode, BlendMode, BufferCaps, BufferPassOptions, ChromaLocation,

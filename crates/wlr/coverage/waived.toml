@@ -2734,12 +2734,6 @@ note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
 
 [[waived]]
-symbol    = "wlr_seat_keyboard_has_grab"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
 symbol    = "wlr_seat_keyboard_send_key"
 reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
@@ -4442,70 +4436,15 @@ note      = "Output stack completion."
 milestone = "M6"
 
 [[waived]]
-symbol    = "wlr_xdg_popup"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_popup_configure"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_popup_configure_field"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_popup_destroy"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_xdg_popup_from_resource"
 reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
 milestone = "M9"
 
 [[waived]]
-symbol    = "wlr_xdg_popup_get_position"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_popup_get_toplevel_coords"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_xdg_popup_grab"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_popup_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_popup_try_from_wlr_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_popup_unconstrain_from_box"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots constructs and destroys this itself on xdg_popup.grab and installs three seat grabs from it; the export table has no wlr_xdg_popup_grab_* function at all, so a consumer can never hold one. The observables this crate offers instead are Popup::grab_requested (popup->seat) and Runtime::seat_has_explicit_grab (wlr_seat_pointer_has_grab / wlr_seat_keyboard_has_grab)."
 
 [[waived]]
 symbol    = "wlr_xdg_positioner"
@@ -4525,23 +4464,6 @@ reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
 milestone = "M9"
 
-[[waived]]
-symbol    = "wlr_xdg_positioner_rules"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_positioner_rules_get_geometry"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_positioner_rules_unconstrain_box"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_xdg_surface_configure"
