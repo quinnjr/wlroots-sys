@@ -2734,12 +2734,6 @@ note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
 
 [[waived]]
-symbol    = "wlr_seat_keyboard_has_grab"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
 symbol    = "wlr_seat_keyboard_send_key"
 reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."

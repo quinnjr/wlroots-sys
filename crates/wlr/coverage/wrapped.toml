@@ -1424,9 +1424,19 @@ module = "backend"
 item   = "SeatHandler::key"
 
 [[wrapped]]
+symbol = "wlr_seat_keyboard_has_grab"
+module = "runtime"
+item   = "Runtime::seat_has_explicit_grab"
+
+[[wrapped]]
 symbol = "wlr_seat_pointer_has_grab"
 module = "backend"
 item   = "SeatHandler::pointer_button"
+
+[[wrapped]]
+symbol = "wlr_seat_pointer_has_grab"
+module = "runtime"
+item   = "Runtime::seat_has_explicit_grab"
 
 [[wrapped]]
 symbol = "wlr_seat_pointer_notify_button"
