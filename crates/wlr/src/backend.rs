@@ -9368,3 +9368,162 @@ mod popup_bound_tests {
         assert_eq!(toplevel_id_if_not_a_popup(None, true), None);
     }
 }
+
+#[cfg(test)]
+mod axis_delivery_tests {
+    use super::*;
+
+    /// Records what `SeatHandler::pointer_axis` was called with. Every other
+    /// handler method is defaulted, so the empty impls below are the whole
+    /// `Handlers` bound `deliver_all` needs.
+    #[derive(Default)]
+    struct Recorder {
+        seen: Vec<(f64, f64, PointerAxis, f64, i32, AxisSource, u32)>,
+    }
+
+    impl OutputHandler for Recorder {}
+    impl crate::ToplevelHandler for Recorder {}
+    impl crate::FdHandler for Recorder {}
+    impl LoopHandler for Recorder {}
+
+    impl crate::SeatHandler for Recorder {
+        fn pointer_axis(
+            &mut self,
+            x: f64,
+            y: f64,
+            axis: PointerAxis,
+            delta: f64,
+            delta_discrete: i32,
+            source: AxisSource,
+            time_msec: u32,
+        ) {
+            self.seen
+                .push((x, y, axis, delta, delta_discrete, source, time_msec));
+        }
+    }
+
+    /// A session with nothing in it. `deliver_all`'s `PointerAxis` arm reads
+    /// neither the tables nor the dispatcher — the event carries everything —
+    /// so this is the whole context the routing needs, and the dispatcher's
+    /// state pointer is deliberately null: a non-null one would alias the
+    /// `&mut Recorder` handed to `deliver_all` alongside it.
+    fn empty_session(runtime: &Runtime) -> Session<'_, Recorder> {
+        Session {
+            dispatcher: Dispatcher::new(std::ptr::null_mut()),
+            outputs: RefCell::new(HashMap::new()),
+            toplevels: RefCell::new(HashMap::new()),
+            decorations: RefCell::new(HashMap::new()),
+            layers: RefCell::new(HashMap::new()),
+            popups: RefCell::new(HashMap::new()),
+            inputs: RefCell::new(HashMap::new()),
+            drags: RefCell::new(HashMap::new()),
+            idle_inhibitors: RefCell::new(HashMap::new()),
+            session_locks: RefCell::new(HashMap::new()),
+            lock_surfaces: RefCell::new(HashMap::new()),
+            scene_buffers: RefCell::new(HashMap::new()),
+            pointer_constraints: RefCell::new(HashMap::new()),
+            #[cfg(wlr_has_xwayland)]
+            xwayland_surfaces: RefCell::new(HashMap::new()),
+            last_key_consumed: Cell::new(false),
+            applied_heads: RefCell::new(VecDeque::new()),
+            runtime,
+            deliver: deliver_all::<Recorder>,
+        }
+    }
+
+    /// The routing half of the feature: an `Event::PointerAxis` must reach
+    /// `SeatHandler::pointer_axis`, with the milli-scaled integers the event
+    /// carries (for `Eq`'s sake) converted back to the `f64`s the trait
+    /// promises. Deliberately uses coordinates and a delta with a fractional
+    /// part — an arm that forgot a `/ 1000.0` would still pass with whole
+    /// numbers only if they were zero.
+    #[test]
+    fn a_pointer_axis_event_reaches_the_seat_handler_with_its_values_rescaled() {
+        let runtime = Runtime::new().expect("runtime");
+        let session = empty_session(&runtime);
+        let mut state = Recorder::default();
+
+        deliver_all(
+            &session,
+            &mut state,
+            Event::PointerAxis {
+                x_milli: 1234,
+                y_milli: -56_780,
+                axis: PointerAxis::Horizontal,
+                delta_milli: -15_500,
+                delta_discrete: -120,
+                source: AxisSource::Finger,
+                relative_direction: AxisRelativeDirection::Inverted,
+                time_msec: 987_654,
+            },
+        );
+
+        assert_eq!(
+            state.seen,
+            vec![(
+                1.234,
+                -56.78,
+                PointerAxis::Horizontal,
+                -15.5,
+                -120,
+                AxisSource::Finger,
+                987_654
+            )],
+            "the handler must see the scroll exactly once, at the scene \
+             coordinates and with the pixel delta the event encoded"
+        );
+    }
+
+    /// The default is a no-op, not a panic or a swallow of the forward: a
+    /// consumer that never mentions `pointer_axis` must still be deliverable
+    /// to, which is what makes the method additive.
+    #[test]
+    fn a_handler_that_does_not_override_pointer_axis_still_takes_delivery() {
+        struct Legacy;
+        impl OutputHandler for Legacy {}
+        impl crate::ToplevelHandler for Legacy {}
+        impl crate::SeatHandler for Legacy {}
+        impl crate::FdHandler for Legacy {}
+        impl LoopHandler for Legacy {}
+
+        let runtime = Runtime::new().expect("runtime");
+        // Same shape as `empty_session`, for the one other state type this
+        // module has; not worth a generic helper for a single extra use.
+        let session = Session::<'_, Legacy> {
+            dispatcher: Dispatcher::new(std::ptr::null_mut()),
+            outputs: RefCell::new(HashMap::new()),
+            toplevels: RefCell::new(HashMap::new()),
+            decorations: RefCell::new(HashMap::new()),
+            layers: RefCell::new(HashMap::new()),
+            popups: RefCell::new(HashMap::new()),
+            inputs: RefCell::new(HashMap::new()),
+            drags: RefCell::new(HashMap::new()),
+            idle_inhibitors: RefCell::new(HashMap::new()),
+            session_locks: RefCell::new(HashMap::new()),
+            lock_surfaces: RefCell::new(HashMap::new()),
+            scene_buffers: RefCell::new(HashMap::new()),
+            pointer_constraints: RefCell::new(HashMap::new()),
+            #[cfg(wlr_has_xwayland)]
+            xwayland_surfaces: RefCell::new(HashMap::new()),
+            last_key_consumed: Cell::new(false),
+            applied_heads: RefCell::new(VecDeque::new()),
+            runtime: &runtime,
+            deliver: deliver_all::<Legacy>,
+        };
+
+        deliver_all(
+            &session,
+            &mut Legacy,
+            Event::PointerAxis {
+                x_milli: 0,
+                y_milli: 0,
+                axis: PointerAxis::Vertical,
+                delta_milli: 15_000,
+                delta_discrete: 120,
+                source: AxisSource::Wheel,
+                relative_direction: AxisRelativeDirection::Identical,
+                time_msec: 1,
+            },
+        );
+    }
+}

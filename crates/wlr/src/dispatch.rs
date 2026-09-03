@@ -747,6 +747,45 @@ mod tests {
         );
     }
 
+    /// A scroll deferred behind another handler must arrive with every one
+    /// of its eight fields intact. `Event` is `Copy` and queued by value, so
+    /// the only way this breaks is a variant that stopped being `Copy` — a
+    /// single `f64` field would do it — which is exactly why the delta is
+    /// carried as `delta_milli`.
+    #[test]
+    fn a_deferred_pointer_axis_survives_the_queue_unchanged() {
+        let scroll = Event::PointerAxis {
+            x_milli: 640_500,
+            y_milli: 360_250,
+            axis: PointerAxis::Horizontal,
+            delta_milli: -15_500,
+            delta_discrete: -120,
+            source: AxisSource::Finger,
+            relative_direction: AxisRelativeDirection::Inverted,
+            time_msec: 4_242,
+        };
+
+        let mut state = Recorder {
+            seen: Vec::new(),
+            reenter_with: Cell::new(Some(scroll)),
+            dispatcher: std::ptr::null(),
+        };
+        // One provenance throughout, as in the tests above.
+        let p = &raw mut state;
+        let d = Dispatcher::new(p);
+        // SAFETY: as in the tests above.
+        unsafe { (*p).dispatcher = &raw const d };
+
+        // SAFETY: as above.
+        unsafe { d.emit(&(), Event::OutputFrame(OutputId(1)), deliver) };
+
+        assert_eq!(
+            state.seen,
+            vec![Event::OutputFrame(OutputId(1)), scroll],
+            "the scroll must arrive after the outer handler returns, and              carry the same axis, delta, source and direction it was emitted              with"
+        );
+    }
+
     #[test]
     fn non_reentrant_events_dispatch_immediately() {
         let mut state = Recorder {
