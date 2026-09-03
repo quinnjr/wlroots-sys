@@ -414,6 +414,137 @@ pub struct ActivationToken {
     pub requesting_toplevel: Option<ToplevelId>,
 }
 
+/// Which axis a scroll event moved along.
+///
+/// Mirrors `wl_pointer.axis` (wlroots' `wl_pointer_axis` C enum), whose two
+/// values are the whole wire enum: vertical and horizontal scroll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PointerAxis {
+    /// Vertical scroll — a wheel turned, two fingers dragged up or down.
+    Vertical,
+    /// Horizontal scroll — a tilted wheel, a sideways two-finger drag.
+    Horizontal,
+}
+
+impl PointerAxis {
+    /// Decode a `wl_pointer_axis` wire value.
+    ///
+    /// Total rather than fallible, and deliberately so: this decodes a value
+    /// libinput produced and wlroots already validated, it runs inside an
+    /// `extern "C"` frame where a panic aborts the compositor, and there is
+    /// no useful thing a handler could do with a `None`. An unknown value —
+    /// which no wlroots 0.20 build can produce, the enum having exactly two
+    /// values — falls back to [`PointerAxis::Vertical`], the overwhelmingly
+    /// common axis, so a future header addition degrades to a wrong-axis
+    /// scroll rather than a dead process.
+    pub(crate) fn from_raw(raw: sys::wl_pointer_axis) -> PointerAxis {
+        use sys::wl_pointer_axis as W;
+        match raw {
+            W::WL_POINTER_AXIS_HORIZONTAL_SCROLL => PointerAxis::Horizontal,
+            // Includes `WL_POINTER_AXIS_VERTICAL_SCROLL` itself.
+            _ => PointerAxis::Vertical,
+        }
+    }
+
+    /// Encode back to the `wl_pointer_axis` wire value
+    /// `wlr_seat_pointer_notify_axis` wants.
+    pub(crate) fn to_raw(self) -> sys::wl_pointer_axis {
+        use sys::wl_pointer_axis as W;
+        match self {
+            PointerAxis::Vertical => W::WL_POINTER_AXIS_VERTICAL_SCROLL,
+            PointerAxis::Horizontal => W::WL_POINTER_AXIS_HORIZONTAL_SCROLL,
+        }
+    }
+}
+
+/// What kind of device produced a scroll event.
+///
+/// Mirrors `wl_pointer.axis_source`. It is the difference between a notched
+/// wheel (which a client may scroll by whole lines) and a touchpad (which a
+/// client should scroll by pixels, with kinetic continuation) — the reason
+/// the wire protocol carries it at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AxisSource {
+    /// A notched scroll wheel.
+    Wheel,
+    /// A finger on a touchpad. The client should expect a terminating
+    /// `axis_stop` when the finger lifts.
+    Finger,
+    /// A continuous source with no notches and no finger — a trackpoint,
+    /// say.
+    Continuous,
+    /// A wheel tilted sideways, reported as horizontal scroll.
+    WheelTilt,
+}
+
+impl AxisSource {
+    /// Decode a `wl_pointer_axis_source` wire value. Total for the same
+    /// reason as [`PointerAxis::from_raw`]; an unknown value falls back to
+    /// [`AxisSource::Wheel`], the source a client handles most
+    /// conservatively (discrete notches, no kinetic scrolling).
+    pub(crate) fn from_raw(raw: sys::wl_pointer_axis_source) -> AxisSource {
+        use sys::wl_pointer_axis_source as W;
+        match raw {
+            W::WL_POINTER_AXIS_SOURCE_FINGER => AxisSource::Finger,
+            W::WL_POINTER_AXIS_SOURCE_CONTINUOUS => AxisSource::Continuous,
+            W::WL_POINTER_AXIS_SOURCE_WHEEL_TILT => AxisSource::WheelTilt,
+            // Includes `WL_POINTER_AXIS_SOURCE_WHEEL` itself.
+            _ => AxisSource::Wheel,
+        }
+    }
+
+    /// Encode back to the `wl_pointer_axis_source` wire value
+    /// `wlr_seat_pointer_notify_axis` wants.
+    pub(crate) fn to_raw(self) -> sys::wl_pointer_axis_source {
+        use sys::wl_pointer_axis_source as W;
+        match self {
+            AxisSource::Wheel => W::WL_POINTER_AXIS_SOURCE_WHEEL,
+            AxisSource::Finger => W::WL_POINTER_AXIS_SOURCE_FINGER,
+            AxisSource::Continuous => W::WL_POINTER_AXIS_SOURCE_CONTINUOUS,
+            AxisSource::WheelTilt => W::WL_POINTER_AXIS_SOURCE_WHEEL_TILT,
+        }
+    }
+}
+
+/// Whether the physical direction of a scroll was inverted by the device or
+/// its configuration ("natural scrolling").
+///
+/// Mirrors `wl_pointer.axis_relative_direction` (wire version 9). The delta
+/// is *not* pre-negated: this says how the delta relates to the physical
+/// motion, and a client that cares (a map, a 3D view) applies it itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AxisRelativeDirection {
+    /// The delta runs in the same direction as the physical motion.
+    Identical,
+    /// The delta runs opposite the physical motion — natural scrolling.
+    Inverted,
+}
+
+impl AxisRelativeDirection {
+    /// Decode a `wl_pointer_axis_relative_direction` wire value. Total for
+    /// the same reason as [`PointerAxis::from_raw`]; an unknown value falls
+    /// back to [`AxisRelativeDirection::Identical`], which is what a client
+    /// on a pre-version-9 `wl_pointer` assumes anyway.
+    pub(crate) fn from_raw(raw: sys::wl_pointer_axis_relative_direction) -> AxisRelativeDirection {
+        use sys::wl_pointer_axis_relative_direction as W;
+        match raw {
+            W::WL_POINTER_AXIS_RELATIVE_DIRECTION_INVERTED => AxisRelativeDirection::Inverted,
+            // Includes `WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL` itself.
+            _ => AxisRelativeDirection::Identical,
+        }
+    }
+
+    /// Encode back to the `wl_pointer_axis_relative_direction` wire value
+    /// `wlr_seat_pointer_notify_axis` wants.
+    pub(crate) fn to_raw(self) -> sys::wl_pointer_axis_relative_direction {
+        use sys::wl_pointer_axis_relative_direction as W;
+        match self {
+            AxisRelativeDirection::Identical => W::WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL,
+            AxisRelativeDirection::Inverted => W::WL_POINTER_AXIS_RELATIVE_DIRECTION_INVERTED,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +553,100 @@ mod tests {
     /// wlroots minor, so a future bindgen regeneration that silently
     /// reordered them would fail this test rather than mis-decode every
     /// modifier key.
+    /// Every wire value this build's headers define round-trips through the
+    /// safe enum unchanged. A decode that collapsed two sources onto one
+    /// variant would send the wrong `axis_source` to every client.
+    #[test]
+    fn the_axis_enums_round_trip_every_known_wire_value() {
+        for (raw, safe) in [
+            (
+                sys::wl_pointer_axis::WL_POINTER_AXIS_VERTICAL_SCROLL,
+                PointerAxis::Vertical,
+            ),
+            (
+                sys::wl_pointer_axis::WL_POINTER_AXIS_HORIZONTAL_SCROLL,
+                PointerAxis::Horizontal,
+            ),
+        ] {
+            assert_eq!(PointerAxis::from_raw(raw), safe);
+            assert_eq!(safe.to_raw(), raw);
+        }
+
+        for (raw, safe) in [
+            (
+                sys::wl_pointer_axis_source::WL_POINTER_AXIS_SOURCE_WHEEL,
+                AxisSource::Wheel,
+            ),
+            (
+                sys::wl_pointer_axis_source::WL_POINTER_AXIS_SOURCE_FINGER,
+                AxisSource::Finger,
+            ),
+            (
+                sys::wl_pointer_axis_source::WL_POINTER_AXIS_SOURCE_CONTINUOUS,
+                AxisSource::Continuous,
+            ),
+            (
+                sys::wl_pointer_axis_source::WL_POINTER_AXIS_SOURCE_WHEEL_TILT,
+                AxisSource::WheelTilt,
+            ),
+        ] {
+            assert_eq!(AxisSource::from_raw(raw), safe);
+            assert_eq!(safe.to_raw(), raw);
+        }
+
+        for (raw, safe) in [
+            (
+                sys::wl_pointer_axis_relative_direction::WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL,
+                AxisRelativeDirection::Identical,
+            ),
+            (
+                sys::wl_pointer_axis_relative_direction::WL_POINTER_AXIS_RELATIVE_DIRECTION_INVERTED,
+                AxisRelativeDirection::Inverted,
+            ),
+        ] {
+            assert_eq!(AxisRelativeDirection::from_raw(raw), safe);
+            assert_eq!(safe.to_raw(), raw);
+        }
+    }
+
+    /// The decode runs under an `extern "C"` frame where a panic aborts the
+    /// compositor, so a value outside the enum must fall back rather than
+    /// hit an unmatched arm. No wlroots 0.20 build produces one; a future
+    /// header addition would.
+    #[test]
+    fn an_unknown_axis_wire_value_falls_back_instead_of_panicking() {
+        assert_eq!(
+            PointerAxis::from_raw(sys::wl_pointer_axis(99)),
+            PointerAxis::Vertical
+        );
+        assert_eq!(
+            AxisSource::from_raw(sys::wl_pointer_axis_source(99)),
+            AxisSource::Wheel
+        );
+        assert_eq!(
+            AxisRelativeDirection::from_raw(sys::wl_pointer_axis_relative_direction(99)),
+            AxisRelativeDirection::Identical
+        );
+    }
+
+    /// The bit values the fallbacks above assume: `0` is the variant each
+    /// unknown value degrades to, so a bindgen regeneration that renumbered
+    /// them would make the fallback a different (still safe, but wrong)
+    /// choice silently.
+    #[test]
+    fn axis_wire_values_match_the_wayland_protocol() {
+        assert_eq!(sys::wl_pointer_axis::WL_POINTER_AXIS_VERTICAL_SCROLL.0, 0);
+        assert_eq!(sys::wl_pointer_axis::WL_POINTER_AXIS_HORIZONTAL_SCROLL.0, 1);
+        assert_eq!(
+            sys::wl_pointer_axis_source::WL_POINTER_AXIS_SOURCE_WHEEL.0,
+            0
+        );
+        assert_eq!(
+            sys::wl_pointer_axis_relative_direction::WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL.0,
+            0
+        );
+    }
+
     #[test]
     fn modifier_bit_values_match_wlroots_headers() {
         assert_eq!(sys::wlr_keyboard_modifier::WLR_MODIFIER_SHIFT.0, 1);
