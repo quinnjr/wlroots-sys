@@ -45,8 +45,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
 use crate::{
-    ActivationToken, CursorShape, CursorShapeDevice, DecorationMode, Edges, LayerSurfaceId, NodeId,
-    OutputId, PopupId, SceneOutputId, ToplevelId,
+    ActivationToken, AxisRelativeDirection, AxisSource, CursorShape, CursorShapeDevice,
+    DecorationMode, Edges, LayerSurfaceId, NodeId, OutputId, PointerAxis, PopupId, SceneOutputId,
+    ToplevelId,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -173,6 +174,22 @@ pub(crate) enum Event {
         y_milli: i64,
         button: u32,
         pressed: bool,
+        time_msec: u32,
+    },
+
+    /// A scroll. `delta_milli` is thousandths of a pixel, for exactly the
+    /// reason `x_milli` is (see [`Event::PointerMotion`]): `Event` derives
+    /// `Eq`, and one `f64` field would take that derive away from every
+    /// variant. `delta_discrete` is already an integer on the wire — a
+    /// notched wheel's 120-per-detent value — and is carried as one.
+    PointerAxis {
+        x_milli: i64,
+        y_milli: i64,
+        axis: PointerAxis,
+        delta_milli: i64,
+        delta_discrete: i32,
+        source: AxisSource,
+        relative_direction: AxisRelativeDirection,
         time_msec: u32,
     },
 
@@ -727,6 +744,45 @@ mod tests {
                 Event::OutputDestroyed(OutputId(2))
             ],
             "the inner event must arrive after the outer handler returns, not during it"
+        );
+    }
+
+    /// A scroll deferred behind another handler must arrive with every one
+    /// of its eight fields intact. `Event` is `Copy` and queued by value, so
+    /// the only way this breaks is a variant that stopped being `Copy` — a
+    /// single `f64` field would do it — which is exactly why the delta is
+    /// carried as `delta_milli`.
+    #[test]
+    fn a_deferred_pointer_axis_survives_the_queue_unchanged() {
+        let scroll = Event::PointerAxis {
+            x_milli: 640_500,
+            y_milli: 360_250,
+            axis: PointerAxis::Horizontal,
+            delta_milli: -15_500,
+            delta_discrete: -120,
+            source: AxisSource::Finger,
+            relative_direction: AxisRelativeDirection::Inverted,
+            time_msec: 4_242,
+        };
+
+        let mut state = Recorder {
+            seen: Vec::new(),
+            reenter_with: Cell::new(Some(scroll)),
+            dispatcher: std::ptr::null(),
+        };
+        // One provenance throughout, as in the tests above.
+        let p = &raw mut state;
+        let d = Dispatcher::new(p);
+        // SAFETY: as in the tests above.
+        unsafe { (*p).dispatcher = &raw const d };
+
+        // SAFETY: as above.
+        unsafe { d.emit(&(), Event::OutputFrame(OutputId(1)), deliver) };
+
+        assert_eq!(
+            state.seen,
+            vec![Event::OutputFrame(OutputId(1)), scroll],
+            "the scroll must arrive after the outer handler returns, and              carry the same axis, delta, source and direction it was emitted              with"
         );
     }
 

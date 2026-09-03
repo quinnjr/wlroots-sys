@@ -138,7 +138,10 @@ pub use scene::{
     SceneNode, SceneOutput, SceneOutputId, SceneOutputStateOptions, SceneRect, SceneSurface,
     SceneTimer, SceneTree,
 };
-pub use seat::{ActivationToken, CursorShape, CursorShapeDevice, KeyEvent, Modifiers};
+pub use seat::{
+    ActivationToken, AxisRelativeDirection, AxisSource, CursorShape, CursorShapeDevice, KeyEvent,
+    Modifiers, PointerAxis,
+};
 pub use toplevel::{Edges, Toplevel, ToplevelId};
 #[cfg(wlr_has_xwayland)]
 pub use xwayland::{XwaylandSurface, XwaylandSurfaceId, XwaylandWindowType};

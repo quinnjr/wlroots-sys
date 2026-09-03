@@ -474,6 +474,60 @@ pre-map commit listener that calls the new
 `Runtime::schedule_frame_all(&self) -> usize` so XWayland's handshake frame
 callback is answered. Bounded to the handshake commits; never busy-loops.
 
+## 0.20.29 — pointer axis
+
+Scrolling. Until this release nothing in the crate subscribed to a pointer's
+`events.axis` or called `wlr_seat_pointer_notify_axis`, so **no client under a
+compositor built on this crate had ever received a `wl_pointer.axis` event**.
+Wheels, touchpads and trackpoints all reached the compositor and stopped there.
+
+### What you get
+
+- `SeatHandler::pointer_axis(x, y, axis, delta, delta_discrete, source, time_msec)`
+  — defaulted, like every other handler method. Override it if you want to
+  observe or act on scrolls (a workspace switcher on `Super`+wheel, say).
+- `PointerAxis` (`Vertical`/`Horizontal`), `AxisSource`
+  (`Wheel`/`Finger`/`Continuous`/`WheelTilt`) and `AxisRelativeDirection`
+  (`Identical`/`Inverted`), re-exported from the crate root. `delta` is in
+  surface-local pixels; `delta_discrete` is the wire protocol's 1/120-of-a-detent
+  wheel count, and is `0` for a continuous source.
+- **Forwarding to the focused client, whether or not you implement anything.**
+  The scroll goes out unconditionally after the handler returns, followed by the
+  `wl_pointer.frame` that closes the group — exactly how buttons already worked,
+  and for the same reason: a compositor that wants to swallow a scroll does it by
+  not having a client under the pointer, not by filtering.
+
+Both of `on_new_input`'s pointer paths link the listener, so a
+`zwlr_virtual_pointer` scrolls too — which is what a test harness injects with.
+
+### It needs no grab bookkeeping, deliberately
+
+Unlike a button, an axis event takes no part in focus. An explicit seat grab (a
+popup's, a drag's) has its own `wlr_pointer_grab_interface.axis`, which
+`wlr_seat_pointer_notify_axis` routes through inside wlroots; and the implicit
+pointer grab 0.20.27 added is established and released by presses and releases
+alone, so a scroll mid-chord already lands on the surface that grab pinned. The
+axis path therefore records nothing, drops nothing, and re-enters no focus
+evaluation. That is a decision, not an omission, and the code says so.
+
+### Additive
+
+`impl SeatHandler for S {}` written against 0.20.28 still compiles unchanged —
+`tests/axis.rs` asserts it with an empty impl block, the way `tests/popups.rs`
+does for `ToplevelHandler`. The one internal change with any reach is
+`Event::PointerAxis`, which carries its delta as `delta_milli: i64` for the same
+reason coordinates are `x_milli`: the event enum derives `Eq`, and a single
+`f64` field would take that derive away from every variant.
+
+### Coverage
+
+Two symbols moved waived to wrapped: `wlr_seat_pointer_notify_axis` and
+`wlr_pointer_axis_event`, both `not-yet`/M7, now `backend` /
+`SeatHandler::pointer_axis`. `wlr_seat_pointer_send_axis` stays waived and is
+re-reasoned `not-yet`/M7 to `superseded-by`: it is the non-grab-aware form of a
+call the crate now makes properly, and no compositor on this crate should use
+it.
+
 ## 0.20.28 — xdg-popup
 
 Menus, tooltips, dropdowns and popovers. A popup can hang off a toplevel, off a

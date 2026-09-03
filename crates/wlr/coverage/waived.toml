@@ -2293,12 +2293,6 @@ note      = "Output stack completion."
 milestone = "M6"
 
 [[waived]]
-symbol    = "wlr_pointer_axis_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
 symbol    = "wlr_pointer_constraint_v1_state"
 reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
@@ -2788,12 +2782,6 @@ note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
 
 [[waived]]
-symbol    = "wlr_seat_pointer_notify_axis"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
 symbol    = "wlr_seat_pointer_request_set_cursor_event"
 reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
@@ -2801,9 +2789,8 @@ milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_seat_pointer_send_axis"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "`wlr_seat_pointer_notify_axis` (wrapped) is the grab-aware form and is what `SeatHandler::pointer_axis` forwards through; the raw send bypasses the seat's pointer grab, which no compositor on this crate should do."
 
 [[waived]]
 symbol    = "wlr_seat_pointer_send_button"

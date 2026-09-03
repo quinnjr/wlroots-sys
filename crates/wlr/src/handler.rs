@@ -5,9 +5,9 @@
 //! implements only what they use.
 
 use crate::{
-    ActivationToken, CursorShape, CursorShapeDevice, DecorationMode, Edges, KeyEvent, LayerSurface,
-    LayerSurfaceId, NodeId, Output, OutputId, Popup, PopupId, SceneOutputId, Toplevel, ToplevelId,
-    Transform,
+    ActivationToken, AxisSource, CursorShape, CursorShapeDevice, DecorationMode, Edges, KeyEvent,
+    LayerSurface, LayerSurfaceId, NodeId, Output, OutputId, PointerAxis, Popup, PopupId,
+    SceneOutputId, Toplevel, ToplevelId, Transform,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -967,6 +967,49 @@ pub trait SeatHandler {
     /// press it saw, wherever the cursor ended up.
     fn pointer_button(&mut self, x: f64, y: f64, button: u32, pressed: bool, time_msec: u32) {
         let _ = (x, y, button, pressed, time_msec);
+    }
+
+    /// A pointer scrolled at `(x, y)` in scene coordinates.
+    ///
+    /// `delta` is in surface-local pixels along `axis`; `delta_discrete` is
+    /// the notch count a wheel reported, in the wire protocol's units of
+    /// 1/120 of a detent (`0` for a touchpad or any other continuous
+    /// source). `source` says which kind of device produced it, which is
+    /// what tells a scroll-by-lines apart from a scroll-by-pixels.
+    ///
+    /// Like [`pointer_button`](SeatHandler::pointer_button), and unlike a
+    /// key, the scroll is forwarded to the focused client unconditionally
+    /// after this returns — there is no interception, for the same reason:
+    /// a compositor that wants to swallow a scroll does it by not having a
+    /// client under the pointer.
+    ///
+    /// Focus is already pinned by the time this runs. An explicit seat grab
+    /// (a popup's, a drag's) routes the scroll itself inside wlroots, and
+    /// the implicit pointer grab described on
+    /// [`pointer_motion`](SeatHandler::pointer_motion) has already pinned
+    /// focus for the duration of a chord — so a scroll goes where the chord
+    /// went, with no bookkeeping of its own.
+    ///
+    /// Defaulted to a no-op: a compositor that wants nothing but "scrolling
+    /// works" needs to write nothing at all.
+    // Seven parameters plus `&mut self`, one for each field a `wl_pointer`
+    // scroll carries. Not the signal `too_many_arguments` is usually raising:
+    // there is no subset that groups meaningfully, and the alternative — a
+    // public `PointerAxisEvent` struct — would make a *defaulted* trait method
+    // impossible to override without naming a type that exists for no other
+    // reason. `pointer_button` takes its five the same way.
+    #[allow(clippy::too_many_arguments)]
+    fn pointer_axis(
+        &mut self,
+        x: f64,
+        y: f64,
+        axis: PointerAxis,
+        delta: f64,
+        delta_discrete: i32,
+        source: AxisSource,
+        time_msec: u32,
+    ) {
+        let _ = (x, y, axis, delta, delta_discrete, source, time_msec);
     }
 
     /// The session's lock state changed. `locked = true` when a locker takes a
