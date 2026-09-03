@@ -834,6 +834,11 @@ module = "backend"
 item   = "SeatHandler::pointer_motion"
 
 [[wrapped]]
+symbol = "wlr_pointer_axis_event"
+module = "backend"
+item   = "SeatHandler::pointer_axis"
+
+[[wrapped]]
 symbol = "wlr_pointer_button_event"
 module = "backend"
 item   = "SeatHandler::pointer_button"
@@ -1437,6 +1442,11 @@ item   = "SeatHandler::pointer_button"
 symbol = "wlr_seat_pointer_has_grab"
 module = "runtime"
 item   = "Runtime::seat_has_explicit_grab"
+
+[[wrapped]]
+symbol = "wlr_seat_pointer_notify_axis"
+module = "backend"
+item   = "SeatHandler::pointer_axis"
 
 [[wrapped]]
 symbol = "wlr_seat_pointer_notify_button"

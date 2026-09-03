@@ -38,7 +38,7 @@ use crate::dispatch::{Dispatcher, DisplayPinGuard, Event};
 use crate::id::{SourceId, attach_id, find_id};
 use crate::layer::Layer;
 use crate::runtime::{PointerGrab, SceneObserver};
-use crate::seat::{KeyEvent, Modifiers};
+use crate::seat::{AxisRelativeDirection, AxisSource, KeyEvent, Modifiers, PointerAxis};
 use crate::{
     AppliedHead, Band, Display, Error, EventLoop, Handlers, LayerSurface, LayerSurfaceId,
     LoopHandler, NodeId, Output, OutputHandler, OutputId, Popup, PopupId, PopupParent, Result,
@@ -2543,6 +2543,31 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
                 y_milli as f64 / 1000.0,
                 button,
                 pressed,
+                time_msec,
+            );
+        }
+        Event::PointerAxis {
+            x_milli,
+            y_milli,
+            axis,
+            delta_milli,
+            delta_discrete,
+            source,
+            // Carried on the event so it is a faithful record of the wire
+            // event, but deliberately not a handler argument: the forwarding
+            // to the client happens in `on_pointer_axis`, which reads the
+            // wlroots event directly, and "natural scrolling" is a flag the
+            // *client* applies to the delta, not a compositor policy input.
+            relative_direction: _,
+            time_msec,
+        } => {
+            state.pointer_axis(
+                x_milli as f64 / 1000.0,
+                y_milli as f64 / 1000.0,
+                axis,
+                delta_milli as f64 / 1000.0,
+                delta_discrete,
+                source,
                 time_msec,
             );
         }
@@ -6860,6 +6885,12 @@ unsafe extern "C" fn on_new_virtual_pointer<S: Handlers>(
                 (*bound).session,
                 &raw const *alive,
             ),
+            Registration::link_bare(
+                &raw mut (*pointer).events.axis,
+                on_pointer_axis::<S>,
+                (*bound).session,
+                &raw const *alive,
+            ),
         ];
 
         // Keyed by the base input-device pointer, exactly as `on_new_input`
@@ -6987,6 +7018,12 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                     listeners.push(Registration::link_bare(
                         &raw mut (*raw_pointer).events.button,
                         on_pointer_button::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*raw_pointer).events.axis,
+                        on_pointer_axis::<S>,
                         (*bound).session,
                         &raw const *alive,
                     ));
@@ -7747,6 +7784,77 @@ unsafe extern "C" fn on_pointer_button<S: Handlers>(
     }
 }
 
+unsafe extern "C" fn on_pointer_axis<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live pointer's `events.axis`,
+    // whose data is a `wlr_pointer_axis_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_pointer_axis_event>();
+        let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
+        let Some(cursor) = runtime.cursor_ptr() else {
+            return;
+        };
+        runtime.ensure_cursor_image();
+
+        // A scroll does not move the cursor; the position is read only so the
+        // handler is told where the scroll happened, exactly as a button is.
+        let (x, y) = ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y);
+        let axis = PointerAxis::from_raw((*ev).orientation);
+        let source = AxisSource::from_raw((*ev).source);
+        let relative_direction = AxisRelativeDirection::from_raw((*ev).relative_direction);
+        let time_msec = (*ev).time_msec;
+
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::PointerAxis {
+                x_milli: (x * 1000.0) as i64,
+                y_milli: (y * 1000.0) as i64,
+                axis,
+                delta_milli: ((*ev).delta * 1000.0) as i64,
+                delta_discrete: (*ev).delta_discrete,
+                source,
+                relative_direction,
+                time_msec,
+            },
+            deliver,
+        );
+
+        // Unconditional after the handler, exactly like a button — see
+        // `SeatHandler::pointer_axis`'s own doc.
+        //
+        // And, unlike a button, with no grab bookkeeping of its own. An
+        // explicit seat grab's `wlr_seat_pointer_grab_interface.axis` is
+        // honoured by `wlr_seat_pointer_notify_axis` itself, inside wlroots;
+        // the implicit grab this crate keeps is established and torn down by
+        // presses and releases alone, and a scroll mid-chord must land on the
+        // surface that grab already pinned. So there is nothing to record,
+        // drop, or re-enter here: no `enter_surface_under_cursor`, no
+        // `set_pointer_grab`.
+        if let Some(seat) = runtime.seat_ptr() {
+            let seat = seat.as_ptr();
+            sys::wlr_seat_pointer_notify_axis(
+                seat,
+                time_msec,
+                axis.to_raw(),
+                (*ev).delta,
+                (*ev).delta_discrete,
+                source.to_raw(),
+                relative_direction.to_raw(),
+            );
+            // The frame that closes the axis group, on the same terms as the
+            // motion and button paths: one `notify_frame` per input event,
+            // after the notify, only when a seat exists.
+            sys::wlr_seat_pointer_notify_frame(seat);
+        }
+    }
+}
+
 /// Borrow the output `id` names, if this session still knows of one.
 ///
 /// The registry borrow is released before `f` runs: a handler can re-enter
@@ -7850,6 +7958,7 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::Key { .. }
         | Event::PointerMotion { .. }
         | Event::PointerButton { .. }
+        | Event::PointerAxis { .. }
         // Unreachable: `run` never registers a session-lock manager either
         // (`Backend::register_toplevel_and_input` is `run_all`'s hook; `run`
         // uses `no_extra`), so this cannot be produced on this path.

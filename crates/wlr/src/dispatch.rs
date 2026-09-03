@@ -45,8 +45,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
 use crate::{
-    ActivationToken, CursorShape, CursorShapeDevice, DecorationMode, Edges, LayerSurfaceId, NodeId,
-    OutputId, PopupId, SceneOutputId, ToplevelId,
+    ActivationToken, AxisRelativeDirection, AxisSource, CursorShape, CursorShapeDevice,
+    DecorationMode, Edges, LayerSurfaceId, NodeId, OutputId, PointerAxis, PopupId, SceneOutputId,
+    ToplevelId,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -173,6 +174,22 @@ pub(crate) enum Event {
         y_milli: i64,
         button: u32,
         pressed: bool,
+        time_msec: u32,
+    },
+
+    /// A scroll. `delta_milli` is thousandths of a pixel, for exactly the
+    /// reason `x_milli` is (see [`Event::PointerMotion`]): `Event` derives
+    /// `Eq`, and one `f64` field would take that derive away from every
+    /// variant. `delta_discrete` is already an integer on the wire — a
+    /// notched wheel's 120-per-detent value — and is carried as one.
+    PointerAxis {
+        x_milli: i64,
+        y_milli: i64,
+        axis: PointerAxis,
+        delta_milli: i64,
+        delta_discrete: i32,
+        source: AxisSource,
+        relative_direction: AxisRelativeDirection,
         time_msec: u32,
     },
 
