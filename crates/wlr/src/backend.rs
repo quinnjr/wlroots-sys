@@ -4764,12 +4764,53 @@ unsafe extern "C" fn on_text_input_commit<S: Handlers>(
     }
 }
 
-/// A text-input requested `disable`. Inert until the relay's deactivation path
-/// lands (A4).
+/// A text-input requested `disable` — the inverse of `enable`. If this
+/// text-input is the one currently driving the bound input-method, deactivate
+/// the IME: `wlr_input_method_v2_send_deactivate` + `send_done`, then clear
+/// `focused_text_input` so [`Runtime::input_method_active`] reads false. A
+/// `disable` from any other text-input is ignored.
+///
+/// This mirrors the leave-triggered deactivate in
+/// [`Runtime::relay_keyboard_focus`] — same deactivate, done, clear sequence.
+///
+/// The `wlr_text_input_v3` is recovered from the signal `data`, not from
+/// `container_of` on `l`: this crate links every listener inside a heap [`Bound`]
+/// (recovered by [`bound_of`]) rather than embedding it in the wlroots object, so
+/// `l` does not sit within the text-input. wlroots emits `events.disable` with
+/// the `wlr_text_input_v3` as `data`, exactly as `on_text_input_enable` reads it.
 unsafe extern "C" fn on_text_input_disable<S: Handlers>(
-    _l: *mut sys::wl_listener,
-    _data: *mut std::ffi::c_void,
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
 ) {
+    // SAFETY: linked by `on_new_text_input` into this text-input's own
+    // `events.disable`; the `Bound` behind `l` carries the `*const Session<S>`
+    // paired with this instantiation. `data` is the live `*mut wlr_text_input_v3`
+    // that disabled (wlroots' object-signal convention), null-guarded below and
+    // only dereferenced, never freed, within this call.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let Some(ti) = NonNull::new(data.cast::<sys::wlr_text_input_v3>()) else {
+            return;
+        };
+        let ti = ti.as_ptr();
+        let mut im = runtime.inner.input_method.borrow_mut();
+        let Some(entry) = im.as_mut() else {
+            // No input-method is bound: nothing to deactivate.
+            return;
+        };
+        // Only the text-input currently driving the IME may deactivate it. A
+        // `disable` from any other text-input is ignored.
+        if entry.focused_text_input != runtime.text_input_key_for(ti) {
+            return;
+        }
+        let raw_im = entry.raw.as_ptr();
+        // SAFETY: `entry.raw` names a live input-method for its entry's lifetime.
+        sys::wlr_input_method_v2_send_deactivate(raw_im);
+        sys::wlr_input_method_v2_send_done(raw_im);
+        entry.focused_text_input = None;
+    }
 }
 
 /// The input-method `commit`ted (its `commit_string`/`preedit`/`delete`). Inert
