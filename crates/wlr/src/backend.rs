@@ -4715,12 +4715,53 @@ unsafe fn forward_text_input_state_to_ime(
     }
 }
 
-/// A text-input `commit`ted a new state. Inert until the relay's state-forward
-/// path lands (A5).
+/// An already-active text-input `commit`ted new `current` state: re-forward the
+/// post-diff surrounding-text / content-type / change-cause to the bound
+/// input-method and `done`, but only while this text-input is the one currently
+/// driving the IME.
+///
+/// The `wlr_text_input_v3` is recovered from the signal `data`, not from
+/// `container_of` on `l`: this crate links every listener inside a heap [`Bound`]
+/// (recovered by [`bound_of`]) rather than embedding it in the wlroots object, so
+/// `l` does not sit within the text-input. wlroots emits `events.commit` with the
+/// `wlr_text_input_v3` as `data`, exactly as `on_text_input_enable` reads it.
 unsafe extern "C" fn on_text_input_commit<S: Handlers>(
-    _l: *mut sys::wl_listener,
-    _data: *mut std::ffi::c_void,
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
 ) {
+    // SAFETY: linked by `on_new_text_input` into this text-input's own
+    // `events.commit`; the `Bound` behind `l` carries the `*const Session<S>`
+    // paired with this instantiation. `data` is the live `*mut wlr_text_input_v3`
+    // that committed (wlroots' object-signal convention), null-guarded below and
+    // only dereferenced, never freed, within this call.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let Some(ti) = NonNull::new(data.cast::<sys::wlr_text_input_v3>()) else {
+            return;
+        };
+        let ti = ti.as_ptr();
+        let mut im = runtime.inner.input_method.borrow_mut();
+        let Some(entry) = im.as_mut() else {
+            // No input-method is bound: nothing to forward to.
+            return;
+        };
+        // Only re-forward when this text-input is the one currently driving the
+        // IME. A commit from any other text-input is ignored.
+        if entry.focused_text_input != runtime.text_input_key_for(ti) {
+            return;
+        }
+        let raw_im = entry.raw.as_ptr();
+        // SAFETY: `entry.raw` names a live input-method for its entry's lifetime;
+        // `ti` is the live text-input recovered above.
+        forward_text_input_state_to_ime(ti, raw_im);
+        // The change-cause is a plain enum value on `current`, not feature-gated;
+        // wlroots defaults it to `INPUT_CHANGE` (0) when the client sends no
+        // cause. Forward it verbatim; the compositor never interprets it.
+        sys::wlr_input_method_v2_send_text_change_cause(raw_im, (*ti).current.text_change_cause);
+        sys::wlr_input_method_v2_send_done(raw_im);
+    }
 }
 
 /// A text-input requested `disable`. Inert until the relay's deactivation path
