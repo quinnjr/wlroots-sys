@@ -116,6 +116,43 @@ pub(crate) struct FdSource {
     pub(crate) id: SourceId,
 }
 
+/// One tracked `zwp_text_input_v3` object: an editable field a client has
+/// declared. Keyed in [`RuntimeInner::text_inputs`] by its destroy-listener
+/// address, so the destroy handler can find and evict its own entry.
+///
+/// `raw` is a borrowed wlroots pointer, never owned — wlroots frees the
+/// `wlr_text_input_v3` with its client resource, and the `destroy` listener
+/// (held in `_listeners`) is what removes this entry before that happens.
+/// `client` is retained so the relay can match a text-input to the seat and
+/// input-method sharing its client. The four listeners (`enable`, `commit`,
+/// `disable`, `destroy`) are parked in `_listeners` purely to keep them
+/// linked for this entry's lifetime; they are unlinked when it is dropped.
+pub(crate) struct TextInputEntry {
+    pub(crate) raw: NonNull<sys::wlr_text_input_v3>,
+    pub(crate) client: *mut sys::wl_client,
+    pub(crate) _listeners: [crate::backend::Registration; 4],
+}
+
+/// The single tracked `zwp_input_method_v2` object (decision #3: at most one
+/// per seat). Held as [`RuntimeInner::input_method`]'s `Some` while an
+/// input-method is bound.
+///
+/// `raw` is a borrowed wlroots pointer, never owned — freed with its client
+/// resource, with the `destroy` listener (in `_listeners`) clearing this slot
+/// first. `focused_text_input` is the [`RuntimeInner::text_inputs`] map key of
+/// the text-input currently driving activation, or `None` when no enabled
+/// text-input is focused (the resting state until a later task wires
+/// activation). `keyboard_grab` is the active
+/// `wlr_input_method_keyboard_grab_v2`, a borrowed pointer, once the method
+/// grabs the keyboard. The listeners vary in number over the relay's tasks,
+/// so they live in a `Vec` rather than a fixed array.
+pub(crate) struct InputMethodEntry {
+    pub(crate) raw: NonNull<sys::wlr_input_method_v2>,
+    pub(crate) focused_text_input: Option<usize>,
+    pub(crate) keyboard_grab: Option<NonNull<sys::wlr_input_method_keyboard_grab_v2>>,
+    pub(crate) _listeners: Vec<crate::backend::Registration>,
+}
+
 pub(crate) struct RuntimeInner {
     pub(crate) sources: RefCell<Vec<FdSource>>,
 
@@ -313,6 +350,26 @@ pub(crate) struct RuntimeInner {
     /// it is created — see [`Runtime::create_gamma_control_manager`] — so the
     /// scene applies every ramp and signals `failed`/`destroy` itself.
     pub(crate) gamma_control_manager: RefCell<Option<NonNull<sys::wlr_gamma_control_manager_v1>>>,
+
+    /// The `zwp_text_input_manager_v3` global, once created — lets a client
+    /// declare an editable field whose state the crate relays to the bound
+    /// input-method. `Option`, same rationale as the other manager globals.
+    pub(crate) text_input_manager: RefCell<Option<NonNull<sys::wlr_text_input_manager_v3>>>,
+
+    /// The `zwp_input_method_manager_v2` global, once created — lets an
+    /// input-method client (an IME) offer composed text back to focused
+    /// fields. `Option`, same rationale as the other manager globals.
+    pub(crate) input_method_manager: RefCell<Option<NonNull<sys::wlr_input_method_manager_v2>>>,
+
+    /// Every live `zwp_text_input_v3` object, keyed by its destroy-listener
+    /// address so the destroy handler can evict its own entry. Empty until a
+    /// client binds a text-input. See [`TextInputEntry`].
+    pub(crate) text_inputs: RefCell<HashMap<usize, TextInputEntry>>,
+
+    /// The single tracked `zwp_input_method_v2` object, or `None` when no
+    /// input-method is bound (decision #3: at most one per seat). See
+    /// [`InputMethodEntry`].
+    pub(crate) input_method: RefCell<Option<InputMethodEntry>>,
 
     /// The pointer constraint currently activated on the focused surface, or
     /// `None` when the pointer is unconstrained. `backend.rs`'s
@@ -1187,6 +1244,10 @@ impl Runtime {
                 cursor_shape_manager: RefCell::new(None),
                 xdg_activation_manager: RefCell::new(None),
                 gamma_control_manager: RefCell::new(None),
+                text_input_manager: RefCell::new(None),
+                input_method_manager: RefCell::new(None),
+                text_inputs: RefCell::new(HashMap::new()),
+                input_method: RefCell::new(None),
                 active_constraint: std::cell::Cell::new(None),
                 pointer_grab: std::cell::Cell::new(None),
                 idle_notifier: RefCell::new(None),
@@ -5174,6 +5235,57 @@ impl Runtime {
         *self.inner.pointer_constraints_manager.borrow()
     }
 
+    /// Create the `zwp_text_input_manager_v3` global. Apps bind it to declare
+    /// an editable field; the crate relays their state to the bound
+    /// input-method. Errors if called twice.
+    pub fn create_text_input_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.text_input_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_text_input_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_text_input_manager_v3_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_text_input_manager_v3_create"))?;
+        *self.inner.text_input_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// Create the `zwp_input_method_manager_v2` global. At most one client per
+    /// seat is tracked (decision #3); a second is sent `unavailable`. Errors
+    /// if called twice.
+    pub fn create_input_method_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.input_method_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_input_method_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_input_method_manager_v2_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_input_method_manager_v2_create"))?;
+        *self.inner.input_method_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// The `zwp_text_input_manager_v3` manager, once created via
+    /// [`Runtime::create_text_input_manager`] — read by `backend.rs` to link
+    /// the `new_text_input` listener that populates
+    /// [`RuntimeInner::text_inputs`].
+    pub(crate) fn text_input_manager_ptr(&self) -> Option<NonNull<sys::wlr_text_input_manager_v3>> {
+        *self.inner.text_input_manager.borrow()
+    }
+
+    /// The `zwp_input_method_manager_v2` manager, once created via
+    /// [`Runtime::create_input_method_manager`] — read by `backend.rs` to link
+    /// the `new_input_method` listener that sets [`RuntimeInner::input_method`].
+    pub(crate) fn input_method_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_input_method_manager_v2>> {
+        *self.inner.input_method_manager.borrow()
+    }
+
     /// Create the `wp_cursor_shape_manager_v1` global, letting clients name
     /// the cursor image they want instead of drawing their own. Errors if
     /// called twice.
@@ -6479,6 +6591,17 @@ impl Runtime {
     /// it. Tests read this to prove the state machine.
     pub fn is_session_locked(&self) -> bool {
         self.inner.session_locked.get()
+    }
+
+    /// Whether the tracked input-method is currently activated for a focused,
+    /// enabled text-input. Read-only oracle for the relay; mirrors
+    /// `is_session_locked`'s shape.
+    pub fn input_method_active(&self) -> bool {
+        self.inner
+            .input_method
+            .borrow()
+            .as_ref()
+            .is_some_and(|e| e.focused_text_input.is_some())
     }
 
     pub(crate) fn session_lock_ptr(&self) -> Option<NonNull<sys::wlr_session_lock_v1>> {
