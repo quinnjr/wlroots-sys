@@ -149,6 +149,9 @@ pub(crate) struct TextInputEntry {
 pub(crate) struct InputMethodEntry {
     pub(crate) raw: NonNull<sys::wlr_input_method_v2>,
     pub(crate) focused_text_input: Option<usize>,
+    // Written at construction, read once A6.2 wires the keyboard grab; kept now
+    // so that milestone is purely additive.
+    #[allow(dead_code)]
     pub(crate) keyboard_grab: Option<NonNull<sys::wlr_input_method_keyboard_grab_v2>>,
     pub(crate) _listeners: Vec<crate::backend::Registration>,
 }
@@ -8573,16 +8576,16 @@ impl Runtime {
                     // so the wlroots leave-assertion holds.
                     unsafe { sys::wlr_text_input_v3_send_leave(ti.raw.as_ptr()) };
                     let mut im = self.inner.input_method.borrow_mut();
-                    if let Some(entry) = im.as_mut() {
-                        if entry.focused_text_input == Some(*key) {
-                            // SAFETY: `entry.raw` names a live input-method for
-                            // its entry's lifetime.
-                            unsafe {
-                                sys::wlr_input_method_v2_send_deactivate(entry.raw.as_ptr());
-                                sys::wlr_input_method_v2_send_done(entry.raw.as_ptr());
-                            }
-                            entry.focused_text_input = None;
+                    if let Some(entry) = im.as_mut()
+                        && entry.focused_text_input == Some(*key)
+                    {
+                        // SAFETY: `entry.raw` names a live input-method for
+                        // its entry's lifetime.
+                        unsafe {
+                            sys::wlr_input_method_v2_send_deactivate(entry.raw.as_ptr());
+                            sys::wlr_input_method_v2_send_done(entry.raw.as_ptr());
                         }
+                        entry.focused_text_input = None;
                     }
                 }
             }
