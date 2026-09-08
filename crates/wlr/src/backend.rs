@@ -4813,12 +4813,89 @@ unsafe extern "C" fn on_text_input_disable<S: Handlers>(
     }
 }
 
-/// The input-method `commit`ted (its `commit_string`/`preedit`/`delete`). Inert
-/// until the relay's send-to-text-input path lands (A5).
+/// The input-method `commit`ted (relay decision #5, reverse direction). Relays
+/// the input-method's newly-committed `current` state — preedit string, commit
+/// string, and delete-surrounding-text, each forwarded only when populated —
+/// back to the application text-input the input-method's `focused_text_input`
+/// names, then finishes with `done`. If no input-method is bound, if it has no
+/// focused text-input, or if that text-input's entry is gone, the handler does
+/// nothing: the input-method committed with nothing on the receiving end.
+///
+/// The compositor does not interpret the committed text; it relays each field
+/// faithfully to the text-input, exactly as the input-method produced it.
+///
+/// The `wlr_input_method_v2` is recovered from the signal `data`, not from
+/// `container_of` on `l`: this crate links every listener inside a heap [`Bound`]
+/// (recovered by [`bound_of`]) rather than embedding it in the wlroots object, so
+/// `l` does not sit within the input-method. wlroots emits `events.commit` with
+/// the committing `wlr_input_method_v2` as `data` (`data == input_method`) —
+/// the same object `on_new_input_method` tracked; only one input-method is ever
+/// bound, so it is `focused_text_input`'s owner too.
+///
+/// `wlr_text_input_v3_send_done` takes only the text-input: wlroots reads and
+/// advances the text-input's own `current_serial` internally, so no serial is
+/// passed here.
 unsafe extern "C" fn on_input_method_commit<S: Handlers>(
-    _l: *mut sys::wl_listener,
-    _data: *mut std::ffi::c_void,
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
 ) {
+    // SAFETY: linked by `on_new_input_method` into this input-method's own
+    // `events.commit`; the `Bound` behind `l` carries the `*const Session<S>`
+    // paired with this instantiation. `data` is the live `*mut wlr_input_method_v2`
+    // that committed (wlroots' object-signal convention), null-guarded below and
+    // only dereferenced, never freed, within this call.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let Some(im) = NonNull::new(data.cast::<sys::wlr_input_method_v2>()) else {
+            return;
+        };
+        // `input_method` and `text_inputs` are distinct RefCells; hold both
+        // immutable borrows across the sends (no relay callback re-enters either),
+        // matching `on_text_input_disable`.
+        let im_ref = runtime.inner.input_method.borrow();
+        let Some(entry) = im_ref.as_ref() else {
+            // No input-method is bound: nothing to relay to.
+            return;
+        };
+        let Some(key) = entry.focused_text_input else {
+            // The input-method committed with no focused text-input.
+            return;
+        };
+        let tis = runtime.inner.text_inputs.borrow();
+        let Some(ti) = tis.get(&key) else {
+            // The focused text-input's entry is gone.
+            return;
+        };
+        let ti = ti.raw.as_ptr();
+        // SAFETY: `im` is the live committing input-method; `current` is an inline
+        // field holding the state it just committed. `ti` names a live text-input
+        // for its entry's lifetime.
+        let cur = &(*im.as_ptr()).current;
+        // Forward each field only when the input-method populated it. The text
+        // pointers are `*const c_char` owned by the input-method state; guard for
+        // null before handing them to the send helpers.
+        if !cur.preedit.text.is_null() {
+            sys::wlr_text_input_v3_send_preedit_string(
+                ti,
+                cur.preedit.text,
+                cur.preedit.cursor_begin,
+                cur.preedit.cursor_end,
+            );
+        }
+        if !cur.commit_text.is_null() {
+            sys::wlr_text_input_v3_send_commit_string(ti, cur.commit_text);
+        }
+        if cur.delete.before_length != 0 || cur.delete.after_length != 0 {
+            sys::wlr_text_input_v3_send_delete_surrounding_text(
+                ti,
+                cur.delete.before_length,
+                cur.delete.after_length,
+            );
+        }
+        sys::wlr_text_input_v3_send_done(ti);
+    }
 }
 
 /// Whether a `cursor-shape-v1` request coming from `seat_client` is entitled
