@@ -268,6 +268,38 @@ struct Bound {
     /// [`XwaylandSurfaceId`] from here, never from `data`.
     #[cfg(wlr_has_xwayland)]
     xwayland: Option<XwaylandSurfaceId>,
+
+    /// The text-input this listener belongs to, for the three per-text-input
+    /// lifecycle listeners `on_new_text_input` links (`enable`/`commit`/
+    /// `disable` on the text-input's own `events`); `None` for every other
+    /// listener in this file — the text-input's `destroy` listener included,
+    /// which recovers its entry by the firing listener's address (`l`) and
+    /// needs no object identity.
+    ///
+    /// A raw object pointer rather than a minted id, because this crate mints
+    /// no id for a text-input (it is keyed in `RuntimeInner::text_inputs` by
+    /// its destroy listener's address). Load-bearing in the same way
+    /// `toplevel` is, and for the identical reason `on_toplevel_map`'s doc
+    /// gives: wlroots 0.20 emits `wlr_text_input_v3.events.{enable,commit,
+    /// disable}` with a **null** `data` argument — the same per-object
+    /// null-data convention `wlr_surface.events.map`/`.unmap` follow — so a
+    /// callback that read the object out of `data` would recover nothing and
+    /// early-`return` on every real fire (the app→IME activation direction is
+    /// dead until it reads this field instead). Set at link time by
+    /// [`Registration::link_text_input`].
+    text_input: Option<NonNull<sys::wlr_text_input_v3>>,
+
+    /// The input-method this listener belongs to, for the single per-input-
+    /// method `commit` listener `on_new_input_method` links; `None` for every
+    /// other listener in this file — the input-method's `destroy` listener
+    /// included, which recovers the tracked entry by listener address.
+    ///
+    /// A raw object pointer, for the reason `text_input`'s own doc gives, and
+    /// load-bearing for the identical reason: wlroots 0.20 emits
+    /// `wlr_input_method_v2.events.commit` with a **null** `data`, so
+    /// `on_input_method_commit` must recover the object here rather than from
+    /// the signal. Set at link time by [`Registration::link_input_method`].
+    input_method: Option<NonNull<sys::wlr_input_method_v2>>,
 }
 
 // `bound_of`'s cast is sound only while `listener` is `Bound`'s first field, at
@@ -337,6 +369,8 @@ impl Registration {
             popup: None,
             #[cfg(wlr_has_xwayland)]
             xwayland: None,
+            text_input: None,
+            input_method: None,
         });
 
         // SAFETY: the caller guarantees `signal` is an initialised `wl_signal`,
@@ -392,6 +426,8 @@ impl Registration {
             node: None,
             popup: None,
             xwayland: Some(xwayland),
+            text_input: None,
+            input_method: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -655,6 +691,128 @@ impl Registration {
             popup: Some(popup),
             #[cfg(wlr_has_xwayland)]
             xwayland: None,
+            text_input: None,
+            input_method: None,
+        });
+
+        // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
+        // caller's contract, and the listener is a freshly boxed one whose
+        // address stays put until this `Registration` drops.
+        unsafe { sys::wl_signal_add(signal, &raw mut bound.listener) };
+
+        Registration { bound }
+    }
+
+    /// Link a per-text-input lifecycle listener, carrying the raw
+    /// `wlr_text_input_v3` its callback reads back from [`Bound::text_input`].
+    /// Every id slot is `None`.
+    ///
+    /// A dedicated constructor rather than a parameter on
+    /// [`Registration::link`], following `link_popup`'s precedent and for the
+    /// reason that function's own doc gives: `link`'s slot list is frozen at
+    /// the five ids the non-text-input call sites use, and threading the raw
+    /// object pointer through it would burden every one of them with a value
+    /// only these leave set. This builds the boxed [`Bound`] directly, exactly
+    /// as `link` does.
+    ///
+    /// Load-bearing because wlroots 0.20 emits
+    /// `wlr_text_input_v3.events.{enable,commit,disable}` with a **null**
+    /// `data` (see [`Bound::text_input`]); the recovered object is what
+    /// `on_text_input_enable`/`_commit`/`_disable` act on.
+    ///
+    /// `alive` is null — the **stronger** claim (see [`Registration::drop`]):
+    /// every one of these is dropped from inside the text-input's own destroy
+    /// emission, while the text-input is still alive, or while the run still
+    /// stands.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`]: `signal` must point at an initialised
+    /// `wl_signal` whose owner outlives the returned `Registration`, and
+    /// `session` must be a `*const Session<S>` for the `S` `notify` casts it
+    /// back to, valid for as long as the registration lives.
+    unsafe fn link_text_input(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        text_input: NonNull<sys::wlr_text_input_v3>,
+    ) -> Self {
+        let mut bound = Box::new(Bound {
+            listener: sys::wl_listener {
+                link: sys::wl_list {
+                    prev: std::ptr::null_mut(),
+                    next: std::ptr::null_mut(),
+                },
+                notify,
+            },
+            session,
+            alive: std::ptr::null(),
+            flag: std::ptr::null(),
+            id: None,
+            toplevel: None,
+            layer: None,
+            node: None,
+            popup: None,
+            #[cfg(wlr_has_xwayland)]
+            xwayland: None,
+            text_input: Some(text_input),
+            input_method: None,
+        });
+
+        // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
+        // caller's contract, and the listener is a freshly boxed one whose
+        // address stays put until this `Registration` drops.
+        unsafe { sys::wl_signal_add(signal, &raw mut bound.listener) };
+
+        Registration { bound }
+    }
+
+    /// Link the per-input-method `commit` listener, carrying the raw
+    /// `wlr_input_method_v2` its callback reads back from
+    /// [`Bound::input_method`]. Every id slot is `None`.
+    ///
+    /// A dedicated constructor for the same reason `link_text_input` is, and
+    /// load-bearing for the same reason: wlroots 0.20 emits
+    /// `wlr_input_method_v2.events.commit` with a **null** `data` (see
+    /// [`Bound::input_method`]); the recovered object is what
+    /// `on_input_method_commit` reads its committed `current` state from.
+    ///
+    /// `alive` is null — the **stronger** claim (see [`Registration::drop`]):
+    /// this is dropped from inside the input-method's own destroy emission, or
+    /// while the run still stands.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`]: `signal` must point at an initialised
+    /// `wl_signal` whose owner outlives the returned `Registration`, and
+    /// `session` must be a `*const Session<S>` for the `S` `notify` casts it
+    /// back to, valid for as long as the registration lives.
+    unsafe fn link_input_method(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        input_method: NonNull<sys::wlr_input_method_v2>,
+    ) -> Self {
+        let mut bound = Box::new(Bound {
+            listener: sys::wl_listener {
+                link: sys::wl_list {
+                    prev: std::ptr::null_mut(),
+                    next: std::ptr::null_mut(),
+                },
+                notify,
+            },
+            session,
+            alive: std::ptr::null(),
+            flag: std::ptr::null(),
+            id: None,
+            toplevel: None,
+            layer: None,
+            node: None,
+            popup: None,
+            #[cfg(wlr_has_xwayland)]
+            xwayland: None,
+            text_input: None,
+            input_method: Some(input_method),
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -4461,23 +4619,31 @@ unsafe extern "C" fn on_new_text_input<S: Handlers>(
         // `on_new_pointer_constraint`: the object cannot be freed by anything
         // other than the `destroy` this very entry watches, which unlinks all
         // four listeners together when the entry is dropped.
-        let enable = Registration::link_bare(
+        //
+        // `enable`/`commit`/`disable` are linked with `link_text_input` so each
+        // carries `ti` in its `Bound::text_input`: wlroots 0.20 emits those
+        // three lifecycle signals with a **null** `data`, so the handlers
+        // recover the object from `Bound`, not the signal (the same discipline
+        // `on_toplevel_map` follows for `wlr_surface.events.map`). `destroy`
+        // needs no object identity — it recovers its entry by the firing
+        // listener's own address — so it stays on `link_bare`.
+        let enable = Registration::link_text_input(
             &raw mut (*ti.as_ptr()).events.enable,
             on_text_input_enable::<S>,
             (*bound).session,
-            std::ptr::null(),
+            ti,
         );
-        let commit = Registration::link_bare(
+        let commit = Registration::link_text_input(
             &raw mut (*ti.as_ptr()).events.commit,
             on_text_input_commit::<S>,
             (*bound).session,
-            std::ptr::null(),
+            ti,
         );
-        let disable = Registration::link_bare(
+        let disable = Registration::link_text_input(
             &raw mut (*ti.as_ptr()).events.disable,
             on_text_input_disable::<S>,
             (*bound).session,
-            std::ptr::null(),
+            ti,
         );
         let destroy = Registration::link_bare(
             &raw mut (*ti.as_ptr()).events.destroy,
@@ -4548,11 +4714,17 @@ unsafe extern "C" fn on_new_input_method<S: Handlers>(
             sys::wlr_input_method_v2_send_unavailable(im.as_ptr());
             return;
         }
-        let commit = Registration::link_bare(
+        // `commit` is linked with `link_input_method` so it carries `im` in its
+        // `Bound::input_method`: wlroots 0.20 emits `events.commit` with a
+        // **null** `data`, so `on_input_method_commit` recovers the object from
+        // `Bound`, not the signal (the `on_toplevel_map` discipline). `destroy`
+        // recovers the tracked entry by listener address and needs no identity,
+        // so it stays on `link_bare`.
+        let commit = Registration::link_input_method(
             &raw mut (*im.as_ptr()).events.commit,
             on_input_method_commit::<S>,
             (*bound).session,
-            std::ptr::null(),
+            im,
         );
         let destroy = Registration::link_bare(
             &raw mut (*im.as_ptr()).events.destroy,
@@ -4639,26 +4811,29 @@ unsafe extern "C" fn on_input_method_destroy<S: Handlers>(
 /// input-method is bound, or this text-input is not the focused one, the handler
 /// does nothing — the two "half-satisfied" states the relay must tolerate.
 ///
-/// The `wlr_text_input_v3` is recovered from the signal `data`, not from
-/// `container_of` on `l`: this crate links every listener inside a heap [`Bound`]
-/// (recovered by [`bound_of`]) rather than embedding it in the wlroots object,
-/// so `l` does not sit within the text-input. wlroots emits `events.enable` with
-/// the `wlr_text_input_v3` as `data`, exactly as it does `new_text_input` — the
-/// same source `on_new_text_input` reads.
+/// The `wlr_text_input_v3` is recovered from [`Bound::text_input`], not from the
+/// signal `data`: wlroots 0.20 emits `wlr_text_input_v3.events.enable` with a
+/// **null** `data` argument (the same per-object null-data convention
+/// `wlr_surface.events.map`/`.unmap` follow — see [`on_toplevel_map`]), so a
+/// callback reading the object out of `data` would recover nothing and
+/// early-`return` on every real fire. `on_new_text_input` linked this listener
+/// with [`Registration::link_text_input`], which set `Bound::text_input` to the
+/// firing text-input.
 unsafe extern "C" fn on_text_input_enable<S: Handlers>(
     l: *mut sys::wl_listener,
-    data: *mut std::ffi::c_void,
+    _data: *mut std::ffi::c_void,
 ) {
     // SAFETY: linked by `on_new_text_input` into this text-input's own
     // `events.enable`; the `Bound` behind `l` carries the `*const Session<S>`
-    // paired with this instantiation. `data` is the live `*mut wlr_text_input_v3`
-    // that enabled (wlroots' object-signal convention), null-guarded below and
-    // only dereferenced, never freed, within this call.
+    // paired with this instantiation and the `*mut wlr_text_input_v3` this
+    // listener was linked for. wlroots emits `events.enable` with null `data`,
+    // so the object comes from `Bound`; it is live for this emission and only
+    // dereferenced, never freed, within this call.
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let runtime = (*session).runtime;
-        let Some(ti) = NonNull::new(data.cast::<sys::wlr_text_input_v3>()) else {
+        let Some(ti) = (*bound).text_input else {
             return;
         };
         let ti = ti.as_ptr();
@@ -4741,25 +4916,27 @@ unsafe fn forward_text_input_state_to_ime(
 /// input-method and `done`, but only while this text-input is the one currently
 /// driving the IME.
 ///
-/// The `wlr_text_input_v3` is recovered from the signal `data`, not from
-/// `container_of` on `l`: this crate links every listener inside a heap [`Bound`]
-/// (recovered by [`bound_of`]) rather than embedding it in the wlroots object, so
-/// `l` does not sit within the text-input. wlroots emits `events.commit` with the
-/// `wlr_text_input_v3` as `data`, exactly as `on_text_input_enable` reads it.
+/// The `wlr_text_input_v3` is recovered from [`Bound::text_input`], not from the
+/// signal `data`: wlroots 0.20 emits `wlr_text_input_v3.events.commit` with a
+/// **null** `data` argument (the null-data convention [`on_toplevel_map`]
+/// documents), so the object comes from the `Bound` this listener was linked
+/// with by [`Registration::link_text_input`], exactly as `on_text_input_enable`
+/// reads it.
 unsafe extern "C" fn on_text_input_commit<S: Handlers>(
     l: *mut sys::wl_listener,
-    data: *mut std::ffi::c_void,
+    _data: *mut std::ffi::c_void,
 ) {
     // SAFETY: linked by `on_new_text_input` into this text-input's own
     // `events.commit`; the `Bound` behind `l` carries the `*const Session<S>`
-    // paired with this instantiation. `data` is the live `*mut wlr_text_input_v3`
-    // that committed (wlroots' object-signal convention), null-guarded below and
-    // only dereferenced, never freed, within this call.
+    // paired with this instantiation and the `*mut wlr_text_input_v3` this
+    // listener was linked for. wlroots emits `events.commit` with null `data`,
+    // so the object comes from `Bound`; it is live for this emission and only
+    // dereferenced, never freed, within this call.
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let runtime = (*session).runtime;
-        let Some(ti) = NonNull::new(data.cast::<sys::wlr_text_input_v3>()) else {
+        let Some(ti) = (*bound).text_input else {
             return;
         };
         let ti = ti.as_ptr();
@@ -4794,25 +4971,27 @@ unsafe extern "C" fn on_text_input_commit<S: Handlers>(
 /// This mirrors the leave-triggered deactivate in
 /// [`Runtime::relay_keyboard_focus`] — same deactivate, done, clear sequence.
 ///
-/// The `wlr_text_input_v3` is recovered from the signal `data`, not from
-/// `container_of` on `l`: this crate links every listener inside a heap [`Bound`]
-/// (recovered by [`bound_of`]) rather than embedding it in the wlroots object, so
-/// `l` does not sit within the text-input. wlroots emits `events.disable` with
-/// the `wlr_text_input_v3` as `data`, exactly as `on_text_input_enable` reads it.
+/// The `wlr_text_input_v3` is recovered from [`Bound::text_input`], not from the
+/// signal `data`: wlroots 0.20 emits `wlr_text_input_v3.events.disable` with a
+/// **null** `data` argument (the null-data convention [`on_toplevel_map`]
+/// documents), so the object comes from the `Bound` this listener was linked
+/// with by [`Registration::link_text_input`], exactly as `on_text_input_enable`
+/// reads it.
 unsafe extern "C" fn on_text_input_disable<S: Handlers>(
     l: *mut sys::wl_listener,
-    data: *mut std::ffi::c_void,
+    _data: *mut std::ffi::c_void,
 ) {
     // SAFETY: linked by `on_new_text_input` into this text-input's own
     // `events.disable`; the `Bound` behind `l` carries the `*const Session<S>`
-    // paired with this instantiation. `data` is the live `*mut wlr_text_input_v3`
-    // that disabled (wlroots' object-signal convention), null-guarded below and
-    // only dereferenced, never freed, within this call.
+    // paired with this instantiation and the `*mut wlr_text_input_v3` this
+    // listener was linked for. wlroots emits `events.disable` with null `data`,
+    // so the object comes from `Bound`; it is live for this emission and only
+    // dereferenced, never freed, within this call.
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let runtime = (*session).runtime;
-        let Some(ti) = NonNull::new(data.cast::<sys::wlr_text_input_v3>()) else {
+        let Some(ti) = (*bound).text_input else {
             return;
         };
         let ti = ti.as_ptr();
@@ -4845,31 +5024,34 @@ unsafe extern "C" fn on_text_input_disable<S: Handlers>(
 /// The compositor does not interpret the committed text; it relays each field
 /// faithfully to the text-input, exactly as the input-method produced it.
 ///
-/// The `wlr_input_method_v2` is recovered from the signal `data`, not from
-/// `container_of` on `l`: this crate links every listener inside a heap [`Bound`]
-/// (recovered by [`bound_of`]) rather than embedding it in the wlroots object, so
-/// `l` does not sit within the input-method. wlroots emits `events.commit` with
-/// the committing `wlr_input_method_v2` as `data` (`data == input_method`) —
-/// the same object `on_new_input_method` tracked; only one input-method is ever
-/// bound, so it is `focused_text_input`'s owner too.
+/// The `wlr_input_method_v2` is recovered from [`Bound::input_method`], not from
+/// the signal `data`: wlroots 0.20 emits `wlr_input_method_v2.events.commit`
+/// with a **null** `data` argument (the same per-object null-data convention
+/// `wlr_surface.events.map`/`.unmap` follow — see [`on_toplevel_map`]), so a
+/// callback reading the object out of `data` would recover nothing and
+/// early-`return`. `on_new_input_method` linked this listener with
+/// [`Registration::link_input_method`], which set `Bound::input_method` to the
+/// tracked input-method; only one is ever bound, so it is `focused_text_input`'s
+/// owner too.
 ///
 /// `wlr_text_input_v3_send_done` takes only the text-input: wlroots reads and
 /// advances the text-input's own `current_serial` internally, so no serial is
 /// passed here.
 unsafe extern "C" fn on_input_method_commit<S: Handlers>(
     l: *mut sys::wl_listener,
-    data: *mut std::ffi::c_void,
+    _data: *mut std::ffi::c_void,
 ) {
     // SAFETY: linked by `on_new_input_method` into this input-method's own
     // `events.commit`; the `Bound` behind `l` carries the `*const Session<S>`
-    // paired with this instantiation. `data` is the live `*mut wlr_input_method_v2`
-    // that committed (wlroots' object-signal convention), null-guarded below and
-    // only dereferenced, never freed, within this call.
+    // paired with this instantiation and the `*mut wlr_input_method_v2` this
+    // listener was linked for. wlroots emits `events.commit` with null `data`,
+    // so the object comes from `Bound`; it is live for this emission and only
+    // dereferenced, never freed, within this call.
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let runtime = (*session).runtime;
-        let Some(im) = NonNull::new(data.cast::<sys::wlr_input_method_v2>()) else {
+        let Some(im) = (*bound).input_method else {
             return;
         };
         // `input_method` and `text_inputs` are distinct RefCells; hold both
