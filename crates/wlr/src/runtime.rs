@@ -6412,6 +6412,9 @@ impl Runtime {
             if (*seat.as_ptr()).keyboard_state.focused_surface == surface {
                 return Some(());
             }
+            // Relay text-input enter/leave off the focus change (decision #4),
+            // before the seat notify so the outgoing surface is still current.
+            self.relay_keyboard_focus(surface);
             let kb = sys::wlr_seat_get_keyboard(seat.as_ptr());
             if kb.is_null() {
                 sys::wlr_seat_keyboard_notify_enter(
@@ -8239,6 +8242,9 @@ impl Runtime {
             if (*seat.as_ptr()).keyboard_state.focused_surface == surface {
                 return Some(());
             }
+            // Relay text-input enter/leave off the focus change (decision #4),
+            // before the seat notify so the outgoing surface is still current.
+            self.relay_keyboard_focus(surface);
             let kb = sys::wlr_seat_get_keyboard(seat.as_ptr());
             if kb.is_null() {
                 sys::wlr_seat_keyboard_notify_enter(
@@ -8425,6 +8431,9 @@ impl Runtime {
             if (*seat.as_ptr()).keyboard_state.focused_surface == surface {
                 return Some(());
             }
+            // Relay text-input enter/leave off the focus change (decision #4),
+            // before the seat notify so the outgoing surface is still current.
+            self.relay_keyboard_focus(surface);
             let kb = sys::wlr_seat_get_keyboard(seat.as_ptr());
             if kb.is_null() {
                 sys::wlr_seat_keyboard_notify_enter(
@@ -8454,10 +8463,114 @@ impl Runtime {
     pub fn clear_keyboard_focus(&self) {
         let seat = *self.inner.seat.borrow();
         let Some(seat) = seat else { return };
+        // Drive text-input leave/deactivate off the focus loss *before* the
+        // seat clears its focus, so the relay still sees the outgoing surface
+        // (decision #4). Incoming is null: focus goes to nothing.
+        self.relay_keyboard_focus(std::ptr::null_mut());
         // SAFETY: the seat is owned by the display and live for as long as
         // this runtime can be used; the call is a no-op when nothing has
         // focus.
         unsafe { sys::wlr_seat_keyboard_notify_clear_focus(seat.as_ptr()) };
+    }
+
+    /// Look up the `wl_client` owning `surface`, or null when `surface` is null
+    /// (or has no resource). Mirrors the `wl_resource_get_client` reach-through
+    /// `on_new_text_input` uses, since the wlroots bindings do not expose it.
+    ///
+    /// # Safety
+    /// `surface`, when non-null, must be a live `wlr_surface` whose `resource`
+    /// (when non-null) is a live `wl_resource`; the call only reads it.
+    unsafe fn surface_client(surface: *mut sys::wlr_surface) -> *mut sys::wl_client {
+        use sys::wayland_sys::ffi_dispatch;
+        #[allow(unused_imports)]
+        use sys::wayland_sys::server::*;
+
+        if surface.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: caller guarantees a non-null `surface` is live.
+        let resource = unsafe { (*surface).resource };
+        if resource.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: `resource` is a live `wl_resource`; `wl_resource_get_client`
+        // only reads it and returns its owning client.
+        unsafe {
+            ffi_dispatch!(
+                sys::wayland_sys::server::wayland_server_handle(),
+                wl_resource_get_client,
+                resource
+            )
+        }
+    }
+
+    /// Drive text-input enter/leave off a keyboard-focus change (decision #4).
+    ///
+    /// `new_surface` is the surface about to gain keyboard focus, or null on
+    /// clear. Called from each keyboard-focus mutator *before* it notifies the
+    /// seat, so the seat's current `focused_surface` is still the outgoing one.
+    ///
+    /// Outgoing: every text-input whose client owns the outgoing surface gets a
+    /// `leave`, and if the IME was activated for one of them it is deactivated.
+    /// Incoming: every text-input whose client owns `new_surface` gets an
+    /// `enter`. Activation waits for that text-input's own `enable` (decision
+    /// #5), so no `send_activate` here.
+    pub(crate) fn relay_keyboard_focus(&self, new_surface: *mut sys::wlr_surface) {
+        let Some(seat) = *self.inner.seat.borrow() else {
+            return;
+        };
+        // SAFETY: the seat is owned by the display and live for the runtime's
+        // lifetime; reading `keyboard_state.focused_surface` is a field read.
+        let old_surface = unsafe { (*seat.as_ptr()).keyboard_state.focused_surface };
+        if old_surface == new_surface {
+            return;
+        }
+        let tis = self.inner.text_inputs.borrow();
+
+        // Outgoing: leave every text-input whose client owns the outgoing
+        // surface, and deactivate the IME if it was activated for one of them.
+        if !old_surface.is_null() {
+            // SAFETY: a live focused surface carries a live resource.
+            let old_client = unsafe { Self::surface_client(old_surface) };
+            if !old_client.is_null() {
+                for (key, ti) in tis.iter() {
+                    if ti.client != old_client {
+                        continue;
+                    }
+                    // SAFETY: `ti.raw` names a live text-input — its destroy
+                    // listener removes the entry before wlroots frees it.
+                    unsafe { sys::wlr_text_input_v3_send_leave(ti.raw.as_ptr()) };
+                    let mut im = self.inner.input_method.borrow_mut();
+                    if let Some(entry) = im.as_mut() {
+                        if entry.focused_text_input == Some(*key) {
+                            // SAFETY: `entry.raw` names a live input-method for
+                            // its entry's lifetime.
+                            unsafe {
+                                sys::wlr_input_method_v2_send_deactivate(entry.raw.as_ptr());
+                                sys::wlr_input_method_v2_send_done(entry.raw.as_ptr());
+                            }
+                            entry.focused_text_input = None;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Incoming: enter every text-input whose client owns the new surface.
+        if !new_surface.is_null() {
+            // SAFETY: the incoming surface is live (checked by the caller).
+            let new_client = unsafe { Self::surface_client(new_surface) };
+            if !new_client.is_null() {
+                for ti in tis.values() {
+                    if ti.client != new_client {
+                        continue;
+                    }
+                    // SAFETY: `ti.raw` is live; `new_surface` is the live
+                    // incoming surface.
+                    unsafe { sys::wlr_text_input_v3_send_enter(ti.raw.as_ptr(), new_surface) };
+                }
+            }
+        }
     }
 
     /// The topmost **toplevel** at scene coordinates `(x, y)`, and the

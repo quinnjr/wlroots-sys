@@ -70,3 +70,30 @@ fn managers_register_listeners_without_a_client() {
         "no client bound, so the text-input table must be empty"
     );
 }
+
+#[test]
+fn relay_focus_is_a_noop_with_no_text_inputs() {
+    headless_env();
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let rt = wlr::Runtime::new().expect("runtime");
+    rt.init_graphics(&display, &backend).expect("graphics");
+    rt.create_seat(&display, "seat0").expect("seat");
+    rt.create_text_input_manager(&display)
+        .expect("text-input manager create");
+    rt.create_input_method_manager(&display)
+        .expect("input-method manager create");
+
+    // The keyboard-focus relay must survive being driven with empty relay
+    // tables: no text-inputs, no input-method, nothing focused. `clear` walks
+    // the outgoing path (from a null outgoing surface) and must not panic. The
+    // non-vacuous enter/leave behaviour is proven in the icedtea harness with
+    // two real clients (Part B, tests 2-3), which a crate test cannot bind.
+    rt.clear_keyboard_focus();
+    assert_eq!(
+        rt.rt_debug_text_input_count(),
+        0,
+        "relay must not have mutated the empty text-input table"
+    );
+}
