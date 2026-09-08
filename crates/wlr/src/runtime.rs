@@ -5286,6 +5286,17 @@ impl Runtime {
         *self.inner.input_method_manager.borrow()
     }
 
+    /// Debug accessor: the number of tracked `zwp_text_input_v3` objects.
+    ///
+    /// Exists only so the `tests/input_method.rs` integration test — which
+    /// cannot see the `pub(crate)` [`RuntimeInner::text_inputs`] map — can
+    /// assert the relay's resting state. `#[doc(hidden)]` keeps it out of the
+    /// public surface; it is not part of the crate's API.
+    #[doc(hidden)]
+    pub fn rt_debug_text_input_count(&self) -> usize {
+        self.inner.text_inputs.borrow().len()
+    }
+
     /// Create the `wp_cursor_shape_manager_v1` global, letting clients name
     /// the cursor image they want instead of drawing their own. Errors if
     /// called twice.

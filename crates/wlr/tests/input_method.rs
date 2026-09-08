@@ -8,8 +8,11 @@
 /// The headless backend is selected by environment, read once when the
 /// display and backend are created below.
 fn headless_env() {
-    // SAFETY: the only test in this binary, so no other harness thread can
-    // observe a torn environment read.
+    // SAFETY: both tests in this binary set the same two variables to the same
+    // values, and the test harness runs the tests in this binary serially by
+    // default (no `#[test]` here spawns threads that read the environment), so
+    // no other harness thread can observe a torn environment read even though
+    // there is now more than one test.
     unsafe {
         std::env::set_var("WLR_BACKENDS", "headless");
         std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
@@ -37,5 +40,33 @@ fn create_text_input_and_input_method_managers_once() {
     assert!(
         rt.create_input_method_manager(&display).is_err(),
         "double-create must error"
+    );
+}
+
+#[test]
+fn managers_register_listeners_without_a_client() {
+    headless_env();
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let rt = wlr::Runtime::new().expect("runtime");
+    rt.init_graphics(&display, &backend).expect("graphics");
+
+    rt.create_text_input_manager(&display)
+        .expect("text-input manager create");
+    rt.create_input_method_manager(&display)
+        .expect("input-method manager create");
+
+    // No client has bound anything, so the `new_text_input` / `new_input_method`
+    // signals never fire. Driving one non-blocking dispatch iteration must not
+    // fault, and the relay tables must stay empty — the resting state the
+    // per-object listeners key their entries off of. The live second-IME-refused
+    // behaviour is proven later in the icedtea harness (Part B, test 6) with real
+    // clients, which a crate integration test cannot bind.
+    display.event_loop().dispatch(0).expect("dispatch");
+    assert_eq!(
+        rt.rt_debug_text_input_count(),
+        0,
+        "no client bound, so the text-input table must be empty"
     );
 }

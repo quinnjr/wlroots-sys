@@ -2070,6 +2070,39 @@ impl<'d> Backend<'d> {
             });
         }
 
+        if let Some(manager) = runtime.text_input_manager_ptr() {
+            // SAFETY: `create_text_input_manager` returned a non-null manager
+            // owned by the display, which this call requires to outlive it,
+            // exactly as for the xdg shell above — null liveness is correct.
+            // This is the `new_text_input` signal wlroots raises when a client
+            // binds `zwp_text_input_v3`; `on_new_text_input` tracks it.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.new_text_input,
+                    on_new_text_input::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
+        if let Some(manager) = runtime.input_method_manager_ptr() {
+            // SAFETY: `create_input_method_manager` returned a non-null manager
+            // owned by the display, which this call requires to outlive it,
+            // exactly as for the xdg shell above — null liveness is correct.
+            // This is the `new_input_method` signal wlroots raises when a client
+            // binds `zwp_input_method_v2`; `on_new_input_method` tracks the first
+            // and refuses any second (decision #3).
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.new_input_method,
+                    on_new_input_method::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
         if let Some(manager) = runtime.cursor_shape_manager_ptr() {
             // SAFETY: `create_cursor_shape_manager` returned a non-null manager
             // owned by the display, which this call requires to outlive it,
@@ -4380,6 +4413,235 @@ unsafe extern "C" fn on_new_pointer_constraint<S: Handlers>(
             },
         );
     }
+}
+
+/// A client bound `zwp_text_input_v3`: it declared an editable field the
+/// input-method relay can drive. Links this text-input's `enable`/`commit`/
+/// `disable`/`destroy` listeners on its own signals and records it in
+/// [`RuntimeInner::text_inputs`](crate::runtime::RuntimeInner), keyed by the
+/// `destroy` listener's own address — the same destroy-keying discipline
+/// `on_new_pointer_constraint` uses, so identity never depends on the signal
+/// `data`. The IME tables live on `RuntimeInner`, reached through the session's
+/// `runtime` reference.
+///
+/// This is lifecycle + tracking only: the `enable`/`commit`/`disable` listeners
+/// are inert stubs here and gain their relay behaviour in later tasks (A4–A7).
+/// The owning client is captured so the relay can later match a text-input to
+/// an input-method on the same client.
+unsafe extern "C" fn on_new_text_input<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    use sys::wayland_sys::ffi_dispatch;
+    #[allow(unused_imports)]
+    use sys::wayland_sys::server::*;
+
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_text_input_manager_v3.events.new_text_input`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal carries
+    // a live `*mut wlr_text_input_v3`, and its `resource` is a live
+    // `wl_resource` for this call — `wl_resource_get_client` only reads it.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let Some(ti) = NonNull::new(data.cast::<sys::wlr_text_input_v3>()) else {
+            return;
+        };
+        // libwayland's `wl_resource_get_client` is not in the wlroots bindings,
+        // so reach it through `ffi_dispatch!` exactly as `Toplevel::client_pid`
+        // does; the returned `*mut wl_client` is `wayland-sys`' own type, which
+        // is what `TextInputEntry::client` is typed as.
+        let client = ffi_dispatch!(
+            sys::wayland_sys::server::wayland_server_handle(),
+            wl_resource_get_client,
+            (*ti.as_ptr()).resource
+        );
+        // Linked on the text-input's own signals. No `alive` backstop, matching
+        // `on_new_pointer_constraint`: the object cannot be freed by anything
+        // other than the `destroy` this very entry watches, which unlinks all
+        // four listeners together when the entry is dropped.
+        let enable = Registration::link_bare(
+            &raw mut (*ti.as_ptr()).events.enable,
+            on_text_input_enable::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        let commit = Registration::link_bare(
+            &raw mut (*ti.as_ptr()).events.commit,
+            on_text_input_commit::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        let disable = Registration::link_bare(
+            &raw mut (*ti.as_ptr()).events.disable,
+            on_text_input_disable::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        let destroy = Registration::link_bare(
+            &raw mut (*ti.as_ptr()).events.destroy,
+            on_text_input_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        // Key by the destroy listener's own address: `on_text_input_destroy`
+        // recovers the same key from the `l` it is handed, never from `data`.
+        let key = destroy.listener_addr();
+        runtime.inner.text_inputs.borrow_mut().insert(
+            key,
+            crate::runtime::TextInputEntry {
+                raw: ti,
+                client,
+                _listeners: [enable, commit, disable, destroy],
+            },
+        );
+    }
+}
+
+/// A client bound `zwp_input_method_v2`. Decision #3: at most one input-method
+/// per seat is tracked. If one is already bound, the newcomer is sent
+/// `unavailable` and **not** tracked — it links no listeners and the client
+/// tears it down, so there is nothing to unlink later. Otherwise it becomes the
+/// single [`RuntimeInner::input_method`](crate::runtime::RuntimeInner) entry
+/// with its `commit`/`destroy` listeners linked (the popup/grab listeners are
+/// added in A6.2).
+unsafe extern "C" fn on_new_input_method<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_input_method_manager_v2.events.new_input_method`, whose `session` is
+    // the `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_input_method_v2`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let Some(im) = NonNull::new(data.cast::<sys::wlr_input_method_v2>()) else {
+            return;
+        };
+        if runtime.inner.input_method.borrow().is_some() {
+            // A second input-method: refuse it. `send_unavailable` is the
+            // protocol's own "some other client already has the seat" reply.
+            sys::wlr_input_method_v2_send_unavailable(im.as_ptr());
+            return;
+        }
+        let commit = Registration::link_bare(
+            &raw mut (*im.as_ptr()).events.commit,
+            on_input_method_commit::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        let destroy = Registration::link_bare(
+            &raw mut (*im.as_ptr()).events.destroy,
+            on_input_method_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        *runtime.inner.input_method.borrow_mut() = Some(crate::runtime::InputMethodEntry {
+            raw: im,
+            focused_text_input: None,
+            keyboard_grab: None,
+            _listeners: vec![commit, destroy],
+        });
+    }
+}
+
+/// The text-input is about to be freed. Removes its entry from
+/// [`RuntimeInner::text_inputs`](crate::runtime::RuntimeInner) — keyed by the
+/// firing listener's own address (`l`), never the signal `data` — which drops
+/// and so unlinks its four listeners together, sound for the same reason
+/// `on_pointer_constraint_destroy` is: `wl_signal_emit_mutable` has advanced its
+/// cursor past this listener before the callback runs. If the removed
+/// text-input was the one the input-method's `focused_text_input` named, that
+/// back-reference is cleared so it never points at a freed key.
+unsafe extern "C" fn on_text_input_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_text_input` into this text-input's own
+    // `events.destroy`; the text-input is still live memory for this emission.
+    // Identity comes from `l` — the address of this handler's own listener,
+    // under which the entry was keyed — never from the signal `data`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let key = l as usize;
+        let removed = runtime.inner.text_inputs.borrow_mut().remove(&key);
+        if removed.is_some()
+            && let Some(entry) = runtime.inner.input_method.borrow_mut().as_mut()
+            && entry.focused_text_input == Some(key)
+        {
+            entry.focused_text_input = None;
+        }
+        drop(removed);
+    }
+}
+
+/// The input-method is about to be freed. Clears the single
+/// [`RuntimeInner::input_method`](crate::runtime::RuntimeInner) slot — which
+/// drops and so unlinks its listeners — but only when the firing listener (`l`)
+/// belongs to the currently tracked input-method, matched against the destroy
+/// listener's stored address. A refused second input-method links no destroy
+/// listener and so never reaches here; the guard additionally means a stale
+/// fire can never evict a different, later-bound input-method.
+unsafe extern "C" fn on_input_method_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input_method` into this IME's own
+    // `events.destroy`; the IME is still live memory for this emission.
+    // Identity comes from `l`, never the signal `data`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let key = l as usize;
+        let is_current = runtime
+            .inner
+            .input_method
+            .borrow()
+            .as_ref()
+            .is_some_and(|entry| entry._listeners.iter().any(|r| r.listener_addr() == key));
+        if is_current {
+            *runtime.inner.input_method.borrow_mut() = None;
+        }
+    }
+}
+
+/// A text-input requested `enable`. Inert until the relay's enable/activation
+/// path lands (A4); linked now so the listener slot exists from the moment the
+/// text-input is tracked.
+unsafe extern "C" fn on_text_input_enable<S: Handlers>(
+    _l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+}
+
+/// A text-input `commit`ted a new state. Inert until the relay's state-forward
+/// path lands (A5).
+unsafe extern "C" fn on_text_input_commit<S: Handlers>(
+    _l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+}
+
+/// A text-input requested `disable`. Inert until the relay's deactivation path
+/// lands (A4).
+unsafe extern "C" fn on_text_input_disable<S: Handlers>(
+    _l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+}
+
+/// The input-method `commit`ted (its `commit_string`/`preedit`/`delete`). Inert
+/// until the relay's send-to-text-input path lands (A5).
+unsafe extern "C" fn on_input_method_commit<S: Handlers>(
+    _l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
 }
 
 /// Whether a `cursor-shape-v1` request coming from `seat_client` is entitled
