@@ -8497,7 +8497,7 @@ impl Runtime {
     /// # Safety
     /// `surface`, when non-null, must be a live `wlr_surface` whose `resource`
     /// (when non-null) is a live `wl_resource`; the call only reads it.
-    unsafe fn surface_client(surface: *mut sys::wlr_surface) -> *mut sys::wl_client {
+    pub(crate) unsafe fn surface_client(surface: *mut sys::wlr_surface) -> *mut sys::wl_client {
         use sys::wayland_sys::ffi_dispatch;
         #[allow(unused_imports)]
         use sys::wayland_sys::server::*;
@@ -8554,8 +8554,23 @@ impl Runtime {
                     if ti.client != old_client {
                         continue;
                     }
+                    // `focused_surface` (the wlroots C field) is the single
+                    // source of truth for "is this text-input entered".
+                    // `wlr_text_input_v3_send_leave` asserts it is non-null, so
+                    // a text-input that was never entered on `old_surface` — one
+                    // created on an already-focused window, say — must be skipped
+                    // entirely: no leave, no paired IME-deactivate. Only leave
+                    // the text-input actually entered on the surface being left.
                     // SAFETY: `ti.raw` names a live text-input — its destroy
-                    // listener removes the entry before wlroots frees it.
+                    // listener removes the entry before wlroots frees it; this
+                    // is a field read.
+                    let entered_surface = unsafe { (*ti.raw.as_ptr()).focused_surface };
+                    if entered_surface != old_surface {
+                        continue;
+                    }
+                    // SAFETY: `ti.raw` names a live text-input, and its
+                    // `focused_surface` is non-null (equal to `old_surface`),
+                    // so the wlroots leave-assertion holds.
                     unsafe { sys::wlr_text_input_v3_send_leave(ti.raw.as_ptr()) };
                     let mut im = self.inner.input_method.borrow_mut();
                     if let Some(entry) = im.as_mut() {
@@ -8580,6 +8595,14 @@ impl Runtime {
             if !new_client.is_null() {
                 for ti in tis.values() {
                     if ti.client != new_client {
+                        continue;
+                    }
+                    // Defensive dedup: skip a text-input already entered on
+                    // `new_surface` to avoid a redundant re-enter. `focused_surface`
+                    // is the source of truth for whether it is already entered.
+                    // SAFETY: `ti.raw` is live; this is a field read.
+                    let entered_surface = unsafe { (*ti.raw.as_ptr()).focused_surface };
+                    if entered_surface == new_surface {
                         continue;
                     }
                     // SAFETY: `ti.raw` is live; `new_surface` is the live

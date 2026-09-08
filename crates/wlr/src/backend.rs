@@ -4496,6 +4496,27 @@ unsafe extern "C" fn on_new_text_input<S: Handlers>(
                 _listeners: [enable, commit, disable, destroy],
             },
         );
+
+        // Enter-on-create-if-focused: `relay_keyboard_focus` fires only on a
+        // focus *change*, so a text-input created while its client's surface
+        // already holds keyboard focus would never receive `enter` and could
+        // never `enable`→activate the IME. sway sends `enter` in exactly this
+        // case. If the seat's current keyboard focus is a surface owned by this
+        // text-input's own client, send `enter` now so its `focused_surface`
+        // (the wlroots source of truth) is set and a later `enable` can drive
+        // activation.
+        if let Some(seat) = runtime.seat_ptr() {
+            // SAFETY: `seat` is a live `wlr_seat` for the runtime's lifetime;
+            // reading `keyboard_state.focused_surface` is a field read.
+            let focused_surface = (*seat.as_ptr()).keyboard_state.focused_surface;
+            if !focused_surface.is_null()
+                && crate::runtime::Runtime::surface_client(focused_surface) == client
+            {
+                // SAFETY: `ti` is the just-registered live text-input; the
+                // focused surface is non-null and live (checked above).
+                sys::wlr_text_input_v3_send_enter(ti.as_ptr(), focused_surface);
+            }
+        }
     }
 }
 
