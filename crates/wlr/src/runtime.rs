@@ -6618,6 +6618,23 @@ impl Runtime {
             .is_some_and(|e| e.focused_text_input.is_some())
     }
 
+    /// The [`RuntimeInner::text_inputs`] map key of the tracked text-input whose
+    /// wlroots pointer is `ti`, or `None` if this runtime is not tracking that
+    /// text-input. The enable relay uses it to record, by key, which text-input
+    /// drove the input-method's activation, so the destroy handler can later
+    /// clear that back-reference by the same key.
+    ///
+    /// `ti` is only ever compared, never dereferenced, so any pointer value is
+    /// accepted; that is why this is a safe method taking a raw pointer.
+    pub(crate) fn text_input_key_for(&self, ti: *mut sys::wlr_text_input_v3) -> Option<usize> {
+        self.inner
+            .text_inputs
+            .borrow()
+            .iter()
+            .find(|(_, entry)| entry.raw.as_ptr() == ti)
+            .map(|(key, _)| *key)
+    }
+
     pub(crate) fn session_lock_ptr(&self) -> Option<NonNull<sys::wlr_session_lock_v1>> {
         *self.inner.session_lock.borrow()
     }

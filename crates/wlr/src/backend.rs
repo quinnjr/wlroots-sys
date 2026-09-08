@@ -4611,13 +4611,108 @@ unsafe extern "C" fn on_input_method_destroy<S: Handlers>(
     }
 }
 
-/// A text-input requested `enable`. Inert until the relay's enable/activation
-/// path lands (A4); linked now so the listener slot exists from the moment the
-/// text-input is tracked.
+/// A text-input requested `enable` (relay decision #5). If the text-input is on
+/// the surface that currently holds keyboard focus *and* an input-method is
+/// bound, activate that method for this text-input and forward the text-input's
+/// `current` surrounding-text / content-type, finishing with `done`. If no
+/// input-method is bound, or this text-input is not the focused one, the handler
+/// does nothing — the two "half-satisfied" states the relay must tolerate.
+///
+/// The `wlr_text_input_v3` is recovered from the signal `data`, not from
+/// `container_of` on `l`: this crate links every listener inside a heap [`Bound`]
+/// (recovered by [`bound_of`]) rather than embedding it in the wlroots object,
+/// so `l` does not sit within the text-input. wlroots emits `events.enable` with
+/// the `wlr_text_input_v3` as `data`, exactly as it does `new_text_input` — the
+/// same source `on_new_text_input` reads.
 unsafe extern "C" fn on_text_input_enable<S: Handlers>(
-    _l: *mut sys::wl_listener,
-    _data: *mut std::ffi::c_void,
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
 ) {
+    // SAFETY: linked by `on_new_text_input` into this text-input's own
+    // `events.enable`; the `Bound` behind `l` carries the `*const Session<S>`
+    // paired with this instantiation. `data` is the live `*mut wlr_text_input_v3`
+    // that enabled (wlroots' object-signal convention), null-guarded below and
+    // only dereferenced, never freed, within this call.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let Some(ti) = NonNull::new(data.cast::<sys::wlr_text_input_v3>()) else {
+            return;
+        };
+        let ti = ti.as_ptr();
+        let Some(seat) = runtime.seat_ptr() else {
+            return;
+        };
+        // Only the text-input sitting on the surface that currently holds
+        // keyboard focus may drive activation. A field read on two live objects.
+        if (*ti).focused_surface != (*seat.as_ptr()).keyboard_state.focused_surface {
+            return;
+        }
+        let mut im = runtime.inner.input_method.borrow_mut();
+        let Some(entry) = im.as_mut() else {
+            // Focused, but no input-method is bound: nothing to activate.
+            return;
+        };
+        // Record which text-input is driving activation, by its map key, so the
+        // text-input destroy handler can clear this back-reference. `ti` fired a
+        // listener `on_new_text_input` linked, so it is in the map; the key is
+        // `Some`.
+        entry.focused_text_input = runtime.text_input_key_for(ti);
+        let raw_im = entry.raw.as_ptr();
+        // SAFETY: `entry.raw` names a live input-method for its entry's lifetime;
+        // `ti` is the live text-input checked above.
+        sys::wlr_input_method_v2_send_activate(raw_im);
+        forward_text_input_state_to_ime(ti, raw_im);
+        sys::wlr_input_method_v2_send_done(raw_im);
+    }
+}
+
+/// Forward a text-input's `current` state to the bound input-method, honouring
+/// the client's advertised feature set: `surrounding_text` only when the
+/// text-input negotiated `WLR_TEXT_INPUT_V3_FEATURE_SURROUNDING_TEXT`, and
+/// `content_type` only when it negotiated `WLR_TEXT_INPUT_V3_FEATURE_CONTENT_TYPE`.
+/// The compositor never interprets `content_type` — `hint` and `purpose` are
+/// forwarded verbatim. Does **not** send `done`; the caller pairs this with
+/// `wlr_input_method_v2_send_done`.
+///
+/// # Safety
+///
+/// `ti` must point at a live `wlr_text_input_v3` and `im` at a live
+/// `wlr_input_method_v2` for the duration of the call.
+unsafe fn forward_text_input_state_to_ime(
+    ti: *const sys::wlr_text_input_v3,
+    im: *mut sys::wlr_input_method_v2,
+) {
+    // SAFETY: `ti` and `im` are live per the contract; every deref below reads a
+    // field of `(*ti).current`, and the surrounding `text` pointer is
+    // null-guarded before it crosses the FFI boundary.
+    unsafe {
+        let features = (*ti).current.features;
+        if features & sys::wlr_text_input_v3_features::WLR_TEXT_INPUT_V3_FEATURE_SURROUNDING_TEXT.0
+            != 0
+        {
+            let surrounding = (*ti).current.surrounding;
+            // A client can advertise the feature yet leave `text` null; pass a
+            // valid empty C string rather than a null across the wire.
+            let text = if surrounding.text.is_null() {
+                c"".as_ptr()
+            } else {
+                surrounding.text
+            };
+            sys::wlr_input_method_v2_send_surrounding_text(
+                im,
+                text,
+                surrounding.cursor,
+                surrounding.anchor,
+            );
+        }
+        if features & sys::wlr_text_input_v3_features::WLR_TEXT_INPUT_V3_FEATURE_CONTENT_TYPE.0 != 0
+        {
+            let content_type = (*ti).current.content_type;
+            sys::wlr_input_method_v2_send_content_type(im, content_type.hint, content_type.purpose);
+        }
+    }
 }
 
 /// A text-input `commit`ted a new state. Inert until the relay's state-forward
