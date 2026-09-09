@@ -2305,6 +2305,16 @@ module = "runtime"
 item   = "InputMethodEntry::keyboard_grab"
 
 [[wrapped]]
+symbol = "wlr_input_method_keyboard_grab_v2_send_key"
+module = "backend"
+item   = "on_key"
+
+[[wrapped]]
+symbol = "wlr_input_method_keyboard_grab_v2_send_modifiers"
+module = "backend"
+item   = "on_modifiers"
+
+[[wrapped]]
 symbol = "wlr_input_method_keyboard_grab_v2_set_keyboard"
 module = "backend"
 item   = "on_input_method_grab_keyboard"

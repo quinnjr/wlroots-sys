@@ -151,10 +151,9 @@ pub(crate) struct InputMethodEntry {
     pub(crate) focused_text_input: Option<usize>,
     /// The active `wlr_input_method_keyboard_grab_v2`, a borrowed pointer set by
     /// `on_input_method_grab_keyboard` and cleared on the grab's own destroy (or
-    /// when this entry drops). Written here in A6.2; the key-forwarding read that
-    /// consumes it lands in A11, so for this task the field is still written but
-    /// never read — hence the retained `#[allow(dead_code)]`.
-    #[allow(dead_code)]
+    /// when this entry drops). Read in `on_key`/`on_modifiers` (A11): while it is
+    /// `Some`, physical key and modifier events are forwarded to the grab instead
+    /// of the seat's keyboard, after the compositor's keybinding dispatch.
     pub(crate) keyboard_grab: Option<NonNull<sys::wlr_input_method_keyboard_grab_v2>>,
     /// The registration for the active keyboard grab's `destroy` signal, held
     /// only while a grab is bound (`Some` iff `keyboard_grab` is `Some`).

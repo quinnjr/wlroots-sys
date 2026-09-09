@@ -8090,13 +8090,38 @@ unsafe extern "C" fn on_key<S: Handlers>(l: *mut sys::wl_listener, data: *mut st
         // because the compositor's answer is not known yet and dropping a
         // keystroke is worse than forwarding one.
         if !(*session).last_key_consumed.get() {
-            sys::wlr_seat_set_keyboard(seat.as_ptr(), kb);
-            sys::wlr_seat_keyboard_notify_key(
-                seat.as_ptr(),
-                (*ev).time_msec,
-                (*ev).keycode,
-                (*ev).state.0,
-            );
+            // When an input-method has grabbed the keyboard, the key goes to
+            // the grab *instead of* the seat's keyboard — the grab replaces
+            // the seat's keyboard for the focused client, so the seat forward
+            // is skipped entirely in that branch. Copy the grab pointer out
+            // and drop the borrow before the FFI call: `send_key` re-enters
+            // wlroots, and holding a `RefCell` borrow across a call that could
+            // (through a client's grab handler) touch `input_method` again
+            // would panic. The read happens *after* `dispatcher.emit` returns,
+            // so it never races the keybinding dispatch above.
+            let runtime = (*session).runtime;
+            let grab = runtime
+                .inner
+                .input_method
+                .borrow()
+                .as_ref()
+                .and_then(|e| e.keyboard_grab);
+            if let Some(grab) = grab {
+                sys::wlr_input_method_keyboard_grab_v2_send_key(
+                    grab.as_ptr(),
+                    (*ev).time_msec,
+                    (*ev).keycode,
+                    (*ev).state.0,
+                );
+            } else {
+                sys::wlr_seat_set_keyboard(seat.as_ptr(), kb);
+                sys::wlr_seat_keyboard_notify_key(
+                    seat.as_ptr(),
+                    (*ev).time_msec,
+                    (*ev).keycode,
+                    (*ev).state.0,
+                );
+            }
         }
     }
 }
@@ -8118,7 +8143,25 @@ unsafe extern "C" fn on_modifiers<S: Handlers>(
         if kb.is_null() {
             return;
         }
-        sys::wlr_seat_keyboard_notify_modifiers(seat.as_ptr(), &raw mut (*kb).modifiers);
+        // Mirror `on_key`: while an input-method holds the keyboard grab, the
+        // modifier state goes to the grab instead of the seat's keyboard. The
+        // grab pointer is copied out and the borrow dropped before the FFI
+        // call, for the same re-entrancy reason.
+        let runtime = (*session).runtime;
+        let grab = runtime
+            .inner
+            .input_method
+            .borrow()
+            .as_ref()
+            .and_then(|e| e.keyboard_grab);
+        if let Some(grab) = grab {
+            sys::wlr_input_method_keyboard_grab_v2_send_modifiers(
+                grab.as_ptr(),
+                &raw mut (*kb).modifiers,
+            );
+        } else {
+            sys::wlr_seat_keyboard_notify_modifiers(seat.as_ptr(), &raw mut (*kb).modifiers);
+        }
     }
 }
 
