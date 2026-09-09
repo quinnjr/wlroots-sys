@@ -8,11 +8,12 @@
 /// The headless backend is selected by environment, read once when the
 /// display and backend are created below.
 fn headless_env() {
-    // SAFETY: both tests in this binary set the same two variables to the same
-    // values, and the test harness runs the tests in this binary serially by
-    // default (no `#[test]` here spawns threads that read the environment), so
-    // no other harness thread can observe a torn environment read even though
-    // there is now more than one test.
+    // SAFETY: libtest runs the tests in a binary in parallel by default, so
+    // this is *not* safe by virtue of serial execution. It is safe because all
+    // three tests in this binary set the same two variables to the same values
+    // (and no `#[test]` here spawns threads that read the environment): a
+    // concurrent write from another test writes byte-identical values, so no
+    // harness thread can observe a torn environment read.
     unsafe {
         std::env::set_var("WLR_BACKENDS", "headless");
         std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");

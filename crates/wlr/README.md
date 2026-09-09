@@ -519,10 +519,14 @@ Twenty-one symbols moved `not-yet`/M8 → wrapped: the two managers and their
 `wlr_text_input_v3_features`, the `wlr_input_method_v2` object, and
 `wlr_input_method_v2_send_{activate,deactivate,surrounding_text,content_type,text_change_cause,done,unavailable}`
 — split across `runtime` (focus routing, the two constructors) and `backend`
-(the per-object listeners). The input-method popups
-(`wlr_input_popup_surface_v2*`), the keyboard grab
-(`wlr_input_method_keyboard_grab_v2*`) and the remaining preedit/state
-forwarding pieces stay waived, re-pointed from M8 to A6.2.
+(the per-object listeners). The keyboard-grab base type
+(`wlr_input_method_keyboard_grab_v2`) is wrapped as a forward-declared field
+type — it is the type of `InputMethodEntry`'s always-`None`,
+`#[allow(dead_code)]` `keyboard_grab` field, required for the coverage audit —
+but its functions (`wlr_input_method_keyboard_grab_v2_send_key` /
+`_send_modifiers` / `_destroy` / `_set_keyboard`) stay waived, along with the
+input-method popups (`wlr_input_popup_surface_v2*`) and the remaining
+preedit/state forwarding pieces, re-pointed from M8 to A6.2.
 
 ## 0.20.29 — pointer axis
 

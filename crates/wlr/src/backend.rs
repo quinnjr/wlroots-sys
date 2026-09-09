@@ -4747,8 +4747,13 @@ unsafe extern "C" fn on_new_input_method<S: Handlers>(
 /// and so unlinks its four listeners together, sound for the same reason
 /// `on_pointer_constraint_destroy` is: `wl_signal_emit_mutable` has advanced its
 /// cursor past this listener before the callback runs. If the removed
-/// text-input was the one the input-method's `focused_text_input` named, that
-/// back-reference is cleared so it never points at a freed key.
+/// text-input was the one the input-method's `focused_text_input` named, the
+/// IME is first deactivated — `wlr_input_method_v2_send_deactivate` +
+/// `send_done`, matching [`on_text_input_disable`] and
+/// [`Runtime::relay_keyboard_focus`]'s leave-path — so destroying an
+/// enabled+focused text-input without a preceding focus change cannot leave the
+/// IME believing it is still activated; then that back-reference is cleared so
+/// it never points at a freed key.
 unsafe extern "C" fn on_text_input_destroy<S: Handlers>(
     l: *mut sys::wl_listener,
     _data: *mut std::ffi::c_void,
@@ -4767,6 +4772,15 @@ unsafe extern "C" fn on_text_input_destroy<S: Handlers>(
             && let Some(entry) = runtime.inner.input_method.borrow_mut().as_mut()
             && entry.focused_text_input == Some(key)
         {
+            // The destroyed text-input was the one driving the IME. Destroying
+            // it without a preceding focus change would otherwise leave the IME
+            // believing it is still activated, unbalancing the next `enable`'s
+            // `activate`. Deactivate identically to `on_text_input_disable` and
+            // `relay_keyboard_focus`'s leave-path: deactivate, done, then clear.
+            // SAFETY: `entry.raw` names a live input-method for its entry's
+            // lifetime.
+            sys::wlr_input_method_v2_send_deactivate(entry.raw.as_ptr());
+            sys::wlr_input_method_v2_send_done(entry.raw.as_ptr());
             entry.focused_text_input = None;
         }
         drop(removed);
