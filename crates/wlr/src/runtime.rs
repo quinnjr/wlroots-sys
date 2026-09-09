@@ -5375,6 +5375,144 @@ impl Runtime {
         self.inner.input_method_popups.borrow().len()
     }
 
+    /// The client `wlr_surface` an input-method popup renders, for the
+    /// compositor's placement math.
+    ///
+    /// `None` if this runtime has no popup under `popup` (an unknown id, or one
+    /// whose popup has already been destroyed — its entry is evicted from
+    /// [`RuntimeInner::input_method_popups`] by the popup's own `destroy`
+    /// listener before wlroots frees it). The returned pointer may itself be
+    /// null if the popup has not yet been given a surface; a live-entry lookup
+    /// does not promise a mapped surface, only that the popup object stands.
+    pub fn input_popup_surface(&self, popup: InputPopupSurfaceId) -> Option<*mut sys::wlr_surface> {
+        let raw = self.inner.input_method_popups.borrow().get(&popup.0)?.raw;
+        // SAFETY: the entry is removed only by the popup's own `destroy`
+        // listener, which fires before wlroots frees the popup, so `raw` names a
+        // live `wlr_input_popup_surface_v2`; reading its `surface` field reads
+        // borrowed memory this crate never owns and copies nothing out.
+        Some(unsafe { (*raw.as_ptr()).surface })
+    }
+
+    /// Place an input-method popup's client surface in the scene under `band`,
+    /// returning the [`NodeId`] of the created subsurface tree.
+    ///
+    /// Wraps `wlr_scene_subsurface_tree_create` over the popup's own
+    /// `wlr_surface`, so the crate keeps every scene-graph FFI on its side and
+    /// the compositor stays pure geometry: it hands back a node the compositor
+    /// then positions with [`set_node_position`](Runtime::set_node_position)
+    /// (the node is [`NodeOrigin::Owned`], like every other node this API
+    /// creates). The [`NodeId`] is also stored back on the popup's entry so a
+    /// later reposition can find it. Popups belong in [`Band::Top`] per the
+    /// relay plan, but any band is accepted.
+    ///
+    /// `None` if this runtime has no popup under `popup`, if the popup has no
+    /// surface yet, before [`init_graphics`](Runtime::init_graphics) has run, if
+    /// wlroots refuses the node, or (having created nothing) while a
+    /// [`with_node`](Runtime::with_node) borrow or a
+    /// [`for_each_buffer`](Runtime::for_each_buffer) walk is live — the same
+    /// scene-insertion gate [`add_rect_in_band`](Runtime::add_rect_in_band)
+    /// carries, and for the identical reason.
+    pub fn add_input_popup_in_band(
+        &self,
+        popup: InputPopupSurfaceId,
+        band: Band,
+    ) -> Option<NodeId> {
+        // Refused while a node borrow or a scene walk is live — see
+        // `add_rect_in_band`'s own comment for the full argument: inserting a
+        // node mid-walk rewires the tail wlroots' `wl_list_for_each` cursor is
+        // about to reach.
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        let surface = self.input_popup_surface(popup)?;
+        if surface.is_null() {
+            return None;
+        }
+        let tree = self.band_ptr(band)?;
+        // SAFETY: `tree` is one of the six band trees `init_graphics` created and
+        // this runtime owns; it outlives the call. `surface` is the popup's live
+        // client surface (resolved from a live entry just above, and null-checked)
+        // — `wlr_scene_subsurface_tree_create` builds a scene subtree under `tree`
+        // tracking that surface and its subsurfaces.
+        let scene_tree = unsafe { sys::wlr_scene_subsurface_tree_create(tree.as_ptr(), surface) };
+        let scene_tree = NonNull::new(scene_tree)?;
+        // SAFETY: `scene_tree` is the tree wlroots just created, so nothing has
+        // had the chance to attach a payload of this kind to its node yet.
+        let id = unsafe {
+            self.record_node(
+                &raw mut (*scene_tree.as_ptr()).node,
+                NodeOrigin::Owned,
+                None,
+            )
+        }?;
+        // Store the node back on the popup's entry so a later reposition (B7/A12)
+        // can find it. A concurrent destroy can only have evicted the entry, in
+        // which case there is nothing to write and the miss is silent.
+        if let Some(entry) = self
+            .inner
+            .input_method_popups
+            .borrow_mut()
+            .get_mut(&popup.0)
+        {
+            entry.node = Some(id);
+        }
+        Some(id)
+    }
+
+    /// Tell an input-method popup the anchor rectangle its candidate list should
+    /// sit against — the `text_input_rectangle` the protocol carries.
+    ///
+    /// `rect` is in the coordinate space the popup's own surface uses, exactly
+    /// as the input-method-v2 protocol defines it. Wraps
+    /// `wlr_input_popup_surface_v2_send_text_input_rectangle`.
+    ///
+    /// `None` (sending nothing) if this runtime has no popup under `popup`.
+    pub fn send_input_popup_rectangle(
+        &self,
+        popup: InputPopupSurfaceId,
+        rect: Box2D,
+    ) -> Option<()> {
+        let raw = self.inner.input_method_popups.borrow().get(&popup.0)?.raw;
+        let mut sbox = sys::wlr_box {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        };
+        // SAFETY: `raw` names a live popup — see `input_popup_surface` for the
+        // liveness argument. `sbox` is a live local for the duration of the call,
+        // which is all the send reads before copying it into the wire message; the
+        // C parameter is `*mut` but the send only reads through it.
+        unsafe {
+            sys::wlr_input_popup_surface_v2_send_text_input_rectangle(raw.as_ptr(), &raw mut sbox);
+        }
+        Some(())
+    }
+
+    /// The cursor rectangle the currently-focused text-input last committed —
+    /// the anchor a compositor positions an input-method popup against.
+    ///
+    /// Reads the active `zwp_input_method_v2`'s focused text-input (its
+    /// `focused_text_input` key into [`RuntimeInner::text_inputs`]) and returns
+    /// that text-input's `current.cursor_rectangle`. `None` when no input-method
+    /// is bound, when none of its text-inputs is the activation-driving focus, or
+    /// when that focus names a text-input this runtime no longer tracks.
+    pub fn focused_text_input_cursor_rectangle(&self) -> Option<Box2D> {
+        let key = self
+            .inner
+            .input_method
+            .borrow()
+            .as_ref()?
+            .focused_text_input?;
+        let raw = self.inner.text_inputs.borrow().get(&key)?.raw;
+        // SAFETY: a `text_inputs` entry is evicted by its own `destroy` listener
+        // before wlroots frees the `wlr_text_input_v3`, so a resolvable key names
+        // a live object; reading its `current.cursor_rectangle` (a `wlr_box` held
+        // by value) only reads borrowed memory this crate never owns.
+        let b = unsafe { (*raw.as_ptr()).current.cursor_rectangle };
+        Some(Box2D::new(b.x, b.y, b.width, b.height))
+    }
+
     /// Create the `wp_cursor_shape_manager_v1` global, letting clients name
     /// the cursor image they want instead of drawing their own. Errors if
     /// called twice.
