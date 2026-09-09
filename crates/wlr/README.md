@@ -474,6 +474,60 @@ pre-map commit listener that calls the new
 `Runtime::schedule_frame_all(&self) -> usize` so XWayland's handshake frame
 callback is answered. Bounded to the handshake commits; never busy-loops.
 
+## 0.20.30 — input-method / text-input relay
+
+Typing through an input method. Until this release the crate bound neither
+`zwp_text_input_v3` nor `zwp_input_method_v2`, so a compositor built on it
+advertised no way for an IME (fcitx5, ibus, and the rest) to reach an
+application's text field — the two protocols existed in wlroots and nothing
+stood the relay between them up. This release does.
+
+### What you get
+
+- `Runtime::create_text_input_manager` and `Runtime::create_input_method_manager`
+  — advertise `zwp_text_input_manager_v3` and `zwp_input_method_manager_v2` to
+  clients. Call both from your setup; the relay between them is wired
+  internally and needs no handler.
+- **The full text-input ↔ input-method relay, driven by keyboard focus.** When
+  focus moves, entered text-inputs on the newly focused surface receive
+  `enter` and the ones leaving receive `leave` (only those actually entered —
+  a text-input created on an already-focused window is entered on creation, and
+  a `leave` is sent to no text-input that never got an `enter`). A text-input
+  `enable` activates the input method and forwards its surrounding text and
+  content type; each `commit` re-forwards that state, including the
+  `text_change_cause`; `disable` deactivates the method. In the other
+  direction, an input-method `commit` relays the preedit string, the commit
+  string and any delete-surrounding-text back to the focused application's
+  text-input, closed with `done`. A second input method binding while one is
+  already active is told `unavailable`, as the protocol requires.
+
+### Additive
+
+No trait changed. The relay is entirely crate-internal — two `Runtime`
+constructors and the listeners behind them — so nothing a compositor already
+implements against 0.20.29 needs touching, and there is no new handler method to
+default. wlroots emits both protocols' per-object `commit`/`destroy` signals
+with a **null** `data`, so the listeners recover their object from the tracked
+binding rather than the signal, which is why the wiring lives in the crate and
+not in a callback surface.
+
+### Coverage
+
+Twenty-one symbols moved `not-yet`/M8 → wrapped: the two managers and their
+`_create`, the `wlr_text_input_v3` object and its
+`send_{enter,leave,preedit_string,commit_string,delete_surrounding_text,done}`,
+`wlr_text_input_v3_features`, the `wlr_input_method_v2` object, and
+`wlr_input_method_v2_send_{activate,deactivate,surrounding_text,content_type,text_change_cause,done,unavailable}`
+— split across `runtime` (focus routing, the two constructors) and `backend`
+(the per-object listeners). The keyboard-grab base type
+(`wlr_input_method_keyboard_grab_v2`) is wrapped as a forward-declared field
+type — it is the type of `InputMethodEntry`'s always-`None`,
+`#[allow(dead_code)]` `keyboard_grab` field, required for the coverage audit —
+but its functions (`wlr_input_method_keyboard_grab_v2_send_key` /
+`_send_modifiers` / `_destroy` / `_set_keyboard`) stay waived, along with the
+input-method popups (`wlr_input_popup_surface_v2*`) and the remaining
+preedit/state forwarding pieces, re-pointed from M8 to A6.2.
+
 ## 0.20.29 — pointer axis
 
 Scrolling. Until this release nothing in the crate subscribed to a pointer's

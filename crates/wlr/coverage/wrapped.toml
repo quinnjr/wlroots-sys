@@ -2269,3 +2269,112 @@ item   = "Popup::unconstrain"
 symbol = "wlr_xdg_popup_try_from_wlr_surface"
 module = "backend"
 item   = "toplevel_id_of_surface"
+
+# text-input-v3 <-> input-method-v2 relay (A6.1). The two managers are created
+# by Runtime; the relay itself is crate-internal — focus routing in `runtime`
+# and the per-object listeners in `backend`.
+
+[[wrapped]]
+symbol = "wlr_text_input_manager_v3"
+module = "runtime"
+item   = "Runtime::create_text_input_manager"
+
+[[wrapped]]
+symbol = "wlr_text_input_manager_v3_create"
+module = "runtime"
+item   = "Runtime::create_text_input_manager"
+
+[[wrapped]]
+symbol = "wlr_input_method_manager_v2"
+module = "runtime"
+item   = "Runtime::create_input_method_manager"
+
+[[wrapped]]
+symbol = "wlr_input_method_manager_v2_create"
+module = "runtime"
+item   = "Runtime::create_input_method_manager"
+
+[[wrapped]]
+symbol = "wlr_input_method_v2"
+module = "runtime"
+item   = "InputMethodEntry"
+
+[[wrapped]]
+symbol = "wlr_input_method_keyboard_grab_v2"
+module = "runtime"
+item   = "InputMethodEntry::keyboard_grab"
+
+[[wrapped]]
+symbol = "wlr_text_input_v3"
+module = "backend"
+item   = "Registration::link_text_input"
+
+[[wrapped]]
+symbol = "wlr_text_input_v3_features"
+module = "backend"
+item   = "forward_text_input_state_to_ime"
+
+[[wrapped]]
+symbol = "wlr_text_input_v3_send_enter"
+module = "backend"
+item   = "on_new_text_input"
+
+[[wrapped]]
+symbol = "wlr_text_input_v3_send_leave"
+module = "runtime"
+item   = "Runtime::relay_keyboard_focus"
+
+[[wrapped]]
+symbol = "wlr_text_input_v3_send_preedit_string"
+module = "backend"
+item   = "on_input_method_commit"
+
+[[wrapped]]
+symbol = "wlr_text_input_v3_send_commit_string"
+module = "backend"
+item   = "on_input_method_commit"
+
+[[wrapped]]
+symbol = "wlr_text_input_v3_send_delete_surrounding_text"
+module = "backend"
+item   = "on_input_method_commit"
+
+[[wrapped]]
+symbol = "wlr_text_input_v3_send_done"
+module = "backend"
+item   = "on_input_method_commit"
+
+[[wrapped]]
+symbol = "wlr_input_method_v2_send_activate"
+module = "backend"
+item   = "on_text_input_enable"
+
+[[wrapped]]
+symbol = "wlr_input_method_v2_send_surrounding_text"
+module = "backend"
+item   = "forward_text_input_state_to_ime"
+
+[[wrapped]]
+symbol = "wlr_input_method_v2_send_content_type"
+module = "backend"
+item   = "forward_text_input_state_to_ime"
+
+[[wrapped]]
+symbol = "wlr_input_method_v2_send_text_change_cause"
+module = "backend"
+item   = "on_text_input_commit"
+
+[[wrapped]]
+symbol = "wlr_input_method_v2_send_deactivate"
+module = "backend"
+item   = "on_text_input_disable"
+
+[[wrapped]]
+symbol = "wlr_input_method_v2_send_done"
+module = "backend"
+item   = "on_text_input_enable"
+
+[[wrapped]]
+symbol = "wlr_input_method_v2_send_unavailable"
+module = "backend"
+item   = "on_new_input_method"

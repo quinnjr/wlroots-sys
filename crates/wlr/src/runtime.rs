@@ -116,6 +116,46 @@ pub(crate) struct FdSource {
     pub(crate) id: SourceId,
 }
 
+/// One tracked `zwp_text_input_v3` object: an editable field a client has
+/// declared. Keyed in [`RuntimeInner::text_inputs`] by its destroy-listener
+/// address, so the destroy handler can find and evict its own entry.
+///
+/// `raw` is a borrowed wlroots pointer, never owned — wlroots frees the
+/// `wlr_text_input_v3` with its client resource, and the `destroy` listener
+/// (held in `_listeners`) is what removes this entry before that happens.
+/// `client` is retained so the relay can match a text-input to the seat and
+/// input-method sharing its client. The four listeners (`enable`, `commit`,
+/// `disable`, `destroy`) are parked in `_listeners` purely to keep them
+/// linked for this entry's lifetime; they are unlinked when it is dropped.
+pub(crate) struct TextInputEntry {
+    pub(crate) raw: NonNull<sys::wlr_text_input_v3>,
+    pub(crate) client: *mut sys::wl_client,
+    pub(crate) _listeners: [crate::backend::Registration; 4],
+}
+
+/// The single tracked `zwp_input_method_v2` object (decision #3: at most one
+/// per seat). Held as [`RuntimeInner::input_method`]'s `Some` while an
+/// input-method is bound.
+///
+/// `raw` is a borrowed wlroots pointer, never owned — freed with its client
+/// resource, with the `destroy` listener (in `_listeners`) clearing this slot
+/// first. `focused_text_input` is the [`RuntimeInner::text_inputs`] map key of
+/// the text-input currently driving activation, or `None` when no enabled
+/// text-input is focused (the resting state until a later task wires
+/// activation). `keyboard_grab` is the active
+/// `wlr_input_method_keyboard_grab_v2`, a borrowed pointer, once the method
+/// grabs the keyboard. The listeners vary in number over the relay's tasks,
+/// so they live in a `Vec` rather than a fixed array.
+pub(crate) struct InputMethodEntry {
+    pub(crate) raw: NonNull<sys::wlr_input_method_v2>,
+    pub(crate) focused_text_input: Option<usize>,
+    // Written at construction, read once A6.2 wires the keyboard grab; kept now
+    // so that milestone is purely additive.
+    #[allow(dead_code)]
+    pub(crate) keyboard_grab: Option<NonNull<sys::wlr_input_method_keyboard_grab_v2>>,
+    pub(crate) _listeners: Vec<crate::backend::Registration>,
+}
+
 pub(crate) struct RuntimeInner {
     pub(crate) sources: RefCell<Vec<FdSource>>,
 
@@ -313,6 +353,26 @@ pub(crate) struct RuntimeInner {
     /// it is created — see [`Runtime::create_gamma_control_manager`] — so the
     /// scene applies every ramp and signals `failed`/`destroy` itself.
     pub(crate) gamma_control_manager: RefCell<Option<NonNull<sys::wlr_gamma_control_manager_v1>>>,
+
+    /// The `zwp_text_input_manager_v3` global, once created — lets a client
+    /// declare an editable field whose state the crate relays to the bound
+    /// input-method. `Option`, same rationale as the other manager globals.
+    pub(crate) text_input_manager: RefCell<Option<NonNull<sys::wlr_text_input_manager_v3>>>,
+
+    /// The `zwp_input_method_manager_v2` global, once created — lets an
+    /// input-method client (an IME) offer composed text back to focused
+    /// fields. `Option`, same rationale as the other manager globals.
+    pub(crate) input_method_manager: RefCell<Option<NonNull<sys::wlr_input_method_manager_v2>>>,
+
+    /// Every live `zwp_text_input_v3` object, keyed by its destroy-listener
+    /// address so the destroy handler can evict its own entry. Empty until a
+    /// client binds a text-input. See [`TextInputEntry`].
+    pub(crate) text_inputs: RefCell<HashMap<usize, TextInputEntry>>,
+
+    /// The single tracked `zwp_input_method_v2` object, or `None` when no
+    /// input-method is bound (decision #3: at most one per seat). See
+    /// [`InputMethodEntry`].
+    pub(crate) input_method: RefCell<Option<InputMethodEntry>>,
 
     /// The pointer constraint currently activated on the focused surface, or
     /// `None` when the pointer is unconstrained. `backend.rs`'s
@@ -1187,6 +1247,10 @@ impl Runtime {
                 cursor_shape_manager: RefCell::new(None),
                 xdg_activation_manager: RefCell::new(None),
                 gamma_control_manager: RefCell::new(None),
+                text_input_manager: RefCell::new(None),
+                input_method_manager: RefCell::new(None),
+                text_inputs: RefCell::new(HashMap::new()),
+                input_method: RefCell::new(None),
                 active_constraint: std::cell::Cell::new(None),
                 pointer_grab: std::cell::Cell::new(None),
                 idle_notifier: RefCell::new(None),
@@ -5174,6 +5238,68 @@ impl Runtime {
         *self.inner.pointer_constraints_manager.borrow()
     }
 
+    /// Create the `zwp_text_input_manager_v3` global. Apps bind it to declare
+    /// an editable field; the crate relays their state to the bound
+    /// input-method. Errors if called twice.
+    pub fn create_text_input_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.text_input_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_text_input_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_text_input_manager_v3_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_text_input_manager_v3_create"))?;
+        *self.inner.text_input_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// Create the `zwp_input_method_manager_v2` global. At most one client per
+    /// seat is tracked (decision #3); a second is sent `unavailable`. Errors
+    /// if called twice.
+    pub fn create_input_method_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.input_method_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_input_method_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_input_method_manager_v2_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_input_method_manager_v2_create"))?;
+        *self.inner.input_method_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// The `zwp_text_input_manager_v3` manager, once created via
+    /// [`Runtime::create_text_input_manager`] — read by `backend.rs` to link
+    /// the `new_text_input` listener that populates
+    /// [`RuntimeInner::text_inputs`].
+    pub(crate) fn text_input_manager_ptr(&self) -> Option<NonNull<sys::wlr_text_input_manager_v3>> {
+        *self.inner.text_input_manager.borrow()
+    }
+
+    /// The `zwp_input_method_manager_v2` manager, once created via
+    /// [`Runtime::create_input_method_manager`] — read by `backend.rs` to link
+    /// the `new_input_method` listener that sets [`RuntimeInner::input_method`].
+    pub(crate) fn input_method_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_input_method_manager_v2>> {
+        *self.inner.input_method_manager.borrow()
+    }
+
+    /// Debug accessor: the number of tracked `zwp_text_input_v3` objects.
+    ///
+    /// Exists only so the `tests/input_method.rs` integration test — which
+    /// cannot see the `pub(crate)` [`RuntimeInner::text_inputs`] map — can
+    /// assert the relay's resting state. `#[doc(hidden)]` keeps it out of the
+    /// public surface; it is not part of the crate's API.
+    #[doc(hidden)]
+    pub fn rt_debug_text_input_count(&self) -> usize {
+        self.inner.text_inputs.borrow().len()
+    }
+
     /// Create the `wp_cursor_shape_manager_v1` global, letting clients name
     /// the cursor image they want instead of drawing their own. Errors if
     /// called twice.
@@ -6289,6 +6415,9 @@ impl Runtime {
             if (*seat.as_ptr()).keyboard_state.focused_surface == surface {
                 return Some(());
             }
+            // Relay text-input enter/leave off the focus change (decision #4),
+            // before the seat notify so the outgoing surface is still current.
+            self.relay_keyboard_focus(surface);
             let kb = sys::wlr_seat_get_keyboard(seat.as_ptr());
             if kb.is_null() {
                 sys::wlr_seat_keyboard_notify_enter(
@@ -6479,6 +6608,34 @@ impl Runtime {
     /// it. Tests read this to prove the state machine.
     pub fn is_session_locked(&self) -> bool {
         self.inner.session_locked.get()
+    }
+
+    /// Whether the tracked input-method is currently activated for a focused,
+    /// enabled text-input. Read-only oracle for the relay; mirrors
+    /// `is_session_locked`'s shape.
+    pub fn input_method_active(&self) -> bool {
+        self.inner
+            .input_method
+            .borrow()
+            .as_ref()
+            .is_some_and(|e| e.focused_text_input.is_some())
+    }
+
+    /// The [`RuntimeInner::text_inputs`] map key of the tracked text-input whose
+    /// wlroots pointer is `ti`, or `None` if this runtime is not tracking that
+    /// text-input. The enable relay uses it to record, by key, which text-input
+    /// drove the input-method's activation, so the destroy handler can later
+    /// clear that back-reference by the same key.
+    ///
+    /// `ti` is only ever compared, never dereferenced, so any pointer value is
+    /// accepted; that is why this is a safe method taking a raw pointer.
+    pub(crate) fn text_input_key_for(&self, ti: *mut sys::wlr_text_input_v3) -> Option<usize> {
+        self.inner
+            .text_inputs
+            .borrow()
+            .iter()
+            .find(|(_, entry)| entry.raw.as_ptr() == ti)
+            .map(|(key, _)| *key)
     }
 
     pub(crate) fn session_lock_ptr(&self) -> Option<NonNull<sys::wlr_session_lock_v1>> {
@@ -8105,6 +8262,9 @@ impl Runtime {
             if (*seat.as_ptr()).keyboard_state.focused_surface == surface {
                 return Some(());
             }
+            // Relay text-input enter/leave off the focus change (decision #4),
+            // before the seat notify so the outgoing surface is still current.
+            self.relay_keyboard_focus(surface);
             let kb = sys::wlr_seat_get_keyboard(seat.as_ptr());
             if kb.is_null() {
                 sys::wlr_seat_keyboard_notify_enter(
@@ -8291,6 +8451,9 @@ impl Runtime {
             if (*seat.as_ptr()).keyboard_state.focused_surface == surface {
                 return Some(());
             }
+            // Relay text-input enter/leave off the focus change (decision #4),
+            // before the seat notify so the outgoing surface is still current.
+            self.relay_keyboard_focus(surface);
             let kb = sys::wlr_seat_get_keyboard(seat.as_ptr());
             if kb.is_null() {
                 sys::wlr_seat_keyboard_notify_enter(
@@ -8320,10 +8483,137 @@ impl Runtime {
     pub fn clear_keyboard_focus(&self) {
         let seat = *self.inner.seat.borrow();
         let Some(seat) = seat else { return };
+        // Drive text-input leave/deactivate off the focus loss *before* the
+        // seat clears its focus, so the relay still sees the outgoing surface
+        // (decision #4). Incoming is null: focus goes to nothing.
+        self.relay_keyboard_focus(std::ptr::null_mut());
         // SAFETY: the seat is owned by the display and live for as long as
         // this runtime can be used; the call is a no-op when nothing has
         // focus.
         unsafe { sys::wlr_seat_keyboard_notify_clear_focus(seat.as_ptr()) };
+    }
+
+    /// Look up the `wl_client` owning `surface`, or null when `surface` is null
+    /// (or has no resource). Mirrors the `wl_resource_get_client` reach-through
+    /// `on_new_text_input` uses, since the wlroots bindings do not expose it.
+    ///
+    /// # Safety
+    /// `surface`, when non-null, must be a live `wlr_surface` whose `resource`
+    /// (when non-null) is a live `wl_resource`; the call only reads it.
+    pub(crate) unsafe fn surface_client(surface: *mut sys::wlr_surface) -> *mut sys::wl_client {
+        use sys::wayland_sys::ffi_dispatch;
+        #[allow(unused_imports)]
+        use sys::wayland_sys::server::*;
+
+        if surface.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: caller guarantees a non-null `surface` is live.
+        let resource = unsafe { (*surface).resource };
+        if resource.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: `resource` is a live `wl_resource`; `wl_resource_get_client`
+        // only reads it and returns its owning client.
+        unsafe {
+            ffi_dispatch!(
+                sys::wayland_sys::server::wayland_server_handle(),
+                wl_resource_get_client,
+                resource
+            )
+        }
+    }
+
+    /// Drive text-input enter/leave off a keyboard-focus change (decision #4).
+    ///
+    /// `new_surface` is the surface about to gain keyboard focus, or null on
+    /// clear. Called from each keyboard-focus mutator *before* it notifies the
+    /// seat, so the seat's current `focused_surface` is still the outgoing one.
+    ///
+    /// Outgoing: every text-input whose client owns the outgoing surface gets a
+    /// `leave`, and if the IME was activated for one of them it is deactivated.
+    /// Incoming: every text-input whose client owns `new_surface` gets an
+    /// `enter`. Activation waits for that text-input's own `enable` (decision
+    /// #5), so no `send_activate` here.
+    pub(crate) fn relay_keyboard_focus(&self, new_surface: *mut sys::wlr_surface) {
+        let Some(seat) = *self.inner.seat.borrow() else {
+            return;
+        };
+        // SAFETY: the seat is owned by the display and live for the runtime's
+        // lifetime; reading `keyboard_state.focused_surface` is a field read.
+        let old_surface = unsafe { (*seat.as_ptr()).keyboard_state.focused_surface };
+        if old_surface == new_surface {
+            return;
+        }
+        let tis = self.inner.text_inputs.borrow();
+
+        // Outgoing: leave every text-input whose client owns the outgoing
+        // surface, and deactivate the IME if it was activated for one of them.
+        if !old_surface.is_null() {
+            // SAFETY: a live focused surface carries a live resource.
+            let old_client = unsafe { Self::surface_client(old_surface) };
+            if !old_client.is_null() {
+                for (key, ti) in tis.iter() {
+                    if ti.client != old_client {
+                        continue;
+                    }
+                    // `focused_surface` (the wlroots C field) is the single
+                    // source of truth for "is this text-input entered".
+                    // `wlr_text_input_v3_send_leave` asserts it is non-null, so
+                    // a text-input that was never entered on `old_surface` — one
+                    // created on an already-focused window, say — must be skipped
+                    // entirely: no leave, no paired IME-deactivate. Only leave
+                    // the text-input actually entered on the surface being left.
+                    // SAFETY: `ti.raw` names a live text-input — its destroy
+                    // listener removes the entry before wlroots frees it; this
+                    // is a field read.
+                    let entered_surface = unsafe { (*ti.raw.as_ptr()).focused_surface };
+                    if entered_surface != old_surface {
+                        continue;
+                    }
+                    // SAFETY: `ti.raw` names a live text-input, and its
+                    // `focused_surface` is non-null (equal to `old_surface`),
+                    // so the wlroots leave-assertion holds.
+                    unsafe { sys::wlr_text_input_v3_send_leave(ti.raw.as_ptr()) };
+                    let mut im = self.inner.input_method.borrow_mut();
+                    if let Some(entry) = im.as_mut()
+                        && entry.focused_text_input == Some(*key)
+                    {
+                        // SAFETY: `entry.raw` names a live input-method for
+                        // its entry's lifetime.
+                        unsafe {
+                            sys::wlr_input_method_v2_send_deactivate(entry.raw.as_ptr());
+                            sys::wlr_input_method_v2_send_done(entry.raw.as_ptr());
+                        }
+                        entry.focused_text_input = None;
+                    }
+                }
+            }
+        }
+
+        // Incoming: enter every text-input whose client owns the new surface.
+        if !new_surface.is_null() {
+            // SAFETY: the incoming surface is live (checked by the caller).
+            let new_client = unsafe { Self::surface_client(new_surface) };
+            if !new_client.is_null() {
+                for ti in tis.values() {
+                    if ti.client != new_client {
+                        continue;
+                    }
+                    // Defensive dedup: skip a text-input already entered on
+                    // `new_surface` to avoid a redundant re-enter. `focused_surface`
+                    // is the source of truth for whether it is already entered.
+                    // SAFETY: `ti.raw` is live; this is a field read.
+                    let entered_surface = unsafe { (*ti.raw.as_ptr()).focused_surface };
+                    if entered_surface == new_surface {
+                        continue;
+                    }
+                    // SAFETY: `ti.raw` is live; `new_surface` is the live
+                    // incoming surface.
+                    unsafe { sys::wlr_text_input_v3_send_enter(ti.raw.as_ptr(), new_surface) };
+                }
+            }
+        }
     }
 
     /// The topmost **toplevel** at scene coordinates `(x, y)`, and the

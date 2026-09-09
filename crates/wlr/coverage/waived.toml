@@ -393,7 +393,6 @@ reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
 
-
 [[waived]]
 symbol    = "wlr_cursor_state"
 reason    = "not-yet"
@@ -1303,130 +1302,64 @@ note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
 
 [[waived]]
-symbol    = "wlr_input_method_keyboard_grab_v2"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
 symbol    = "wlr_input_method_keyboard_grab_v2_destroy"
 reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
+note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
+milestone = "A6.2"
 
 [[waived]]
 symbol    = "wlr_input_method_keyboard_grab_v2_send_key"
 reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
+note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
+milestone = "A6.2"
 
 [[waived]]
 symbol    = "wlr_input_method_keyboard_grab_v2_send_modifiers"
 reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
+note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
+milestone = "A6.2"
 
 [[waived]]
 symbol    = "wlr_input_method_keyboard_grab_v2_set_keyboard"
 reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_input_method_manager_v2"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_input_method_manager_v2_create"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_input_method_v2"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
+note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
+milestone = "A6.2"
 
 [[waived]]
 symbol    = "wlr_input_method_v2_delete_surrounding_text"
 reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
+note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
+milestone = "A6.2"
 
 [[waived]]
 symbol    = "wlr_input_method_v2_preedit_string"
 reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_input_method_v2_send_activate"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_input_method_v2_send_content_type"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_input_method_v2_send_deactivate"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_input_method_v2_send_done"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_input_method_v2_send_surrounding_text"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_input_method_v2_send_text_change_cause"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_input_method_v2_send_unavailable"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
+note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
+milestone = "A6.2"
 
 [[waived]]
 symbol    = "wlr_input_method_v2_state"
 reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
+note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
+milestone = "A6.2"
 
 [[waived]]
 symbol    = "wlr_input_popup_surface_v2"
 reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
+note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
+milestone = "A6.2"
 
 [[waived]]
 symbol    = "wlr_input_popup_surface_v2_send_text_input_rectangle"
 reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
+note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
+milestone = "A6.2"
 
 [[waived]]
 symbol    = "wlr_input_popup_surface_v2_try_from_wlr_surface"
 reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
+note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
+milestone = "A6.2"
 
 [[waived]]
 symbol    = "wlr_keyboard_finish"
@@ -3925,70 +3858,10 @@ note      = "Output stack completion."
 milestone = "M6"
 
 [[waived]]
-symbol    = "wlr_text_input_manager_v3"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_text_input_manager_v3_create"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_text_input_v3"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_text_input_v3_features"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_text_input_v3_send_commit_string"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_text_input_v3_send_delete_surrounding_text"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_text_input_v3_send_done"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_text_input_v3_send_enter"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_text_input_v3_send_leave"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_text_input_v3_send_preedit_string"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
 symbol    = "wlr_text_input_v3_state"
 reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
+note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
+milestone = "A6.2"
 
 [[waived]]
 symbol    = "wlr_texture_impl"
@@ -4450,7 +4323,6 @@ symbol    = "wlr_xdg_positioner_is_complete"
 reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
 milestone = "M9"
-
 
 [[waived]]
 symbol    = "wlr_xdg_surface_configure"
