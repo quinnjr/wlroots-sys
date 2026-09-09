@@ -4900,6 +4900,20 @@ unsafe extern "C" fn on_input_method_new_popup_surface<S: Handlers>(
 /// drops and so unlinks its `destroy` listener, sound for the same reason
 /// `on_text_input_destroy` is: `wl_signal_emit_mutable` has advanced its cursor
 /// past this listener before the callback runs.
+///
+/// If A10 placed the popup in the scene, its scene node is destroyed here too.
+/// The `wlr_input_popup_surface_v2` role object is freed now, but the protocol
+/// requires the client to keep the underlying `wl_surface` alive as long as the
+/// popup object existed — so the surface has *not* been destroyed yet. The
+/// scene subsurface tree [`add_input_popup_in_band`](crate::Runtime::add_input_popup_in_band)
+/// created auto-destroys on that *surface's* destroy, not the popup's, so
+/// without this the tree would linger in the scene graph (orphaned, possibly
+/// still visible) with the crate's only handle to it discarded.
+/// [`Runtime::destroy_node`](crate::Runtime::destroy_node) runs
+/// `wlr_scene_node_destroy`, which unlinks the subsurface tree's own
+/// surface-destroy listener — so the later `wl_surface` destroy will not
+/// double-free — and clears the node's `alive` bookkeeping, so the now-stale
+/// [`NodeId`](crate::NodeId) cannot double-destroy either.
 unsafe extern "C" fn on_input_method_popup_destroy<S: Handlers>(
     l: *mut sys::wl_listener,
     _data: *mut std::ffi::c_void,
@@ -4913,7 +4927,15 @@ unsafe extern "C" fn on_input_method_popup_destroy<S: Handlers>(
         let session = (*bound).session.cast::<Session<'_, S>>();
         let runtime = (*session).runtime;
         let key = l as usize;
-        runtime.inner.input_method_popups.borrow_mut().remove(&key);
+        // Evict first (dropping the entry unlinks this `destroy` listener), then
+        // destroy the popup's scene node through the same `Owned`-node path every
+        // node this crate creates is torn down by. `destroy_node` never borrows
+        // `input_method_popups`, so the borrow is released before the call; a
+        // stale or refused id (a live scene walk) misses cleanly.
+        let entry = runtime.inner.input_method_popups.borrow_mut().remove(&key);
+        if let Some(node) = entry.and_then(|entry| entry.node) {
+            runtime.destroy_node(node);
+        }
     }
 }
 
