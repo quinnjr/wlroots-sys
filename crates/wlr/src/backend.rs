@@ -4691,8 +4691,8 @@ unsafe extern "C" fn on_new_text_input<S: Handlers>(
 /// `unavailable` and **not** tracked — it links no listeners and the client
 /// tears it down, so there is nothing to unlink later. Otherwise it becomes the
 /// single [`RuntimeInner::input_method`](crate::runtime::RuntimeInner) entry
-/// with its `commit`/`destroy` listeners linked (the popup/grab listeners are
-/// added in A6.2).
+/// with its `commit`/`destroy`/`new_popup_surface`/`grab_keyboard` listeners
+/// linked.
 unsafe extern "C" fn on_new_input_method<S: Handlers>(
     l: *mut sys::wl_listener,
     data: *mut std::ffi::c_void,
@@ -4732,11 +4732,33 @@ unsafe extern "C" fn on_new_input_method<S: Handlers>(
             (*bound).session,
             std::ptr::null(),
         );
+        // `new_popup_surface` and `grab_keyboard` are creation signals: each
+        // carries the newly created object in its `data` (a
+        // `wlr_input_popup_surface_v2*` and a `wlr_input_method_keyboard_grab_v2*`
+        // respectively, the `wlr_input_method_manager_v2.events.new_input_method`
+        // convention this very handler is reached by), so their notify functions
+        // recover the object from `data`, not from `Bound`. They need no object
+        // identity of their own and stay on `link_bare`. Both are dropped when
+        // this entry drops (on the IME's own destroy, from inside that emission),
+        // so `alive` is null — the stronger claim — as for `commit`/`destroy`.
+        let new_popup_surface = Registration::link_bare(
+            &raw mut (*im.as_ptr()).events.new_popup_surface,
+            on_input_method_new_popup_surface::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        let grab_keyboard = Registration::link_bare(
+            &raw mut (*im.as_ptr()).events.grab_keyboard,
+            on_input_method_grab_keyboard::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
         *runtime.inner.input_method.borrow_mut() = Some(crate::runtime::InputMethodEntry {
             raw: im,
             focused_text_input: None,
             keyboard_grab: None,
-            _listeners: vec![commit, destroy],
+            keyboard_grab_destroy: None,
+            _listeners: vec![commit, destroy, new_popup_surface, grab_keyboard],
         });
     }
 }
@@ -4814,6 +4836,180 @@ unsafe extern "C" fn on_input_method_destroy<S: Handlers>(
             .is_some_and(|entry| entry._listeners.iter().any(|r| r.listener_addr() == key));
         if is_current {
             *runtime.inner.input_method.borrow_mut() = None;
+        }
+    }
+}
+
+/// The bound input-method created a `zwp_input_method_v2` popup surface — a
+/// candidate-list surface it wants placed near the text cursor. Tracks it in
+/// [`RuntimeInner::input_method_popups`](crate::runtime::RuntimeInner), keyed by
+/// its own `destroy` listener's address, and links that `destroy` listener; the
+/// scene placement and the text-input-rectangle send land in A10.
+///
+/// This is a **creation** signal: wlroots emits
+/// `wlr_input_method_v2.events.new_popup_surface` with the freshly created
+/// `wlr_input_popup_surface_v2*` as its `data` (the same convention the manager
+/// `new_input_method` signal `on_new_input_method` reads follows), so the new
+/// object is recovered from `data`, not from `Bound`. The popup's own `destroy`
+/// is a per-object lifecycle signal, so [`on_input_method_popup_destroy`]
+/// recovers its entry by the firing listener's address (`l`) instead — the same
+/// destroy-keying discipline `on_new_text_input`/`on_new_pointer_constraint`
+/// use, which never depends on the signal `data`.
+unsafe extern "C" fn on_input_method_new_popup_surface<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener `on_new_input_method`
+    // linked into this IME's `events.new_popup_surface`, whose `session` is the
+    // `*const Session<'_, S>` paired with that instantiation. The signal carries
+    // a live `*mut wlr_input_popup_surface_v2`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let Some(popup) = NonNull::new(data.cast::<sys::wlr_input_popup_surface_v2>()) else {
+            return;
+        };
+        // Linked on the popup's own `destroy`. No `alive` backstop, matching the
+        // text-input and pointer-constraint entries: the popup cannot be freed by
+        // anything other than the `destroy` this entry watches, which evicts the
+        // entry — and so unlinks the listener — from inside that emission.
+        let destroy = Registration::link_bare(
+            &raw mut (*popup.as_ptr()).events.destroy,
+            on_input_method_popup_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        // Key by the destroy listener's own address: `on_input_method_popup_destroy`
+        // recovers the same key from the `l` it is handed, never from `data`.
+        let key = destroy.listener_addr();
+        runtime.inner.input_method_popups.borrow_mut().insert(
+            key,
+            crate::runtime::InputPopupEntry {
+                raw: popup,
+                node: None,
+                _destroy: destroy,
+            },
+        );
+    }
+}
+
+/// An input-method popup surface is about to be freed. Removes its entry from
+/// [`RuntimeInner::input_method_popups`](crate::runtime::RuntimeInner) — keyed
+/// by the firing listener's own address (`l`), never the signal `data` — which
+/// drops and so unlinks its `destroy` listener, sound for the same reason
+/// `on_text_input_destroy` is: `wl_signal_emit_mutable` has advanced its cursor
+/// past this listener before the callback runs.
+unsafe extern "C" fn on_input_method_popup_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_input_method_new_popup_surface` into this popup's own
+    // `events.destroy`; the popup is still live memory for this emission.
+    // Identity comes from `l` — the address under which the entry was keyed —
+    // never from the signal `data`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let key = l as usize;
+        runtime.inner.input_method_popups.borrow_mut().remove(&key);
+    }
+}
+
+/// The bound input-method grabbed the keyboard: it wants raw key events routed
+/// to it (for its own hotkeys) rather than straight to the focused client.
+/// Records the grab on
+/// [`InputMethodEntry`](crate::runtime::InputMethodEntry)`::keyboard_grab`, sets
+/// the seat's active keyboard on it so wlroots can send the keymap, and links
+/// the grab's `destroy` listener. A9 only tracks the grab; the key-forwarding
+/// that consumes it lands in A11.
+///
+/// This is a **creation** signal: wlroots emits
+/// `wlr_input_method_v2.events.grab_keyboard` with the freshly created
+/// `wlr_input_method_keyboard_grab_v2*` as its `data`, so the grab is recovered
+/// from `data`, not from `Bound`. The grab's own `destroy` is a per-object
+/// lifecycle signal, so [`on_input_method_grab_destroy`] recovers the entry by
+/// its stored registration address rather than from `data`.
+unsafe extern "C" fn on_input_method_grab_keyboard<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener `on_new_input_method`
+    // linked into this IME's `events.grab_keyboard`, whose `session` is the
+    // `*const Session<'_, S>` paired with that instantiation. The signal carries
+    // a live `*mut wlr_input_method_keyboard_grab_v2`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let Some(grab) = NonNull::new(data.cast::<sys::wlr_input_method_keyboard_grab_v2>()) else {
+            return;
+        };
+        // Hand the grab the seat's *active* keyboard — the one
+        // `wlr_seat_set_keyboard` established — mirroring `on_keyboard_key`'s own
+        // `wlr_seat_get_keyboard` read. wlroots' `set_keyboard` sends the keymap
+        // and wires the grab's own keyboard listeners; passing a null keyboard is
+        // tolerated (a no-op), so a seat with no keyboard yet is handled by simply
+        // not calling it.
+        if let Some(seat) = runtime.seat_ptr() {
+            let kb = sys::wlr_seat_get_keyboard(seat.as_ptr());
+            if !kb.is_null() {
+                sys::wlr_input_method_keyboard_grab_v2_set_keyboard(grab.as_ptr(), kb);
+            }
+        }
+        // Linked on the grab's own `destroy`. No `alive` backstop: the grab
+        // cannot be freed by anything other than the `destroy` this listener
+        // watches (which clears the field from inside that emission), or when the
+        // IME itself is destroyed — and then the grab is still alive as this
+        // registration is dropped with the entry. Both are the "owner alive at
+        // unlink" case a null `alive` asserts.
+        let destroy = Registration::link_bare(
+            &raw mut (*grab.as_ptr()).events.destroy,
+            on_input_method_grab_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        if let Some(entry) = runtime.inner.input_method.borrow_mut().as_mut() {
+            entry.keyboard_grab = Some(grab);
+            entry.keyboard_grab_destroy = Some(destroy);
+        }
+        // If no IME entry is tracked (which cannot happen: this signal is only
+        // linked on the tracked IME's object), `destroy` drops here and unlinks
+        // while the grab is still alive — sound, and it simply means the grab is
+        // untracked.
+    }
+}
+
+/// The input-method's keyboard grab is about to be freed. Clears
+/// [`InputMethodEntry`](crate::runtime::InputMethodEntry)`::keyboard_grab` and
+/// drops the grab's `destroy` registration, but only when the firing listener
+/// (`l`) is the one this entry stored for its current grab — so a stale fire can
+/// never clear a grab the entry has since re-acquired. Dropping the registration
+/// from inside the grab's own destroy emission unlinks it safely, for the same
+/// reason `on_text_input_destroy`'s eviction is sound.
+unsafe extern "C" fn on_input_method_grab_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_input_method_grab_keyboard` into this grab's own
+    // `events.destroy`; the grab is still live memory for this emission.
+    // Identity comes from the stored registration's address, never from `data`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let key = l as usize;
+        if let Some(entry) = runtime.inner.input_method.borrow_mut().as_mut()
+            && entry
+                .keyboard_grab_destroy
+                .as_ref()
+                .is_some_and(|r| r.listener_addr() == key)
+        {
+            entry.keyboard_grab = None;
+            // Drops the registration, unlinking this listener from inside the
+            // grab's own destroy emission — the cursor has advanced past it.
+            entry.keyboard_grab_destroy = None;
         }
     }
 }

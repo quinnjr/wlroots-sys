@@ -149,11 +149,63 @@ pub(crate) struct TextInputEntry {
 pub(crate) struct InputMethodEntry {
     pub(crate) raw: NonNull<sys::wlr_input_method_v2>,
     pub(crate) focused_text_input: Option<usize>,
-    // Written at construction, read once A6.2 wires the keyboard grab; kept now
-    // so that milestone is purely additive.
+    /// The active `wlr_input_method_keyboard_grab_v2`, a borrowed pointer set by
+    /// `on_input_method_grab_keyboard` and cleared on the grab's own destroy (or
+    /// when this entry drops). Written here in A6.2; the key-forwarding read that
+    /// consumes it lands in A11, so for this task the field is still written but
+    /// never read — hence the retained `#[allow(dead_code)]`.
     #[allow(dead_code)]
     pub(crate) keyboard_grab: Option<NonNull<sys::wlr_input_method_keyboard_grab_v2>>,
+    /// The registration for the active keyboard grab's `destroy` signal, held
+    /// only while a grab is bound (`Some` iff `keyboard_grab` is `Some`).
+    ///
+    /// Its `Drop` unlinks the listener, so it must be taken — and so dropped —
+    /// from inside the grab's own destroy emission, which is what
+    /// `on_input_method_grab_destroy` does; leaving it to unlink from freed grab
+    /// memory would be a use-after-free. The invariant "set iff the grab is
+    /// alive" makes dropping it when this whole entry drops (on the IME's own
+    /// destroy) sound too: the grab is still alive then, so the listener is
+    /// unlinked while its owner stands.
+    pub(crate) keyboard_grab_destroy: Option<crate::backend::Registration>,
     pub(crate) _listeners: Vec<crate::backend::Registration>,
+}
+
+/// A stable handle for one tracked `zwp_input_method_v2` popup surface — the key
+/// under which its [`InputPopupEntry`] lives in
+/// [`RuntimeInner::input_method_popups`].
+///
+/// Opaque to consumers, exactly like [`PopupId`](crate::PopupId): the compositor
+/// receives one when a popup is announced and hands it back to the crate to
+/// place or query that popup. The wrapped value is the popup's destroy-listener
+/// address, which is what keys the map (the destroy handler recovers the same
+/// key from the firing listener), but that is an implementation detail the
+/// newtype hides.
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`PopupId`](crate::PopupId): an
+/// opaque id's ordering would promise a creation-order semantics nobody asked
+/// for, and this API is frozen within the wlroots minor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InputPopupSurfaceId(pub(crate) usize);
+
+/// One tracked `zwp_input_method_v2` popup surface — a candidate-list surface an
+/// input-method offers to sit near the text cursor.
+///
+/// `raw` is a borrowed wlroots pointer, never owned; it is freed with its client
+/// resource, with the `_destroy` listener evicting this entry from
+/// [`RuntimeInner::input_method_popups`] first. `node` is the scene node the
+/// popup is placed under once A10 wires scene placement — `None` until then.
+/// Kept in a map keyed by the destroy-listener address, the same
+/// destroy-keying discipline [`TextInputEntry`] and the pointer-constraint
+/// table use, so identity never depends on a signal `data`.
+pub(crate) struct InputPopupEntry {
+    // `raw` and `node` are written at construction (as the popup pointer and
+    // `None`) and first *read* in A10, which places the popup in the scene; for
+    // A9 they are tracking state only, hence the `#[allow(dead_code)]`.
+    #[allow(dead_code)]
+    pub(crate) raw: NonNull<sys::wlr_input_popup_surface_v2>,
+    #[allow(dead_code)]
+    pub(crate) node: Option<NodeId>,
+    pub(crate) _destroy: crate::backend::Registration,
 }
 
 pub(crate) struct RuntimeInner {
@@ -373,6 +425,15 @@ pub(crate) struct RuntimeInner {
     /// input-method is bound (decision #3: at most one per seat). See
     /// [`InputMethodEntry`].
     pub(crate) input_method: RefCell<Option<InputMethodEntry>>,
+
+    /// Every live `zwp_input_method_v2` popup surface, keyed by its
+    /// destroy-listener address so the destroy handler can evict its own entry
+    /// — the same discipline [`RuntimeInner::text_inputs`] uses. Empty until the
+    /// bound input-method creates a popup. The map lives on the runtime, not on
+    /// the [`InputMethodEntry`], so a popup's destroy registration is only ever
+    /// dropped by its own destroy handler removing it here; see
+    /// [`InputPopupEntry`]. See A10 for scene placement.
+    pub(crate) input_method_popups: RefCell<HashMap<usize, InputPopupEntry>>,
 
     /// The pointer constraint currently activated on the focused surface, or
     /// `None` when the pointer is unconstrained. `backend.rs`'s
@@ -1251,6 +1312,7 @@ impl Runtime {
                 input_method_manager: RefCell::new(None),
                 text_inputs: RefCell::new(HashMap::new()),
                 input_method: RefCell::new(None),
+                input_method_popups: RefCell::new(HashMap::new()),
                 active_constraint: std::cell::Cell::new(None),
                 pointer_grab: std::cell::Cell::new(None),
                 idle_notifier: RefCell::new(None),
@@ -5298,6 +5360,19 @@ impl Runtime {
     #[doc(hidden)]
     pub fn rt_debug_text_input_count(&self) -> usize {
         self.inner.text_inputs.borrow().len()
+    }
+
+    /// Debug accessor: the number of tracked `zwp_input_method_v2` popup
+    /// surfaces.
+    ///
+    /// Exists for the same reason [`Runtime::rt_debug_text_input_count`] does —
+    /// so `tests/input_method.rs` can assert the popup table's resting state
+    /// without seeing the `pub(crate)` [`RuntimeInner::input_method_popups`]
+    /// map. `#[doc(hidden)]` keeps it out of the public surface; it is not part
+    /// of the crate's API.
+    #[doc(hidden)]
+    pub fn rt_debug_input_popup_count(&self) -> usize {
+        self.inner.input_method_popups.borrow().len()
     }
 
     /// Create the `wp_cursor_shape_manager_v1` global, letting clients name

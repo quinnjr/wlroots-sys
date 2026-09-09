@@ -1320,12 +1320,6 @@ note      = "Input-method popups, the keyboard grab, and the remaining preedit/s
 milestone = "A6.2"
 
 [[waived]]
-symbol    = "wlr_input_method_keyboard_grab_v2_set_keyboard"
-reason    = "not-yet"
-note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
-milestone = "A6.2"
-
-[[waived]]
 symbol    = "wlr_input_method_v2_delete_surrounding_text"
 reason    = "not-yet"
 note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
@@ -1339,12 +1333,6 @@ milestone = "A6.2"
 
 [[waived]]
 symbol    = "wlr_input_method_v2_state"
-reason    = "not-yet"
-note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
-milestone = "A6.2"
-
-[[waived]]
-symbol    = "wlr_input_popup_surface_v2"
 reason    = "not-yet"
 note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
 milestone = "A6.2"

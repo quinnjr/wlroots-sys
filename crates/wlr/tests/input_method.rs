@@ -70,6 +70,15 @@ fn managers_register_listeners_without_a_client() {
         0,
         "no client bound, so the text-input table must be empty"
     );
+    // The A6.2 popup table shares the same resting state: no input-method has
+    // bound, so `new_popup_surface` never fired and the table stays empty. The
+    // live popup-created/keyboard-grab behaviour is proven in the icedtea harness
+    // (Part B, tests 8-9) with real clients, which a crate test cannot bind.
+    assert_eq!(
+        rt.rt_debug_input_popup_count(),
+        0,
+        "no input-method bound, so the popup table must be empty"
+    );
 }
 
 #[test]
