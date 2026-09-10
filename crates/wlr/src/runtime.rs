@@ -149,11 +149,79 @@ pub(crate) struct TextInputEntry {
 pub(crate) struct InputMethodEntry {
     pub(crate) raw: NonNull<sys::wlr_input_method_v2>,
     pub(crate) focused_text_input: Option<usize>,
-    // Written at construction, read once A6.2 wires the keyboard grab; kept now
-    // so that milestone is purely additive.
-    #[allow(dead_code)]
+    /// The active `wlr_input_method_keyboard_grab_v2`, a borrowed pointer set by
+    /// `on_input_method_grab_keyboard` and cleared on the grab's own destroy (or
+    /// when this entry drops). Read in `on_key`/`on_modifiers` (A11): while it is
+    /// `Some`, physical key and modifier events are forwarded to the grab instead
+    /// of the seat's keyboard, after the compositor's keybinding dispatch.
     pub(crate) keyboard_grab: Option<NonNull<sys::wlr_input_method_keyboard_grab_v2>>,
+    /// The registration for the active keyboard grab's `destroy` signal, held
+    /// only while a grab is bound (`Some` iff `keyboard_grab` is `Some`).
+    ///
+    /// Its `Drop` unlinks the listener, so it must be taken — and so dropped —
+    /// from inside the grab's own destroy emission, which is what
+    /// `on_input_method_grab_destroy` does; leaving it to unlink from freed grab
+    /// memory would be a use-after-free. The invariant "set iff the grab is
+    /// alive" makes dropping it when this whole entry drops (on the IME's own
+    /// destroy) sound too: the grab is still alive then, so the listener is
+    /// unlinked while its owner stands.
+    pub(crate) keyboard_grab_destroy: Option<crate::backend::Registration>,
     pub(crate) _listeners: Vec<crate::backend::Registration>,
+}
+
+/// A stable handle for one tracked `zwp_input_method_v2` popup surface — the key
+/// under which its `InputPopupEntry` lives in the runtime's `input_method_popups`
+/// table.
+///
+/// Opaque to consumers, exactly like [`PopupId`](crate::PopupId): the compositor
+/// receives one when a popup is announced and hands it back to the crate to
+/// place or query that popup. The wrapped value is the popup's destroy-listener
+/// address, which is what keys the map (the destroy handler recovers the same
+/// key from the firing listener), but that is an implementation detail the
+/// newtype hides.
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`PopupId`](crate::PopupId): an
+/// opaque id's ordering would promise a creation-order semantics nobody asked
+/// for, and this API is frozen within the wlroots minor.
+///
+/// `Debug` is redacted on purpose: the wrapped value is a heap address (the
+/// popup's destroy-listener address, which keys the map), and every other id
+/// in this crate is a counter that leaks nothing — printing this one would
+/// hand out an ASLR/heap-layout oracle to anyone holding the logs.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InputPopupSurfaceId(pub(crate) usize);
+
+impl std::fmt::Debug for InputPopupSurfaceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InputPopupSurfaceId(..)")
+    }
+}
+
+impl InputPopupSurfaceId {
+    /// An id that names no popup, for negative tests: `usize::MAX - n` can
+    /// never be a listener address handed out here (heap addresses never sit
+    /// at the top of the address space). Mirrors
+    /// `ToplevelId::dangling_nth_for_test`.
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
+/// One tracked `zwp_input_method_v2` popup surface — a candidate-list surface an
+/// input-method offers to sit near the text cursor.
+///
+/// `raw` is a borrowed wlroots pointer, never owned; it is freed with its client
+/// resource, with the `_destroy` listener evicting this entry from
+/// [`RuntimeInner::input_method_popups`] first. `node` is the scene node the
+/// popup is placed under by [`Runtime::add_input_popup_in_band`] — `None`
+/// until placed. Kept in a map keyed by the destroy-listener address, the same
+/// destroy-keying discipline [`TextInputEntry`] and the pointer-constraint
+/// table use, so identity never depends on a signal `data`.
+pub(crate) struct InputPopupEntry {
+    pub(crate) raw: NonNull<sys::wlr_input_popup_surface_v2>,
+    pub(crate) node: Option<NodeId>,
+    pub(crate) _destroy: crate::backend::Registration,
 }
 
 pub(crate) struct RuntimeInner {
@@ -373,6 +441,15 @@ pub(crate) struct RuntimeInner {
     /// input-method is bound (decision #3: at most one per seat). See
     /// [`InputMethodEntry`].
     pub(crate) input_method: RefCell<Option<InputMethodEntry>>,
+
+    /// Every live `zwp_input_method_v2` popup surface, keyed by its
+    /// destroy-listener address so the destroy handler can evict its own entry
+    /// — the same discipline [`RuntimeInner::text_inputs`] uses. Empty until the
+    /// bound input-method creates a popup. The map lives on the runtime, not on
+    /// the [`InputMethodEntry`], so a popup's destroy registration is only ever
+    /// dropped by its own destroy handler removing it here; see
+    /// [`InputPopupEntry`]. See A10 for scene placement.
+    pub(crate) input_method_popups: RefCell<HashMap<usize, InputPopupEntry>>,
 
     /// The pointer constraint currently activated on the focused surface, or
     /// `None` when the pointer is unconstrained. `backend.rs`'s
@@ -1251,6 +1328,7 @@ impl Runtime {
                 input_method_manager: RefCell::new(None),
                 text_inputs: RefCell::new(HashMap::new()),
                 input_method: RefCell::new(None),
+                input_method_popups: RefCell::new(HashMap::new()),
                 active_constraint: std::cell::Cell::new(None),
                 pointer_grab: std::cell::Cell::new(None),
                 idle_notifier: RefCell::new(None),
@@ -2982,7 +3060,7 @@ impl Runtime {
     /// use `wl_list_for_each`, not the `_safe` form. Its cursor holds a raw
     /// `next`, so unlinking is a use-after-free inside its recursion and
     /// inserting silently rewires the tail it is about to reach.
-    fn scene_is_being_walked(&self) -> bool {
+    pub(crate) fn scene_is_being_walked(&self) -> bool {
         self.inner.node_borrows.get() != 0 || crate::dispatch::in_foreign_frame()
     }
 
@@ -5298,6 +5376,199 @@ impl Runtime {
     #[doc(hidden)]
     pub fn rt_debug_text_input_count(&self) -> usize {
         self.inner.text_inputs.borrow().len()
+    }
+
+    /// Debug accessor: the number of tracked `zwp_input_method_v2` popup
+    /// surfaces.
+    ///
+    /// Exists for the same reason [`Runtime::rt_debug_text_input_count`] does —
+    /// so `tests/input_method.rs` can assert the popup table's resting state
+    /// without seeing the `pub(crate)` [`RuntimeInner::input_method_popups`]
+    /// map. `#[doc(hidden)]` keeps it out of the public surface; it is not part
+    /// of the crate's API.
+    #[doc(hidden)]
+    pub fn rt_debug_input_popup_count(&self) -> usize {
+        self.inner.input_method_popups.borrow().len()
+    }
+
+    /// The scene node a placed input-method popup's entry tracks, for tests:
+    /// lets a behavioural test capture the node while the popup is placed and
+    /// assert it is gone after teardown (the regression tripwire for destroying
+    /// the node on popup destroy). `None` for an unknown id, a destroyed
+    /// popup, or a popup placed without a node. `#[doc(hidden)]` keeps it out
+    /// of the public surface; it is not part of the crate's API.
+    #[doc(hidden)]
+    pub fn rt_debug_input_popup_node(&self, popup: InputPopupSurfaceId) -> Option<NodeId> {
+        self.inner.input_method_popups.borrow().get(&popup.0)?.node
+    }
+
+    /// The client `wlr_surface` an input-method popup renders, for the
+    /// compositor's placement math.
+    ///
+    /// `None` if this runtime has no popup under `popup` (an unknown id, or one
+    /// whose popup has already been destroyed — its entry is evicted from the
+    /// runtime's `input_method_popups` table by the popup's own `destroy`
+    /// listener before wlroots frees it), or if the popup has not yet been
+    /// given a surface: a live-entry lookup does not promise a mapped surface,
+    /// only that the popup object stands.
+    pub fn input_popup_surface(&self, popup: InputPopupSurfaceId) -> Option<*mut sys::wlr_surface> {
+        let surface = unsafe { (*self.input_popup_raw(popup)?.as_ptr()).surface };
+        if surface.is_null() {
+            return None;
+        }
+        Some(surface)
+    }
+
+    /// The live `wlr_input_popup_surface_v2` behind `popup`, `None` for an
+    /// unknown or destroyed id. The single site encoding the miss semantics
+    /// every popup accessor shares.
+    fn input_popup_raw(
+        &self,
+        popup: InputPopupSurfaceId,
+    ) -> Option<NonNull<sys::wlr_input_popup_surface_v2>> {
+        let raw = self.inner.input_method_popups.borrow().get(&popup.0)?.raw;
+        // SAFETY: the entry is removed only by the popup's own `destroy`
+        // listener, which fires before wlroots frees the popup, so `raw` names a
+        // live `wlr_input_popup_surface_v2`; reading its `surface` field reads
+        // borrowed memory this crate never owns and copies nothing out.
+        Some(raw)
+    }
+
+    /// Place an input-method popup's client surface in the scene under `band`,
+    /// returning the [`NodeId`] of the created subsurface tree.
+    ///
+    /// Wraps `wlr_scene_subsurface_tree_create` over the popup's own
+    /// `wlr_surface`, so the crate keeps every scene-graph FFI on its side and
+    /// the compositor stays pure geometry: it hands back a node the compositor
+    /// then positions with [`set_node_position`](Runtime::set_node_position)
+    /// (the node is `NodeOrigin::Owned`, like every other node this API
+    /// creates). The [`NodeId`] is also stored back on the popup's entry so a
+    /// later reposition can find it. Popups belong in [`Band::Top`] per the
+    /// relay plan, but any band is accepted.
+    ///
+    /// `None` if this runtime has no popup under `popup`, if the popup has no
+    /// surface yet (both via `input_popup_surface`), before
+    /// [`init_graphics`](Runtime::init_graphics) has run, if wlroots refuses
+    /// the node, or — the one retryable case — while a
+    /// [`with_node`](Runtime::with_node) borrow or a
+    /// [`for_each_buffer`](Runtime::for_each_buffer) walk is live: inserting a
+    /// node mid-walk rewires the tail wlroots is about to reach (the same
+    /// scene-insertion gate [`add_rect_in_band`](Runtime::add_rect_in_band)
+    /// carries, and for the identical reason), so a caller that gets `None`
+    /// mid-walk retries after it. Every other `None` is final for this id.
+    pub fn add_input_popup_in_band(
+        &self,
+        popup: InputPopupSurfaceId,
+        band: Band,
+    ) -> Option<NodeId> {
+        // Refused while a node borrow or a scene walk is live — see
+        // `add_rect_in_band`'s own comment for the full argument: inserting a
+        // node mid-walk rewires the tail wlroots' `wl_list_for_each` cursor is
+        // about to reach.
+        if self.scene_is_being_walked() {
+            return None;
+        }
+        let surface = self.input_popup_surface(popup)?;
+        if surface.is_null() {
+            return None;
+        }
+        let tree = self.band_ptr(band)?;
+        // SAFETY: `tree` is one of the six band trees `init_graphics` created and
+        // this runtime owns; it outlives the call. `surface` is the popup's live
+        // client surface (resolved from a live entry just above, and null-checked)
+        // — `wlr_scene_subsurface_tree_create` builds a scene subtree under `tree`
+        // tracking that surface and its subsurfaces.
+        let scene_tree = unsafe { sys::wlr_scene_subsurface_tree_create(tree.as_ptr(), surface) };
+        let scene_tree = NonNull::new(scene_tree)?;
+        // SAFETY: `scene_tree` is the tree wlroots just created, so nothing has
+        // had the chance to attach a payload of this kind to its node yet.
+        let id = unsafe {
+            self.record_node(
+                &raw mut (*scene_tree.as_ptr()).node,
+                NodeOrigin::Owned,
+                None,
+            )
+        }?;
+        // Store the node back on the popup's entry so a later reposition (B7/A12)
+        // can find it. A repeat placement destroys the previous tree first:
+        // overwriting the handle would orphan a still-visible subtree the
+        // popup-destroy teardown could never reach afterwards. The borrow ends
+        // with this block, before the destroy below.
+        let previous = {
+            let mut popups = self.inner.input_method_popups.borrow_mut();
+            let Some(entry) = popups.get_mut(&popup.0) else {
+                // The entry was evicted between the resolve above and this
+                // write — in single-threaded emission that is a destroy racing
+                // this call. Assert rather than returning a `Some` id the
+                // popup table does not track.
+                debug_assert!(
+                    false,
+                    "input popup entry evicted between resolve and node store-back"
+                );
+                return None;
+            };
+            entry.node.replace(id)
+        };
+        if let Some(previous) = previous {
+            // Cannot refuse: the live-walk gate at the top of this function
+            // already returned `None`, and the id was live in this table.
+            let _ = self.destroy_node(previous);
+        }
+        Some(id)
+    }
+
+    /// Tell an input-method popup the anchor rectangle its candidate list should
+    /// sit against — the `text_input_rectangle` the protocol carries.
+    ///
+    /// `rect` is in the coordinate space the popup's own surface uses, exactly
+    /// as the input-method-v2 protocol defines it. Wraps
+    /// `wlr_input_popup_surface_v2_send_text_input_rectangle`.
+    ///
+    /// `None` (sending nothing) if this runtime has no popup under `popup`.
+    pub fn send_input_popup_rectangle(
+        &self,
+        popup: InputPopupSurfaceId,
+        rect: Box2D,
+    ) -> Option<()> {
+        let raw = self.input_popup_raw(popup)?;
+        let mut sbox = sys::wlr_box {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        };
+        // SAFETY: `raw` names a live popup — see `input_popup_surface` for the
+        // liveness argument. `sbox` is a live local for the duration of the call,
+        // which is all the send reads before copying it into the wire message; the
+        // C parameter is `*mut` but the send only reads through it.
+        unsafe {
+            sys::wlr_input_popup_surface_v2_send_text_input_rectangle(raw.as_ptr(), &raw mut sbox);
+        }
+        Some(())
+    }
+
+    /// The cursor rectangle the currently-focused text-input last committed —
+    /// the anchor a compositor positions an input-method popup against.
+    ///
+    /// Reads the active `zwp_input_method_v2`'s focused text-input (its
+    /// `focused_text_input` key into the runtime's `text_inputs` table) and returns
+    /// that text-input's `current.cursor_rectangle`. `None` when no input-method
+    /// is bound, when none of its text-inputs is the activation-driving focus, or
+    /// when that focus names a text-input this runtime no longer tracks.
+    pub fn focused_text_input_cursor_rectangle(&self) -> Option<Box2D> {
+        let key = self
+            .inner
+            .input_method
+            .borrow()
+            .as_ref()?
+            .focused_text_input?;
+        let raw = self.inner.text_inputs.borrow().get(&key)?.raw;
+        // SAFETY: a `text_inputs` entry is evicted by its own `destroy` listener
+        // before wlroots frees the `wlr_text_input_v3`, so a resolvable key names
+        // a live object; reading its `current.cursor_rectangle` (a `wlr_box` held
+        // by value) only reads borrowed memory this crate never owns.
+        let b = unsafe { (*raw.as_ptr()).current.cursor_rectangle };
+        Some(Box2D::new(b.x, b.y, b.width, b.height))
     }
 
     /// Create the `wp_cursor_shape_manager_v1` global, letting clients name

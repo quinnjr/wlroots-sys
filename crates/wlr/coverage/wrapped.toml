@@ -2305,6 +2305,31 @@ module = "runtime"
 item   = "InputMethodEntry::keyboard_grab"
 
 [[wrapped]]
+symbol = "wlr_input_method_keyboard_grab_v2_send_key"
+module = "backend"
+item   = "on_key"
+
+[[wrapped]]
+symbol = "wlr_input_method_keyboard_grab_v2_send_modifiers"
+module = "backend"
+item   = "on_modifiers"
+
+[[wrapped]]
+symbol = "wlr_input_method_keyboard_grab_v2_set_keyboard"
+module = "backend"
+item   = "on_input_method_grab_keyboard"
+
+[[wrapped]]
+symbol = "wlr_input_popup_surface_v2"
+module = "runtime"
+item   = "InputPopupEntry"
+
+[[wrapped]]
+symbol = "wlr_input_popup_surface_v2_send_text_input_rectangle"
+module = "runtime"
+item   = "Runtime::send_input_popup_rectangle"
+
+[[wrapped]]
 symbol = "wlr_text_input_v3"
 module = "backend"
 item   = "Registration::link_text_input"
