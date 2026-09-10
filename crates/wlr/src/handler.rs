@@ -5,9 +5,9 @@
 //! implements only what they use.
 
 use crate::{
-    ActivationToken, AxisSource, CursorShape, CursorShapeDevice, DecorationMode, Edges, KeyEvent,
-    LayerSurface, LayerSurfaceId, NodeId, Output, OutputId, PointerAxis, Popup, PopupId,
-    SceneOutputId, Toplevel, ToplevelId, Transform,
+    ActivationToken, AxisSource, CursorShape, CursorShapeDevice, DecorationMode, Edges,
+    InputPopupSurfaceId, KeyEvent, LayerSurface, LayerSurfaceId, NodeId, Output, OutputId,
+    PointerAxis, Popup, PopupId, SceneOutputId, Toplevel, ToplevelId, Transform,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -1069,6 +1069,38 @@ pub trait SeatHandler {
     /// [`ActivationToken::has_seat`] is `true`.
     fn request_activate(&mut self, target: Option<ToplevelId>, token: ActivationToken) {
         let _ = (target, token);
+    }
+
+    /// An input-method (`zwp_input_method_v2`) created a candidate *popup
+    /// surface* — the list an IME shows next to the text cursor. `popup` is the
+    /// stable handle for it; the compositor places it in the scene — typically
+    /// [`Runtime::add_input_popup_in_band`](crate::Runtime::add_input_popup_in_band)
+    /// under the focused text input's cursor rectangle — and re-anchors it as
+    /// the cursor moves.
+    ///
+    /// wlroots tracks the surface but the compositor still owns the scene: it
+    /// decides where the popup's node sits. Defaulted to a no-op — a compositor
+    /// that does not surface IME candidate lists needs to write nothing; the
+    /// popup then simply never enters the scene, which is a valid (if
+    /// unhelpful) compositor policy.
+    ///
+    /// Lives on `SeatHandler` rather than a trait of its own so adding it stays
+    /// semver-additive: a new supertrait on [`Handlers`] would break every
+    /// downstream consumer that does not also implement it (see commit
+    /// `f2cc8a9`, which dropped a would-be `SessionLockHandler` for the same
+    /// reason). Input-method popups are a seat-focus concern regardless.
+    fn new_popup_surface(&mut self, popup: InputPopupSurfaceId) {
+        let _ = popup;
+    }
+
+    /// An input-method candidate popup surface is gone — its
+    /// `zwp_input_method_v2` popup role object was destroyed. The crate has
+    /// already torn down the scene node it created for the popup (if any) by
+    /// the time this runs, so this is the compositor's cue to drop *its own*
+    /// bookkeeping for `popup`; the handle is stale afterwards. Defaulted to a
+    /// no-op.
+    fn popup_surface_destroyed(&mut self, popup: InputPopupSurfaceId) {
+        let _ = popup;
     }
 }
 

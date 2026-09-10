@@ -2768,6 +2768,8 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         }
         Event::RequestActivate(target, token) => state.request_activate(target, token),
         Event::GammaControlChanged(id) => state.gamma_control_changed(id),
+        Event::InputMethodPopupCreated(popup) => state.new_popup_surface(popup),
+        Event::InputMethodPopupDestroyed(popup) => state.popup_surface_destroyed(popup),
         Event::OutputConfigurationApplied => {
             // Pop the owned payload staged alongside this marker. FIFO, so the
             // `Vec` popped here is the one `on_output_manager_apply` pushed for
@@ -4891,6 +4893,18 @@ unsafe extern "C" fn on_input_method_new_popup_surface<S: Handlers>(
                 _destroy: destroy,
             },
         );
+        // Announce the popup once its entry is recorded, so the id the handler
+        // receives resolves through the runtime table (`add_input_popup_in_band`,
+        // `input_popup_surface`). Mirrors the `SessionLockChanged` emit shape:
+        // read `deliver`, then `dispatcher.emit`. The borrow above is released
+        // before this — a handler that reaches back into the popup table on
+        // this event must not deadlock on a still-held borrow.
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::InputMethodPopupCreated(crate::InputPopupSurfaceId(key)),
+            deliver,
+        );
     }
 }
 
@@ -4936,6 +4950,16 @@ unsafe extern "C" fn on_input_method_popup_destroy<S: Handlers>(
         if let Some(node) = entry.and_then(|entry| entry.node) {
             runtime.destroy_node(node);
         }
+        // Notify the compositor after the crate's own teardown (entry evicted,
+        // scene node destroyed), so its `popup_surface_destroyed` runs against a
+        // consistent runtime — the id is stale for resolution by design and only
+        // names which popup went away. Same emit shape as the creation site.
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::InputMethodPopupDestroyed(crate::InputPopupSurfaceId(key)),
+            deliver,
+        );
     }
 }
 
@@ -8963,6 +8987,12 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::RequestSetShape(..)
         | Event::RequestActivate(..)
         | Event::GammaControlChanged(..)
+        // Unreachable: `run` never registers an input-method manager either
+        // (`Backend::register_toplevel_and_input` is `run_all`'s hook; `run`
+        // uses `no_extra`), so no input-method popup can be announced or
+        // destroyed on this path.
+        | Event::InputMethodPopupCreated(..)
+        | Event::InputMethodPopupDestroyed(..)
         // Unreachable: `run` never registers an output manager either, for the
         // same reason — so no `apply` can fire on this path.
         | Event::OutputConfigurationApplied => {}

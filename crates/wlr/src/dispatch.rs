@@ -46,8 +46,8 @@ use std::collections::VecDeque;
 
 use crate::{
     ActivationToken, AxisRelativeDirection, AxisSource, CursorShape, CursorShapeDevice,
-    DecorationMode, Edges, LayerSurfaceId, NodeId, OutputId, PointerAxis, PopupId, SceneOutputId,
-    ToplevelId,
+    DecorationMode, Edges, InputPopupSurfaceId, LayerSurfaceId, NodeId, OutputId, PointerAxis,
+    PopupId, SceneOutputId, ToplevelId,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -226,6 +226,21 @@ pub(crate) enum Event {
     /// [`crate::OutputHandler::gamma_control_changed`]'s own doc for why
     /// there is nothing left here for a handler to *do*.
     GammaControlChanged(OutputId),
+
+    /// An input-method created a `zwp_input_method_v2` candidate popup surface.
+    /// Carries the crate's own [`InputPopupSurfaceId`] handle for it — an
+    /// opaque, `Copy`/`Eq` id (its wrapped value is the popup's destroy-listener
+    /// address), so it rides the `Copy`/`Eq` `Event` like every other id and a
+    /// deferred delivery names the same popup the creation announced. The entry
+    /// is recorded in the runtime table before this is emitted, so the handle
+    /// resolves at delivery unless the popup was destroyed in between.
+    InputMethodPopupCreated(InputPopupSurfaceId),
+    /// An input-method's candidate popup surface was destroyed. Carries the
+    /// [`InputPopupSurfaceId`] that named it — read at emission time, since the
+    /// crate has already evicted the entry and torn down its scene node by then,
+    /// so the id is stale for resolution and serves only to tell the handler
+    /// *which* popup went away.
+    InputMethodPopupDestroyed(InputPopupSurfaceId),
 
     /// A client's `zwlr_output_manager_v1` configuration was applied. Carries
     /// no data — the owned `Vec<AppliedHead>` payload cannot ride in a `Copy`,
