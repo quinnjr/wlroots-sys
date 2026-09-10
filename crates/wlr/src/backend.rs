@@ -4846,7 +4846,9 @@ unsafe extern "C" fn on_input_method_destroy<S: Handlers>(
 /// candidate-list surface it wants placed near the text cursor. Tracks it in
 /// [`RuntimeInner::input_method_popups`](crate::runtime::RuntimeInner), keyed by
 /// its own `destroy` listener's address, and links that `destroy` listener; the
-/// scene placement and the text-input-rectangle send land in A10.
+/// scene placement (`Runtime::add_input_popup_in_band`) and the
+/// text-input-rectangle send (`Runtime::send_input_popup_rectangle`) consume
+/// this table.
 ///
 /// This is a **creation** signal: wlroots emits
 /// `wlr_input_method_v2.events.new_popup_surface` with the freshly created
@@ -4869,6 +4871,10 @@ unsafe extern "C" fn on_input_method_new_popup_surface<S: Handlers>(
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let runtime = (*session).runtime;
+        // A null `data` here would be a wlroots protocol violation — creation
+        // signals always carry the fresh object — so fail loudly in debug
+        // rather than silently tracking nothing.
+        debug_assert!(!data.is_null(), "new_popup_surface emitted with null data");
         let Some(popup) = NonNull::new(data.cast::<sys::wlr_input_popup_surface_v2>()) else {
             return;
         };
@@ -4944,10 +4950,20 @@ unsafe extern "C" fn on_input_method_popup_destroy<S: Handlers>(
         // Evict first (dropping the entry unlinks this `destroy` listener), then
         // destroy the popup's scene node through the same `Owned`-node path every
         // node this crate creates is torn down by. `destroy_node` never borrows
-        // `input_method_popups`, so the borrow is released before the call; a
-        // stale or refused id (a live scene walk) misses cleanly.
+        // `input_method_popups`, so the borrow is released before the call.
+        // Refusal (a live scene walk) is a leak with no remaining handle, so it
+        // is asserted rather than silent: the destroy emission must never land
+        // inside a scene walk.
         let entry = runtime.inner.input_method_popups.borrow_mut().remove(&key);
         if let Some(node) = entry.and_then(|entry| entry.node) {
+            // A live scene walk here would make `destroy_node` refuse and leak
+            // the node with no remaining handle — assert the emission never
+            // lands inside one. A stale id (scene torn down first) still
+            // misses silently.
+            debug_assert!(
+                !runtime.scene_is_being_walked(),
+                "popup destroy emitted inside a live scene walk; its node will leak"
+            );
             runtime.destroy_node(node);
         }
         // Notify the compositor after the crate's own teardown (entry evicted,
@@ -4963,13 +4979,57 @@ unsafe extern "C" fn on_input_method_popup_destroy<S: Handlers>(
     }
 }
 
+/// The input-method's held keyboard grab, if any — copied out of the runtime
+/// table with the borrow released before return, so callers can hand the
+/// pointer to FFI without risking a `RefCell` re-entrancy panic (a client's
+/// grab handler can touch `input_method` again through `send_key`).
+///
+/// The single site for the resolution `on_key`/`on_modifiers` share: the
+/// grab's storage must never evolve in one key path and not the other.
+unsafe fn input_method_grab<S: Handlers>(
+    session: *const Session<'_, S>,
+) -> Option<NonNull<sys::wlr_input_method_keyboard_grab_v2>> {
+    // SAFETY: callers pass the `Session` their own listener `Bound` pairs
+    // them with; copying `runtime` out and the table borrow below are both
+    // temporaries released before return.
+    unsafe {
+        let runtime = (*session).runtime;
+        runtime
+            .inner
+            .input_method
+            .borrow()
+            .as_ref()
+            .and_then(|e| e.keyboard_grab)
+    }
+}
+
+/// Re-point a held input-method keyboard grab at `kb` after the seat's
+/// keyboard changes. The grab reads the seat keyboard exactly once, when it
+/// is created — without this, a keyboard attached (or replaced) while a grab
+/// is held leaves the grab on the old keyboard, or on none at all (a grab
+/// created before any keyboard exists skips `set_keyboard` at creation):
+/// keymap-less, while `on_key`/`on_modifiers` keep routing keys to it.
+unsafe fn resync_input_method_grab_keyboard<S: Handlers>(
+    session: *const Session<'_, S>,
+    kb: *mut sys::wlr_keyboard,
+) {
+    // SAFETY: `kb` is the just-attached live keyboard the caller established
+    // on the seat; the table borrow is taken inside `input_method_grab` and
+    // released before return.
+    unsafe {
+        if let Some(grab) = input_method_grab(session) {
+            sys::wlr_input_method_keyboard_grab_v2_set_keyboard(grab.as_ptr(), kb);
+        }
+    }
+}
+
 /// The bound input-method grabbed the keyboard: it wants raw key events routed
 /// to it (for its own hotkeys) rather than straight to the focused client.
 /// Records the grab on
 /// [`InputMethodEntry`](crate::runtime::InputMethodEntry)`::keyboard_grab`, sets
 /// the seat's active keyboard on it so wlroots can send the keymap, and links
-/// the grab's `destroy` listener. A9 only tracks the grab; the key-forwarding
-/// that consumes it lands in A11.
+/// the grab's `destroy` listener. The key-forwarding in `on_key`/`on_modifiers`
+/// consumes it (after the compositor's keybinding dispatch).
 ///
 /// This is a **creation** signal: wlroots emits
 /// `wlr_input_method_v2.events.grab_keyboard` with the freshly created
@@ -4989,6 +5049,10 @@ unsafe extern "C" fn on_input_method_grab_keyboard<S: Handlers>(
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let runtime = (*session).runtime;
+        // A null `data` here would be a wlroots protocol violation — creation
+        // signals always carry the fresh object — so fail loudly in debug
+        // rather than silently tracking nothing.
+        debug_assert!(!data.is_null(), "grab_keyboard emitted with null data");
         let Some(grab) = NonNull::new(data.cast::<sys::wlr_input_method_keyboard_grab_v2>()) else {
             return;
         };
@@ -4997,7 +5061,9 @@ unsafe extern "C" fn on_input_method_grab_keyboard<S: Handlers>(
         // `wlr_seat_get_keyboard` read. wlroots' `set_keyboard` sends the keymap
         // and wires the grab's own keyboard listeners; passing a null keyboard is
         // tolerated (a no-op), so a seat with no keyboard yet is handled by simply
-        // not calling it.
+        // not calling it. That skip heals itself: the keyboard-attach paths
+        // re-issue `set_keyboard` through `resync_input_method_grab_keyboard`
+        // when a keyboard arrives while a grab is held.
         if let Some(seat) = runtime.seat_ptr() {
             let kb = sys::wlr_seat_get_keyboard(seat.as_ptr());
             if !kb.is_null() {
@@ -7757,6 +7823,9 @@ unsafe extern "C" fn on_new_virtual_keyboard<S: Handlers>(
         sys::wlr_keyboard_set_repeat_info(kb, 25, 600);
         if let Some(seat) = runtime.seat_ptr() {
             sys::wlr_seat_set_keyboard(seat.as_ptr(), kb);
+            // A grab held across this attach would otherwise keep the old (or
+            // no) keyboard: re-point it at the one just established.
+            resync_input_method_grab_keyboard(session, kb);
         }
         let kb_nn = NonNull::new_unchecked(kb);
         runtime.record_keyboard(kb_nn);
@@ -7949,6 +8018,10 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
 
                     if let Some(seat) = runtime.seat_ptr() {
                         sys::wlr_seat_set_keyboard(seat.as_ptr(), kb);
+                        // A grab held across this attach would otherwise keep
+                        // the old (or no) keyboard: re-point it at the one
+                        // just established.
+                        resync_input_method_grab_keyboard(session, kb);
                     }
                     let kb_nn = NonNull::new_unchecked(kb);
                     runtime.record_keyboard(kb_nn);
@@ -8139,19 +8212,10 @@ unsafe extern "C" fn on_key<S: Handlers>(l: *mut sys::wl_listener, data: *mut st
             // When an input-method has grabbed the keyboard, the key goes to
             // the grab *instead of* the seat's keyboard — the grab replaces
             // the seat's keyboard for the focused client, so the seat forward
-            // is skipped entirely in that branch. Copy the grab pointer out
-            // and drop the borrow before the FFI call: `send_key` re-enters
-            // wlroots, and holding a `RefCell` borrow across a call that could
-            // (through a client's grab handler) touch `input_method` again
-            // would panic. The read happens *after* `dispatcher.emit` returns,
-            // so it never races the keybinding dispatch above.
-            let runtime = (*session).runtime;
-            let grab = runtime
-                .inner
-                .input_method
-                .borrow()
-                .as_ref()
-                .and_then(|e| e.keyboard_grab);
+            // is skipped entirely in that branch. The read happens *after*
+            // `dispatcher.emit` returns, so it never races the keybinding
+            // dispatch above.
+            let grab = input_method_grab(session);
             if let Some(grab) = grab {
                 sys::wlr_input_method_keyboard_grab_v2_send_key(
                     grab.as_ptr(),
@@ -8190,16 +8254,9 @@ unsafe extern "C" fn on_modifiers<S: Handlers>(
             return;
         }
         // Mirror `on_key`: while an input-method holds the keyboard grab, the
-        // modifier state goes to the grab instead of the seat's keyboard. The
-        // grab pointer is copied out and the borrow dropped before the FFI
-        // call, for the same re-entrancy reason.
-        let runtime = (*session).runtime;
-        let grab = runtime
-            .inner
-            .input_method
-            .borrow()
-            .as_ref()
-            .and_then(|e| e.keyboard_grab);
+        // modifier state goes to the grab instead of the seat's keyboard
+        // (shared `input_method_grab` resolution, same re-entrancy discipline).
+        let grab = input_method_grab(session);
         if let Some(grab) = grab {
             sys::wlr_input_method_keyboard_grab_v2_send_modifiers(
                 grab.as_ptr(),

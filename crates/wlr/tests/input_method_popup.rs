@@ -80,9 +80,10 @@ fn headless_env() {
 
 /// A `run_all` over a headless backend with an IME-popup-aware handler
 /// installed must start, dispatch and stop cleanly. No input-method is ever
-/// bound, so no popup event is ever produced — what this proves is that the new
-/// events are wired through `deliver_all` and that overriding the methods
-/// changes nothing about the ordinary lifecycle.
+/// bound, so no popup event is ever produced — what this proves is lifecycle
+/// neutrality only (overriding the methods breaks nothing about the ordinary
+/// run), not event routing: a deleted `deliver_all` popup arm would still
+/// pass. Routing a real popup to the handler is icedtea's harness test 8.
 #[test]
 fn a_run_with_an_input_method_popup_handler_starts_and_stops_cleanly() {
     headless_env();
@@ -132,5 +133,49 @@ fn a_run_with_an_input_method_popup_handler_starts_and_stops_cleanly() {
         app.popups, 0,
         "a headless run with no input-method bound must not synthesise a \
          popup from nowhere"
+    );
+}
+
+/// The unknown-id and no-IME contracts need no Wayland client: a dangling id
+/// (one no listener address can ever equal) must miss cleanly on every popup
+/// accessor, and the cursor-rectangle anchor must be `None` with no IME bound.
+/// A regression turning a clean `None` into a panic has this as its tripwire.
+#[test]
+fn unknown_popup_ids_and_no_ime_miss_cleanly() {
+    headless_env();
+    let runtime = wlr::Runtime::new().expect("runtime");
+    let bogus = wlr::InputPopupSurfaceId::dangling_nth_for_test(0);
+
+    assert!(
+        runtime.input_popup_surface(bogus).is_none(),
+        "unknown popup id must resolve to no surface"
+    );
+    assert!(
+        runtime
+            .send_input_popup_rectangle(
+                bogus,
+                wlr::Box2D {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1
+                }
+            )
+            .is_none(),
+        "rectangle send to an unknown popup id must send nothing"
+    );
+    assert!(
+        runtime
+            .add_input_popup_in_band(bogus, wlr::Band::Top)
+            .is_none(),
+        "placing an unknown popup id must create no node"
+    );
+    assert!(
+        runtime.rt_debug_input_popup_node(bogus).is_none(),
+        "unknown popup id must track no node"
+    );
+    assert!(
+        runtime.focused_text_input_cursor_rectangle().is_none(),
+        "no bound IME must anchor against no cursor rectangle"
     );
 }

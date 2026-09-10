@@ -183,8 +183,30 @@ pub(crate) struct InputMethodEntry {
 /// Deliberately no `PartialOrd`/`Ord`, matching [`PopupId`](crate::PopupId): an
 /// opaque id's ordering would promise a creation-order semantics nobody asked
 /// for, and this API is frozen within the wlroots minor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// `Debug` is redacted on purpose: the wrapped value is a heap address (the
+/// popup's destroy-listener address, which keys the map), and every other id
+/// in this crate is a counter that leaks nothing — printing this one would
+/// hand out an ASLR/heap-layout oracle to anyone holding the logs.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InputPopupSurfaceId(pub(crate) usize);
+
+impl std::fmt::Debug for InputPopupSurfaceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InputPopupSurfaceId(..)")
+    }
+}
+
+impl InputPopupSurfaceId {
+    /// An id that names no popup, for negative tests: `usize::MAX - n` can
+    /// never be a listener address handed out here (heap addresses never sit
+    /// at the top of the address space). Mirrors
+    /// `ToplevelId::dangling_nth_for_test`.
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
 
 /// One tracked `zwp_input_method_v2` popup surface — a candidate-list surface an
 /// input-method offers to sit near the text cursor.
@@ -192,17 +214,12 @@ pub struct InputPopupSurfaceId(pub(crate) usize);
 /// `raw` is a borrowed wlroots pointer, never owned; it is freed with its client
 /// resource, with the `_destroy` listener evicting this entry from
 /// [`RuntimeInner::input_method_popups`] first. `node` is the scene node the
-/// popup is placed under once A10 wires scene placement — `None` until then.
-/// Kept in a map keyed by the destroy-listener address, the same
+/// popup is placed under by [`Runtime::add_input_popup_in_band`] — `None`
+/// until placed. Kept in a map keyed by the destroy-listener address, the same
 /// destroy-keying discipline [`TextInputEntry`] and the pointer-constraint
 /// table use, so identity never depends on a signal `data`.
 pub(crate) struct InputPopupEntry {
-    // `raw` and `node` are written at construction (as the popup pointer and
-    // `None`) and first *read* in A10, which places the popup in the scene; for
-    // A9 they are tracking state only, hence the `#[allow(dead_code)]`.
-    #[allow(dead_code)]
     pub(crate) raw: NonNull<sys::wlr_input_popup_surface_v2>,
-    #[allow(dead_code)]
     pub(crate) node: Option<NodeId>,
     pub(crate) _destroy: crate::backend::Registration,
 }
@@ -3043,7 +3060,7 @@ impl Runtime {
     /// use `wl_list_for_each`, not the `_safe` form. Its cursor holds a raw
     /// `next`, so unlinking is a use-after-free inside its recursion and
     /// inserting silently rewires the tail it is about to reach.
-    fn scene_is_being_walked(&self) -> bool {
+    pub(crate) fn scene_is_being_walked(&self) -> bool {
         self.inner.node_borrows.get() != 0 || crate::dispatch::in_foreign_frame()
     }
 
@@ -5374,22 +5391,47 @@ impl Runtime {
         self.inner.input_method_popups.borrow().len()
     }
 
+    /// The scene node a placed input-method popup's entry tracks, for tests:
+    /// lets a behavioural test capture the node while the popup is placed and
+    /// assert it is gone after teardown (the regression tripwire for destroying
+    /// the node on popup destroy). `None` for an unknown id, a destroyed
+    /// popup, or a popup placed without a node. `#[doc(hidden)]` keeps it out
+    /// of the public surface; it is not part of the crate's API.
+    #[doc(hidden)]
+    pub fn rt_debug_input_popup_node(&self, popup: InputPopupSurfaceId) -> Option<NodeId> {
+        self.inner.input_method_popups.borrow().get(&popup.0)?.node
+    }
+
     /// The client `wlr_surface` an input-method popup renders, for the
     /// compositor's placement math.
     ///
     /// `None` if this runtime has no popup under `popup` (an unknown id, or one
     /// whose popup has already been destroyed — its entry is evicted from the
     /// runtime's `input_method_popups` table by the popup's own `destroy`
-    /// listener before wlroots frees it). The returned pointer may itself be
-    /// null if the popup has not yet been given a surface; a live-entry lookup
-    /// does not promise a mapped surface, only that the popup object stands.
+    /// listener before wlroots frees it), or if the popup has not yet been
+    /// given a surface: a live-entry lookup does not promise a mapped surface,
+    /// only that the popup object stands.
     pub fn input_popup_surface(&self, popup: InputPopupSurfaceId) -> Option<*mut sys::wlr_surface> {
+        let surface = unsafe { (*self.input_popup_raw(popup)?.as_ptr()).surface };
+        if surface.is_null() {
+            return None;
+        }
+        Some(surface)
+    }
+
+    /// The live `wlr_input_popup_surface_v2` behind `popup`, `None` for an
+    /// unknown or destroyed id. The single site encoding the miss semantics
+    /// every popup accessor shares.
+    fn input_popup_raw(
+        &self,
+        popup: InputPopupSurfaceId,
+    ) -> Option<NonNull<sys::wlr_input_popup_surface_v2>> {
         let raw = self.inner.input_method_popups.borrow().get(&popup.0)?.raw;
         // SAFETY: the entry is removed only by the popup's own `destroy`
         // listener, which fires before wlroots frees the popup, so `raw` names a
         // live `wlr_input_popup_surface_v2`; reading its `surface` field reads
         // borrowed memory this crate never owns and copies nothing out.
-        Some(unsafe { (*raw.as_ptr()).surface })
+        Some(raw)
     }
 
     /// Place an input-method popup's client surface in the scene under `band`,
@@ -5405,12 +5447,15 @@ impl Runtime {
     /// relay plan, but any band is accepted.
     ///
     /// `None` if this runtime has no popup under `popup`, if the popup has no
-    /// surface yet, before [`init_graphics`](Runtime::init_graphics) has run, if
-    /// wlroots refuses the node, or (having created nothing) while a
+    /// surface yet (both via `input_popup_surface`), before
+    /// [`init_graphics`](Runtime::init_graphics) has run, if wlroots refuses
+    /// the node, or — the one retryable case — while a
     /// [`with_node`](Runtime::with_node) borrow or a
-    /// [`for_each_buffer`](Runtime::for_each_buffer) walk is live — the same
+    /// [`for_each_buffer`](Runtime::for_each_buffer) walk is live: inserting a
+    /// node mid-walk rewires the tail wlroots is about to reach (the same
     /// scene-insertion gate [`add_rect_in_band`](Runtime::add_rect_in_band)
-    /// carries, and for the identical reason.
+    /// carries, and for the identical reason), so a caller that gets `None`
+    /// mid-walk retries after it. Every other `None` is final for this id.
     pub fn add_input_popup_in_band(
         &self,
         popup: InputPopupSurfaceId,
@@ -5445,15 +5490,29 @@ impl Runtime {
             )
         }?;
         // Store the node back on the popup's entry so a later reposition (B7/A12)
-        // can find it. A concurrent destroy can only have evicted the entry, in
-        // which case there is nothing to write and the miss is silent.
-        if let Some(entry) = self
-            .inner
-            .input_method_popups
-            .borrow_mut()
-            .get_mut(&popup.0)
-        {
-            entry.node = Some(id);
+        // can find it. A repeat placement destroys the previous tree first:
+        // overwriting the handle would orphan a still-visible subtree the
+        // popup-destroy teardown could never reach afterwards. The borrow ends
+        // with this block, before the destroy below.
+        let previous = {
+            let mut popups = self.inner.input_method_popups.borrow_mut();
+            let Some(entry) = popups.get_mut(&popup.0) else {
+                // The entry was evicted between the resolve above and this
+                // write — in single-threaded emission that is a destroy racing
+                // this call. Assert rather than returning a `Some` id the
+                // popup table does not track.
+                debug_assert!(
+                    false,
+                    "input popup entry evicted between resolve and node store-back"
+                );
+                return None;
+            };
+            entry.node.replace(id)
+        };
+        if let Some(previous) = previous {
+            // Cannot refuse: the live-walk gate at the top of this function
+            // already returned `None`, and the id was live in this table.
+            let _ = self.destroy_node(previous);
         }
         Some(id)
     }
@@ -5471,7 +5530,7 @@ impl Runtime {
         popup: InputPopupSurfaceId,
         rect: Box2D,
     ) -> Option<()> {
-        let raw = self.inner.input_method_popups.borrow().get(&popup.0)?.raw;
+        let raw = self.input_popup_raw(popup)?;
         let mut sbox = sys::wlr_box {
             x: rect.x,
             y: rect.y,
