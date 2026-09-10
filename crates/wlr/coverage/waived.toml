@@ -1304,32 +1304,32 @@ milestone = "M7"
 [[waived]]
 symbol    = "wlr_input_method_keyboard_grab_v2_destroy"
 reason    = "not-yet"
-note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
-milestone = "A6.2"
+note      = "The A6.2 relay tears the grab down via its client-destroyed listener, never this explicit destructor; IME/text-input depth is M8."
+milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_input_method_v2_delete_surrounding_text"
 reason    = "not-yet"
-note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
-milestone = "A6.2"
+note      = "A compositor-as-its-own-IME send helper; the A6.2 relay forwards an external IME's delete through the text-input protocol instead. IME depth is M8."
+milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_input_method_v2_preedit_string"
 reason    = "not-yet"
-note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
-milestone = "A6.2"
+note      = "A compositor-as-its-own-IME send helper; the A6.2 relay forwards an external IME's preedit through the text-input protocol instead. IME depth is M8."
+milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_input_method_v2_state"
 reason    = "not-yet"
-note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
-milestone = "A6.2"
+note      = "The IME's aggregate double-buffered state accessor; the A6.2 relay reads the individual fields it forwards, not this struct. IME depth is M8."
+milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_input_popup_surface_v2_try_from_wlr_surface"
 reason    = "not-yet"
-note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
-milestone = "A6.2"
+note      = "A surface-downcast helper; the A6.2 relay tracks popups by its own entry table keyed on listener address, never downcasts a surface. IME depth is M8."
+milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_keyboard_finish"
@@ -3830,8 +3830,8 @@ milestone = "M6"
 [[waived]]
 symbol    = "wlr_text_input_v3_state"
 reason    = "not-yet"
-note      = "Input-method popups, the keyboard grab, and the remaining preedit/state forwarding land in A6.2."
-milestone = "A6.2"
+note      = "The text-input's aggregate double-buffered state accessor; the A6.2 relay reads the individual current.* fields it forwards, not this struct. text-input depth is M8."
+milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_texture_impl"

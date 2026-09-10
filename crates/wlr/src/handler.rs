@@ -1075,8 +1075,9 @@ pub trait SeatHandler {
     /// surface* — the list an IME shows next to the text cursor. `popup` is the
     /// stable handle for it; the compositor places it in the scene — typically
     /// [`Runtime::add_input_popup_in_band`](crate::Runtime::add_input_popup_in_band)
-    /// under the focused text input's cursor rectangle — and re-anchors it as
-    /// the cursor moves.
+    /// under the focused text input's cursor rectangle. There is no reposition
+    /// event yet, so re-anchoring as the cursor moves is the compositor's to
+    /// poll and re-place until one exists.
     ///
     /// wlroots tracks the surface but the compositor still owns the scene: it
     /// decides where the popup's node sits. Defaulted to a no-op — a compositor

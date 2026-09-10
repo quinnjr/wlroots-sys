@@ -170,8 +170,8 @@ pub(crate) struct InputMethodEntry {
 }
 
 /// A stable handle for one tracked `zwp_input_method_v2` popup surface — the key
-/// under which its [`InputPopupEntry`] lives in
-/// [`RuntimeInner::input_method_popups`].
+/// under which its `InputPopupEntry` lives in the runtime's `input_method_popups`
+/// table.
 ///
 /// Opaque to consumers, exactly like [`PopupId`](crate::PopupId): the compositor
 /// receives one when a popup is announced and hands it back to the crate to
@@ -5378,8 +5378,8 @@ impl Runtime {
     /// compositor's placement math.
     ///
     /// `None` if this runtime has no popup under `popup` (an unknown id, or one
-    /// whose popup has already been destroyed — its entry is evicted from
-    /// [`RuntimeInner::input_method_popups`] by the popup's own `destroy`
+    /// whose popup has already been destroyed — its entry is evicted from the
+    /// runtime's `input_method_popups` table by the popup's own `destroy`
     /// listener before wlroots frees it). The returned pointer may itself be
     /// null if the popup has not yet been given a surface; a live-entry lookup
     /// does not promise a mapped surface, only that the popup object stands.
@@ -5399,7 +5399,7 @@ impl Runtime {
     /// `wlr_surface`, so the crate keeps every scene-graph FFI on its side and
     /// the compositor stays pure geometry: it hands back a node the compositor
     /// then positions with [`set_node_position`](Runtime::set_node_position)
-    /// (the node is [`NodeOrigin::Owned`], like every other node this API
+    /// (the node is `NodeOrigin::Owned`, like every other node this API
     /// creates). The [`NodeId`] is also stored back on the popup's entry so a
     /// later reposition can find it. Popups belong in [`Band::Top`] per the
     /// relay plan, but any band is accepted.
@@ -5492,7 +5492,7 @@ impl Runtime {
     /// the anchor a compositor positions an input-method popup against.
     ///
     /// Reads the active `zwp_input_method_v2`'s focused text-input (its
-    /// `focused_text_input` key into [`RuntimeInner::text_inputs`]) and returns
+    /// `focused_text_input` key into the runtime's `text_inputs` table) and returns
     /// that text-input's `current.cursor_rectangle`. `None` when no input-method
     /// is bound, when none of its text-inputs is the activation-driving focus, or
     /// when that focus names a text-input this runtime no longer tracks.

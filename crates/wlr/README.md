@@ -474,6 +474,56 @@ pre-map commit listener that calls the new
 `Runtime::schedule_frame_all(&self) -> usize` so XWayland's handshake frame
 callback is answered. Bounded to the handshake commits; never busy-loops.
 
+## 0.20.31 — input-method popups + keyboard grab
+
+The second half of the input-method work (A6.2). 0.20.30 stood up the
+text-input ↔ input-method relay; this release adds the two pieces an IME needs
+to actually compose: the **candidate popup** an IME shows next to the caret,
+and the **hardware keyboard grab** it takes to process key events itself (the
+CJK compose path).
+
+### What you get
+
+- **Input-method candidate popups.** Two new `SeatHandler` callbacks —
+  `new_popup_surface` and `popup_surface_destroyed` — tell a compositor when an
+  IME opens or closes a candidate list. `Runtime::add_input_popup_in_band`
+  places the popup's surface in the scene and hands back a `NodeId` the
+  compositor positions with `set_node_position`; `Runtime::send_input_popup_rectangle`
+  tells the popup which text-input rectangle it was anchored against; and
+  `Runtime::focused_text_input_cursor_rectangle` reads the caret rectangle to
+  anchor it against. The crate destroys the popup's scene node when the popup
+  role object is destroyed, and cascades that teardown when the whole
+  input-method goes away, so a compositor keeps no scene bookkeeping of its own.
+- **The keyboard grab.** When an input method holds a `zwp_input_method_keyboard_grab_v2`,
+  physical key and modifier events are forwarded to the grab
+  (`wlr_input_method_keyboard_grab_v2_send_key` / `_send_modifiers`) instead of
+  the focused surface's `wl_keyboard` — but only *after* the compositor's own
+  key dispatch has run, so compositor keybindings still fire during a grab.
+
+### Additive
+
+No trait was added and no supertrait changed. The two popup callbacks live on
+the existing `SeatHandler` as defaulted no-ops, so an empty `SeatHandler` impl
+written against 0.20.30 still compiles and still satisfies `Handlers` — adding a
+new supertrait to `Handlers` would instead break every downstream consumer that
+did not also implement it, which a `0.20.z` patch release may not do (the same
+reasoning that dropped a would-be `SessionLockHandler` earlier). An
+integration test asserts the additivity as a compile-time claim.
+
+### Coverage
+
+The A6.2 hot-path symbols moved `not-yet` → wrapped: the popup rectangle send
+(`wlr_input_popup_surface_v2_send_text_input_rectangle`), the grab's
+`send_key` / `send_modifiers` / `set_keyboard`, and the scene-node plumbing
+behind `add_input_popup_in_band`. The remaining input-method / text-input
+symbols the relay design deliberately does **not** use — the
+compositor-as-its-own-IME send helpers (`wlr_input_method_v2_preedit_string`,
+`_delete_surrounding_text`), the aggregate `_state` accessors on both objects,
+the popup surface-downcast helper, and the grab's explicit `_destroy` (the grab
+tears down via its client-destroyed listener) — were re-pointed from A6.2 to
+**M8** (IME/text-input depth), where they belong. No dead FFI was added to
+reach 100% on paper.
+
 ## 0.20.30 — input-method / text-input relay
 
 Typing through an input method. Until this release the crate bound neither
