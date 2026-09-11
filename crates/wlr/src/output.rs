@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use crate::buffer::Buffer;
-use crate::geom::{Subpixel, Transform};
+use crate::geom::{Box2D, FBox, Subpixel, Transform};
 use crate::id::{OutputId, find_id};
 use crate::region::Region;
 use crate::{Error, Result, sys};
@@ -637,6 +637,134 @@ impl<'h> Output<'h> {
             sys::wlr_output_lock_software_cursors(self.raw.as_ptr(), lock);
         }
     }
+
+    /// Create a hardware cursor on this output. The cursor starts invisible
+    /// with no buffer; show it with [`OutputCursor::set_buffer`] and place
+    /// it with [`OutputCursor::move_to`]. Destroy explicitly with
+    /// [`OutputCursor::destroy`] before the output goes away.
+    pub fn create_cursor(&self) -> Option<OutputCursor<'_>> {
+        // SAFETY: the handle's lifetime guarantees the output is live, which
+        // is what the cursor is created on. Null means wlroots refused
+        // (allocation failure), mapped to `None`.
+        unsafe {
+            let raw = sys::wlr_output_cursor_create(self.raw.as_ptr());
+            NonNull::new(raw).map(|raw| OutputCursor { raw, staged: None })
+        }
+    }
+
+    /// Create an output layer on this output: a scene-graph-adjacent plane
+    /// the compositor positions itself (drm planes, hardware overlays).
+    /// Destroy explicitly with [`OutputLayer::destroy`] before the output
+    /// goes away.
+    pub fn create_layer(&self) -> Option<OutputLayer> {
+        // SAFETY: as in `create_cursor`.
+        unsafe {
+            let raw = sys::wlr_output_layer_create(self.raw.as_ptr());
+            NonNull::new(raw).map(|raw| OutputLayer { raw })
+        }
+    }
+}
+
+/// A hardware cursor owned by its output: created by
+/// [`Output::create_cursor`], destroyed explicitly by [`destroy`](OutputCursor::destroy)
+/// before the output goes away. Dropping without destroying leaks the C
+/// object (deliberately: a `Drop` that frees during wlroots' own teardown
+/// ordering would be the use-after-free this discipline avoids).
+pub struct OutputCursor<'b> {
+    raw: NonNull<sys::wlr_output_cursor>,
+    staged: Option<&'b Buffer<'b>>,
+}
+
+impl<'b> OutputCursor<'b> {
+    /// Destroy the cursor, releasing it. Consumes the handle so a destroyed
+    /// cursor cannot be used again.
+    pub fn destroy(self) {
+        // SAFETY: `raw` names a live cursor: created by `create_cursor`,
+        // consumable exactly once by this method, and the output it belongs
+        // to outlives the call per the documented discipline.
+        unsafe {
+            sys::wlr_output_cursor_destroy(self.raw.as_ptr());
+        }
+    }
+
+    /// Stage a buffer as the cursor image with the given hotspot (the pixel
+    /// within the image that sits at the pointer position). The borrow is
+    /// stored on the cursor, so the buffer must outlive every later use of
+    /// it — the same guard as [`OutputState::set_buffer`].
+    pub fn set_buffer(&mut self, buffer: &'b Buffer<'b>, hotspot_x: i32, hotspot_y: i32) {
+        // SAFETY: `raw` is live per above; the buffer borrow is stored
+        // below, extending its life past this call.
+        unsafe {
+            sys::wlr_output_cursor_set_buffer(
+                self.raw.as_ptr(),
+                buffer.as_ptr(),
+                hotspot_x,
+                hotspot_y,
+            );
+        }
+        self.staged = Some(buffer);
+    }
+
+    /// Move the cursor to output-local `(x, y)`, which also places the
+    /// hotspot set by the last `set_buffer`. Reports whether wlroots
+    /// accepted the move.
+    pub fn move_to(&self, x: f64, y: f64) -> bool {
+        // SAFETY: `raw` is live per `destroy`'s discipline.
+        unsafe { sys::wlr_output_cursor_move(self.raw.as_ptr(), x, y) }
+    }
+
+    /// The cursor image size in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        // SAFETY: `raw` is live per above; read-only scalar fields.
+        unsafe {
+            let raw = self.raw.as_ptr();
+            ((*raw).width, (*raw).height)
+        }
+    }
+
+    /// Whether the cursor is currently enabled (has a buffer).
+    pub fn is_enabled(&self) -> bool {
+        // SAFETY: as in `size`.
+        unsafe { (*self.raw.as_ptr()).enabled }
+    }
+}
+
+/// An output layer owned by its output: created by
+/// [`Output::create_layer`], destroyed explicitly by [`destroy`](OutputLayer::destroy)
+/// before the output goes away. Same owned-handle discipline as
+/// [`OutputCursor`].
+pub struct OutputLayer {
+    raw: NonNull<sys::wlr_output_layer>,
+}
+
+impl OutputLayer {
+    /// Destroy the layer, releasing it. Consumes the handle.
+    pub fn destroy(self) {
+        // SAFETY: `raw` names a live layer: created by `create_layer`,
+        // consumable exactly once, output discipline as in `OutputCursor`.
+        unsafe {
+            sys::wlr_output_layer_destroy(self.raw.as_ptr());
+        }
+    }
+}
+
+/// One layer entry of an atomic [`OutputState`]: which layer, what to show
+/// in it, and where. All borrows must outlive the transaction's commit —
+/// `set_layers` stores them exactly like [`OutputState::set_buffer`]'s
+/// guard, so a dropped buffer/region is a compile error.
+pub struct LayerState<'l> {
+    /// The layer being described.
+    pub layer: &'l OutputLayer,
+    /// Buffer to show, or `None` to leave the layer's buffer unchanged.
+    pub buffer: Option<&'l Buffer<'l>>,
+    /// Source box within the buffer.
+    pub src: FBox,
+    /// Destination box on the output.
+    pub dst: Box2D,
+    /// Damaged region (buffer-local) for a partial update.
+    pub damage: &'l Region,
+    /// Whether the compositor accepts this layer.
+    pub accepted: bool,
 }
 
 /// Adaptive-sync status of an output: whether variable refresh is active.
@@ -968,6 +1096,53 @@ impl<'a, 'b> OutputState<'a, 'b> {
             }
         }
     }
+
+    /// Stage the output layers for an atomic commit. Each entry borrows its
+    /// layer, buffer, and damage region for the transaction's lifetime (same
+    /// guard discipline as [`set_buffer`](OutputState::set_buffer)), and the
+    /// whole slice must outlive `commit` — dropping any of them first is a
+    /// compile error.
+    pub fn set_layers<'s, 'l>(&mut self, layers: &'s [LayerState<'l>])
+    where
+        's: 'b,
+        'l: 'b,
+    {
+        // SAFETY: as in `set_enabled`. The stack array outlives the call;
+        // every pointer inside it is either a table-held layer (live while
+        // its `OutputLayer` handle stands, which outlives `'l`) or a
+        // caller borrow valid for `'b`. wlroots copies the array contents
+        // into the state on return.
+        unsafe {
+            if let Some(state) = self.state.as_mut() {
+                let mut raw: Vec<sys::wlr_output_layer_state> = layers
+                    .iter()
+                    .map(|l| sys::wlr_output_layer_state {
+                        layer: l.layer.raw.as_ptr(),
+                        buffer: l.buffer.map(|b| b.as_ptr()).unwrap_or(std::ptr::null_mut()),
+                        src_box: sys::wlr_fbox {
+                            x: l.src.x,
+                            y: l.src.y,
+                            width: l.src.width,
+                            height: l.src.height,
+                        },
+                        dst_box: sys::wlr_box {
+                            x: l.dst.x,
+                            y: l.dst.y,
+                            width: l.dst.width,
+                            height: l.dst.height,
+                        },
+                        damage: l.damage.as_ptr(),
+                        accepted: l.accepted,
+                    })
+                    .collect();
+                sys::wlr_output_state_set_layers(state as *mut _, raw.as_mut_ptr(), raw.len());
+            }
+        }
+        // No stored guard is needed beyond the signature above: `&'s [..]`
+        // with `'s: 'b, 'l: 'b` already forces every layer, buffer, and
+        // region borrow to outlive every later use of `self`, exactly like
+        // the stored `staged_buffer` guard does for `set_buffer`.
+    }
 }
 
 /// Which fields an [`OutputState`] transaction has staged: the
@@ -1005,6 +1180,9 @@ impl CommittedFields {
     /// A subpixel geometry is staged.
     pub const SUBPIXEL: CommittedFields =
         CommittedFields(sys::wlr_output_state_field::WLR_OUTPUT_STATE_SUBPIXEL.0);
+    /// Whether output layers are staged.
+    pub const LAYERS: CommittedFields =
+        CommittedFields(sys::wlr_output_state_field::WLR_OUTPUT_STATE_LAYERS.0);
 
     /// No fields staged.
     pub const NONE: CommittedFields = CommittedFields(0);
@@ -1391,6 +1569,18 @@ mod tests {
         assert!(!CommittedFields::SCALE.is_empty());
         assert!(CommittedFields::SCALE.contains(CommittedFields::SCALE));
         assert!(!CommittedFields::SCALE.contains(CommittedFields::MODE));
+    }
+
+    /// The LAYERS bit pinned against the header like every other staged
+    /// bit: a swapped discriminant would misreport layer staging silently.
+    #[test]
+    fn layers_bit_matches_wlroots() {
+        assert_eq!(
+            CommittedFields::LAYERS.bits(),
+            sys::wlr_output_state_field::WLR_OUTPUT_STATE_LAYERS.0
+        );
+        assert!(!CommittedFields::LAYERS.is_empty());
+        assert!(!CommittedFields::LAYERS.contains(CommittedFields::MODE));
     }
 
     /// Flag combinators behave as a set algebra; unknown bits round-trip

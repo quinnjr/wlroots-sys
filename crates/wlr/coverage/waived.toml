@@ -1637,41 +1637,11 @@ reason    = "not-yet"
 note      = "with the M6-protocols slice (output-management)."
 milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_cursor"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_cursor_create"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_cursor_destroy"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_cursor_move"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_cursor_set_buffer"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_cursor_size"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_destroy"
@@ -1759,35 +1729,10 @@ milestone = "M13"
 
 
 
-[[waived]]
-symbol    = "wlr_output_layer"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_layer_create"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_layer_destroy"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_layer_feedback_event"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_layer_state"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_layout_adjacent_output"
@@ -1911,11 +1856,6 @@ reason    = "not-yet"
 note      = "with M12 (needs the color image-description type)."
 milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_state_set_layers"
-reason    = "not-yet"
-note      = "with the M6-cursor-layer slice (needs a safe layer-state type; layers have no standalone use)."
-milestone = "M6"
 
 
 [[waived]]
@@ -4428,3 +4368,15 @@ symbol    = "wlr_tablet_v2_tablet_tool"
 reason    = "not-yet"
 note      = "Tablet v2 protocol objects: creation is wrapped, sends land later."
 milestone = "M8"
+[[waived]]
+symbol    = "wlr_output_cursor_size"
+reason    = "not-yet"
+note      = "size-list element for renderer get_cursor_sizes vtable (M13); cursor extents are read off the live object instead."
+milestone = "M6"
+
+[[waived]]
+symbol    = "wlr_output_layer_feedback_event"
+reason    = "not-yet"
+note      = "consumed by M10 dmabuf-feedback init options; needs frame-event listener infrastructure, with the M6-feedback slice."
+milestone = "M6"
+

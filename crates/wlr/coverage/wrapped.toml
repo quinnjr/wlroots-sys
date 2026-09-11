@@ -2704,3 +2704,58 @@ item   = "PresentFlags"
 symbol = "wlr_output_event_present"
 module = "output"
 item   = "PresentEvent"
+
+[[wrapped]]
+symbol = "wlr_output_cursor"
+module = "output"
+item   = "OutputCursor"
+
+[[wrapped]]
+symbol = "wlr_output_cursor_create"
+module = "output"
+item   = "Output::create_cursor"
+
+[[wrapped]]
+symbol = "wlr_output_cursor_destroy"
+module = "output"
+item   = "OutputCursor::destroy"
+
+[[wrapped]]
+symbol = "wlr_output_cursor_move"
+module = "output"
+item   = "OutputCursor::move_to"
+
+[[wrapped]]
+symbol = "wlr_output_cursor_set_buffer"
+module = "output"
+item   = "OutputCursor::set_buffer"
+
+
+[[wrapped]]
+symbol = "wlr_output_layer"
+module = "output"
+item   = "OutputLayer"
+
+[[wrapped]]
+symbol = "wlr_output_layer_create"
+module = "output"
+item   = "Output::create_layer"
+
+[[wrapped]]
+symbol = "wlr_output_layer_destroy"
+module = "output"
+item   = "OutputLayer::destroy"
+
+
+[[wrapped]]
+symbol = "wlr_output_layer_state"
+module = "output"
+item   = "LayerState"
+
+[[wrapped]]
+symbol = "wlr_output_state_set_layers"
+module = "output"
+item   = "OutputState::set_layers"
+
+
+
