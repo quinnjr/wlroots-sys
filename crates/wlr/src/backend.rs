@@ -2350,6 +2350,23 @@ impl<'d> Backend<'d> {
             });
         }
 
+        if let Some(manager) = runtime.transient_seat_manager_ptr() {
+            // SAFETY: `create_transient_seat_manager` returned a non-null
+            // manager owned by the display, which this call requires to outlive
+            // it, exactly as for the xdg shell above — null liveness is correct.
+            // This is the `create_seat` signal a client raises to ask for a
+            // seat of its own; `on_new_transient_seat` records the pending
+            // request for the compositor to answer or refuse.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.create_seat,
+                    on_new_transient_seat::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
         if let Some(manager) = runtime.idle_inhibit_manager_ptr() {
             // SAFETY: `create_idle_inhibit_manager` returned a non-null
             // manager owned by the display, which this call requires to outlive
@@ -2967,6 +2984,9 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         }
         Event::TabletToolUpdate(id) => state.tablet_tool_event(id),
         Event::TabletPadUpdate(id) => state.tablet_pad_event(id),
+        Event::VirtualKeyboardCreated(id) => state.virtual_keyboard_created(id),
+        Event::VirtualPointerCreated(id) => state.virtual_pointer_created(id),
+        Event::TransientSeatRequested(id) => state.transient_seat_requested(id),
         Event::OutputConfigurationApplied => {
             // Pop the owned payload staged alongside this marker. FIFO, so the
             // `Vec` popped here is the one `on_output_manager_apply` pushed for
@@ -8539,6 +8559,20 @@ unsafe extern "C" fn on_new_virtual_keyboard<S: Handlers>(
         );
 
         update_seat_capabilities(runtime);
+
+        // Mint the stable id from the `data` object (creation = data) and
+        // announce it. No borrow is held: the table insert above ended its
+        // borrow, so a handler reaching back into the virtual-keyboard
+        // table on the event cannot deadlock.
+        if let Some(vk_nn) = NonNull::new(vk) {
+            let id = runtime.record_virtual_keyboard(vk_nn);
+            let deliver = (*session).deliver;
+            (*session).dispatcher.emit(
+                &*session,
+                crate::dispatch::Event::VirtualKeyboardCreated(id),
+                deliver,
+            );
+        }
     }
 }
 
@@ -8633,6 +8667,61 @@ unsafe extern "C" fn on_new_virtual_pointer<S: Handlers>(
         );
 
         update_seat_capabilities(runtime);
+
+        // Mint the stable id from the event's object (creation = data) and
+        // announce it. No borrow is held, for the reason the virtual
+        // keyboard path above gives.
+        if let Some(vp_nn) = NonNull::new(vp) {
+            let id = runtime.record_virtual_pointer(vp_nn);
+            let deliver = (*session).deliver;
+            (*session).dispatcher.emit(
+                &*session,
+                crate::dispatch::Event::VirtualPointerCreated(id),
+                deliver,
+            );
+        }
+    }
+}
+
+/// A client asked for a seat of its own. Record the pending request and
+/// announce it, so the compositor can answer with
+/// [`Runtime::ready_transient_seat`](crate::Runtime::ready_transient_seat)
+/// or refuse with
+/// [`Runtime::destroy_transient_seat`](crate::Runtime::destroy_transient_seat) —
+/// an unanswered request leaves the client waiting.
+///
+/// No per-object destroy listener is linked here, and no `Session` map entry
+/// is kept: a transient seat exposes no public destroy signal, so there is
+/// nothing to link into. The request lifecycle ends at the answer, which
+/// consumes the runtime entry — FIX-3's listener-address recovery has no
+/// per-object signal to recover from here, and needs none: creation carries
+/// the object in `data`, and answering ends the tracking.
+unsafe extern "C" fn on_new_transient_seat<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked into `wlr_transient_seat_manager_v1.events.create_seat`,
+    // whose data is a live `wlr_transient_seat_v1` — the manager passes the
+    // request object, and the compositor's answer (`ready`/`deny`) is what
+    // ends its life.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let ts = data.cast::<sys::wlr_transient_seat_v1>();
+        let Some(raw) = NonNull::new(ts) else {
+            return;
+        };
+        let id = runtime.record_transient_seat(raw);
+        // Copy out, drop every borrow, then emit: a handler that answers the
+        // request on the event (consuming the entry just recorded) must not
+        // deadlock on a still-held borrow — and no borrow crosses the emit.
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            crate::dispatch::Event::TransientSeatRequested(id),
+            deliver,
+        );
     }
 }
 
@@ -8905,9 +8994,18 @@ unsafe extern "C" fn on_input_destroy<S: Handlers>(
         if let Some(entry) = removed {
             if let Some(kb) = entry.keyboard {
                 runtime.forget_keyboard(kb);
+                // The virtual keyboard's destroy path: it dies with its
+                // device and exposes no public per-object destroy signal of
+                // its own, so this sweep — not a listener — is what evicts
+                // its tracking entry (the same backstop discipline the
+                // tablet-tool table keeps below).
+                runtime.forget_virtual_keyboards_for_keyboard(kb);
             }
             if let Some(p) = entry.pointer {
                 runtime.forget_pointer(p);
+                // As for virtual keyboards above: the virtual pointer dies
+                // with its device, so this sweep is its destroy path.
+                runtime.forget_virtual_pointers_for_pointer(p);
             }
             if let Some(tab) = entry.tablet {
                 // Backstop for tools that never got their own destroy
@@ -9841,11 +9939,15 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         // Unreachable: `run` never registers an output manager either, for the
         // same reason — so no `apply` can fire on this path.
         | Event::OutputConfigurationApplied
-        // Unreachable: `run` never registers shortcuts inhibit or tablet
-        // managers either.
+        // Unreachable: `run` never registers shortcuts inhibit, tablet,
+        // virtual-keyboard, virtual-pointer or transient-seat managers
+        // either.
         | Event::ShortcutsInhibitorToggled(..)
         | Event::TabletToolUpdate(..)
-        | Event::TabletPadUpdate(..) => {}
+        | Event::TabletPadUpdate(..)
+        | Event::VirtualKeyboardCreated(..)
+        | Event::VirtualPointerCreated(..)
+        | Event::TransientSeatRequested(..) => {}
         // Unreachable: `run` never creates the Xwayland manager either
         // (`register_toplevel_and_input` is `run_all`'s hook; `run` uses
         // `no_extra`), so none of these can be produced on this path. Dropped

@@ -1709,6 +1709,31 @@ module = "backend"
 item   = "Backend::run"
 
 [[wrapped]]
+symbol = "wlr_transient_seat_manager_v1"
+module = "runtime"
+item   = "Runtime::create_transient_seat_manager"
+
+[[wrapped]]
+symbol = "wlr_transient_seat_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_transient_seat_manager"
+
+[[wrapped]]
+symbol = "wlr_transient_seat_v1"
+module = "runtime"
+item   = "TransientSeatId"
+
+[[wrapped]]
+symbol = "wlr_transient_seat_v1_deny"
+module = "runtime"
+item   = "Runtime::destroy_transient_seat"
+
+[[wrapped]]
+symbol = "wlr_transient_seat_v1_ready"
+module = "runtime"
+item   = "Runtime::ready_transient_seat"
+
+[[wrapped]]
 symbol = "wlr_viewporter"
 module = "runtime"
 item   = "Runtime::create_viewporter"
@@ -1734,6 +1759,11 @@ module = "backend"
 item   = "Runtime::create_virtual_keyboard_manager"
 
 [[wrapped]]
+symbol = "wlr_virtual_keyboard_v1_from_resource"
+module = "runtime"
+item   = "Runtime::try_virtual_keyboard_from_resource"
+
+[[wrapped]]
 symbol = "wlr_virtual_pointer_manager_v1"
 module = "runtime"
 item   = "Runtime::create_virtual_pointer_manager"
@@ -1741,6 +1771,11 @@ item   = "Runtime::create_virtual_pointer_manager"
 [[wrapped]]
 symbol = "wlr_virtual_pointer_manager_v1_create"
 module = "runtime"
+item   = "Runtime::create_virtual_pointer_manager"
+
+[[wrapped]]
+symbol = "wlr_virtual_pointer_v1"
+module = "backend"
 item   = "Runtime::create_virtual_pointer_manager"
 
 [[wrapped]]

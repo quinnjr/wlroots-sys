@@ -48,6 +48,7 @@ use crate::{
     ActivationToken, AxisRelativeDirection, AxisSource, CursorShape, CursorShapeDevice,
     DecorationMode, Edges, InputPopupSurfaceId, LayerSurfaceId, NodeId, OutputId, PointerAxis,
     PopupId, SceneOutputId, ShortcutsInhibitorId, TabletPadId, TabletToolId, ToplevelId,
+    TransientSeatId, VirtualKeyboardId, VirtualPointerId,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -295,6 +296,34 @@ pub(crate) enum Event {
     /// hardware pad's address (FIX-3); like `TabletToolUpdate`, notification
     /// only, with client-bound feedback driven separately.
     TabletPadUpdate(TabletPadId),
+
+    /// A client injected a virtual keyboard. Carries the crate's own
+    /// [`VirtualKeyboardId`] handle for it — minted from the `data` object
+    /// the manager's `new_virtual_keyboard` signal carried, so it rides the
+    /// `Copy`/`Eq` `Event` like every other id. The entry is recorded in
+    /// the runtime table before this is emitted, so the handle resolves at
+    /// delivery unless the device was destroyed in between; like
+    /// `InputMethodPopupDestroyed`, the id then only tells the handler
+    /// *which* keyboard the announcement was for.
+    VirtualKeyboardCreated(VirtualKeyboardId),
+
+    /// A client injected a virtual pointer. Same shape as
+    /// `VirtualKeyboardCreated`: the id is minted from the event `data` the
+    /// manager's `new_virtual_pointer` signal carried.
+    VirtualPointerCreated(VirtualPointerId),
+
+    /// A client asked for a seat of its own. Carries the crate's own
+    /// [`TransientSeatId`] handle for the *pending request* — minted from
+    /// the `data` object the manager's `create_seat` signal carried. The
+    /// compositor answers with
+    /// [`Runtime::ready_transient_seat`](crate::Runtime::ready_transient_seat)
+    /// or refuses with
+    /// [`Runtime::destroy_transient_seat`](crate::Runtime::destroy_transient_seat);
+    /// either consumes the entry, so a deferred delivery may name a request
+    /// already answered — the id then only tells the handler *which*
+    /// request the announcement was for. Write this so an unknown id is
+    /// harmless.
+    TransientSeatRequested(TransientSeatId),
 
     /// A client's `zwlr_output_manager_v1` configuration was applied. Carries
     /// no data — the owned `Vec<AppliedHead>` payload cannot ride in a `Copy`,

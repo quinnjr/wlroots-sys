@@ -3757,36 +3757,6 @@ note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
 
 [[waived]]
-symbol    = "wlr_transient_seat_manager_v1"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_transient_seat_manager_v1_create"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_transient_seat_v1"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_transient_seat_v1_deny"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_transient_seat_v1_ready"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
 symbol    = "wlr_version_get_major"
 reason    = "not-yet"
 note      = "Backend-specific construction and the interfaces milestone."
@@ -3803,18 +3773,6 @@ symbol    = "wlr_version_get_minor"
 reason    = "not-yet"
 note      = "Backend-specific construction and the interfaces milestone."
 milestone = "M13"
-
-[[waived]]
-symbol    = "wlr_virtual_keyboard_v1_from_resource"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_virtual_pointer_v1"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_wl_backend_create"

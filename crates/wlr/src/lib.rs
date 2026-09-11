@@ -135,7 +135,8 @@ pub use render::{Vk, VkImageAttribs};
 pub use runtime::{
     Band, CommittedImeState, CommittedTextInputState, ImePreedit, InhibitorId, InputPopupSurfaceId,
     KeyboardGroupId, KeyboardState, PendingImeState, PendingKeyboardState, PendingTextInputState,
-    Runtime, ShortcutsInhibitorId, TabletPadId, TabletToolId, ToolId,
+    Runtime, ShortcutsInhibitorId, TabletPadId, TabletToolId, ToolId, TransientSeatId,
+    VirtualKeyboardId, VirtualPointerId,
 };
 pub use scene::{
     DamageRing, DamageRingRef, NodeId, NodeKind, RectId, SceneBuffer, SceneBufferOptions,
