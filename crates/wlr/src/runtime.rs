@@ -6583,6 +6583,41 @@ impl Runtime {
             .find_map(|(&key, entry)| (entry.raw == popup).then_some(InputPopupSurfaceId(key)))
     }
 
+    /// The id of the tracked output behind a client resource, if it names
+    /// one of this runtime's outputs.
+    ///
+    /// `None` for a null resource, a resource that is not an output, or an
+    /// output this runtime does not track (already destroyed, or announced
+    /// while no run was active).
+    ///
+    /// # Safety
+    ///
+    /// `resource` must be null or point at a live `wl_resource`: a non-null
+    /// argument is read by the downcast, so a dangling pointer is undefined
+    /// behaviour. In practice callers pass back resources wlroots handed
+    /// out, which are live while their object stands.
+    pub unsafe fn try_output_from_resource(
+        &self,
+        resource: *mut sys::wl_resource,
+    ) -> Option<OutputId> {
+        if resource.is_null() {
+            return None;
+        }
+        // SAFETY: `resource` is non-null per the check above. The downcast
+        // only reads the resource to decide whether it backs an output and
+        // returns null for anything else, which `NonNull::new` turns into
+        // the miss below; the returned output is borrowed, never freed here.
+        let output = unsafe { sys::wlr_output_from_resource(resource) };
+        let output = NonNull::new(output)?;
+        // Borrow, scan, copy the id out, drop the borrow: the FFI call above
+        // already returned, so no borrow crosses it.
+        self.inner
+            .outputs
+            .borrow()
+            .iter()
+            .find_map(|(&id, raw)| (*raw == output).then_some(id))
+    }
+
     /// Place an input-method popup's client surface in the scene under `band`,
     /// returning the [`NodeId`] of the created subsurface tree.
     ///

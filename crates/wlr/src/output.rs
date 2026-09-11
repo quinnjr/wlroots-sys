@@ -8,12 +8,14 @@
 //! Anything a consumer needs to remember goes in their own state, keyed by
 //! [`OutputId`].
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-use crate::geom::Transform;
+use crate::buffer::Buffer;
+use crate::geom::{Subpixel, Transform};
 use crate::id::{OutputId, find_id};
+use crate::region::Region;
 use crate::{Error, Result, sys};
 
 /// A wlroots output, borrowed for the duration of a handler call.
@@ -443,6 +445,494 @@ impl<'h> Output<'h> {
                 Err(Error::Operation("wlr_output_commit_state"))
             }
         }
+    }
+
+    /// Begin an atomic state transaction on this output.
+    ///
+    /// Unlike the one-shot setters above ([`set_mode`](Output::set_mode),
+    /// [`set_scale`](Output::set_scale), [`set_transform`](Output::set_transform),
+    /// [`disable`](Output::disable)), which each commit a single field, a
+    /// transaction stages several fields and commits them together: the
+    /// display-configuration use case (mode + scale + transform in one
+    /// atomic commit). Setters take `&mut self` and never fail — validation
+    /// is by type (`Buffer`/`Region` carry non-null pointers; scalars pass
+    /// through for wlroots to accept or reject) — and [`commit`](OutputState::commit)
+    /// consumes the transaction, which is the single fallible boundary.
+    pub fn state(&self) -> OutputState<'_> {
+        OutputState::new(self)
+    }
+
+    /// Set the output's human-readable name (shown by configuration tools).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] if the name contains an interior NUL (it cannot
+    /// cross into C) or wlroots rejected it.
+    pub fn set_name(&self, name: &str) -> Result<()> {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        let name = CString::new(name).map_err(|_| Error::Operation("wlr_output_set_name"))?;
+        unsafe {
+            sys::wlr_output_set_name(self.raw.as_ptr(), name.as_ptr());
+        }
+        Ok(())
+    }
+
+    /// Set the output's human-readable description.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] if the description contains an interior NUL or
+    /// wlroots rejected it.
+    pub fn set_description(&self, desc: &str) -> Result<()> {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        let desc =
+            CString::new(desc).map_err(|_| Error::Operation("wlr_output_set_description"))?;
+        unsafe {
+            sys::wlr_output_set_description(self.raw.as_ptr(), desc.as_ptr());
+        }
+        Ok(())
+    }
+
+    /// The output's effective resolution in pixels, accounting for scale and
+    /// transform — the size its content is actually presented at.
+    pub fn effective_resolution(&self) -> (i32, i32) {
+        // SAFETY: the handle's lifetime guarantees the output is live. Both
+        // out-parameters point at live locals that outlive the call.
+        unsafe {
+            let mut width = 0;
+            let mut height = 0;
+            sys::wlr_output_effective_resolution(
+                self.raw.as_ptr(),
+                &raw mut width,
+                &raw mut height,
+            );
+            (width, height)
+        }
+    }
+
+    /// Whether this output is driven by the DRM backend.
+    pub fn is_drm(&self) -> bool {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        unsafe { sys::wlr_output_is_drm(self.raw.as_ptr()) }
+    }
+
+    /// Whether this output is driven by the headless backend.
+    pub fn is_headless(&self) -> bool {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        unsafe { sys::wlr_output_is_headless(self.raw.as_ptr()) }
+    }
+
+    /// Whether this output is driven by the nested Wayland backend.
+    pub fn is_wl(&self) -> bool {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        unsafe { sys::wlr_output_is_wl(self.raw.as_ptr()) }
+    }
+
+    /// Whether this output is driven by the nested X11 backend.
+    pub fn is_x11(&self) -> bool {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        unsafe { sys::wlr_output_is_x11(self.raw.as_ptr()) }
+    }
+
+    /// Whether direct scan-out is currently allowed on this output.
+    /// Typically disallowed while software cursors are forced or during
+    /// screen capture.
+    pub fn is_direct_scanout_allowed(&self) -> bool {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        unsafe { sys::wlr_output_is_direct_scanout_allowed(self.raw.as_ptr()) }
+    }
+
+    /// The output's current adaptive-sync status, read from the live object.
+    pub fn adaptive_sync_status(&self) -> AdaptiveSyncStatus {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        let raw: sys::wlr_output_adaptive_sync_status =
+            unsafe { (*self.raw.as_ptr()).adaptive_sync_status };
+        AdaptiveSyncStatus::from_raw(raw.0).unwrap_or(AdaptiveSyncStatus::Disabled)
+    }
+
+    /// Schedule a `done` event (frame callbacks) on this output.
+    pub fn schedule_done(&self) {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        unsafe {
+            sys::wlr_output_schedule_done(self.raw.as_ptr());
+        }
+    }
+
+    /// Recompute whether this output needs a frame (damage or timer
+    /// pending); use [`needs_frame`](Output::needs_frame) to read the result.
+    pub fn update_needs_frame(&self) {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        unsafe {
+            sys::wlr_output_update_needs_frame(self.raw.as_ptr());
+        }
+    }
+
+    /// Whether this output currently needs a frame. Recompute first with
+    /// [`update_needs_frame`](Output::update_needs_frame) after damage or
+    /// timer changes; the flag itself is wlroots-owned.
+    pub fn needs_frame(&self) -> bool {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        unsafe { (*self.raw.as_ptr()).needs_frame }
+    }
+
+    /// Send a `frame` event: ask clients to draw the next frame.
+    pub fn send_frame(&self) {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        unsafe {
+            sys::wlr_output_send_frame(self.raw.as_ptr());
+        }
+    }
+
+    /// Send a `present` event built from `event`: report a presented frame
+    /// (or its failure) for presentation-time feedback.
+    pub fn send_present(&self, event: &PresentEvent) {
+        // SAFETY: the handle's lifetime guarantees the output is live. The
+        // stack event struct outlives the call; wlroots copies what it keeps.
+        unsafe {
+            let mut raw = event.as_c(self.raw.as_ptr());
+            sys::wlr_output_send_present(self.raw.as_ptr(), &raw mut raw);
+        }
+    }
+
+    /// Lock the output to rendering instead of direct scan-out (for screen
+    /// capture). Every lock needs a matching unlock to restore the original
+    /// state; never unlock without a lock.
+    pub fn lock_attach_render(&self, lock: bool) {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        unsafe {
+            sys::wlr_output_lock_attach_render(self.raw.as_ptr(), lock);
+        }
+    }
+
+    /// Lock the output to software cursors instead of hardware cursors (for
+    /// screen capture). Every lock needs a matching unlock.
+    pub fn lock_software_cursors(&self, lock: bool) {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        unsafe {
+            sys::wlr_output_lock_software_cursors(self.raw.as_ptr(), lock);
+        }
+    }
+}
+
+/// Adaptive-sync status of an output: whether variable refresh is active.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum AdaptiveSyncStatus {
+    /// Adaptive sync is off.
+    #[default]
+    Disabled = 0,
+    /// Adaptive sync is on.
+    Enabled = 1,
+}
+
+impl AdaptiveSyncStatus {
+    /// Decode a raw status value. Unknown values (a future wlroots minor
+    /// adding a state) read as [`AdaptiveSyncStatus::Disabled`] rather than
+    /// panicking: this is a read-only status, never round-tripped into a
+    /// setter, so degrading to off is the safe direction.
+    pub fn from_raw(value: u32) -> Option<AdaptiveSyncStatus> {
+        Some(match value {
+            0 => AdaptiveSyncStatus::Disabled,
+            1 => AdaptiveSyncStatus::Enabled,
+            _ => return None,
+        })
+    }
+}
+
+/// Present-event flags: how a presented frame reached the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct PresentFlags(pub u32);
+
+impl PresentFlags {
+    /// Presented on a vertical blank.
+    pub const VSYNC: PresentFlags =
+        PresentFlags(sys::wlr_output_present_flag::WLR_OUTPUT_PRESENT_VSYNC.0);
+    /// Presented with a hardware clock timestamp.
+    pub const HW_CLOCK: PresentFlags =
+        PresentFlags(sys::wlr_output_present_flag::WLR_OUTPUT_PRESENT_HW_CLOCK.0);
+    /// Presented with hardware completion signalling.
+    pub const HW_COMPLETION: PresentFlags =
+        PresentFlags(sys::wlr_output_present_flag::WLR_OUTPUT_PRESENT_HW_COMPLETION.0);
+    /// Presented by zero-copy scan-out.
+    pub const ZERO_COPY: PresentFlags =
+        PresentFlags(sys::wlr_output_present_flag::WLR_OUTPUT_PRESENT_ZERO_COPY.0);
+
+    /// Combine flags.
+    pub fn union(self, other: PresentFlags) -> PresentFlags {
+        PresentFlags(self.0 | other.0)
+    }
+}
+
+/// A present event to report via [`Output::send_present`]: which commit is
+/// being reported on, whether it presented, when, and with what flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentEvent {
+    /// The commit sequence number being reported on.
+    pub commit_seq: u32,
+    /// Whether the frame presented (false reports a miss).
+    pub presented: bool,
+    /// When the frame presented, as time since an unspecified epoch (matches
+    /// `CLOCK_MONOTONIC` on Linux hosts).
+    pub when: std::time::Duration,
+    /// Presentation sequence counter.
+    pub seq: u32,
+    /// Refresh rate in mHz at presentation time.
+    pub refresh: i32,
+    /// How it reached the screen.
+    pub flags: PresentFlags,
+}
+
+impl PresentEvent {
+    fn as_c(&self, output: *mut sys::wlr_output) -> sys::wlr_output_event_present {
+        sys::wlr_output_event_present {
+            output,
+            commit_seq: self.commit_seq,
+            presented: self.presented,
+            when: libc_timespec(self.when),
+            seq: self.seq,
+            refresh: self.refresh,
+            flags: self.flags.0,
+        }
+    }
+}
+
+/// An atomic state transaction on an output: stage several fields, commit
+/// once. Created by [`Output::state`]; [`commit`](OutputState::commit)
+/// consumes it. Dropping an uncommitted transaction finishes (abandons)
+/// the staged state without committing anything.
+pub struct OutputState<'a> {
+    output: &'a Output<'a>,
+    state: Option<sys::wlr_output_state>,
+}
+
+impl Drop for OutputState<'_> {
+    fn drop(&mut self) {
+        if let Some(mut state) = self.state.take() {
+            // SAFETY: the state was initialised by `OutputState::new` and
+            // has not been finished yet (commit takes it first). Finishing
+            // an uncommitted state abandons the staged fields, which is
+            // exactly what dropping without committing must do.
+            unsafe {
+                sys::wlr_output_state_finish(&raw mut state);
+            }
+        }
+    }
+}
+
+impl<'a> OutputState<'a> {
+    fn new(output: &'a Output<'a>) -> Self {
+        // SAFETY: `state` starts uninitialised rather than zeroed for the
+        // same reason `Output::commit` documents: nothing reads it before
+        // `wlr_output_state_init` writes it, and the struct is finished
+        // before it drops (here or in `commit`), as wlroots requires.
+        let state = unsafe {
+            let mut state = std::mem::MaybeUninit::<sys::wlr_output_state>::uninit();
+            sys::wlr_output_state_init(state.as_mut_ptr());
+            state.assume_init()
+        };
+        OutputState {
+            output,
+            state: Some(state),
+        }
+    }
+
+    /// Commit the staged fields atomically.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`] if wlroots rejected the commit.
+    pub fn commit(mut self) -> Result<()> {
+        let mut state = self
+            .state
+            .take()
+            .expect("unreachable: commit consumes self");
+        // SAFETY: the output handle is live, and the state was initialised
+        // by `new`. Finished below on every path, as wlroots requires.
+        let ok = unsafe {
+            let ok = sys::wlr_output_commit_state(self.output.raw.as_ptr(), &raw const state);
+            sys::wlr_output_state_finish(&raw mut state);
+            ok
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(Error::Operation("wlr_output_commit_state"))
+        }
+    }
+
+    /// Copy another transaction's staged fields into this one.
+    pub fn copy_from(&mut self, src: &OutputState<'_>) {
+        // SAFETY: both states are initialised (constructor invariant;
+        // committed states are taken, never re-staged). `wlr_output_state_copy`
+        // only reads the source.
+        unsafe {
+            if let (Some(dst), Some(src)) = (self.state.as_mut(), src.state.as_ref()) {
+                sys::wlr_output_state_copy(dst as *mut _, src as *const _);
+            }
+        }
+    }
+
+    /// The fields staged so far, as a bitmask of
+    /// [`Self::FIELD_*`](OutputState::FIELD_ENABLED) flags.
+    pub fn committed_fields(&self) -> u32 {
+        // No unsafe: the state is owned by this transaction, not borrowed
+        // C memory; reading its fields touches nothing wlroots owns.
+        self.state.as_ref().map(|s| s.committed).unwrap_or(0)
+    }
+
+    /// Whether a buffer is staged.
+    pub const FIELD_BUFFER: u32 = sys::wlr_output_state_field::WLR_OUTPUT_STATE_BUFFER.0;
+    /// Whether damage is staged.
+    pub const FIELD_DAMAGE: u32 = sys::wlr_output_state_field::WLR_OUTPUT_STATE_DAMAGE.0;
+    /// Whether a mode is staged.
+    pub const FIELD_MODE: u32 = sys::wlr_output_state_field::WLR_OUTPUT_STATE_MODE.0;
+    /// Whether `FIELD_ENABLED` is staged.
+    pub const FIELD_ENABLED: u32 = sys::wlr_output_state_field::WLR_OUTPUT_STATE_ENABLED.0;
+    /// Whether `FIELD_SCALE` is staged.
+    pub const FIELD_SCALE: u32 = sys::wlr_output_state_field::WLR_OUTPUT_STATE_SCALE.0;
+    /// Whether a transform is staged.
+    pub const FIELD_TRANSFORM: u32 = sys::wlr_output_state_field::WLR_OUTPUT_STATE_TRANSFORM.0;
+    /// Whether adaptive sync is staged.
+    pub const FIELD_ADAPTIVE_SYNC_ENABLED: u32 =
+        sys::wlr_output_state_field::WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED.0;
+    /// Whether a render format is staged.
+    pub const FIELD_RENDER_FORMAT: u32 =
+        sys::wlr_output_state_field::WLR_OUTPUT_STATE_RENDER_FORMAT.0;
+    /// Whether a subpixel geometry is staged.
+    pub const FIELD_SUBPIXEL: u32 = sys::wlr_output_state_field::WLR_OUTPUT_STATE_SUBPIXEL.0;
+
+    /// How the staged mode was chosen: a backend mode or a custom size.
+    pub fn mode_type(&self) -> Option<ModeType> {
+        // No unsafe: owned state, read-only scalar field (see
+        // `committed_fields`). Names the bindgen newtype so the coverage
+        // ledger sees this reader cover `wlr_output_state_mode_type`.
+        self.state.as_ref().and_then(|s| {
+            let raw: sys::wlr_output_state_mode_type = s.mode_type;
+            ModeType::from_raw(raw.0)
+        })
+    }
+
+    /// Stage enabled/disabled.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        // SAFETY: initialised by the constructor; setter borrows nothing.
+        unsafe {
+            if let Some(state) = self.state.as_mut() {
+                sys::wlr_output_state_set_enabled(state as *mut _, enabled);
+            }
+        }
+    }
+
+    /// Stage a custom mode. The output must already be enabled.
+    pub fn set_custom_mode(&mut self, width: i32, height: i32, refresh_mhz: i32) {
+        // SAFETY: as in `set_enabled`.
+        unsafe {
+            if let Some(state) = self.state.as_mut() {
+                sys::wlr_output_state_set_custom_mode(state as *mut _, width, height, refresh_mhz);
+            }
+        }
+    }
+
+    /// Stage the scale used to size UI elements up on high-DPI outputs.
+    pub fn set_scale(&mut self, scale: f32) {
+        // SAFETY: as in `set_enabled`.
+        unsafe {
+            if let Some(state) = self.state.as_mut() {
+                sys::wlr_output_state_set_scale(state as *mut _, scale);
+            }
+        }
+    }
+
+    /// Stage the transform (rotation/flip) of the output's contents.
+    pub fn set_transform(&mut self, transform: Transform) {
+        // SAFETY: as in `set_enabled`.
+        unsafe {
+            if let Some(state) = self.state.as_mut() {
+                sys::wlr_output_state_set_transform(state as *mut _, transform.into());
+            }
+        }
+    }
+
+    /// Stage adaptive sync on or off.
+    pub fn set_adaptive_sync_enabled(&mut self, enabled: bool) {
+        // SAFETY: as in `set_enabled`.
+        unsafe {
+            if let Some(state) = self.state.as_mut() {
+                sys::wlr_output_state_set_adaptive_sync_enabled(state as *mut _, enabled);
+            }
+        }
+    }
+
+    /// Stage the render format (a DRM format code) for allocated buffers.
+    pub fn set_render_format(&mut self, format: u32) {
+        // SAFETY: as in `set_enabled`.
+        unsafe {
+            if let Some(state) = self.state.as_mut() {
+                sys::wlr_output_state_set_render_format(state as *mut _, format);
+            }
+        }
+    }
+
+    /// Stage the subpixel geometry of the panel.
+    pub fn set_subpixel(&mut self, subpixel: Subpixel) {
+        // SAFETY: as in `set_enabled`.
+        unsafe {
+            if let Some(state) = self.state.as_mut() {
+                sys::wlr_output_state_set_subpixel(state as *mut _, subpixel.into());
+            }
+        }
+    }
+
+    /// Stage the buffer to scan out or render from.
+    pub fn set_buffer(&mut self, buffer: &Buffer<'_>) {
+        // SAFETY: as in `set_enabled`. The buffer outlives the transaction
+        // by the borrow; wlroots takes its own reference on commit.
+        unsafe {
+            if let Some(state) = self.state.as_mut() {
+                sys::wlr_output_state_set_buffer(state as *mut _, buffer.as_ptr());
+            }
+        }
+    }
+
+    /// Stage the damaged region (buffer-local coordinates) for a partial
+    /// update.
+    pub fn set_damage(&mut self, region: &Region) {
+        // SAFETY: as in `set_enabled`. The region outlives the call;
+        // wlroots copies what it keeps.
+        unsafe {
+            if let Some(state) = self.state.as_mut() {
+                sys::wlr_output_state_set_damage(state as *mut _, region.as_ptr());
+            }
+        }
+    }
+}
+
+/// How a staged mode was chosen.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ModeType {
+    /// A backend-advertised mode.
+    Fixed = 0,
+    /// A custom width/height/refresh.
+    Custom = 1,
+}
+
+impl ModeType {
+    /// Decode a raw mode-type value. `None` for anything outside 0..=1.
+    pub fn from_raw(value: u32) -> Option<ModeType> {
+        Some(match value {
+            0 => ModeType::Fixed,
+            1 => ModeType::Custom,
+            _ => return None,
+        })
+    }
+}
+
+fn libc_timespec(d: std::time::Duration) -> sys::timespec {
+    sys::timespec {
+        tv_sec: d.as_secs() as _,
+        tv_nsec: d.subsec_nanos() as _,
     }
 }
 

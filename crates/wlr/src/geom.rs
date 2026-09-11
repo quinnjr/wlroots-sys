@@ -385,6 +385,70 @@ impl TryFrom<sys::wl_output_transform> for Transform {
     }
 }
 
+/// A subpixel geometry: the physical subpixel order of an output's panel.
+///
+/// Mirrors [`Transform`] in shape for the same reason: six Wayland-protocol
+/// values, pinned against libwayland's own constants by this module's tests,
+/// `#[non_exhaustive]` for the frozen 0.20 line, and lossless conversions
+/// both ways.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum Subpixel {
+    /// Unknown order (the backend could not tell).
+    #[default]
+    Unknown = 0,
+    /// No subpixel structure (e.g. projectors, OLED without stripes).
+    None = 1,
+    /// Horizontal RGB stripe.
+    HorizontalRgb = 2,
+    /// Horizontal BGR stripe.
+    HorizontalBgr = 3,
+    /// Vertical RGB stripe.
+    VerticalRgb = 4,
+    /// Vertical BGR stripe.
+    VerticalBgr = 5,
+}
+
+impl Subpixel {
+    /// Decode a raw `wl_output_subpixel` value.
+    ///
+    /// `None` for anything outside 0..=5 rather than a panic, for the same
+    /// client-reachable reason as [`Transform::from_raw`].
+    pub fn from_raw(value: u32) -> Option<Subpixel> {
+        Some(match value {
+            0 => Subpixel::Unknown,
+            1 => Subpixel::None,
+            2 => Subpixel::HorizontalRgb,
+            3 => Subpixel::HorizontalBgr,
+            4 => Subpixel::VerticalRgb,
+            5 => Subpixel::VerticalBgr,
+            _ => return None,
+        })
+    }
+
+    /// The raw `wl_output_subpixel` value.
+    pub fn to_raw(self) -> u32 {
+        self as u32
+    }
+}
+
+impl From<Subpixel> for sys::wl_output_subpixel {
+    fn from(s: Subpixel) -> sys::wl_output_subpixel {
+        sys::wl_output_subpixel(s as u32)
+    }
+}
+
+impl TryFrom<sys::wl_output_subpixel> for Subpixel {
+    type Error = ();
+
+    /// Fails for a value outside 0..=5. The error is `()` because there is
+    /// nothing to say about it that the input does not already say.
+    fn try_from(raw: sys::wl_output_subpixel) -> Result<Subpixel, ()> {
+        Subpixel::from_raw(raw.0).ok_or(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,5 +500,42 @@ mod tests {
     fn from_raw_rejects_everything_outside_the_protocol_range() {
         assert_eq!(Transform::from_raw(8), None);
         assert_eq!(Transform::from_raw(u32::MAX), None);
+    }
+
+    /// The six discriminants are Wayland ABI. Pin them against libwayland's
+    /// own constants rather than against the comment next to them.
+    #[test]
+    fn subpixel_values_match_the_wayland_protocol() {
+        for (ours, theirs) in [
+            (
+                Subpixel::Unknown,
+                sys::wl_output_subpixel::WL_OUTPUT_SUBPIXEL_UNKNOWN,
+            ),
+            (
+                Subpixel::None,
+                sys::wl_output_subpixel::WL_OUTPUT_SUBPIXEL_NONE,
+            ),
+            (
+                Subpixel::HorizontalRgb,
+                sys::wl_output_subpixel::WL_OUTPUT_SUBPIXEL_HORIZONTAL_RGB,
+            ),
+            (
+                Subpixel::HorizontalBgr,
+                sys::wl_output_subpixel::WL_OUTPUT_SUBPIXEL_HORIZONTAL_BGR,
+            ),
+            (
+                Subpixel::VerticalRgb,
+                sys::wl_output_subpixel::WL_OUTPUT_SUBPIXEL_VERTICAL_RGB,
+            ),
+            (
+                Subpixel::VerticalBgr,
+                sys::wl_output_subpixel::WL_OUTPUT_SUBPIXEL_VERTICAL_BGR,
+            ),
+        ] {
+            assert_eq!(ours.to_raw(), theirs.0, "{ours:?}");
+            assert_eq!(Subpixel::try_from(theirs), Ok(ours));
+        }
+        assert_eq!(Subpixel::from_raw(6), None);
+        assert_eq!(Subpixel::from_raw(u32::MAX), None);
     }
 }
