@@ -224,6 +224,232 @@ pub(crate) struct InputPopupEntry {
     pub(crate) _destroy: crate::backend::Registration,
 }
 
+/// A staged preedit string an input-method offered but has not committed: the
+/// text plus the cursor span inside it the client should render as composing.
+///
+/// Mirrors `wlr_input_method_v2_preedit_string`. Constructed only by the crate
+/// from a live input-method (`pub(crate)` constructor); fields `pub` for read.
+/// `None` at the [`PendingImeState`]/[`CommittedImeState`] level means the
+/// input-method staged no preedit text at all (null `text`) — distinct from an
+/// empty string, which the relay still forwards (see `on_input_method_commit`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImePreedit {
+    /// The composing text, copied out of wlroots-owned memory.
+    pub text: String,
+    /// Byte index into `text` where the composing cursor starts.
+    pub cursor_begin: i32,
+    /// Byte index into `text` where the composing cursor ends.
+    pub cursor_end: i32,
+}
+
+impl ImePreedit {
+    /// Copy the C preedit out, or `None` when its `text` is null (no preedit
+    /// staged — the same population check `on_input_method_commit` applies
+    /// before forwarding).
+    pub(crate) fn from_raw(raw: &sys::wlr_input_method_v2_preedit_string) -> Option<Self> {
+        if raw.text.is_null() {
+            return None;
+        }
+        // SAFETY: `text` is null-checked above and wlroots owns the C string
+        // for the state's lifetime; it is copied out here, never freed.
+        let text = unsafe {
+            std::ffi::CStr::from_ptr(raw.text)
+                .to_string_lossy()
+                .into_owned()
+        };
+        Some(Self {
+            text,
+            cursor_begin: raw.cursor_begin,
+            cursor_end: raw.cursor_end,
+        })
+    }
+}
+
+/// Copy a wlroots-owned nullable C string into an owned `String`, `None` for
+/// null. The single site encoding the null-guarded copy every snapshot field
+/// of this shape shares.
+fn copy_nullable_string(text: *const std::ffi::c_char) -> Option<String> {
+    if text.is_null() {
+        return None;
+    }
+    // SAFETY: null-checked above; the C string is wlroots-owned and only read
+    // up to its terminator, then copied out — never freed here.
+    unsafe {
+        Some(
+            std::ffi::CStr::from_ptr(text)
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+}
+
+/// Copy an IME's staged delete-surrounding-text lengths out: `(before, after)`.
+/// Zero/zero means nothing staged — the same population check the relay
+/// applies before forwarding (see `on_input_method_commit`).
+fn delete_lengths(delete: &sys::wlr_input_method_v2_delete_surrounding_text) -> (u32, u32) {
+    (delete.before_length, delete.after_length)
+}
+
+/// The staged (`pending`) half of a `wlr_input_method_v2`'s double-buffered
+/// state: what the input-method offered but has not committed.
+///
+/// Mirrors `wlr_input_method_v2_state` as read from the input-method's
+/// `pending` field. Constructed only by the crate from a live input-method
+/// (`pub(crate)` constructor, called by [`Runtime::pending_ime_state`]);
+/// fields `pub` for read, all owned (`String`/`Option`/lengths) so no raw
+/// pointer escapes. A distinct type from [`CommittedImeState`] so staged data
+/// can never be mistaken for committed — the re-forward path (M8-2) takes the
+/// committed generation, and passing this is a type error.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingImeState {
+    /// The staged preedit, or `None` when none was offered; see [`ImePreedit`].
+    pub preedit: Option<ImePreedit>,
+    /// The staged commit text, or `None` when none was offered.
+    pub commit_text: Option<String>,
+    /// How many bytes before the cursor the staged delete removes.
+    pub delete_before: u32,
+    /// How many bytes after the cursor the staged delete removes.
+    pub delete_after: u32,
+}
+
+impl PendingImeState {
+    /// Copy the C state out. `state` must point at a live
+    /// `wlr_input_method_v2_state` for the read — the callers
+    /// ([`Runtime::pending_ime_state`]) establish that.
+    pub(crate) fn from_state(state: &sys::wlr_input_method_v2_state) -> Self {
+        let (delete_before, delete_after) = delete_lengths(&state.delete);
+        Self {
+            preedit: ImePreedit::from_raw(&state.preedit),
+            commit_text: copy_nullable_string(state.commit_text),
+            delete_before,
+            delete_after,
+        }
+    }
+}
+
+/// The committed (`current`) half of a `wlr_input_method_v2`'s double-buffered
+/// state: the generation the input-method last committed.
+///
+/// Same shape as [`PendingImeState`], read from the input-method's `current`
+/// field instead — the generation the relay forwards (M8-2) and the overlay
+/// renders. Constructed only by the crate (`pub(crate)` constructor, called by
+/// [`Runtime::committed_ime_state`]); fields `pub` for read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommittedImeState {
+    /// The committed preedit, or `None` when none was committed.
+    pub preedit: Option<ImePreedit>,
+    /// The committed commit text, or `None` when none was committed.
+    pub commit_text: Option<String>,
+    /// How many bytes before the cursor the committed delete removes.
+    pub delete_before: u32,
+    /// How many bytes after the cursor the committed delete removes.
+    pub delete_after: u32,
+}
+
+impl CommittedImeState {
+    /// Copy the C state out. `state` must point at a live
+    /// `wlr_input_method_v2_state` for the read — the callers
+    /// ([`Runtime::committed_ime_state`]) establish that.
+    pub(crate) fn from_state(state: &sys::wlr_input_method_v2_state) -> Self {
+        let (delete_before, delete_after) = delete_lengths(&state.delete);
+        Self {
+            preedit: ImePreedit::from_raw(&state.preedit),
+            commit_text: copy_nullable_string(state.commit_text),
+            delete_before,
+            delete_after,
+        }
+    }
+}
+
+/// The staged (`pending`) half of a `wlr_text_input_v3`'s double-buffered
+/// state: the surrounding text, content type and change cause an editable
+/// field offered but has not committed.
+///
+/// Mirrors `wlr_text_input_v3_state` as read from the activation-driving
+/// text-input's `pending` field (see [`Runtime::pending_text_input_state`]).
+/// Constructed only by the crate (`pub(crate)` constructor); fields `pub` for
+/// read, all owned so no raw pointer escapes. A distinct type from
+/// [`CommittedTextInputState`] so staged data can never be mistaken for
+/// committed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingTextInputState {
+    /// The staged surrounding text, or `None` when the client left it null
+    /// (advertising the feature does not promise the pointer — see
+    /// `forward_text_input_state_to_ime`).
+    pub surrounding_text: Option<String>,
+    /// Cursor byte index into `surrounding_text`, when present.
+    pub surrounding_cursor: u32,
+    /// Anchor byte index into `surrounding_text`, when present.
+    pub surrounding_anchor: u32,
+    /// The staged content hint, forwarded verbatim — never interpreted.
+    pub content_hint: u32,
+    /// The staged content purpose, forwarded verbatim — never interpreted.
+    pub content_purpose: u32,
+    /// Why the client says the text changed; wlroots defaults it to
+    /// `INPUT_CHANGE` (0) when the client sends no cause.
+    pub text_change_cause: u32,
+}
+
+impl PendingTextInputState {
+    /// Copy the C state out. `state` must point at a live
+    /// `wlr_text_input_v3_state` for the read — the callers
+    /// ([`Runtime::pending_text_input_state`]) establish that.
+    pub(crate) fn from_state(state: &sys::wlr_text_input_v3_state) -> Self {
+        Self {
+            surrounding_text: copy_nullable_string(state.surrounding.text),
+            surrounding_cursor: state.surrounding.cursor,
+            surrounding_anchor: state.surrounding.anchor,
+            content_hint: state.content_type.hint,
+            content_purpose: state.content_type.purpose,
+            text_change_cause: state.text_change_cause,
+        }
+    }
+}
+
+/// The committed (`current`) half of a `wlr_text_input_v3`'s double-buffered
+/// state: the generation an editable field last committed, including the
+/// cursor rectangle a compositor positions an input-method popup against.
+///
+/// Same scalar fields as [`PendingTextInputState`], read from the
+/// activation-driving text-input's `current` field instead, plus the committed
+/// cursor rectangle. Constructed only by the crate (`pub(crate)` constructor,
+/// called by [`Runtime::committed_text_input_state`]); fields `pub` for read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommittedTextInputState {
+    /// The committed surrounding text, or `None` when the client left it null.
+    pub surrounding_text: Option<String>,
+    /// Cursor byte index into `surrounding_text`, when present.
+    pub surrounding_cursor: u32,
+    /// Anchor byte index into `surrounding_text`, when present.
+    pub surrounding_anchor: u32,
+    /// The committed content hint, forwarded verbatim — never interpreted.
+    pub content_hint: u32,
+    /// The committed content purpose, forwarded verbatim — never interpreted.
+    pub content_purpose: u32,
+    /// Why the client says the text changed.
+    pub text_change_cause: u32,
+    /// The committed cursor rectangle — the popup-placement anchor.
+    pub cursor_rectangle: Box2D,
+}
+
+impl CommittedTextInputState {
+    /// Copy the C state out. `state` must point at a live
+    /// `wlr_text_input_v3_state` for the read — the callers
+    /// ([`Runtime::committed_text_input_state`]) establish that.
+    pub(crate) fn from_state(state: &sys::wlr_text_input_v3_state) -> Self {
+        let rect = state.cursor_rectangle;
+        Self {
+            surrounding_text: copy_nullable_string(state.surrounding.text),
+            surrounding_cursor: state.surrounding.cursor,
+            surrounding_anchor: state.surrounding.anchor,
+            content_hint: state.content_type.hint,
+            content_purpose: state.content_type.purpose,
+            text_change_cause: state.text_change_cause,
+            cursor_rectangle: Box2D::new(rect.x, rect.y, rect.width, rect.height),
+        }
+    }
+}
+
 pub(crate) struct RuntimeInner {
     pub(crate) sources: RefCell<Vec<FdSource>>,
 
@@ -5434,6 +5660,46 @@ impl Runtime {
         Some(raw)
     }
 
+    /// The tracked popup id for a client `wlr_surface`, or `None` when this
+    /// runtime tracks no popup under it.
+    ///
+    /// Wraps `wlr_input_popup_surface_v2_try_from_wlr_surface` (the downcast)
+    /// and matches the resulting popup against the tracked entries' `raw`
+    /// pointers — the reverse lookup the downcast enables. `None` for a null
+    /// surface (never dereferenced — the null check comes first), for a
+    /// surface with a different role or a destroyed popup (both of which the
+    /// downcast reports as null), and for a live popup this runtime does not
+    /// track.
+    ///
+    /// # Safety
+    ///
+    /// `surface` must be null or point at a live `wlr_surface`: a non-null
+    /// argument is read by the downcast to decide the surface's role, so a
+    /// dangling pointer is undefined behaviour. In practice callers pass back
+    /// surfaces [`input_popup_surface`](Runtime::input_popup_surface) handed
+    /// out, which are live while their entry stands.
+    pub unsafe fn try_input_popup_surface(
+        &self,
+        surface: *mut sys::wlr_surface,
+    ) -> Option<InputPopupSurfaceId> {
+        if surface.is_null() {
+            return None;
+        }
+        // SAFETY: `surface` is non-null per the check above. The downcast only
+        // reads the surface's role to decide whether it backs a popup and
+        // returns null for anything else, which `NonNull::new` turns into the
+        // miss below; the returned popup is borrowed, never freed here.
+        let popup = unsafe { sys::wlr_input_popup_surface_v2_try_from_wlr_surface(surface) };
+        let popup = NonNull::new(popup)?;
+        // Borrow, scan, copy the id out, drop the borrow: the FFI call above
+        // already returned, so no borrow crosses it.
+        self.inner
+            .input_method_popups
+            .borrow()
+            .iter()
+            .find_map(|(&key, entry)| (entry.raw == popup).then_some(InputPopupSurfaceId(key)))
+    }
+
     /// Place an input-method popup's client surface in the scene under `band`,
     /// returning the [`NodeId`] of the created subsurface tree.
     ///
@@ -5569,6 +5835,122 @@ impl Runtime {
         // by value) only reads borrowed memory this crate never owns.
         let b = unsafe { (*raw.as_ptr()).current.cursor_rectangle };
         Some(Box2D::new(b.x, b.y, b.width, b.height))
+    }
+
+    /// The live `wlr_input_method_v2` this runtime tracks, `None` when no
+    /// input-method is bound. The single site encoding the miss semantics the
+    /// IME-state readers share — `input_popup_raw`'s role for popups.
+    fn input_method_raw(&self) -> Option<NonNull<sys::wlr_input_method_v2>> {
+        let raw = self.inner.input_method.borrow().as_ref()?.raw;
+        // SAFETY: the entry is cleared only by the input-method's own `destroy`
+        // listener, which fires before wlroots frees it, so a resolvable entry
+        // names a live `wlr_input_method_v2`; callers read only its inline
+        // `pending`/`current` fields — borrowed memory this crate never owns,
+        // copied out, never freed.
+        Some(raw)
+    }
+
+    /// The staged IME state: what the bound input-method offered but has not
+    /// committed, copied out of its `pending` field.
+    ///
+    /// `None` when no input-method is bound. The staged half of the
+    /// pending/committed pair — never feed this to the re-forward path, which
+    /// takes [`CommittedImeState`]; the types make that mix-up a compile error.
+    pub fn pending_ime_state(&self) -> Option<PendingImeState> {
+        let raw = self.input_method_raw()?;
+        // SAFETY: live per `input_method_raw`; `pending` is an inline field, so
+        // borrowing it borrows the live input-method for the copy below.
+        let state = unsafe { &(*raw.as_ptr()).pending };
+        Some(PendingImeState::from_state(state))
+    }
+
+    /// The committed IME state: the generation the bound input-method last
+    /// committed, copied out of its `current` field.
+    ///
+    /// `None` when no input-method is bound. This is the generation the relay
+    /// forwards (M8-2) and the preedit overlay renders.
+    pub fn committed_ime_state(&self) -> Option<CommittedImeState> {
+        let raw = self.input_method_raw()?;
+        // SAFETY: live per `input_method_raw`; `current` is an inline field, so
+        // borrowing it borrows the live input-method for the copy below.
+        let state = unsafe { &(*raw.as_ptr()).current };
+        Some(CommittedImeState::from_state(state))
+    }
+
+    /// The staged text-input state: what the activation-driving text-input
+    /// offered but has not committed, copied out of its `pending` field.
+    ///
+    /// `None` when no input-method is bound, when none of its text-inputs is
+    /// the activation-driving focus, or when that focus names a text-input
+    /// this runtime no longer tracks — the same miss chain as
+    /// [`focused_text_input_cursor_rectangle`](Runtime::focused_text_input_cursor_rectangle).
+    pub fn pending_text_input_state(&self) -> Option<PendingTextInputState> {
+        let key = self
+            .inner
+            .input_method
+            .borrow()
+            .as_ref()?
+            .focused_text_input?;
+        let raw = self.inner.text_inputs.borrow().get(&key)?.raw;
+        // SAFETY: a `text_inputs` entry is evicted by its own `destroy` listener
+        // before wlroots frees the `wlr_text_input_v3`, so a resolvable key
+        // names a live object; `pending` is read by value out of it.
+        let state = unsafe { &(*raw.as_ptr()).pending };
+        Some(PendingTextInputState::from_state(state))
+    }
+
+    /// The committed text-input state: the generation the activation-driving
+    /// text-input last committed, copied out of its `current` field, including
+    /// the cursor rectangle.
+    ///
+    /// Same miss chain as [`pending_text_input_state`](Runtime::pending_text_input_state).
+    /// This is the generation the relay forwards to the input-method (M8-2).
+    pub fn committed_text_input_state(&self) -> Option<CommittedTextInputState> {
+        let key = self
+            .inner
+            .input_method
+            .borrow()
+            .as_ref()?
+            .focused_text_input?;
+        let raw = self.inner.text_inputs.borrow().get(&key)?.raw;
+        // SAFETY: a `text_inputs` entry is evicted by its own `destroy` listener
+        // before wlroots frees the `wlr_text_input_v3`, so a resolvable key
+        // names a live object; `current` is read by value out of it.
+        let state = unsafe { &(*raw.as_ptr()).current };
+        Some(CommittedTextInputState::from_state(state))
+    }
+
+    /// Destroy the input-method's active keyboard grab, if one is held.
+    ///
+    /// Wraps `wlr_input_method_keyboard_grab_v2_destroy`: the explicit-teardown
+    /// shape of [`destroy_node`](Runtime::destroy_node). `true` when a grab was
+    /// held and is now destroyed; `false` when no input-method is bound or no
+    /// grab is held. The grab's `destroy` registration is taken (unlinking the
+    /// crate's listener while the grab still stands) before the destructor
+    /// runs, so its synchronous `destroy` emission reaches no crate listener —
+    /// and even a stale fire would no-op on the address check in
+    /// `on_input_method_grab_destroy`.
+    pub fn destroy_keyboard_grab(&self) -> bool {
+        let grab = {
+            let mut ime = self.inner.input_method.borrow_mut();
+            let Some(entry) = ime.as_mut() else {
+                return false;
+            };
+            let Some(grab) = entry.keyboard_grab.take() else {
+                return false;
+            };
+            entry.keyboard_grab_destroy = None;
+            grab
+        };
+        // SAFETY: the entry holds `Some` only while the grab is alive (cleared
+        // by the grab's own destroy, and the entry itself outlives the grab),
+        // so `grab` names a live
+        // `wlr_input_method_keyboard_grab_v2` the destructor takes ownership
+        // of. The table borrow ended with the block above, so the
+        // destructor's synchronous `destroy` emission cannot observe a held
+        // borrow.
+        unsafe { sys::wlr_input_method_keyboard_grab_v2_destroy(grab.as_ptr()) };
+        true
     }
 
     /// Create the `wp_cursor_shape_manager_v1` global, letting clients name

@@ -2403,3 +2403,33 @@ item   = "on_text_input_enable"
 symbol = "wlr_input_method_v2_send_unavailable"
 module = "backend"
 item   = "on_new_input_method"
+
+[[wrapped]]
+symbol = "wlr_input_method_v2_state"
+module = "runtime"
+item   = "PendingImeState"
+
+[[wrapped]]
+symbol = "wlr_input_method_v2_preedit_string"
+module = "runtime"
+item   = "ImePreedit"
+
+[[wrapped]]
+symbol = "wlr_input_method_v2_delete_surrounding_text"
+module = "runtime"
+item   = "PendingImeState"
+
+[[wrapped]]
+symbol = "wlr_text_input_v3_state"
+module = "runtime"
+item   = "PendingTextInputState"
+
+[[wrapped]]
+symbol = "wlr_input_popup_surface_v2_try_from_wlr_surface"
+module = "runtime"
+item   = "Runtime::try_input_popup_surface"
+
+[[wrapped]]
+symbol = "wlr_input_method_keyboard_grab_v2_destroy"
+module = "runtime"
+item   = "Runtime::destroy_keyboard_grab"

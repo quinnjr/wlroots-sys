@@ -107,3 +107,19 @@ fn relay_focus_is_a_noop_with_no_text_inputs() {
         "relay must not have mutated the empty text-input table"
     );
 }
+
+#[test]
+fn dangling_ids_and_no_ime_read_empty_snapshots() {
+    headless_env();
+    let runtime = wlr::Runtime::new().expect("runtime");
+    let bogus = wlr::InputPopupSurfaceId::dangling_nth_for_test(0);
+    assert!(runtime.pending_ime_state().is_none());
+    assert!(runtime.committed_ime_state().is_none());
+    assert!(runtime.pending_text_input_state().is_none());
+    assert!(runtime.committed_text_input_state().is_none());
+    // SAFETY: null is the one argument the downcast never dereferences — the
+    // implementation null-checks first and reports the miss as `None`.
+    assert!(unsafe { runtime.try_input_popup_surface(std::ptr::null_mut()) }.is_none());
+    assert!(!runtime.destroy_keyboard_grab());
+    assert!(runtime.input_popup_surface(bogus).is_none());
+}
