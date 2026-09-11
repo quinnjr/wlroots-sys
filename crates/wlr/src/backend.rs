@@ -2772,6 +2772,7 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         Event::InputMethodPopupDestroyed(popup) => state.popup_surface_destroyed(popup),
         Event::InputMethodPopupRepositioned(popup) => state.popup_repositioned(popup),
         Event::InputMethodCommitted => state.input_method_committed(),
+        Event::InputMethodDeactivated => state.input_method_deactivated(),
         Event::OutputConfigurationApplied => {
             // Pop the owned payload staged alongside this marker. FIFO, so the
             // `Vec` popped here is the one `on_output_manager_apply` pushed for
@@ -4823,6 +4824,16 @@ unsafe extern "C" fn on_text_input_destroy<S: Handlers>(
             if let Some(activation) = crate::runtime::ImeActivation::of(runtime) {
                 activation.deactivate();
             }
+            // The deactivate above has settled: tell the compositor the IME
+            // deactivated, so it can hide whatever overlay the committed
+            // state was showing. The event carries no payload, and no borrow
+            // is held here (the table borrows ended before the deactivate;
+            // the token holds none), so emitting cannot deadlock a handler
+            // that reads the tables back.
+            let deliver = (*session).deliver;
+            (*session)
+                .dispatcher
+                .emit(&*session, Event::InputMethodDeactivated, deliver);
         }
         drop(removed);
     }
@@ -4855,6 +4866,21 @@ unsafe extern "C" fn on_input_method_destroy<S: Handlers>(
             .is_some_and(|entry| entry._listeners.iter().any(|r| r.listener_addr() == key));
         if is_current {
             *runtime.inner.input_method.borrow_mut() = None;
+            // The teardown above has settled: tell the compositor the IME
+            // went away, so it can hide whatever overlay the committed state
+            // was showing. Emitted whenever a bound IME is evicted — even one
+            // never activated — and never when none was bound (`is_current`
+            // false: a stale fire, or a refused second IME that was never
+            // tracked). The choice is deliberate over-notification on a rare
+            // path: the overlay-hide must fire whenever composition could
+            // have been visible, and the destroy site cannot prove it was
+            // not. The event carries no id, so no payload goes stale with
+            // the eviction; the borrow ended with the assignment above, so
+            // emitting cannot deadlock a handler that reads the tables back.
+            let deliver = (*session).deliver;
+            (*session)
+                .dispatcher
+                .emit(&*session, Event::InputMethodDeactivated, deliver);
         }
     }
 }
@@ -5359,6 +5385,16 @@ unsafe extern "C" fn on_text_input_disable<S: Handlers>(
         if let Some(activation) = crate::runtime::ImeActivation::of(runtime) {
             activation.deactivate();
         }
+        // The deactivate above has settled: tell the compositor the IME
+        // deactivated, so it can hide whatever overlay the committed state
+        // was showing. The event carries no payload — a deactivate names no
+        // generation — and no borrow is held here (the table borrow ended
+        // with the block above; the token holds none), so emitting cannot
+        // deadlock a handler that reads the tables back.
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::InputMethodDeactivated, deliver);
     }
 }
 
@@ -6016,7 +6052,25 @@ unsafe extern "C" fn on_new_session_lock<S: Handlers>(
 
         // Enter the locked state synchronously — the security bit is set here,
         // before anything else runs.
+        //
+        // Locking pulls keyboard focus off whatever normal client held it,
+        // which drives `relay_keyboard_focus`'s leave-path and deactivates a
+        // live IME — but the relay itself cannot emit: `Runtime` holds no
+        // `Session`, so it has no dispatcher to reach. Snapshot the oracle
+        // before, and notify after when the lock's focus pull actually
+        // settled a deactivate (active → inactive), so the compositor still
+        // gets its overlay-hide cue on this path. A focus change the
+        // compositor drives itself through the public `focus_*` /
+        // `clear_keyboard_focus` API stays silent — there is no delivery path
+        // outside a run, and the caller already knows focus moved.
+        let ime_was_active = runtime.input_method_active();
         runtime.begin_session_lock(lock);
+        if ime_was_active && !runtime.input_method_active() {
+            let deliver = (*session).deliver;
+            (*session)
+                .dispatcher
+                .emit(&*session, Event::InputMethodDeactivated, deliver);
+        }
 
         // Link the lock's three signals. Null liveness flag: each is dropped
         // from inside `on_session_lock_destroy`, while the lock is still
@@ -6298,7 +6352,20 @@ unsafe extern "C" fn on_session_lock_destroy<S: Handlers>(
             // `session_lock_changed(false)`. The dead client's surfaces are
             // gone (their trees dropped above), so pull keyboard focus off
             // them; input stays refused to normal clients by the gates.
+            //
+            // The focus pull drives `relay_keyboard_focus`'s leave-path and
+            // deactivates a live IME — but the relay itself cannot emit
+            // (`Runtime` holds no `Session`, so no dispatcher to reach), so
+            // the oracle is snapshotted before and the deactivate notified
+            // after, exactly as `on_new_session_lock` does.
+            let ime_was_active = runtime.input_method_active();
             runtime.clear_keyboard_focus();
+            if ime_was_active && !runtime.input_method_active() {
+                let deliver = (*session).deliver;
+                (*session)
+                    .dispatcher
+                    .emit(&*session, Event::InputMethodDeactivated, deliver);
+            }
         }
     }
 }
@@ -9080,12 +9147,13 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         // Unreachable: `run` never registers an input-method manager either
         // (`Backend::register_toplevel_and_input` is `run_all`'s hook; `run`
         // uses `no_extra`), so no input-method popup can be announced,
-        // destroyed or repositioned — and no IME commit announced — on this
-        // path.
+        // destroyed or repositioned — and no IME commit or deactivate
+        // announced — on this path.
         | Event::InputMethodPopupCreated(..)
         | Event::InputMethodPopupDestroyed(..)
         | Event::InputMethodPopupRepositioned(..)
         | Event::InputMethodCommitted
+        | Event::InputMethodDeactivated
         // Unreachable: `run` never registers an output manager either, for the
         // same reason — so no `apply` can fire on this path.
         | Event::OutputConfigurationApplied => {}

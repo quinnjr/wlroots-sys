@@ -262,6 +262,15 @@ pub(crate) enum Event {
     /// finished forward rather than a half-applied one.
     InputMethodCommitted,
 
+    /// The bound input-method deactivated. Carries no data — a deactivate
+    /// names no generation, so there is nothing to snapshot; it is purely the
+    /// compositor's cue to hide whatever overlay the committed state was
+    /// showing. Emitted once per deactivate, after the `deactivate` + `done`
+    /// sends have settled, so observers see a finished transition rather
+    /// than a half-applied one (the same "carry nothing" shape
+    /// `InputMethodCommitted` uses).
+    InputMethodDeactivated,
+
     /// A client's `zwlr_output_manager_v1` configuration was applied. Carries
     /// no data — the owned `Vec<AppliedHead>` payload cannot ride in a `Copy`,
     /// `Eq` enum, so it is staged in

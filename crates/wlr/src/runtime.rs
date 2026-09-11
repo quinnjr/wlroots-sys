@@ -9526,6 +9526,13 @@ impl Runtime {
     /// Incoming: every text-input whose client owns `new_surface` gets an
     /// `enter`. Activation waits for that text-input's own `enable` (decision
     /// #5), so no `send_activate` here.
+    ///
+    /// The leave-path deactivate sends but never notifies: this type holds no
+    /// `Session`, so it has no dispatcher to emit
+    /// `Event::InputMethodDeactivated` through. Callers with a session
+    /// (`on_new_session_lock`, `on_session_lock_destroy`) snapshot
+    /// [`Runtime::input_method_active`] around their focus pull and emit when
+    /// it settled a deactivate; compositor-driven `focus_*` calls stay silent.
     pub(crate) fn relay_keyboard_focus(&self, new_surface: *mut sys::wlr_surface) {
         let Some(seat) = *self.inner.seat.borrow() else {
             return;

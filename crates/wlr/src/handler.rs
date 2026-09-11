@@ -1146,6 +1146,20 @@ pub trait SeatHandler {
     /// `f2cc8a9`, which dropped a would-be `SessionLockHandler` for the same
     /// reason a new supertrait on [`Handlers`] is not how this ships).
     fn input_method_committed(&mut self) {}
+
+    /// The bound input-method deactivated. Notification only — the
+    /// `deactivate` + `done` sends have already gone out by the time this
+    /// runs, so there is nothing left here for a handler to *forward*. Hide
+    /// whatever overlay the committed state was showing. Defaulted to a
+    /// no-op.
+    ///
+    /// Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged (see commit
+    /// `f2cc8a9`, which dropped a would-be `SessionLockHandler` for the same
+    /// reason a new supertrait on [`Handlers`] is not how this ships).
+    fn input_method_deactivated(&mut self) {}
 }
 
 /// Every handler trait at once.

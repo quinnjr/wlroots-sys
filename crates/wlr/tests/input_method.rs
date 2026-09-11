@@ -125,31 +125,37 @@ fn dangling_ids_and_no_ime_read_empty_snapshots() {
 }
 
 /// A `SeatHandler` written against the release before this one, with an empty
-/// body, must still compile and still be usable now: the IME-commit
-/// notification method is defaulted, so it does not appear in a legacy impl.
-/// That is the additivity claim of this task, and it is a compile-time claim,
-/// so the test that asserts it is a type that exists.
+/// body, must still compile and still be usable now: the IME-commit and
+/// IME-deactivate notification methods are defaulted, so neither appears in a
+/// legacy impl. That is the additivity claim of this task, and it is a
+/// compile-time claim, so the test that asserts it is a type that exists.
 struct LegacyCommitHandler;
 
 impl wlr::SeatHandler for LegacyCommitHandler {}
 
-/// A handler that overrides the commit-notification method, proving the
-/// signature is what the contract froze: no payload — the handler reads the
-/// committed generation back via `Runtime::committed_ime_state()`.
+/// A handler that overrides both notification methods, proving the signatures
+/// are what the contract froze: no payloads — the handler reads state back
+/// via `Runtime` snapshots (`committed_ime_state()` for commits; nothing to
+/// read for a deactivate, which is purely an overlay-hide cue).
 #[derive(Default)]
 struct CommitHandler {
     seen: u32,
+    hidden: u32,
 }
 
 impl wlr::SeatHandler for CommitHandler {
     fn input_method_committed(&mut self) {
         self.seen += 1;
     }
+    fn input_method_deactivated(&mut self) {
+        self.hidden += 1;
+    }
 }
 
 #[test]
-fn the_ime_commit_notification_hook_is_additive_and_overridable() {
+fn the_ime_notification_hooks_are_additive_and_overridable() {
     let _legacy = LegacyCommitHandler;
     let handler = CommitHandler::default();
     assert_eq!(handler.seen, 0);
+    assert_eq!(handler.hidden, 0);
 }
