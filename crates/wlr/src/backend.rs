@@ -4680,9 +4680,14 @@ unsafe extern "C" fn on_new_text_input<S: Handlers>(
             if !focused_surface.is_null()
                 && crate::runtime::Runtime::surface_client(focused_surface) == client
             {
-                // SAFETY: `ti` is the just-registered live text-input; the
-                // focused surface is non-null and live (checked above).
-                sys::wlr_text_input_v3_send_enter(ti.as_ptr(), focused_surface);
+                // SAFETY: `ti` is the just-registered live text-input, so its
+                // key resolves; the focused surface is non-null and live
+                // (checked above), satisfying `send_enter`'s contract.
+                if let Some(key) = runtime.text_input_key_for(ti.as_ptr())
+                    && let Some(entered) = crate::runtime::EnteredTextInput::of(runtime, key)
+                {
+                    entered.send_enter(focused_surface);
+                }
             }
         }
     }
@@ -4713,7 +4718,8 @@ unsafe extern "C" fn on_new_input_method<S: Handlers>(
         if runtime.inner.input_method.borrow().is_some() {
             // A second input-method: refuse it. `send_unavailable` is the
             // protocol's own "some other client already has the seat" reply.
-            sys::wlr_input_method_v2_send_unavailable(im.as_ptr());
+            // SAFETY: `im` is the live just-bound input-method checked above.
+            crate::runtime::ImeActivation::refuse(im.as_ptr());
             return;
         }
         // `commit` is linked with `link_input_method` so it carries `im` in its
@@ -4792,20 +4798,29 @@ unsafe extern "C" fn on_text_input_destroy<S: Handlers>(
         let runtime = (*session).runtime;
         let key = l as usize;
         let removed = runtime.inner.text_inputs.borrow_mut().remove(&key);
-        if removed.is_some()
-            && let Some(entry) = runtime.inner.input_method.borrow_mut().as_mut()
-            && entry.focused_text_input == Some(key)
-        {
-            // The destroyed text-input was the one driving the IME. Destroying
-            // it without a preceding focus change would otherwise leave the IME
-            // believing it is still activated, unbalancing the next `enable`'s
-            // `activate`. Deactivate identically to `on_text_input_disable` and
-            // `relay_keyboard_focus`'s leave-path: deactivate, done, then clear.
-            // SAFETY: `entry.raw` names a live input-method for its entry's
-            // lifetime.
-            sys::wlr_input_method_v2_send_deactivate(entry.raw.as_ptr());
-            sys::wlr_input_method_v2_send_done(entry.raw.as_ptr());
-            entry.focused_text_input = None;
+        // Was the destroyed text-input the one driving the IME? Destroying
+        // it without a preceding focus change would otherwise leave the IME
+        // believing it is still activated, unbalancing the next `enable`'s
+        // `activate`. The borrow ends with this block, before any emit below.
+        let was_driving = removed.is_some() && {
+            let mut im = runtime.inner.input_method.borrow_mut();
+            match im.as_mut() {
+                Some(entry) if entry.focused_text_input == Some(key) => {
+                    entry.focused_text_input = None;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if was_driving {
+            // Deactivate identically to `on_text_input_disable` and
+            // `relay_keyboard_focus`'s leave-path: deactivate, done, then
+            // clear (cleared above, before the borrow ended — the wire order
+            // is unchanged). The entry existed a moment ago and nothing runs
+            // between, so the session resolves; a stale miss no-ops.
+            if let Some(activation) = crate::runtime::ImeActivation::of(runtime) {
+                activation.deactivate();
+            }
         }
         drop(removed);
     }
@@ -5175,61 +5190,26 @@ unsafe extern "C" fn on_text_input_enable<S: Handlers>(
         // Record which text-input is driving activation, by its map key, so the
         // text-input destroy handler can clear this back-reference. `ti` fired a
         // listener `on_new_text_input` linked, so it is in the map; the key is
-        // `Some`.
+        // `Some`. The borrow is dropped below, before any emit.
         entry.focused_text_input = runtime.text_input_key_for(ti);
-        let raw_im = entry.raw.as_ptr();
-        // SAFETY: `entry.raw` names a live input-method for its entry's lifetime;
-        // `ti` is the live text-input checked above.
-        sys::wlr_input_method_v2_send_activate(raw_im);
-        forward_text_input_state_to_ime(ti, raw_im);
-        sys::wlr_input_method_v2_send_done(raw_im);
-    }
-}
-
-/// Forward a text-input's `current` state to the bound input-method, honouring
-/// the client's advertised feature set: `surrounding_text` only when the
-/// text-input negotiated `WLR_TEXT_INPUT_V3_FEATURE_SURROUNDING_TEXT`, and
-/// `content_type` only when it negotiated `WLR_TEXT_INPUT_V3_FEATURE_CONTENT_TYPE`.
-/// The compositor never interprets `content_type` — `hint` and `purpose` are
-/// forwarded verbatim. Does **not** send `done`; the caller pairs this with
-/// `wlr_input_method_v2_send_done`.
-///
-/// # Safety
-///
-/// `ti` must point at a live `wlr_text_input_v3` and `im` at a live
-/// `wlr_input_method_v2` for the duration of the call.
-unsafe fn forward_text_input_state_to_ime(
-    ti: *const sys::wlr_text_input_v3,
-    im: *mut sys::wlr_input_method_v2,
-) {
-    // SAFETY: `ti` and `im` are live per the contract; every deref below reads a
-    // field of `(*ti).current`, and the surrounding `text` pointer is
-    // null-guarded before it crosses the FFI boundary.
-    unsafe {
+        drop(im);
+        // Payloads come from the committed text-input snapshot (the M8-1
+        // readers); the feature gates stay on the live text-input, which the
+        // snapshots deliberately do not carry.
+        // SAFETY: `ti` is the live text-input checked above; reading
+        // `current.features` is a field read, and the snapshot copies out.
         let features = (*ti).current.features;
-        if features & sys::wlr_text_input_v3_features::WLR_TEXT_INPUT_V3_FEATURE_SURROUNDING_TEXT.0
-            != 0
-        {
-            let surrounding = (*ti).current.surrounding;
-            // A client can advertise the feature yet leave `text` null; pass a
-            // valid empty C string rather than a null across the wire.
-            let text = if surrounding.text.is_null() {
-                c"".as_ptr()
-            } else {
-                surrounding.text
-            };
-            sys::wlr_input_method_v2_send_surrounding_text(
-                im,
-                text,
-                surrounding.cursor,
-                surrounding.anchor,
-            );
+        let snap = runtime.committed_text_input_state();
+        // The entry existed a moment ago and nothing runs between, so the
+        // session resolves; the `else` is the stale no-op, never taken here.
+        let Some(activation) = crate::runtime::ImeActivation::of(runtime) else {
+            return;
+        };
+        activation.send_activate();
+        if let Some(ref state) = snap {
+            activation.send_text_input_state(state, features);
         }
-        if features & sys::wlr_text_input_v3_features::WLR_TEXT_INPUT_V3_FEATURE_CONTENT_TYPE.0 != 0
-        {
-            let content_type = (*ti).current.content_type;
-            sys::wlr_input_method_v2_send_content_type(im, content_type.hint, content_type.purpose);
-        }
+        activation.finish();
     }
 }
 
@@ -5262,25 +5242,36 @@ unsafe extern "C" fn on_text_input_commit<S: Handlers>(
             return;
         };
         let ti = ti.as_ptr();
-        let mut im = runtime.inner.input_method.borrow_mut();
-        let Some(entry) = im.as_mut() else {
-            // No input-method is bound: nothing to forward to.
+        // SAFETY: `ti` is the live text-input recovered above; a field read.
+        let features = (*ti).current.features;
+        let key = runtime.text_input_key_for(ti);
+        {
+            let im = runtime.inner.input_method.borrow();
+            let Some(entry) = im.as_ref() else {
+                // No input-method is bound: nothing to forward to.
+                return;
+            };
+            // Only re-forward when this text-input is the one currently driving the
+            // IME. A commit from any other text-input is ignored.
+            if entry.focused_text_input != key {
+                return;
+            }
+        }
+        // Borrow released before any emit below. Payloads come from the
+        // committed text-input snapshot; the feature gates stay on the live
+        // text-input, as in `on_text_input_enable`.
+        let snap = runtime.committed_text_input_state();
+        let Some(activation) = crate::runtime::ImeActivation::of(runtime) else {
             return;
         };
-        // Only re-forward when this text-input is the one currently driving the
-        // IME. A commit from any other text-input is ignored.
-        if entry.focused_text_input != runtime.text_input_key_for(ti) {
-            return;
+        if let Some(ref state) = snap {
+            activation.send_text_input_state(state, features);
+            // The change-cause is a plain enum value on `current`, not feature-gated;
+            // wlroots defaults it to `INPUT_CHANGE` (0) when the client sends no
+            // cause. Forward it verbatim; the compositor never interprets it.
+            activation.send_change_cause(state.text_change_cause);
         }
-        let raw_im = entry.raw.as_ptr();
-        // SAFETY: `entry.raw` names a live input-method for its entry's lifetime;
-        // `ti` is the live text-input recovered above.
-        forward_text_input_state_to_ime(ti, raw_im);
-        // The change-cause is a plain enum value on `current`, not feature-gated;
-        // wlroots defaults it to `INPUT_CHANGE` (0) when the client sends no
-        // cause. Forward it verbatim; the compositor never interprets it.
-        sys::wlr_input_method_v2_send_text_change_cause(raw_im, (*ti).current.text_change_cause);
-        sys::wlr_input_method_v2_send_done(raw_im);
+        activation.finish();
     }
 }
 
@@ -5317,21 +5308,27 @@ unsafe extern "C" fn on_text_input_disable<S: Handlers>(
             return;
         };
         let ti = ti.as_ptr();
-        let mut im = runtime.inner.input_method.borrow_mut();
-        let Some(entry) = im.as_mut() else {
-            // No input-method is bound: nothing to deactivate.
-            return;
-        };
-        // Only the text-input currently driving the IME may deactivate it. A
-        // `disable` from any other text-input is ignored.
-        if entry.focused_text_input != runtime.text_input_key_for(ti) {
-            return;
+        let key = runtime.text_input_key_for(ti);
+        {
+            let mut im = runtime.inner.input_method.borrow_mut();
+            let Some(entry) = im.as_mut() else {
+                // No input-method is bound: nothing to deactivate.
+                return;
+            };
+            // Only the text-input currently driving the IME may deactivate it. A
+            // `disable` from any other text-input is ignored.
+            if entry.focused_text_input != key {
+                return;
+            }
+            // Clear before emitting: the borrow must end before the sends
+            // below, and the wire order (deactivate, done) is unchanged.
+            entry.focused_text_input = None;
         }
-        let raw_im = entry.raw.as_ptr();
-        // SAFETY: `entry.raw` names a live input-method for its entry's lifetime.
-        sys::wlr_input_method_v2_send_deactivate(raw_im);
-        sys::wlr_input_method_v2_send_done(raw_im);
-        entry.focused_text_input = None;
+        // The entry existed a moment ago and nothing runs between, so the
+        // session resolves; a stale miss no-ops.
+        if let Some(activation) = crate::runtime::ImeActivation::of(runtime) {
+            activation.deactivate();
+        }
     }
 }
 
@@ -5376,50 +5373,45 @@ unsafe extern "C" fn on_input_method_commit<S: Handlers>(
         let Some(im) = (*bound).input_method else {
             return;
         };
-        // `input_method` and `text_inputs` are distinct RefCells; hold both
-        // immutable borrows across the sends (no relay callback re-enters either),
-        // matching `on_text_input_disable`.
-        let im_ref = runtime.inner.input_method.borrow();
-        let Some(entry) = im_ref.as_ref() else {
-            // No input-method is bound: nothing to relay to.
+        // Resolve the receiving text-input's key while holding the tables,
+        // then release both borrows before emitting: no borrow crosses the
+        // FFI sends below.
+        let key = {
+            let im_ref = runtime.inner.input_method.borrow();
+            let Some(entry) = im_ref.as_ref() else {
+                // No input-method is bound: nothing to relay to.
+                return;
+            };
+            let Some(key) = entry.focused_text_input else {
+                // The input-method committed with no focused text-input.
+                return;
+            };
+            if !runtime.inner.text_inputs.borrow().contains_key(&key) {
+                // The focused text-input's entry is gone.
+                return;
+            }
+            key
+        };
+        // SAFETY: `im` is the live committing input-method recovered from
+        // `Bound` above; `current` is the inline state it just committed —
+        // copied out here into the snapshot, never freed.
+        let snap = crate::runtime::CommittedImeState::from_state(&(*im.as_ptr()).current);
+        let Some(entered) = crate::runtime::EnteredTextInput::of(runtime, key) else {
             return;
         };
-        let Some(key) = entry.focused_text_input else {
-            // The input-method committed with no focused text-input.
-            return;
-        };
-        let tis = runtime.inner.text_inputs.borrow();
-        let Some(ti) = tis.get(&key) else {
-            // The focused text-input's entry is gone.
-            return;
-        };
-        let ti = ti.raw.as_ptr();
-        // SAFETY: `im` is the live committing input-method; `current` is an inline
-        // field holding the state it just committed. `ti` names a live text-input
-        // for its entry's lifetime.
-        let cur = &(*im.as_ptr()).current;
-        // Forward each field only when the input-method populated it. The text
-        // pointers are `*const c_char` owned by the input-method state; guard for
-        // null before handing them to the send helpers.
-        if !cur.preedit.text.is_null() {
-            sys::wlr_text_input_v3_send_preedit_string(
-                ti,
-                cur.preedit.text,
-                cur.preedit.cursor_begin,
-                cur.preedit.cursor_end,
-            );
+        // Forward each field only when the input-method populated it. A
+        // staged-but-null pointer reads as `None` in the snapshot and is
+        // skipped; an empty string is `Some("")` and still goes out.
+        if let Some(ref preedit) = snap.preedit {
+            entered.send_preedit(preedit);
         }
-        if !cur.commit_text.is_null() {
-            sys::wlr_text_input_v3_send_commit_string(ti, cur.commit_text);
+        if let Some(ref text) = snap.commit_text {
+            entered.send_commit(text);
         }
-        if cur.delete.before_length != 0 || cur.delete.after_length != 0 {
-            sys::wlr_text_input_v3_send_delete_surrounding_text(
-                ti,
-                cur.delete.before_length,
-                cur.delete.after_length,
-            );
+        if snap.delete_before != 0 || snap.delete_after != 0 {
+            entered.send_delete(snap.delete_before, snap.delete_after);
         }
-        sys::wlr_text_input_v3_send_done(ti);
+        let _serial = entered.finish();
     }
 }
 

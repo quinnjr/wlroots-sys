@@ -450,6 +450,309 @@ impl CommittedTextInputState {
     }
 }
 
+/// Copy relay text into a C string for a token send, truncating at the first
+/// NUL. The wire serialisation reads C strings to their terminator, so a
+/// truncating copy sends exactly what passing the untruncated pointer would.
+fn relay_cstring(text: &str) -> std::ffi::CString {
+    let truncated = text.split('\0').next().unwrap_or("");
+    // `truncated` contains no NUL by construction, so this cannot fail; the
+    // `expect` names the invariant rather than handling an error.
+    std::ffi::CString::new(truncated).expect("NUL-truncated relay text contains no NUL")
+}
+
+/// A live input-method relay session toward the bound input-method.
+///
+/// `ImeActivation` is the session-typed proof that the single tracked
+/// input-method is still bound: every send resolves the
+/// [`RuntimeInner::input_method`] slot and no-ops when it is gone (stale —
+/// the IME was destroyed), preserving each call site's guard. It carries no
+/// key — decision #3 tracks at most one input-method, so the slot itself is
+/// the identity — and no borrow: each method copies the raw pointer out,
+/// drops the borrow, then emits, so no table borrow is ever held across FFI.
+/// `Clone`, not `Copy`: the handle holds a `Runtime` (an `Rc`), which cannot
+/// be `Copy`, and a clone is the same cheap handle.
+///
+/// `finish` is the only path to `send_done` on this side, and `deactivate`
+/// the only path to `send_deactivate` + `done`: the relay handlers never
+/// touch the raw IME sends.
+#[derive(Clone)]
+pub(crate) struct ImeActivation {
+    runtime: Runtime,
+}
+
+impl std::fmt::Debug for ImeActivation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redacted like `InputPopupSurfaceId`: the runtime holds heap
+        // addresses, and an id-shaped debug line promises nothing here.
+        f.write_str("ImeActivation(..)")
+    }
+}
+
+impl ImeActivation {
+    /// The live activation session, or `None` when no input-method is bound
+    /// (stale — every caller no-ops, preserving the relay guards).
+    pub(crate) fn of(runtime: &Runtime) -> Option<Self> {
+        if runtime.inner.input_method.borrow().is_none() {
+            return None;
+        }
+        Some(Self {
+            runtime: runtime.clone(),
+        })
+    }
+
+    /// Announce the input-method's activation for the focused text-input.
+    pub(crate) fn send_activate(&self) {
+        let Some(raw) = self.runtime.input_method_raw() else {
+            return;
+        };
+        // SAFETY: `raw` names a live input-method per `input_method_raw`; the
+        // table borrow ended inside that call, so no borrow crosses this emit.
+        unsafe { sys::wlr_input_method_v2_send_activate(raw.as_ptr()) };
+    }
+
+    /// Forward surrounding text, exactly as offered (`None` — the client
+    /// advertised the feature but left `text` null — sends as empty, matching
+    /// the old forward helper's valid empty C string).
+    pub(crate) fn send_surrounding(&self, text: &str, cursor: u32, anchor: u32) {
+        let Some(raw) = self.runtime.input_method_raw() else {
+            return;
+        };
+        let text = relay_cstring(text);
+        // SAFETY: as for `send_activate`. `text` is a live local for the
+        // call, which is all the send reads before copying it into the wire
+        // message.
+        unsafe {
+            sys::wlr_input_method_v2_send_surrounding_text(
+                raw.as_ptr(),
+                text.as_ptr(),
+                cursor,
+                anchor,
+            )
+        };
+    }
+
+    /// Forward the content hint and purpose verbatim — the compositor never
+    /// interprets them.
+    pub(crate) fn send_content_type(&self, hint: u32, purpose: u32) {
+        let Some(raw) = self.runtime.input_method_raw() else {
+            return;
+        };
+        // SAFETY: as for `send_activate`.
+        unsafe { sys::wlr_input_method_v2_send_content_type(raw.as_ptr(), hint, purpose) };
+    }
+
+    /// Forward why the client says the text changed, verbatim.
+    pub(crate) fn send_change_cause(&self, cause: u32) {
+        let Some(raw) = self.runtime.input_method_raw() else {
+            return;
+        };
+        // SAFETY: as for `send_activate`.
+        unsafe { sys::wlr_input_method_v2_send_text_change_cause(raw.as_ptr(), cause) };
+    }
+
+    /// Forward an app-side text-input generation to the bound input-method,
+    /// honouring the client's advertised feature set: `surrounding_text` only
+    /// when the text-input negotiated
+    /// `WLR_TEXT_INPUT_V3_FEATURE_SURROUNDING_TEXT`, and `content_type` only
+    /// when it negotiated `WLR_TEXT_INPUT_V3_FEATURE_CONTENT_TYPE`. The
+    /// feature bits stay on the live text-input — the snapshots deliberately
+    /// do not carry them — so callers read `features` off `current` and pass
+    /// the snapshot for the payload. Does **not** send `done`; the caller
+    /// pairs this with [`finish`](ImeActivation::finish), exactly as the old
+    /// `forward_text_input_state_to_ime` paired with `send_done`.
+    pub(crate) fn send_text_input_state(&self, state: &CommittedTextInputState, features: u32) {
+        if features & sys::wlr_text_input_v3_features::WLR_TEXT_INPUT_V3_FEATURE_SURROUNDING_TEXT.0
+            != 0
+        {
+            self.send_surrounding(
+                state.surrounding_text.as_deref().unwrap_or(""),
+                state.surrounding_cursor,
+                state.surrounding_anchor,
+            );
+        }
+        if features & sys::wlr_text_input_v3_features::WLR_TEXT_INPUT_V3_FEATURE_CONTENT_TYPE.0 != 0
+        {
+            self.send_content_type(state.content_hint, state.content_purpose);
+        }
+    }
+
+    /// Deactivate the IME (`deactivate` + `done`) and consume the session:
+    /// the only path to `send_deactivate`, used by `disable`, the
+    /// text-input-destroy path, and the focus-leave path. The slot cannot
+    /// empty between the two sends — nothing re-enters on this thread — so
+    /// the `done` half still goes out when the `deactivate` half did.
+    pub(crate) fn deactivate(self) {
+        let Some(raw) = self.runtime.input_method_raw() else {
+            return;
+        };
+        // SAFETY: as for `send_activate`; both sends read only the live object.
+        unsafe { sys::wlr_input_method_v2_send_deactivate(raw.as_ptr()) };
+        self.finish();
+    }
+
+    /// Complete the activation (`done`) and consume the session: the only
+    /// path to `send_done` on this side — every enable/commit-site `done`
+    /// flows through here (or through `deactivate`).
+    pub(crate) fn finish(self) {
+        let Some(raw) = self.runtime.input_method_raw() else {
+            return;
+        };
+        // SAFETY: as for `send_activate`.
+        unsafe { sys::wlr_input_method_v2_send_done(raw.as_ptr()) };
+    }
+
+    /// Refuse a second input-method: send `unavailable` to the newcomer,
+    /// which is never tracked. An associated function, not a session method —
+    /// the refused object has no session. Lives on this impl so the raw-send
+    /// audit (sends only inside token impls) stays clean.
+    ///
+    /// # Safety
+    ///
+    /// `im` must point at a live `wlr_input_method_v2` for the call.
+    pub(crate) unsafe fn refuse(im: *mut sys::wlr_input_method_v2) {
+        // SAFETY: live per the caller's contract; the send only reads the
+        // object before copying the reply into the wire message.
+        unsafe { sys::wlr_input_method_v2_send_unavailable(im) };
+    }
+}
+
+/// A live relay session toward one entered text-input (an editable field).
+///
+/// `EnteredTextInput` is the session-typed proof that the text-input under
+/// `ti` — its [`RuntimeInner::text_inputs`] map key — is still tracked:
+/// every send resolves the entry and no-ops when it is gone (stale — the
+/// text-input was destroyed), preserving each call site's guard. Same
+/// no-borrow-across-FFI discipline as [`ImeActivation`].
+///
+/// `finish` is the only path to `send_done` on this side: the relay handlers
+/// never touch the raw text-input sends.
+#[derive(Clone)]
+pub(crate) struct EnteredTextInput {
+    runtime: Runtime,
+    /// Key into [`RuntimeInner::text_inputs`].
+    ti: usize,
+}
+
+impl std::fmt::Debug for EnteredTextInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redacted like `ImeActivation`: the key is a heap address.
+        f.write_str("EnteredTextInput(..)")
+    }
+}
+
+impl EnteredTextInput {
+    /// The live session for the tracked text-input under `key`, or `None`
+    /// when its entry is gone (stale — every caller no-ops).
+    pub(crate) fn of(runtime: &Runtime, key: usize) -> Option<Self> {
+        if !runtime.inner.text_inputs.borrow().contains_key(&key) {
+            return None;
+        }
+        Some(Self {
+            runtime: runtime.clone(),
+            ti: key,
+        })
+    }
+
+    /// The live text-input pointer, or `None` when the entry emptied since
+    /// `of` (stale — the send no-ops). Copies the pointer out and releases
+    /// the borrow before return, so callers never hold it across FFI.
+    fn raw(&self) -> Option<NonNull<sys::wlr_text_input_v3>> {
+        let raw = self.runtime.inner.text_inputs.borrow().get(&self.ti)?.raw;
+        // SAFETY: the entry is evicted by its own `destroy` listener before
+        // wlroots frees the `wlr_text_input_v3`, so a resolvable key names a
+        // live object; callers only hand it to the sends below.
+        Some(raw)
+    }
+
+    /// Send `enter` for the incoming focus surface.
+    ///
+    /// # Safety
+    ///
+    /// `surface` must be a live, non-null `wlr_surface`.
+    pub(crate) unsafe fn send_enter(&self, surface: *mut sys::wlr_surface) {
+        let Some(raw) = self.raw() else {
+            return;
+        };
+        // SAFETY: `raw` names a live text-input per `raw()`; `surface` is
+        // live per the caller's contract. The table borrow ended inside
+        // `raw()`, so no borrow crosses this emit.
+        unsafe { sys::wlr_text_input_v3_send_enter(raw.as_ptr(), surface) };
+    }
+
+    /// Send `leave` for the outgoing focus surface. The caller establishes
+    /// the wlroots leave-assertion (`focused_surface` non-null) before
+    /// building the session, as the focus relay does.
+    pub(crate) fn send_leave(&self) {
+        let Some(raw) = self.raw() else {
+            return;
+        };
+        // SAFETY: `raw` names a live text-input per `raw()`; the table borrow
+        // ended inside that call, so no borrow crosses this emit.
+        unsafe { sys::wlr_text_input_v3_send_leave(raw.as_ptr()) };
+    }
+
+    /// Forward the committed preedit string, exactly as the input-method
+    /// offered it — including an empty string, which the relay still forwards.
+    pub(crate) fn send_preedit(&self, preedit: &ImePreedit) {
+        let Some(raw) = self.raw() else {
+            return;
+        };
+        let text = relay_cstring(&preedit.text);
+        // SAFETY: as for `send_leave`. `text` is a live local for the call,
+        // which is all the send reads before copying it into the wire message.
+        unsafe {
+            sys::wlr_text_input_v3_send_preedit_string(
+                raw.as_ptr(),
+                text.as_ptr(),
+                preedit.cursor_begin,
+                preedit.cursor_end,
+            )
+        };
+    }
+
+    /// Forward the committed commit string.
+    pub(crate) fn send_commit(&self, text: &str) {
+        let Some(raw) = self.raw() else {
+            return;
+        };
+        let text = relay_cstring(text);
+        // SAFETY: as for `send_preedit`.
+        unsafe { sys::wlr_text_input_v3_send_commit_string(raw.as_ptr(), text.as_ptr()) };
+    }
+
+    /// Forward the committed delete-surrounding-text lengths.
+    pub(crate) fn send_delete(&self, before: u32, after: u32) {
+        let Some(raw) = self.raw() else {
+            return;
+        };
+        // SAFETY: as for `send_leave`.
+        unsafe { sys::wlr_text_input_v3_send_delete_surrounding_text(raw.as_ptr(), before, after) };
+    }
+
+    /// Complete the relay (`done`) and consume the session, handing back the
+    /// text-input's serial after the send. `CommitSerial(0)` when stale —
+    /// nothing went out, so there is no serial for it.
+    pub(crate) fn finish(self) -> CommitSerial {
+        let Some(raw) = self.raw() else {
+            return CommitSerial(0);
+        };
+        // SAFETY: as for `send_leave`.
+        unsafe { sys::wlr_text_input_v3_send_done(raw.as_ptr()) };
+        // SAFETY: `raw` still names the live text-input; `current_serial` is
+        // an inline field read, borrowed memory this crate never owns.
+        let serial = unsafe { (*raw.as_ptr()).current_serial };
+        CommitSerial(serial)
+    }
+}
+
+/// The text-input serial a relay `done` send advanced to.
+///
+/// [`EnteredTextInput::finish`] hands one back per completed relay so a later
+/// slice can order generations; `pub(crate)` in this slice — the observable
+/// contract is the unchanged wire behavior, not the marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CommitSerial(pub u32);
+
 pub(crate) struct RuntimeInner {
     pub(crate) sources: RefCell<Vec<FdSource>>,
 
@@ -9198,23 +9501,29 @@ impl Runtime {
         if old_surface == new_surface {
             return;
         }
-        let tis = self.inner.text_inputs.borrow();
-
-        // Outgoing: leave every text-input whose client owns the outgoing
-        // surface, and deactivate the IME if it was activated for one of them.
+        // Collect the session keys to drive while holding the tables, then
+        // release every borrow before emitting below: no borrow crosses FFI.
+        // `leaving` is in table order — the wire order the old loop sent in —
+        // and `driving` names the leaving key the IME is activated for, if
+        // any, so the emit loop replays the old leave→deactivate→done→leave
+        // order exactly.
+        let mut leaving: Vec<usize> = Vec::new();
+        let mut driving: Option<usize> = None;
         if !old_surface.is_null() {
             // SAFETY: a live focused surface carries a live resource.
             let old_client = unsafe { Self::surface_client(old_surface) };
             if !old_client.is_null() {
+                let tis = self.inner.text_inputs.borrow();
+                let im = self.inner.input_method.borrow();
                 for (key, ti) in tis.iter() {
                     if ti.client != old_client {
                         continue;
                     }
                     // `focused_surface` (the wlroots C field) is the single
                     // source of truth for "is this text-input entered".
-                    // `wlr_text_input_v3_send_leave` asserts it is non-null, so
-                    // a text-input that was never entered on `old_surface` — one
-                    // created on an already-focused window, say — must be skipped
+                    // `send_leave` asserts it is non-null, so a text-input
+                    // that was never entered on `old_surface` — one created on
+                    // an already-focused window, say — must be skipped
                     // entirely: no leave, no paired IME-deactivate. Only leave
                     // the text-input actually entered on the surface being left.
                     // SAFETY: `ti.raw` names a live text-input — its destroy
@@ -9224,32 +9533,26 @@ impl Runtime {
                     if entered_surface != old_surface {
                         continue;
                     }
-                    // SAFETY: `ti.raw` names a live text-input, and its
-                    // `focused_surface` is non-null (equal to `old_surface`),
-                    // so the wlroots leave-assertion holds.
-                    unsafe { sys::wlr_text_input_v3_send_leave(ti.raw.as_ptr()) };
-                    let mut im = self.inner.input_method.borrow_mut();
-                    if let Some(entry) = im.as_mut()
-                        && entry.focused_text_input == Some(*key)
+                    leaving.push(*key);
+                    if im
+                        .as_ref()
+                        .is_some_and(|entry| entry.focused_text_input == Some(*key))
                     {
-                        // SAFETY: `entry.raw` names a live input-method for
-                        // its entry's lifetime.
-                        unsafe {
-                            sys::wlr_input_method_v2_send_deactivate(entry.raw.as_ptr());
-                            sys::wlr_input_method_v2_send_done(entry.raw.as_ptr());
-                        }
-                        entry.focused_text_input = None;
+                        driving = Some(*key);
                     }
                 }
             }
         }
 
-        // Incoming: enter every text-input whose client owns the new surface.
+        // Incoming: collect the keys to enter, in the same table order the
+        // old loop sent in.
+        let mut entering: Vec<usize> = Vec::new();
         if !new_surface.is_null() {
             // SAFETY: the incoming surface is live (checked by the caller).
             let new_client = unsafe { Self::surface_client(new_surface) };
             if !new_client.is_null() {
-                for ti in tis.values() {
+                let tis = self.inner.text_inputs.borrow();
+                for (key, ti) in tis.iter() {
                     if ti.client != new_client {
                         continue;
                     }
@@ -9261,10 +9564,44 @@ impl Runtime {
                     if entered_surface == new_surface {
                         continue;
                     }
-                    // SAFETY: `ti.raw` is live; `new_surface` is the live
-                    // incoming surface.
-                    unsafe { sys::wlr_text_input_v3_send_enter(ti.raw.as_ptr(), new_surface) };
+                    entering.push(*key);
                 }
+            }
+        }
+
+        // Emit phase: every borrow above has ended. Each session resolves its
+        // own object and no-ops when stale.
+        for key in leaving {
+            if let Some(entered) = EnteredTextInput::of(self, key) {
+                // SAFETY: `entered` resolved a live text-input whose
+                // `focused_surface` was non-null (equal to `old_surface`) when
+                // collected above, so the wlroots leave-assertion holds.
+                entered.send_leave();
+            }
+            if driving == Some(key) {
+                // The IME was activated for this text-input: deactivate it,
+                // then clear the back-reference so it never points at a stale
+                // key. Cleared before emitting — the borrow must end before
+                // the sends — while the wire order (leave, deactivate, done)
+                // matches the old loop exactly.
+                {
+                    let mut im = self.inner.input_method.borrow_mut();
+                    if let Some(entry) = im.as_mut()
+                        && entry.focused_text_input == Some(key)
+                    {
+                        entry.focused_text_input = None;
+                    }
+                }
+                if let Some(activation) = ImeActivation::of(self) {
+                    activation.deactivate();
+                }
+            }
+        }
+        for key in entering {
+            if let Some(entered) = EnteredTextInput::of(self, key) {
+                // SAFETY: `entered` resolved a live text-input; `new_surface`
+                // is the live incoming surface.
+                unsafe { entered.send_enter(new_surface) };
             }
         }
     }
