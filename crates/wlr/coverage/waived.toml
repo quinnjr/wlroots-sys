@@ -1606,22 +1606,17 @@ reason    = "not-yet"
 note      = "Backend-specific construction and the interfaces milestone."
 milestone = "M13"
 
-[[waived]]
-symbol    = "wlr_output_adaptive_sync_status"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_add_software_cursors_to_render_pass"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with the render-pass follow-up (needs renderer + pass plumbing)."
 milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_begin_render_pass"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with the render-pass follow-up (needs renderer + pass plumbing)."
 milestone = "M6"
 
 [[waived]]
@@ -1639,7 +1634,7 @@ milestone = "M6"
 [[waived]]
 symbol    = "wlr_output_create_global"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with the M6-protocols slice (output-management)."
 milestone = "M6"
 
 [[waived]]
@@ -1687,49 +1682,39 @@ milestone = "M13"
 [[waived]]
 symbol    = "wlr_output_destroy_global"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with the M6-protocols slice (output-management)."
 milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_effective_resolution"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_event_bind"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with the M6-feedback slice (frame-event listener infrastructure)."
 milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_event_commit"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with the M6-feedback slice (frame-event listener infrastructure)."
 milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_event_damage"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with the M6-feedback slice (frame-event listener infrastructure)."
 milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_event_precommit"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with the M6-feedback slice (frame-event listener infrastructure)."
 milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_event_present"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_event_request_state"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with the M6-feedback slice (frame-event listener infrastructure)."
 milestone = "M6"
 
 [[waived]]
@@ -1738,16 +1723,11 @@ reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
 milestone = "M13"
 
-[[waived]]
-symbol    = "wlr_output_from_resource"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_get_primary_formats"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with M10 (drm format sets feed dmabuf feedback)."
 milestone = "M6"
 
 [[waived]]
@@ -1774,35 +1754,10 @@ reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
 milestone = "M13"
 
-[[waived]]
-symbol    = "wlr_output_is_direct_scanout_allowed"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_is_drm"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_is_headless"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_is_wl"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_is_x11"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_layer"
@@ -1894,22 +1849,12 @@ symbol    = "wlr_output_layout_remove"
 reason    = "internal"
 note      = "outputs leave the layout via display teardown only; per-output removal is never needed (see layout docs)."
 
-[[waived]]
-symbol    = "wlr_output_lock_attach_render"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_lock_software_cursors"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_mode_aspect_ratio"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "needs a live mode object; owned Mode copies carry no pointer."
 milestone = "M6"
 
 [[waived]]
@@ -1936,29 +1881,9 @@ reason    = "not-yet"
 note      = "Output stack completion."
 milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_present_flag"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_schedule_done"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_send_frame"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_send_present"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_send_request_state"
@@ -1966,94 +1891,44 @@ reason    = "not-yet"
 note      = "Output stack completion."
 milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_set_description"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_set_name"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_state_copy"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_state_field"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_state_mode_type"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_state_set_adaptive_sync_enabled"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_state_set_buffer"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_state_set_color_transform"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with M12 (needs the color-transform type)."
 milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_state_set_damage"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_state_set_image_description"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with M12 (needs the color image-description type)."
 milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_state_set_layers"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with the M6-cursor-layer slice (needs a safe layer-state type; layers have no standalone use)."
 milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_state_set_render_format"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_state_set_signal_timeline"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with M10 (needs the drm-syncobj timeline type)."
 milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_state_set_subpixel"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_state_set_wait_timeline"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with M10 (needs the drm-syncobj timeline type)."
 milestone = "M6"
 
 [[waived]]
@@ -2095,14 +1970,9 @@ milestone = "M6"
 [[waived]]
 symbol    = "wlr_output_try_from_ext_image_capture_source_v1"
 reason    = "not-yet"
-note      = "Output stack completion."
+note      = "with M10 (image-capture sources)."
 milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_update_needs_frame"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_pointer_constraint_v1_state"

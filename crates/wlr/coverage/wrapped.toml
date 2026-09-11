@@ -2573,3 +2573,134 @@ item   = "SeatHandler::tablet_tool_event"
 symbol = "wlr_tablet_tool_tip_event"
 module = "backend"
 item   = "SeatHandler::tablet_tool_event"
+
+[[wrapped]]
+symbol = "wlr_output_state_set_adaptive_sync_enabled"
+module = "output"
+item   = "OutputState::set_adaptive_sync_enabled"
+
+[[wrapped]]
+symbol = "wlr_output_state_set_buffer"
+module = "output"
+item   = "OutputState::set_buffer"
+
+[[wrapped]]
+symbol = "wlr_output_state_set_damage"
+module = "output"
+item   = "OutputState::set_damage"
+
+[[wrapped]]
+symbol = "wlr_output_state_set_render_format"
+module = "output"
+item   = "OutputState::set_render_format"
+
+[[wrapped]]
+symbol = "wlr_output_state_set_subpixel"
+module = "output"
+item   = "OutputState::set_subpixel"
+
+[[wrapped]]
+symbol = "wlr_output_state_copy"
+module = "output"
+item   = "OutputState::copy_from"
+
+[[wrapped]]
+symbol = "wlr_output_state_field"
+module = "output"
+item   = "OutputState::committed_fields"
+
+[[wrapped]]
+symbol = "wlr_output_state_mode_type"
+module = "output"
+item   = "ModeType"
+
+[[wrapped]]
+symbol = "wlr_output_set_name"
+module = "output"
+item   = "Output::set_name"
+
+[[wrapped]]
+symbol = "wlr_output_set_description"
+module = "output"
+item   = "Output::set_description"
+
+[[wrapped]]
+symbol = "wlr_output_effective_resolution"
+module = "output"
+item   = "Output::effective_resolution"
+
+[[wrapped]]
+symbol = "wlr_output_is_drm"
+module = "output"
+item   = "Output::is_drm"
+
+[[wrapped]]
+symbol = "wlr_output_is_headless"
+module = "output"
+item   = "Output::is_headless"
+
+[[wrapped]]
+symbol = "wlr_output_is_wl"
+module = "output"
+item   = "Output::is_wl"
+
+[[wrapped]]
+symbol = "wlr_output_is_x11"
+module = "output"
+item   = "Output::is_x11"
+
+[[wrapped]]
+symbol = "wlr_output_is_direct_scanout_allowed"
+module = "output"
+item   = "Output::is_direct_scanout_allowed"
+
+[[wrapped]]
+symbol = "wlr_output_schedule_done"
+module = "output"
+item   = "Output::schedule_done"
+
+[[wrapped]]
+symbol = "wlr_output_update_needs_frame"
+module = "output"
+item   = "Output::update_needs_frame"
+
+[[wrapped]]
+symbol = "wlr_output_send_frame"
+module = "output"
+item   = "Output::send_frame"
+
+[[wrapped]]
+symbol = "wlr_output_send_present"
+module = "output"
+item   = "Output::send_present"
+
+[[wrapped]]
+symbol = "wlr_output_from_resource"
+module = "runtime"
+item   = "Runtime::try_output_from_resource"
+
+[[wrapped]]
+symbol = "wlr_output_lock_attach_render"
+module = "output"
+item   = "Output::lock_attach_render"
+
+[[wrapped]]
+symbol = "wlr_output_lock_software_cursors"
+module = "output"
+item   = "Output::lock_software_cursors"
+
+[[wrapped]]
+symbol = "wlr_output_adaptive_sync_status"
+module = "output"
+item   = "AdaptiveSyncStatus"
+
+[[wrapped]]
+symbol = "wlr_output_present_flag"
+module = "output"
+item   = "PresentFlags"
+
+
+[[wrapped]]
+symbol = "wlr_output_event_present"
+module = "output"
+item   = "PresentEvent"

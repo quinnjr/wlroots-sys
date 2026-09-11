@@ -104,7 +104,7 @@ pub use buffer::{Buffer, BufferDataAccess, BufferId, DataPtrAccess};
 pub use decoration::DecorationMode;
 pub use display::{Display, EventLoop};
 pub use error::{Error, Result};
-pub use geom::{Box2D, FBox, Transform};
+pub use geom::{Box2D, FBox, Subpixel, Transform};
 pub use handler::{
     AppliedHead, FdHandler, Handlers, LoopHandler, OutputHandler, SeatHandler, ToplevelHandler,
 };
@@ -112,7 +112,10 @@ pub use id::{OutputId, SourceId};
 pub use interest::{Interest, Readiness};
 pub use layer::{Anchor, Layer, LayerSurface, LayerSurfaceId};
 pub use log::{LogLevel, init_logging, log_verbosity};
-pub use output::{Mode, Output};
+pub use output::{
+    AdaptiveSyncStatus, CommittedFields, Mode, ModeType, Output, OutputState, PresentEvent,
+    PresentFlags,
+};
 pub use popup::{
     ConstraintAdjustment, Popup, PopupId, PopupParent, PositionerAnchor, PositionerGravity,
     PositionerRules,

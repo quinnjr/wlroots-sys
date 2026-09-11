@@ -643,6 +643,17 @@ mod tests {
         assert_eq!(NodeKind::from_raw(sys::wlr_scene_node_type(9999)), None);
     }
 
+    /// A timestamp beyond `time_t` saturates instead of wrapping into garbage:
+    /// presentation-time feedback must never carry a false clock.
+    #[test]
+    fn timespec_of_saturates_out_of_range_durations() {
+        let t = timespec_of(std::time::Duration::new(1, 500_000_000));
+        assert_eq!((t.tv_sec, t.tv_nsec), (1, 500_000_000));
+        let t = timespec_of(std::time::Duration::MAX);
+        assert_eq!(t.tv_sec, i64::MAX, "seconds must clamp, never wrap");
+        assert!(t.tv_nsec >= 0, "nanos must stay in range");
+    }
+
     /// Dangling ids must sit in the reserved top of the counter's range, well
     /// clear of anything a real process issues.
     #[test]
