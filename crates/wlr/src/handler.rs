@@ -1075,9 +1075,9 @@ pub trait SeatHandler {
     /// surface* — the list an IME shows next to the text cursor. `popup` is the
     /// stable handle for it; the compositor places it in the scene — typically
     /// [`Runtime::add_input_popup_in_band`](crate::Runtime::add_input_popup_in_band)
-    /// under the focused text input's cursor rectangle. There is no reposition
-    /// event yet, so re-anchoring as the cursor moves is the compositor's to
-    /// poll and re-place until one exists.
+    /// under the focused text input's cursor rectangle — and re-places it on
+    /// [`popup_repositioned`](SeatHandler::popup_repositioned) as the cursor
+    /// moves.
     ///
     /// wlroots tracks the surface but the compositor still owns the scene: it
     /// decides where the popup's node sits. Defaulted to a no-op — a compositor
@@ -1101,6 +1101,33 @@ pub trait SeatHandler {
     /// bookkeeping for `popup`; the handle is stale afterwards. Defaulted to a
     /// no-op.
     fn popup_surface_destroyed(&mut self, popup: InputPopupSurfaceId) {
+        let _ = popup;
+    }
+
+    /// A tracked input-method candidate popup surface needs re-placing — the
+    /// focused text-input committed, so the cursor rectangle the compositor
+    /// placed the popup against may have moved. Re-run the placement math
+    /// (read the fresh anchor from
+    /// [`Runtime::focused_text_input_cursor_rectangle`](crate::Runtime::focused_text_input_cursor_rectangle)
+    /// and the popup's own extent from
+    /// [`Runtime::input_popup_size`](crate::Runtime::input_popup_size)) and
+    /// move the node [`Runtime::add_input_popup_in_band`](crate::Runtime::add_input_popup_in_band)
+    /// returned. One call per tracked popup, emitted after the relay to the
+    /// input-method has settled.
+    ///
+    /// **`popup` may be one this runtime no longer tracks.** The event is
+    /// queued behind a running handler like every other, and a popup destroyed
+    /// in between still delivers — the id then only names which popup the
+    /// reposition was for. Write this so an unknown id is harmless: every
+    /// popup accessor returns `None` for one.
+    ///
+    /// Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged (see commit
+    /// `f2cc8a9`, which dropped a would-be `SessionLockHandler` for the same
+    /// reason a new supertrait on [`Handlers`] is not how this ships).
+    fn popup_repositioned(&mut self, popup: InputPopupSurfaceId) {
         let _ = popup;
     }
 }

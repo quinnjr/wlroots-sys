@@ -5961,6 +5961,28 @@ impl Runtime {
         Some(surface)
     }
 
+    /// The committed size of an input-method popup's client surface, in
+    /// surface-local pixels — the extent a compositor re-places the popup's
+    /// node against on [`SeatHandler::popup_repositioned`](crate::SeatHandler::popup_repositioned).
+    ///
+    /// Reads the surface's committed `current` size, the same state a mapped
+    /// check would consult: `(0, 0)` before the client commits a buffer, not
+    /// `None` — `None` is reserved for "no popup under `popup`" (an unknown
+    /// id, or one whose popup has already been destroyed) and for a popup
+    /// with no surface yet, the identical miss contract
+    /// [`input_popup_surface`](Runtime::input_popup_surface) documents.
+    pub fn input_popup_size(&self, popup: InputPopupSurfaceId) -> Option<(i32, i32)> {
+        let surface = self.input_popup_surface(popup)?;
+        // SAFETY: `input_popup_surface` resolved a live entry's non-null client
+        // surface — live by the argument `input_popup_raw`'s own doc gives
+        // (the entry stands only while the popup does, and the client keeps
+        // the surface past the popup's destroy). Reading its committed
+        // `current` size reads borrowed memory this crate never owns and
+        // copies two integers out.
+        let (width, height) = unsafe { ((*surface).current.width, (*surface).current.height) };
+        Some((width, height))
+    }
+
     /// The live `wlr_input_popup_surface_v2` behind `popup`, `None` for an
     /// unknown or destroyed id. The single site encoding the miss semantics
     /// every popup accessor shares.

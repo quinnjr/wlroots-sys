@@ -241,6 +241,16 @@ pub(crate) enum Event {
     /// so the id is stale for resolution and serves only to tell the handler
     /// *which* popup went away.
     InputMethodPopupDestroyed(InputPopupSurfaceId),
+    /// A tracked input-method candidate popup surface needs re-placing: the
+    /// focused text-input committed, so the cursor rectangle the compositor
+    /// placed the popup against may have moved. Carries the crate's own
+    /// [`InputPopupSurfaceId`] — an opaque, `Copy`/`Eq` id like every other id
+    /// here. One is emitted per tracked popup, after the relay to the
+    /// input-method has settled, so observers see a finished forward rather
+    /// than a half-applied one. A deferred delivery may name a popup destroyed
+    /// in between; like `InputMethodPopupDestroyed`, the id then only tells
+    /// the handler *which* popup the reposition was for.
+    InputMethodPopupRepositioned(InputPopupSurfaceId),
 
     /// A client's `zwlr_output_manager_v1` configuration was applied. Carries
     /// no data — the owned `Vec<AppliedHead>` payload cannot ride in a `Copy`,
