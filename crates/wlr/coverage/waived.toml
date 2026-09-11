@@ -1836,75 +1836,63 @@ milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_layout_adjacent_output"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "the crate maintains its own layout and exposes the one query consumers need (output_layout_box); the remaining query fns are deliberately unused."
 
 [[waived]]
 symbol    = "wlr_output_layout_closest_point"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "the crate maintains its own layout and exposes the one query consumers need (output_layout_box); the remaining query fns are deliberately unused."
 
 [[waived]]
 symbol    = "wlr_output_layout_contains_point"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "the crate maintains its own layout and exposes the one query consumers need (output_layout_box); the remaining query fns are deliberately unused."
 
 [[waived]]
 symbol    = "wlr_output_layout_destroy"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "wlroots destroys the layout itself on display death (its own destroy listener; see Runtime layout docs); never called directly."
 
 [[waived]]
 symbol    = "wlr_output_layout_farthest_output"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "the crate maintains its own layout and exposes the one query consumers need (output_layout_box); the remaining query fns are deliberately unused."
 
 [[waived]]
 symbol    = "wlr_output_layout_get"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "the crate maintains its own layout and exposes the one query consumers need (output_layout_box); the remaining query fns are deliberately unused."
 
 [[waived]]
 symbol    = "wlr_output_layout_get_center_output"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "the crate maintains its own layout and exposes the one query consumers need (output_layout_box); the remaining query fns are deliberately unused."
 
 [[waived]]
 symbol    = "wlr_output_layout_intersects"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "the crate maintains its own layout and exposes the one query consumers need (output_layout_box); the remaining query fns are deliberately unused."
 
 [[waived]]
 symbol    = "wlr_output_layout_output"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "the crate maintains its own layout and exposes the one query consumers need (output_layout_box); the remaining query fns are deliberately unused."
 
 [[waived]]
 symbol    = "wlr_output_layout_output_at"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "the crate maintains its own layout and exposes the one query consumers need (output_layout_box); the remaining query fns are deliberately unused."
 
 [[waived]]
 symbol    = "wlr_output_layout_output_coords"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "the crate maintains its own layout and exposes the one query consumers need (output_layout_box); the remaining query fns are deliberately unused."
 
 [[waived]]
 symbol    = "wlr_output_layout_remove"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "outputs leave the layout via display teardown only; per-output removal is never needed (see layout docs)."
 
 [[waived]]
 symbol    = "wlr_output_lock_attach_render"
