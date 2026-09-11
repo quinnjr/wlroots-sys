@@ -453,6 +453,121 @@ impl CommittedTextInputState {
     }
 }
 
+/// The live keyboard's committed state: modifiers, LEDs, keymap and repeat
+/// info, copied out of a live `wlr_keyboard`.
+///
+/// Mirrors `wlr_keyboard` fields as read at emission time (like
+/// [`CommittedImeState`] mirrors `wlr_input_method_v2_state.current`).
+/// Distinct from [`PendingKeyboardState`] so staged data can never be mistaken
+/// for committed — the pair exists for the same reason the IME snapshots do.
+/// Constructed only by the crate (`pub(crate)` ctor, called by
+/// [`Runtime::keyboard_state`]); fields `pub` for read, all owned so no raw
+/// pointer escapes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyboardState {
+    /// Modifiers derived from `wlr_keyboard_get_modifiers` at the moment of
+    /// the snapshot (Logo/Ctrl/Alt/Shift).
+    pub modifiers: crate::seat::Modifiers,
+    /// LED mask (`wlr_keyboard.leds`).
+    pub leds: u32,
+    /// Null-guarded copy of `wlr_keyboard.keymap_string` — `None` when the
+    /// keyboard has no keymap yet (null pointer). The C string is copied with
+    /// `to_string_lossy` so spec-violating bytes are replaced rather than
+    /// rejected.
+    pub keymap: Option<String>,
+    /// `wlr_keyboard.repeat_info.rate`.
+    pub repeat_rate: i32,
+    /// `wlr_keyboard.repeat_info.delay`.
+    pub repeat_delay: i32,
+}
+
+impl KeyboardState {
+    /// Copy the C keyboard out. `kb` must point at a live `wlr_keyboard`.
+    pub(crate) fn from_raw(kb: &sys::wlr_keyboard) -> Self {
+        // SAFETY: `kb` is a live `wlr_keyboard` per the caller; `wlr_keyboard_get_modifiers`
+        // only reads inline fields and returns a mask.
+        let modifiers_raw = unsafe { sys::wlr_keyboard_get_modifiers(kb as *const _ as *mut _) };
+        Self {
+            modifiers: crate::seat::Modifiers::from_mask(modifiers_raw),
+            leds: kb.leds,
+            keymap: copy_nullable_string(kb.keymap_string),
+            repeat_rate: kb.repeat_info.rate,
+            repeat_delay: kb.repeat_info.delay,
+        }
+    }
+}
+
+/// The staged keyboard state: the same shape as [`KeyboardState`] but read as
+/// the `pending` generation would be if wlroots double-buffered keyboards.
+/// wlroots 0.20 does not double-buffer `wlr_keyboard` — `current`/`pending` do
+/// not exist on that struct — so this is a distinct type for the pending/committed
+/// pair contract (see spec §3) that today reads the live keyboard identically
+/// to [`KeyboardState`]. A distinct type keeps the API honest for a future
+/// wlroots that does double-buffer, without breaking downstream handlers that
+/// already pattern-match on the two states.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingKeyboardState {
+    /// Modifiers at snapshot time.
+    pub modifiers: crate::seat::Modifiers,
+    /// LED mask at snapshot time.
+    pub leds: u32,
+    /// Null-guarded keymap copy at snapshot time.
+    pub keymap: Option<String>,
+    /// Repeat rate at snapshot time.
+    pub repeat_rate: i32,
+    /// Repeat delay at snapshot time.
+    pub repeat_delay: i32,
+}
+
+impl PendingKeyboardState {
+    /// Copy the C keyboard out as a pending snapshot.
+    pub(crate) fn from_raw(kb: &sys::wlr_keyboard) -> Self {
+        // SAFETY: as for `KeyboardState::from_raw`.
+        let modifiers_raw = unsafe { sys::wlr_keyboard_get_modifiers(kb as *const _ as *mut _) };
+        Self {
+            modifiers: crate::seat::Modifiers::from_mask(modifiers_raw),
+            leds: kb.leds,
+            keymap: copy_nullable_string(kb.keymap_string),
+            repeat_rate: kb.repeat_info.rate,
+            repeat_delay: kb.repeat_info.delay,
+        }
+    }
+}
+
+/// A stable handle for one tracked `wlr_keyboard_group`.
+///
+/// Opaque to consumers, like [`InputPopupSurfaceId`]: the compositor receives
+/// one when a group is created and hands it back to query it. The wrapped value
+/// is the group's destroy-listener address, which keys the map (the destroy
+/// handler recovers the same key from the firing listener), hiding that detail.
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`InputPopupSurfaceId`]: an
+/// opaque id's ordering would promise creation-order semantics nobody asked for.
+///
+/// `Debug` is redacted: the wrapped value is a heap address and every other id
+/// is a counter that leaks nothing — printing this would hand out an ASLR oracle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KeyboardGroupId(pub(crate) usize);
+
+impl std::fmt::Debug for KeyboardGroupId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("KeyboardGroupId(..)")
+    }
+}
+
+impl KeyboardGroupId {
+    /// An id that names no group, for negative tests.
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
+/// One tracked `wlr_keyboard_group`.
+pub(crate) struct KeyboardGroupEntry {
+    pub(crate) raw: NonNull<sys::wlr_keyboard_group>,
+}
+
 /// Copy relay text into a C string for a token send, truncating at the first
 /// NUL. The wire serialisation reads C strings to their terminator, so a
 /// truncating copy sends exactly what passing the untruncated pointer would.
@@ -1263,6 +1378,15 @@ pub(crate) struct RuntimeInner {
     /// pruning as `keyboards`, for [`Runtime::has_pointer`].
     pub(crate) pointers: RefCell<Vec<NonNull<sys::wlr_pointer>>>,
 
+    /// Every live `wlr_keyboard_group` this runtime tracks, keyed by the
+    /// group's destroy-listener address (the same discipline
+    /// [`RuntimeInner::text_inputs`] and `input_method_popups` use, so
+    /// identity never depends on a signal `data` that wlroots may emit as
+    /// NULL). Empty until a group is created; pruned by the group's own
+    /// destroy handler via listener address (FIX-3) and left empty across runs
+    /// only if no group exists.
+    pub(crate) keyboard_groups: RefCell<HashMap<usize, KeyboardGroupEntry>>,
+
     /// Test-only: whether [`Runtime::enable_test_touch`] has been called.
     /// There is no touch input device and never will be one recorded here —
     /// unlike `keyboards`/`pointers`, this is not counting anything real, it
@@ -1910,6 +2034,7 @@ impl Runtime {
                 applied_cursor: std::cell::Cell::new(None),
                 keyboards: RefCell::new(Vec::new()),
                 pointers: RefCell::new(Vec::new()),
+                keyboard_groups: RefCell::new(HashMap::new()),
                 test_touch_enabled: std::cell::Cell::new(false),
                 outputs: RefCell::new(HashMap::new()),
                 drag_icon_tree: RefCell::new(None),
@@ -6291,6 +6416,129 @@ impl Runtime {
         true
     }
 
+    /// The live keyboard's committed state, or `None` when no keyboard is
+    /// tracked (no device announced, or every keyboard unplugged). The
+    /// committed half of the pending/committed pair — never feed the staged
+    /// half to a committed-only path, the types make that a compile error.
+    /// Copied out of the seat's active keyboard when a seat exists, otherwise
+    /// the first tracked keyboard, matching `on_key`'s own `wlr_seat_get_keyboard`
+    /// resolution; `None` mirrors the IME state readers' miss shape.
+    pub fn keyboard_state(&self) -> Option<KeyboardState> {
+        let kb = self.keyboard_raw()?;
+        // SAFETY: `keyboard_raw` returned a live keyboard; reading its fields is a
+        // borrowed read of wlroots-owned memory, never freed by this crate.
+        let kb_ref = unsafe { &*kb.as_ptr() };
+        Some(KeyboardState::from_raw(kb_ref))
+    }
+
+    /// The staged keyboard state, or `None` when no keyboard is tracked.
+    ///
+    /// Same miss chain as [`Runtime::keyboard_state`]. wlroots 0.20 does not
+    /// double-buffer `wlr_keyboard`, so this currently reads the same live
+    /// keyboard as the committed side — a distinct type keeps the pending/committed
+    /// contract honest without adding a wlroots field that does not exist.
+    pub fn pending_keyboard_state(&self) -> Option<PendingKeyboardState> {
+        let kb = self.keyboard_raw()?;
+        // SAFETY: as for `keyboard_state`.
+        let kb_ref = unsafe { &*kb.as_ptr() };
+        Some(PendingKeyboardState::from_raw(kb_ref))
+    }
+
+    /// The `wlr_keyboard` behind a tracked [`KeyboardGroupId`], or `None` for
+    /// an unknown or destroyed id. The group owns a `wlr_keyboard` as its
+    /// first field (`wlr_keyboard_group.keyboard`), so the group's committed
+    /// state is that keyboard's state — see [`KeyboardState`].
+    /// Miss `None` matches every other by-id accessor in this crate (FIX-3).
+    pub fn keyboard_group_state(&self, id: KeyboardGroupId) -> Option<KeyboardState> {
+        let raw = self.keyboard_group_raw(id)?;
+        // SAFETY: entry is live until the group's destroy listener evicts it before
+        // wlroots frees the group; `keyboard` is an inline field, borrowing it borrows the live group.
+        let kb = unsafe { &(*raw.as_ptr()).keyboard };
+        Some(KeyboardState::from_raw(kb))
+    }
+
+    /// The live `wlr_keyboard_group` behind `id`, or `None` for an unknown id.
+    fn keyboard_group_raw(&self, id: KeyboardGroupId) -> Option<NonNull<sys::wlr_keyboard_group>> {
+        let raw = self.inner.keyboard_groups.borrow().get(&id.0)?.raw;
+        Some(raw)
+    }
+
+    /// Reverse lookup: the [`KeyboardGroupId`] for a live `wlr_keyboard_group`,
+    /// or `None` when this runtime tracks no group under it. Wraps the same
+    /// listener-address keying discipline `try_input_popup_surface` uses —
+    /// `None` for null, for a group this runtime does not track, and for a
+    /// dangling pointer (which is UB to pass — see `# Safety`).
+    ///
+    /// # Safety
+    ///
+    /// `group` must be null or point at a live `wlr_keyboard_group`.
+    pub unsafe fn try_keyboard_group(
+        &self,
+        group: *mut sys::wlr_keyboard_group,
+    ) -> Option<KeyboardGroupId> {
+        if group.is_null() {
+            return None;
+        }
+        let needle = NonNull::new(group)?;
+        self.inner
+            .keyboard_groups
+            .borrow()
+            .iter()
+            .find_map(|(&key, entry)| (entry.raw == needle).then_some(KeyboardGroupId(key)))
+    }
+
+    /// Debug accessor: number of tracked keyboard groups.
+    #[doc(hidden)]
+    pub fn rt_debug_keyboard_group_count(&self) -> usize {
+        self.inner.keyboard_groups.borrow().len()
+    }
+
+    /// Resolve the live keyboard for snapshots: the seat's active keyboard when
+    /// a seat exists (the same `wlr_seat_get_keyboard` `on_key` funnels through),
+    /// otherwise the first device in [`RuntimeInner::keyboards`].
+    fn keyboard_raw(&self) -> Option<NonNull<sys::wlr_keyboard>> {
+        if let Some(seat) = self.seat_ptr() {
+            // SAFETY: `seat` is live per `seat_ptr`; `wlr_seat_get_keyboard` returns a
+            // borrowed `wlr_keyboard` or null, which this crate never frees.
+            let kb = unsafe { sys::wlr_seat_get_keyboard(seat.as_ptr()) };
+            if let Some(kb) = NonNull::new(kb) {
+                return Some(kb);
+            }
+        }
+        // Copy the first entry out, drop the borrow before return — no borrow crosses FFI.
+        self.inner.keyboards.borrow().first().copied()
+    }
+
+    /// Create a `wlr_keyboard_group` and track it under a fresh
+    /// [`KeyboardGroupId`] keyed by the group's address. Returns `None` if
+    /// wlroots could not allocate the group.
+    pub fn create_keyboard_group(&self) -> Option<KeyboardGroupId> {
+        // SAFETY: `wlr_keyboard_group_create` returns a freshly allocated group.
+        let raw = unsafe { sys::wlr_keyboard_group_create() };
+        let raw = NonNull::new(raw)?;
+        let key = raw.as_ptr() as usize;
+        self.inner
+            .keyboard_groups
+            .borrow_mut()
+            .insert(key, KeyboardGroupEntry { raw });
+        Some(KeyboardGroupId(key))
+    }
+
+    /// Destroy a tracked keyboard group. `true` when a group was tracked under
+    /// `id` and is now destroyed; `false` for unknown or already-destroyed.
+    pub fn destroy_keyboard_group(&self, id: KeyboardGroupId) -> bool {
+        let entry = {
+            let mut groups = self.inner.keyboard_groups.borrow_mut();
+            match groups.remove(&id.0) {
+                Some(e) => e,
+                None => return false,
+            }
+        };
+        // SAFETY: `entry.raw` is live per the table invariant. No borrow held across FFI.
+        unsafe { sys::wlr_keyboard_group_destroy(entry.raw.as_ptr()) };
+        true
+    }
+
     /// Create the `wp_cursor_shape_manager_v1` global, letting clients name
     /// the cursor image they want instead of drawing their own. Errors if
     /// called twice.
@@ -10232,6 +10480,13 @@ impl Runtime {
     /// whether the seat should advertise the keyboard capability.
     pub(crate) fn has_keyboard(&self) -> bool {
         !self.inner.keyboards.borrow().is_empty()
+    }
+
+    /// Forget a keyboard group, called from the group's own destroy handler
+    /// or an explicit teardown.
+    #[allow(dead_code)]
+    pub(crate) fn forget_keyboard_group(&self, key: usize) {
+        self.inner.keyboard_groups.borrow_mut().remove(&key);
     }
 
     /// Record a pointer the backend announced, for

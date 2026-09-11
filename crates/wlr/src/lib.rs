@@ -134,7 +134,8 @@ pub use render::{Gles2, Gles2TextureAttribs};
 pub use render::{Vk, VkImageAttribs};
 pub use runtime::{
     Band, CommittedImeState, CommittedTextInputState, ImePreedit, InputPopupSurfaceId,
-    PendingImeState, PendingTextInputState, Runtime,
+    KeyboardGroupId, KeyboardState, PendingImeState, PendingKeyboardState, PendingTextInputState,
+    Runtime,
 };
 pub use scene::{
     DamageRing, DamageRingRef, NodeId, NodeKind, RectId, SceneBuffer, SceneBufferOptions,

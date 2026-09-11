@@ -2433,3 +2433,18 @@ item   = "Runtime::try_input_popup_surface"
 symbol = "wlr_input_method_keyboard_grab_v2_destroy"
 module = "runtime"
 item   = "Runtime::destroy_keyboard_grab"
+
+[[wrapped]]
+symbol = "wlr_keyboard_group"
+module = "runtime"
+item   = "KeyboardGroupId"
+
+[[wrapped]]
+symbol = "wlr_keyboard_group_create"
+module = "runtime"
+item   = "Runtime::create_keyboard_group"
+
+[[wrapped]]
+symbol = "wlr_keyboard_group_destroy"
+module = "runtime"
+item   = "Runtime::destroy_keyboard_group"

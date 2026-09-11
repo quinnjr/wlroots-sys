@@ -1314,25 +1314,7 @@ note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
 
 [[waived]]
-symbol    = "wlr_keyboard_group"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
 symbol    = "wlr_keyboard_group_add_keyboard"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_keyboard_group_create"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_keyboard_group_destroy"
 reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
