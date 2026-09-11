@@ -155,6 +155,7 @@ pub use pass::{
 };
 pub use pixman::Pixman;
 pub use shm::ShmAttributesRef;
+pub(crate) use swapchain::acquire_raw;
 pub use swapchain::{LockedBuffer, SWAPCHAIN_CAP, Swapchain};
 pub use sync::{SyncFlags, SyncTimeline, SyncWaiter};
 pub use texture::{ReadPixels, Texture};

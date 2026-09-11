@@ -12,11 +12,12 @@ use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
+use crate::backend::Backend;
 use crate::buffer::Buffer;
 use crate::geom::{Box2D, FBox, Subpixel, Transform};
 use crate::id::{OutputId, find_id};
 use crate::region::Region;
-use crate::{Error, Result, sys};
+use crate::{Error, LockedBuffer, Result, sys};
 
 /// A wlroots output, borrowed for the duration of a handler call.
 ///
@@ -773,6 +774,149 @@ pub struct LayerState<'l, 'o> {
     pub damage: &'l Region,
     /// Whether the compositor accepts this layer.
     pub accepted: bool,
+}
+
+/// Mode-setting swapchain management for a backend: one manager per
+/// compositor, borrowing the backend it allocates from.
+///
+/// The wlroots flow is prepare → repaint from an acquired buffer →
+/// `wlr_backend_commit` → [`apply`](SwapchainManager::apply). Of that flow
+/// this type owns the middle: creation, the pending [`SwapchainRef`] lookup,
+/// and apply. `prepare` takes backend-commit states (`wlr_backend_output_state`
+/// plus `wlr_backend_commit`), which belong to the backend-commit milestone
+/// and are not wrapped yet — until they are, the full repaint loop is e2e-only
+/// (icedtea harness), and [`get_swapchain`](SwapchainManager::get_swapchain)
+/// with it. What this type proves on its own is the lifecycle every other
+/// call depends on: init on construction, finish on drop, apply as a no-op
+/// with nothing pending.
+pub struct SwapchainManager<'b> {
+    raw: Box<sys::wlr_output_swapchain_manager>,
+    _backend: PhantomData<&'b ()>,
+}
+
+impl<'b> SwapchainManager<'b> {
+    /// Create a manager on `backend`, initialising it.
+    ///
+    /// The borrow is the contract: the manager stores the backend pointer
+    /// and hands out swapchains allocated from the backend's allocator, so
+    /// the backend must outlive the manager.
+    pub fn new(backend: &'b Backend<'_>) -> SwapchainManager<'b> {
+        // SAFETY: `init` writes every field (`backend` plus the outputs
+        // array), so assuming initialisation afterwards is sound; the backend
+        // borrow guarantees the stored pointer stays live for `'b`.
+        let mut raw = Box::<sys::wlr_output_swapchain_manager>::new_uninit();
+        unsafe {
+            sys::wlr_output_swapchain_manager_init(raw.as_mut_ptr(), backend.as_ptr());
+            SwapchainManager {
+                raw: raw.assume_init(),
+                _backend: PhantomData,
+            }
+        }
+    }
+
+    /// The pending swapchain for `output`, if a prepared manager has one.
+    ///
+    /// Null — a disabled output, or one the last prepare did not cover —
+    /// reports as `None` rather than a null handle. Calling this before any
+    /// successful prepare is a contract violation (wlroots documents it as
+    /// prepare-then-get); the method itself only reads the manager.
+    pub fn get_swapchain<'m>(&'m self, output: &Output<'_>) -> Option<SwapchainRef<'m>> {
+        // SAFETY: both handles are live borrows; the call only reads the
+        // manager's output list, and the returned pointer — when non-null —
+        // is a manager-owned swapchain that cannot outlive the manager, which
+        // `'m` enforces.
+        unsafe {
+            let raw =
+                sys::wlr_output_swapchain_manager_get_swapchain(self.as_ptr(), output.as_ptr());
+            NonNull::new(raw).map(|raw| SwapchainRef::from_raw(raw))
+        }
+    }
+
+    /// Swap in the swapchains the last successful prepare allocated.
+    ///
+    /// Called after a successful backend commit; with nothing pending it is a
+    /// no-op. Takes `&self` rather than `&mut self`: wlroots takes a bare
+    /// pointer and interior-mutates through it, and the borrow checker cannot
+    /// see that — the documented call order (prepare, commit, apply) is what
+    /// serialises it, not exclusivity here.
+    pub fn apply(&self) {
+        // SAFETY: this value owns a live, initialised manager.
+        unsafe { sys::wlr_output_swapchain_manager_apply(self.as_ptr()) };
+    }
+
+    fn as_ptr(&self) -> *mut sys::wlr_output_swapchain_manager {
+        // SAFETY: `Box` owns the allocation for the manager's whole life.
+        (&*self.raw) as *const sys::wlr_output_swapchain_manager
+            as *mut sys::wlr_output_swapchain_manager
+    }
+}
+
+impl Drop for SwapchainManager<'_> {
+    fn drop(&mut self) {
+        // SAFETY: this value owns the initialised manager; `finish` undoes
+        // exactly what `init` did, and runs before the backend borrow ends.
+        unsafe { sys::wlr_output_swapchain_manager_finish(self.as_ptr()) };
+    }
+}
+
+/// A manager-owned swapchain, borrowed from [`SwapchainManager`].
+///
+/// Unlike [`Swapchain`](crate::Swapchain), dropping this destroys nothing —
+/// the manager owns the swapchain and reaps it in `finish`. What it shares
+/// with the owned kind is acquiring: [`acquire`](SwapchainRef::acquire) hands
+/// out the same [`LockedBuffer`] consumer reference, released the same way.
+pub struct SwapchainRef<'m> {
+    raw: NonNull<sys::wlr_swapchain>,
+    _manager: PhantomData<&'m ()>,
+}
+
+impl<'m> SwapchainRef<'m> {
+    /// Wrap a manager-owned swapchain.
+    ///
+    /// # Safety
+    ///
+    /// `raw` must be a live `wlr_swapchain` owned by the manager this ref
+    /// borrows, and must stay so for `'m` — exactly what
+    /// [`get_swapchain`](SwapchainManager::get_swapchain) establishes.
+    pub(crate) unsafe fn from_raw(raw: NonNull<sys::wlr_swapchain>) -> SwapchainRef<'m> {
+        SwapchainRef {
+            raw,
+            _manager: PhantomData,
+        }
+    }
+
+    /// Buffer width in pixels.
+    pub fn width(&self) -> i32 {
+        // SAFETY: the manager owns a live swapchain for as long as this
+        // borrow exists.
+        unsafe { (*self.raw.as_ptr()).width }
+    }
+
+    /// Buffer height in pixels.
+    pub fn height(&self) -> i32 {
+        // SAFETY: as above.
+        unsafe { (*self.raw.as_ptr()).height }
+    }
+
+    /// Take the next free buffer, allocating one if the slot is empty.
+    ///
+    /// Same consumer-reference contract as
+    /// [`Swapchain::acquire`](crate::Swapchain::acquire): dropping the
+    /// [`LockedBuffer`] unlocks the buffer and frees the slot. The allocator
+    /// liveness check the owned kind performs is the manager's contract here
+    /// instead — the allocator is the backend's, which outlives the
+    /// manager's backend borrow, which outlives this ref.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Operation`](crate::Error::Operation) if all slots are still
+    /// in flight or the allocation failed; wlroots reports both as a null
+    /// return and logs which.
+    pub fn acquire(&self) -> Result<LockedBuffer<'_>> {
+        // SAFETY: as in `width` — plus the manager-contract argument above
+        // for the allocator.
+        unsafe { crate::render::acquire_raw(self.raw.as_ptr()) }
+    }
 }
 
 /// Adaptive-sync status of an output: whether variable refresh is active.

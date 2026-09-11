@@ -155,13 +155,7 @@ impl<'a> Swapchain<'a> {
         // SAFETY: this value owns a live swapchain whose allocator is live
         // (checked immediately above, on the same thread, with no wlroots call
         // in between that could destroy it).
-        let raw = unsafe { sys::wlr_swapchain_acquire(self.raw.as_ptr()) };
-        if raw.is_null() {
-            return Err(Error::Operation("wlr_swapchain_acquire"));
-        }
-        // SAFETY: non-null, and wlroots documents the returned buffer as
-        // locked — the consumer reference `LockedBuffer` releases.
-        Ok(unsafe { LockedBuffer::from_raw(raw) })
+        unsafe { acquire_raw(self.raw.as_ptr()) }
     }
 
     /// Whether `buffer` is one of this swapchain's own.
@@ -252,6 +246,34 @@ impl Drop for LockedBuffer<'_> {
         // has already dropped its own.
         unsafe { sys::wlr_buffer_unlock(self.buffer.as_ptr()) };
     }
+}
+
+/// Acquire a buffer from a swapchain the caller does not own.
+///
+/// The manager-owned swapchains [`crate::output::SwapchainManager`] hands out
+/// acquire exactly like owned ones; this is the shared tail both call. Any
+/// lifetime works for the returned lock: the lock itself is what keeps the
+/// buffer alive, so outliving the swapchain borrow is sound — the buffer
+/// simply survives until its last lock is released.
+///
+/// # Safety
+///
+/// `raw` must point at a live `wlr_swapchain` whose allocator is live, and
+/// stay so for the call. [`Swapchain::acquire`] establishes this by checking
+/// [`Swapchain::allocator_alive`] on the same thread with no wlroots call in
+/// between; [`crate::output::SwapchainRef::acquire`] by the manager's
+/// contract (the manager owns its swapchains while the manager lives, and
+/// the allocator is the backend's, which outlives the manager's backend
+/// borrow).
+pub(crate) unsafe fn acquire_raw<'x>(raw: *mut sys::wlr_swapchain) -> Result<LockedBuffer<'x>> {
+    // SAFETY: forwarded from the caller.
+    let raw = unsafe { sys::wlr_swapchain_acquire(raw) };
+    if raw.is_null() {
+        return Err(Error::Operation("wlr_swapchain_acquire"));
+    }
+    // SAFETY: non-null, and wlroots documents the returned buffer as
+    // locked — the consumer reference `LockedBuffer` releases.
+    Ok(unsafe { LockedBuffer::from_raw(raw) })
 }
 
 #[cfg(test)]
