@@ -47,7 +47,8 @@ use std::collections::VecDeque;
 use crate::{
     ActivationToken, AxisRelativeDirection, AxisSource, CursorShape, CursorShapeDevice,
     DecorationMode, Edges, InputPopupSurfaceId, LayerSurfaceId, NodeId, OutputId, PointerAxis,
-    PopupId, SceneOutputId, ToplevelId,
+    PopupId, SceneOutputId, ShortcutsInhibitorId, TabletPadId, TabletToolId, ToplevelId,
+    TransientSeatId, VirtualKeyboardId, VirtualPointerId,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -270,6 +271,59 @@ pub(crate) enum Event {
     /// than a half-applied one (the same "carry nothing" shape
     /// `InputMethodCommitted` uses).
     InputMethodDeactivated,
+
+    /// A shortcuts inhibitor's active state was announced. Carries the
+    /// inhibitor id and the new state — read at emission time, so a deferred
+    /// delivery still reports the transition that actually happened. The id
+    /// is the inhibitor's destroy-listener address (FIX-3): the destroy
+    /// signal names a surface, not the inhibitor, so a deferred destroy
+    /// still tells the handler *which* inhibitor went away. Creation
+    /// announces the birth state (activated at once when the inhibitor
+    /// names the focused surface, inactive otherwise); destroy announces
+    /// `false`.
+    ShortcutsInhibitorToggled(ShortcutsInhibitorId, bool),
+
+    /// A tablet tool did something — proximity, motion, tip or button. The
+    /// id is the hardware tool's address (FIX-3): every tool signal carries
+    /// its tool in the event, so identity never depends on a signal `data`.
+    /// Payloads the tool reports (pressure, tilt, position) cannot ride in a
+    /// `Copy`/`Eq` enum and are not snapshotted: this is the compositor's
+    /// cue that traffic happened, and client-bound forwarding goes through
+    /// the tool's `wlr_tablet_v2_tablet_tool`, driven separately.
+    TabletToolUpdate(TabletToolId),
+
+    /// A tablet pad did something — button, ring or strip. The id is the
+    /// hardware pad's address (FIX-3); like `TabletToolUpdate`, notification
+    /// only, with client-bound feedback driven separately.
+    TabletPadUpdate(TabletPadId),
+
+    /// A client injected a virtual keyboard. Carries the crate's own
+    /// [`VirtualKeyboardId`] handle for it — minted from the `data` object
+    /// the manager's `new_virtual_keyboard` signal carried, so it rides the
+    /// `Copy`/`Eq` `Event` like every other id. The entry is recorded in
+    /// the runtime table before this is emitted, so the handle resolves at
+    /// delivery unless the device was destroyed in between; like
+    /// `InputMethodPopupDestroyed`, the id then only tells the handler
+    /// *which* keyboard the announcement was for.
+    VirtualKeyboardCreated(VirtualKeyboardId),
+
+    /// A client injected a virtual pointer. Same shape as
+    /// `VirtualKeyboardCreated`: the id is minted from the event `data` the
+    /// manager's `new_virtual_pointer` signal carried.
+    VirtualPointerCreated(VirtualPointerId),
+
+    /// A client asked for a seat of its own. Carries the crate's own
+    /// [`TransientSeatId`] handle for the *pending request* — minted from
+    /// the `data` object the manager's `create_seat` signal carried. The
+    /// compositor answers with
+    /// [`Runtime::ready_transient_seat`](crate::Runtime::ready_transient_seat)
+    /// or refuses with
+    /// [`Runtime::destroy_transient_seat`](crate::Runtime::destroy_transient_seat);
+    /// either consumes the entry, so a deferred delivery may name a request
+    /// already answered — the id then only tells the handler *which*
+    /// request the announcement was for. Write this so an unknown id is
+    /// harmless.
+    TransientSeatRequested(TransientSeatId),
 
     /// A client's `zwlr_output_manager_v1` configuration was applied. Carries
     /// no data — the owned `Vec<AppliedHead>` payload cannot ride in a `Copy`,

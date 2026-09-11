@@ -474,6 +474,113 @@ pre-map commit listener that calls the new
 `Runtime::schedule_frame_all(&self) -> usize` so XWayland's handshake frame
 callback is answered. Bounded to the handshake commits; never busy-loops.
 
+## 0.20.33 — M8 remainder: keyboard, inhibit, tablet, virtual, transient
+
+The last of the M8 waived symbols: a compositor can now **read** its
+keyboards (live state plus group state, as owned snapshots), gets told
+**when** an inhibitor toggles or a tablet tool/pad reports, and can host
+client-injected input (virtual keyboards/pointers) plus client-requested
+seats (transient) — and keeps paying nothing for any of it. The wire
+behavior is byte-identical to 0.20.32.
+
+### What you get
+
+- **Keyboard snapshot pairs + group handles.** Two owned types with
+  `pub(crate)` constructors and `pub` fields, so staged data can never be
+  mistaken for committed: `KeyboardState` / `PendingKeyboardState`
+  (modifiers via `wlr_keyboard_get_modifiers`, `leds`, a null-guarded
+  `keymap` copy, `repeat_rate`/`repeat_delay`). wlroots 0.20 does not
+  double-buffer `wlr_keyboard`, so the pending half reads the same live
+  keyboard today — a distinct type keeps the pending/committed contract
+  honest without inventing a wlroots field that does not exist. Read them
+  through `Runtime::{keyboard_state, pending_keyboard_state}` (each answers
+  `None` when no keyboard is tracked: no device, or every keyboard
+  unplugged — the seat's active keyboard wins when a seat exists, otherwise
+  the first tracked device) and `Runtime::keyboard_group_state(id)` for one
+  `wlr_keyboard_group`'s embedded keyboard. Groups are `KeyboardGroupId`
+  handles (`create_keyboard_group` / `destroy_keyboard_group` returning
+  `false` on a second call, `try_keyboard_group` with null → `None`, never
+  dereferenced), keyed by the group's object address and evicted by explicit
+  `destroy_keyboard_group` only, so a stale id misses cleanly.
+- **Shortcuts-inhibit + tablet events, all id-only and defaulted.**
+  `ShortcutsInhibitorId` (`InhibitorId` alias) with
+  `Runtime::create_shortcuts_inhibit_manager`,
+  `set_shortcuts_inhibitor_active`, and `shortcuts_inhibited`;
+  `TabletToolId` (`ToolId` alias) and `TabletPadId` behind
+  `Runtime::create_tablet_manager`. Six notification-only hooks on the
+  existing `SeatHandler`, all defaulted no-ops:
+  `shortcuts_inhibitor_toggled(id, active)`, `tablet_tool_event(id)`,
+  `tablet_pad_event(id)`, `virtual_keyboard_created(id)`,
+  `virtual_pointer_created(id)`, `transient_seat_requested(id)`. Per-object
+  lifecycle signals emit NULL `data`, so every id is recovered from the
+  tracked binding or the listener address (FIX-3) — the tablet tool id is
+  keyed by the hardware `wlr_tablet_tool`'s address (the identity every
+  tool signal carries), the pad id by its hardware pad (whose signals carry
+  no pad pointer, so per-pad listeners carry it instead). A deferred
+  delivery may name an id whose device went away in between; like
+  `popup_surface_destroyed`, write the arm so an unknown id is harmless.
+- **Virtual input + transient seats as opaque handles.**
+  `VirtualKeyboardId` / `VirtualPointerId` (`create_virtual_keyboard_manager`
+  / `create_virtual_pointer_manager`, plus
+  `try_virtual_keyboard_from_resource` with null → `None`), evicted by the
+  embedded device-destroy sweep — a virtual keyboard has no public
+  per-object destroy signal, so the run's input teardown is the backstop.
+  `TransientSeatId` (`create_transient_seat_manager`,
+  `ready_transient_seat` answering `TransientSeatAnswer::{Answered,
+  NoSeatYet, Unknown}` — a missing seat stays retryable while a dead id
+  stays dead — / `destroy_transient_seat` consuming the pending request
+  and answering `false` on a second call): answer a
+  `transient_seat_requested` announcement with one or the other, or leave
+  the client waiting. The id carries a generation alongside the address,
+  so a freed-then-reused request address never resolves under a stale id.
+- **Blessed lossy strings, carried over.** As in 0.20.32, Wayland requires
+  valid UTF-8, so a keymap that is not is spec-violating — and rather than
+  failing the snapshot on it, the keymap copy replaces non-UTF-8 bytes per
+  `to_string_lossy` at the copy-out boundary. Valid UTF-8 is byte-identical;
+  invalid UTF-8 degrades to replacement characters instead of aborting the
+  read.
+- **Review-blessed lifetime fixes.** Tablet tools are evicted on the
+  per-tool destroy signal (keyed by the hardware tool, not the v2 protocol
+  object — which exposes no public destroy signal — with the tablet-device
+  destroy sweep as the backstop), and transient seats are evicted on the
+  per-request resource-destroy signal plus the client/manager destroy sweep,
+  so a client that disconnects with a pending request leaves no row behind.
+
+### Additive
+
+No trait was added and no supertrait changed. The six hooks live on the
+existing `SeatHandler` as defaulted no-ops, so an empty `SeatHandler` impl
+written against 0.20.32 still compiles and still satisfies `Handlers` — adding a
+new supertrait to `Handlers` would instead break every downstream consumer that
+did not also implement it, which a `0.20.z` patch release may not do (the same
+reasoning that dropped a would-be `SessionLockHandler` earlier). The new
+`Event` variants ride a `pub(crate)` enum — internal dispatch, not public
+surface. `ShortcutsInhibitorId` and `TabletToolId` are the canonical
+spellings; `InhibitorId` and `ToolId` are compatibility aliases for the same
+types. An integration test asserts the additivity as a compile-time claim.
+
+### Coverage
+
+Twenty-eight symbols moved waived → wrapped: the keyboard group trio
+(`wlr_keyboard_group`, `_create`, `_destroy`), the shortcuts-inhibit set
+(`wlr_keyboard_shortcuts_inhibit_manager_v1`,
+`wlr_keyboard_shortcuts_inhibit_v1_create`,
+`wlr_keyboard_shortcuts_inhibitor_v1` + `_activate`/`_deactivate`), the
+tablet hardware and event types (`wlr_tablet`,
+`wlr_tablet_from_input_device`, `wlr_tablet_pad`, `wlr_tablet_pad_create`,
+`wlr_tablet_pad_from_input_device`, `wlr_tablet_tool`,
+`wlr_tablet_tool_axis_event`, `wlr_tablet_tool_button_event`,
+`wlr_tablet_tool_create`, `wlr_tablet_tool_proximity_event`,
+`wlr_tablet_tool_tip_event`), the tablet manager pair
+(`wlr_tablet_manager_v2`, `wlr_tablet_v2_create`), the virtual pair
+(`wlr_virtual_keyboard_v1_from_resource`, `wlr_virtual_pointer_v1`), and the
+transient-seat set (`wlr_transient_seat_manager_v1` + `_create`,
+`wlr_transient_seat_v1` + `_deny`/`_ready`). The tablet v2 protocol objects
+(`wlr_tablet_v2_tablet_pad`, `wlr_tablet_v2_tablet_tool`) stay waived,
+re-pointed from the M8 blanket note to "creation is wrapped, sends land
+later" — the same re-reasoning discipline 0.20.29 applied to
+`wlr_seat_pointer_send_axis`. No dead FFI was added to reach 100% on paper.
+
 ## 0.20.32 — IME/text-input depth (M8)
 
 The relay 0.20.30 stood up and the popups 0.20.31 added get their observable

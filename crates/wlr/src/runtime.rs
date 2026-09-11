@@ -453,6 +453,443 @@ impl CommittedTextInputState {
     }
 }
 
+/// The live keyboard's committed state: modifiers, LEDs, keymap and repeat
+/// info, copied out of a live `wlr_keyboard`.
+///
+/// Mirrors `wlr_keyboard` fields as read at emission time (like
+/// [`CommittedImeState`] mirrors `wlr_input_method_v2_state.current`).
+/// Distinct from [`PendingKeyboardState`] so staged data can never be mistaken
+/// for committed — the pair exists for the same reason the IME snapshots do.
+/// Constructed only by the crate (`pub(crate)` ctor, called by
+/// [`Runtime::keyboard_state`]); fields `pub` for read, all owned so no raw
+/// pointer escapes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyboardState {
+    /// Modifiers derived from `wlr_keyboard_get_modifiers` at the moment of
+    /// the snapshot (Logo/Ctrl/Alt/Shift).
+    pub modifiers: crate::seat::Modifiers,
+    /// LED mask (`wlr_keyboard.leds`).
+    pub leds: u32,
+    /// Null-guarded copy of `wlr_keyboard.keymap_string` — `None` when the
+    /// keyboard has no keymap yet (null pointer). The C string is copied with
+    /// `to_string_lossy` so spec-violating bytes are replaced rather than
+    /// rejected.
+    pub keymap: Option<String>,
+    /// `wlr_keyboard.repeat_info.rate`.
+    pub repeat_rate: i32,
+    /// `wlr_keyboard.repeat_info.delay`.
+    pub repeat_delay: i32,
+}
+
+impl KeyboardState {
+    /// Copy the C keyboard out. `kb` must point at a live `wlr_keyboard`.
+    pub(crate) fn from_raw(kb: &sys::wlr_keyboard) -> Self {
+        // SAFETY: `kb` is a live `wlr_keyboard` per the caller; `wlr_keyboard_get_modifiers`
+        // only reads inline fields and returns a mask.
+        let modifiers_raw = unsafe { sys::wlr_keyboard_get_modifiers(kb as *const _ as *mut _) };
+        Self {
+            modifiers: crate::seat::Modifiers::from_mask(modifiers_raw),
+            leds: kb.leds,
+            keymap: copy_nullable_string(kb.keymap_string),
+            repeat_rate: kb.repeat_info.rate,
+            repeat_delay: kb.repeat_info.delay,
+        }
+    }
+}
+
+/// The staged keyboard state: the same shape as [`KeyboardState`] but read as
+/// the `pending` generation would be if wlroots double-buffered keyboards.
+/// wlroots 0.20 does not double-buffer `wlr_keyboard` — `current`/`pending` do
+/// not exist on that struct — so this is a distinct type for the pending/committed
+/// pair contract (see spec §3) that today reads the live keyboard identically
+/// to [`KeyboardState`]. A distinct type keeps the API honest for a future
+/// wlroots that does double-buffer, without breaking downstream handlers that
+/// already pattern-match on the two states.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingKeyboardState {
+    /// Modifiers at snapshot time.
+    pub modifiers: crate::seat::Modifiers,
+    /// LED mask at snapshot time.
+    pub leds: u32,
+    /// Null-guarded keymap copy at snapshot time.
+    pub keymap: Option<String>,
+    /// Repeat rate at snapshot time.
+    pub repeat_rate: i32,
+    /// Repeat delay at snapshot time.
+    pub repeat_delay: i32,
+}
+
+impl PendingKeyboardState {
+    /// Copy the C keyboard out as a pending snapshot.
+    pub(crate) fn from_raw(kb: &sys::wlr_keyboard) -> Self {
+        // SAFETY: as for `KeyboardState::from_raw`.
+        let modifiers_raw = unsafe { sys::wlr_keyboard_get_modifiers(kb as *const _ as *mut _) };
+        Self {
+            modifiers: crate::seat::Modifiers::from_mask(modifiers_raw),
+            leds: kb.leds,
+            keymap: copy_nullable_string(kb.keymap_string),
+            repeat_rate: kb.repeat_info.rate,
+            repeat_delay: kb.repeat_info.delay,
+        }
+    }
+}
+
+/// A stable handle for one tracked `wlr_keyboard_group`.
+///
+/// Opaque to consumers, like [`InputPopupSurfaceId`]: the compositor receives
+/// one when a group is created and hands it back to query it. The wrapped value
+/// is the group's own address, which keys the map — creation names the object
+/// directly (`create_keyboard_group` mints the group itself, no signal `data`
+/// to recover), hiding that detail.
+///
+/// Eviction is explicit-destroy-only: the entry stands until
+/// [`Runtime::destroy_keyboard_group`] removes it (or the whole runtime
+/// drops). A `wlr_keyboard_group` exposes no public per-object destroy
+/// signal this crate listens on, so unlike the listener-keyed tables there
+/// is no destroy listener that could evict it — and a stale id misses
+/// cleanly for exactly that reason.
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`InputPopupSurfaceId`]: an
+/// opaque id's ordering would promise creation-order semantics nobody asked for.
+///
+/// `Debug` is redacted: the wrapped value is a heap address and every other id
+/// is a counter that leaks nothing — printing this would hand out an ASLR oracle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KeyboardGroupId(pub(crate) usize);
+
+impl std::fmt::Debug for KeyboardGroupId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("KeyboardGroupId(..)")
+    }
+}
+
+impl KeyboardGroupId {
+    /// An id that names no group, for negative tests.
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
+/// One tracked `wlr_keyboard_group`.
+pub(crate) struct KeyboardGroupEntry {
+    pub(crate) raw: NonNull<sys::wlr_keyboard_group>,
+}
+
+/// A stable handle for one tracked `wlr_keyboard_shortcuts_inhibitor_v1`.
+///
+/// Opaque to consumers, like [`KeyboardGroupId`]: the compositor receives one
+/// when an inhibitor is created and hands it back to query it. The wrapped
+/// value is the inhibitor's destroy-listener address, which keys the map
+/// (the destroy handler recovers the same key from the firing listener).
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`KeyboardGroupId`]:
+/// an opaque id's ordering would promise creation-order semantics nobody
+/// asked for.
+///
+/// `Debug` is redacted: the wrapped value is a heap address and every other
+/// id is a counter that leaks nothing — printing this would hand out an
+/// ASLR oracle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ShortcutsInhibitorId(pub(crate) usize);
+
+impl std::fmt::Debug for ShortcutsInhibitorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ShortcutsInhibitorId(..)")
+    }
+}
+
+impl ShortcutsInhibitorId {
+    /// An id that names no inhibitor, for negative tests.
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
+/// Compatibility alias for the `InhibitorId` spelling
+/// `tests/keyboard.rs`'s alias harness uses: the canonical name is
+/// [`ShortcutsInhibitorId`], which new code should prefer. Kept through the
+/// 0.20.x line; remove in 0.21.
+pub type InhibitorId = ShortcutsInhibitorId;
+
+/// One tracked `wlr_keyboard_shortcuts_inhibitor_v1`.
+pub(crate) struct ShortcutsInhibitorEntry {
+    pub(crate) raw: NonNull<sys::wlr_keyboard_shortcuts_inhibitor_v1>,
+    pub(crate) active: bool,
+}
+
+/// A stable handle for one tracked tablet tool.
+///
+/// Opaque to consumers, like [`ShortcutsInhibitorId`]: the wrapped value is
+/// the hardware `wlr_tablet_tool`'s address — the identity every tablet-tool
+/// signal (`axis`, `proximity`, `tip`, `button`) carries in its event, so a
+/// handler recovers the id from the event itself rather than from a signal
+/// `data` that may be NULL (FIX-3, the same discipline the inhibitor ids
+/// follow).
+///
+/// Keyed by the hardware tool rather than the `wlr_tablet_v2_tablet_tool`
+/// the crate creates for it: the v2 object exposes no public destroy signal
+/// (only `set_cursor`), so nothing could evict a v2-keyed entry, while the
+/// hardware tool's lifetime ends with its tablet device's — whose destroy
+/// handler sweeps these entries synchronously.
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`KeyboardGroupId`]: an
+/// opaque id's ordering would promise creation-order semantics nobody asked
+/// for.
+///
+/// `Debug` is redacted: the wrapped value is a heap address and every other
+/// id is a counter that leaks nothing — printing this would hand out an
+/// ASLR oracle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TabletToolId(pub(crate) usize);
+
+impl std::fmt::Debug for TabletToolId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TabletToolId(..)")
+    }
+}
+
+impl TabletToolId {
+    /// An id that names no tool, for negative tests.
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
+/// Compatibility alias for the `ToolId` spelling `tests/keyboard.rs`'s
+/// alias harness uses: the canonical name is [`TabletToolId`], which new
+/// code should prefer. Kept through the 0.20.x line; remove in 0.21.
+pub type ToolId = TabletToolId;
+
+/// A stable handle for one tracked tablet pad.
+///
+/// Opaque to consumers, like [`TabletToolId`]: the wrapped value is the
+/// hardware `wlr_tablet_pad`'s address. Pad signals (`button`, `ring`,
+/// `strip`) carry no pad pointer in their events — unlike the tool signals,
+/// which name their tool — so per-pad listeners recover it from the
+/// listener slot set at link time instead (the same reason the text-input
+/// listeners carry their object there). Evicted
+/// synchronously by the pad device's own destroy handler.
+///
+/// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
+/// reasons [`TabletToolId`]'s doc gives.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TabletPadId(pub(crate) usize);
+
+impl std::fmt::Debug for TabletPadId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TabletPadId(..)")
+    }
+}
+
+impl TabletPadId {
+    /// An id that names no pad, for negative tests.
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
+/// A stable handle for one tracked `wlr_virtual_keyboard_v1`.
+///
+/// Opaque to consumers, like [`TabletToolId`]: the wrapped value is the
+/// virtual keyboard's own address — the identity the manager's
+/// `new_virtual_keyboard` signal carries in its `data`, so creation
+/// recovery needs no side channel. There is no public per-object destroy
+/// signal on a virtual keyboard (only the embedded keyboard's base input
+/// device emits `destroy`, watched by the run's input teardown), so the
+/// entry is evicted by the device-destroy sweep in
+/// `Runtime::forget_virtual_keyboards_for_keyboard`, the same backstop
+/// discipline the tablet-tool table uses.
+///
+/// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
+/// reasons [`TabletToolId`]'s doc gives.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VirtualKeyboardId(pub(crate) usize);
+
+impl std::fmt::Debug for VirtualKeyboardId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VirtualKeyboardId(..)")
+    }
+}
+
+impl VirtualKeyboardId {
+    /// An id that names no virtual keyboard, for negative tests.
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
+/// A stable handle for one tracked `wlr_virtual_pointer_v1`.
+///
+/// Opaque to consumers, like [`VirtualKeyboardId`]: the wrapped value is the
+/// virtual pointer's own address — the identity the manager's
+/// `new_virtual_pointer` signal carries inside its event `data` — and the
+/// entry is evicted by the device-destroy sweep in
+/// `Runtime::forget_virtual_pointers_for_pointer`, since a virtual
+/// pointer exposes no public per-object destroy signal of its own.
+///
+/// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
+/// reasons [`TabletToolId`]'s doc gives.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VirtualPointerId(pub(crate) usize);
+
+impl std::fmt::Debug for VirtualPointerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VirtualPointerId(..)")
+    }
+}
+
+impl VirtualPointerId {
+    /// An id that names no virtual pointer, for negative tests.
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
+/// A stable handle for one tracked `wlr_transient_seat_v1` seat request.
+///
+/// Opaque to consumers, like [`VirtualKeyboardId`]: the id carries the
+/// transient seat's own address *plus* a runtime generation counter — the
+/// address is the identity the manager's `create_seat` signal carries in
+/// its `data`, so creation recovery needs no side channel, and the
+/// generation is what makes the id safe against allocator reuse: wlroots
+/// may free a request and allocate the next one at the very same address,
+/// and a bare-address id would then still resolve — granting a new client's
+/// seat to whoever holds the old id. The generation is bumped on every
+/// record, so a re-recorded address mints a strictly new id and the old
+/// one misses. The id names the *pending request*, not a lasting object:
+/// answering it — [`Runtime::ready_transient_seat`] or
+/// [`Runtime::destroy_transient_seat`] — consumes the entry, and the id
+/// misses afterwards; so does a request whose client went away or whose
+/// manager died first (both evict — see `TransientSeatEntry`'s own doc).
+/// There is
+/// no public per-object destroy signal on a transient seat to evict
+/// anything by, which is exactly why the resource and manager listeners
+/// exist.
+///
+/// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
+/// reasons [`TabletToolId`]'s doc gives.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TransientSeatId(pub(crate) usize, pub(crate) u64);
+
+impl std::fmt::Debug for TransientSeatId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TransientSeatId(..)")
+    }
+}
+
+impl TransientSeatId {
+    /// An id that names no transient seat, for negative tests.
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n, u64::MAX - n as u64)
+    }
+}
+
+/// What answering a pending transient-seat request settled as.
+///
+/// [`Runtime::ready_transient_seat`] used to answer a bare `bool`, which
+/// collapsed two very different failures into one `false`: an id that
+/// names no pending request (fatal — retrying it can never succeed) and a
+/// request that is still pending but has no seat to offer yet (retryable —
+/// the entry is kept). Callers that treated the collapse as "missing, drop
+/// it" silently dropped retryable requests; callers that treated it as
+/// "not yet, retry" retried dead ids forever. The three variants keep the
+/// two apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransientSeatAnswer {
+    /// The request was answered with this runtime's seat, and its entry
+    /// was consumed — the id misses from then on.
+    Answered,
+    /// The request is still pending but this runtime has no seat to offer
+    /// yet. Nothing was consumed: keep the id and retry after creating the
+    /// seat.
+    NoSeatYet,
+    /// The id names no pending request — never announced, or already
+    /// answered — and nothing changed. Retrying the same id will never
+    /// succeed: drop it.
+    Unknown,
+}
+
+/// One tracked `wlr_virtual_keyboard_v1`: the embedded `wlr_keyboard` its
+/// device-destroy sweep matches on.
+///
+/// Keyed in the map by the virtual keyboard's own address (the
+/// [`VirtualKeyboardId`] wraps that key directly, so lookup is a membership
+/// check, not a search). The keyboard is the entry's payload rather than
+/// the key because the sweep in `backend.rs`'s `on_input_destroy` arrives
+/// holding the dying *device*, from which only the keyboard (stored in the
+/// run's input entry) is reachable — never the virtual keyboard itself.
+pub(crate) struct VirtualKeyboardEntry {
+    pub(crate) keyboard: NonNull<sys::wlr_keyboard>,
+}
+
+/// One tracked `wlr_virtual_pointer_v1`: the embedded `wlr_pointer` its
+/// device-destroy sweep matches on. Same keying and sweep discipline as
+/// [`VirtualKeyboardEntry`].
+pub(crate) struct VirtualPointerEntry {
+    pub(crate) pointer: NonNull<sys::wlr_pointer>,
+}
+
+/// One tracked `wlr_transient_seat_v1` seat request.
+///
+/// Keyed in the map by the transient seat's own address paired with the
+/// generation [`TransientSeatId`] carries: the address is what the
+/// manager's `create_seat` signal and the resource-destroy listener both
+/// name the request by, and the generation is what keeps a freed-then-
+/// reused address from resolving under an id minted for its predecessor.
+/// `raw` is a borrowed
+/// wlroots pointer, never owned — the entry is evicted by whichever comes
+/// first: the compositor's answer ([`Runtime::ready_transient_seat`] or
+/// [`Runtime::destroy_transient_seat`]), the client's resource dying
+/// (`backend.rs`'s resource-destroy listener, linked at record time, which
+/// evicts by address and so takes whatever generation stands), or
+/// the manager itself going away (`backend.rs`'s manager-destroy listener
+/// clears the whole table). No entry outlives its object, and none survives
+/// longer than the run that recorded it needs.
+pub(crate) struct TransientSeatEntry {
+    pub(crate) raw: NonNull<sys::wlr_transient_seat_v1>,
+}
+
+/// One tracked hardware tablet tool: the tablet device that announced it,
+/// and whether its client-facing `wlr_tablet_v2_tablet_tool` was created.
+///
+/// Keyed in the map by the hardware tool's own address (the [`TabletToolId`]
+/// wraps that key directly, so lookup is a membership check, not a search).
+/// The `wlr_tablet_v2_tablet_tool` the crate creates for clients is
+/// deliberately *not* stored: wlroots owns it and frees it with the hardware
+/// tool, and no public destroy signal could evict a v2-keyed entry — while
+/// this entry is evicted synchronously by the tablet device's destroy
+/// handler (hardware tools live and die with their device) via
+/// [`Runtime::forget_tablet_tools_for_tablet`].
+///
+/// `v2_created` remembers whether the v2 object exists, so a later
+/// [`Runtime::ensure_tablet_tool`] — after the manager or the seat finally
+/// exists — re-attempts the creation an earlier call had to skip instead
+/// of early-returning on the tracked id forever.
+pub(crate) struct TabletToolEntry {
+    pub(crate) tablet: NonNull<sys::wlr_tablet>,
+    pub(crate) v2_created: bool,
+}
+
+/// One tracked hardware tablet pad: whether its client-facing
+/// `wlr_tablet_v2_tablet_pad` was created.
+///
+/// The pad *is* its device, so the device-destroy handler recovers the key
+/// from the device pointer itself — the map key stays the pad's address
+/// (which [`TabletPadId`] wraps directly), and this payload exists only so
+/// a later [`Runtime::ensure_tablet_pad`] can re-attempt a creation an
+/// earlier call had to skip, the same retry [`TabletToolEntry`]'s
+/// `v2_created` gives tools.
+pub(crate) struct TabletPadEntry {
+    pub(crate) v2_created: bool,
+}
+
 /// Copy relay text into a C string for a token send, truncating at the first
 /// NUL. The wire serialisation reads C strings to their terminator, so a
 /// truncating copy sends exactly what passing the untruncated pointer would.
@@ -917,6 +1354,49 @@ pub(crate) struct RuntimeInner {
     pub(crate) virtual_pointer_manager:
         RefCell<Option<NonNull<sys::wlr_virtual_pointer_manager_v1>>>,
 
+    /// Every live `wlr_virtual_keyboard_v1` this runtime tracks, keyed by the
+    /// virtual keyboard's own address — the identity the manager's
+    /// `new_virtual_keyboard` signal carries in its `data` (creation = data,
+    /// so no side channel). Empty until a client injects a keyboard; pruned
+    /// by the device-destroy sweep in
+    /// [`Runtime::forget_virtual_keyboards_for_keyboard`], since a virtual
+    /// keyboard exposes no public per-object destroy signal of its own.
+    pub(crate) virtual_keyboards: RefCell<HashMap<usize, VirtualKeyboardEntry>>,
+
+    /// Every live `wlr_virtual_pointer_v1` this runtime tracks, keyed by the
+    /// virtual pointer's own address — the identity the manager's
+    /// `new_virtual_pointer` signal carries inside its event `data`. Same
+    /// sweep discipline as `virtual_keyboards` (see
+    /// [`Runtime::forget_virtual_pointers_for_pointer`]).
+    pub(crate) virtual_pointers: RefCell<HashMap<usize, VirtualPointerEntry>>,
+
+    /// The `wp_transient_seat_manager_v1` global, once created — lets a
+    /// client ask for a seat of its own (per-test seat isolation in a
+    /// harness, e.g.), which the compositor answers with
+    /// [`Runtime::ready_transient_seat`] or refuses with
+    /// [`Runtime::destroy_transient_seat`]. `Option`, same rationale as the
+    /// other manager globals.
+    pub(crate) transient_seat_manager: RefCell<Option<NonNull<sys::wlr_transient_seat_manager_v1>>>,
+
+    /// Every *pending* `wlr_transient_seat_v1` seat request, keyed by the
+    /// transient seat's own address paired with the generation its
+    /// [`TransientSeatId`] carries — the address is the identity the
+    /// manager's `create_seat` signal carries in its `data`, and the
+    /// generation (from [`RuntimeInner::transient_seat_gen`]) is what keeps
+    /// a reused address from resolving under a stale id. Answering a request
+    /// consumes its entry, so this never holds an answered one (see
+    /// [`TransientSeatEntry`]).
+    pub(crate) transient_seats: RefCell<HashMap<(usize, u64), TransientSeatEntry>>,
+
+    /// The generation counter the next [`Runtime::record_transient_seat`]
+    /// mints its [`TransientSeatId`] with. Bumped on every record (wrapping)
+    /// so no two records — even of the same address — ever share an id;
+    /// `0` is a valid first generation, since only exact `(address,
+    /// generation)` pairs resolve and the `dangling_nth_for_test` ids sit at
+    /// the top of both ranges. `Cell`, not `RefCell`: it is written from
+    /// `record_transient_seat`, which must not be able to fail on a borrow.
+    pub(crate) transient_seat_gen: std::cell::Cell<u64>,
+
     /// The screencopy (`zwlr_screencopy_manager_v1`) manager, once created —
     /// lets a client capture an output's rendered contents (screenshots,
     /// screen sharing). `Option`, same rationale as the other manager globals.
@@ -1262,6 +1742,51 @@ pub(crate) struct RuntimeInner {
     /// Every live pointer the backend has announced. Same shape and same
     /// pruning as `keyboards`, for [`Runtime::has_pointer`].
     pub(crate) pointers: RefCell<Vec<NonNull<sys::wlr_pointer>>>,
+
+    /// Every live `wlr_keyboard_group` this runtime tracks, keyed by the
+    /// group's own address — the identity `create_keyboard_group` minted it
+    /// under, so lookup is a membership check, not a search. Empty until a
+    /// group is created; evicted only by an explicit
+    /// [`Runtime::destroy_keyboard_group`] (the group exposes no public
+    /// per-object destroy signal to listen on), never by a listener.
+    pub(crate) keyboard_groups: RefCell<HashMap<usize, KeyboardGroupEntry>>,
+
+    /// The `zwp_keyboard_shortcuts_inhibit_manager_v1` global, once created —
+    /// lets a client ask that the compositor not handle its own shortcuts
+    /// while a surface has focus. `Option` for the same reason
+    /// `xdg_shell` is: a consumer that never calls
+    /// [`Runtime::create_shortcuts_inhibit_manager`] never advertises the
+    /// global.
+    pub(crate) shortcuts_inhibit_manager:
+        RefCell<Option<NonNull<sys::wlr_keyboard_shortcuts_inhibit_manager_v1>>>,
+
+    /// Every live `wlr_keyboard_shortcuts_inhibitor_v1` this runtime tracks,
+    /// keyed by the inhibitor's destroy-listener address (the same discipline
+    /// as `keyboard_groups` and `text_inputs`). Empty until an inhibitor is
+    /// created; pruned via listener address (FIX-3).
+    pub(crate) shortcuts_inhibitors: RefCell<HashMap<usize, ShortcutsInhibitorEntry>>,
+
+    /// The `zwp_tablet_manager_v2` global, once created — bridges tablet
+    /// tools and pads to the compositor. `Option` for the same reason as the
+    /// other manager globals.
+    pub(crate) tablet_manager: RefCell<Option<NonNull<sys::wlr_tablet_manager_v2>>>,
+
+    /// Every hardware tablet tool announced via a tablet device's
+    /// `proximity`/`axis`/`tip`/`button` signals, keyed by the hardware
+    /// tool's own address (which [`TabletToolId`] wraps directly). The entry
+    /// names the tablet device that announced it, for the device-destroy
+    /// sweep — hardware tools live and die with their device, so the sweep
+    /// in [`Runtime::forget_tablet_tools_for_tablet`] evicts them
+    /// synchronously and no entry outlives its tool.
+    pub(crate) tablet_tools: RefCell<HashMap<usize, TabletToolEntry>>,
+
+    /// Every hardware tablet pad announced as an input device, keyed by its
+    /// address (which [`TabletPadId`] wraps directly). The pad *is* its
+    /// device, so the device-destroy handler recovers the key from the
+    /// device pointer itself. The payload records whether the client-facing
+    /// v2 pad was created, so [`Runtime::ensure_tablet_pad`] re-attempts a
+    /// skipped creation once the manager and seat exist.
+    pub(crate) tablet_pads: RefCell<HashMap<usize, TabletPadEntry>>,
 
     /// Test-only: whether [`Runtime::enable_test_touch`] has been called.
     /// There is no touch input device and never will be one recorded here —
@@ -1860,6 +2385,11 @@ impl Runtime {
                 data_control_manager: RefCell::new(None),
                 virtual_keyboard_manager: RefCell::new(None),
                 virtual_pointer_manager: RefCell::new(None),
+                virtual_keyboards: RefCell::new(HashMap::new()),
+                virtual_pointers: RefCell::new(HashMap::new()),
+                transient_seat_manager: RefCell::new(None),
+                transient_seats: RefCell::new(HashMap::new()),
+                transient_seat_gen: std::cell::Cell::new(0),
                 screencopy_manager: RefCell::new(None),
                 pointer_constraints_manager: RefCell::new(None),
                 relative_pointer_manager: RefCell::new(None),
@@ -1910,6 +2440,12 @@ impl Runtime {
                 applied_cursor: std::cell::Cell::new(None),
                 keyboards: RefCell::new(Vec::new()),
                 pointers: RefCell::new(Vec::new()),
+                keyboard_groups: RefCell::new(HashMap::new()),
+                shortcuts_inhibit_manager: RefCell::new(None),
+                shortcuts_inhibitors: RefCell::new(HashMap::new()),
+                tablet_manager: RefCell::new(None),
+                tablet_tools: RefCell::new(HashMap::new()),
+                tablet_pads: RefCell::new(HashMap::new()),
                 test_touch_enabled: std::cell::Cell::new(false),
                 outputs: RefCell::new(HashMap::new()),
                 drag_icon_tree: RefCell::new(None),
@@ -1993,6 +2529,15 @@ impl Runtime {
         }
         if let Some(source) = self.take_live_source(id) {
             use sys::wayland_sys::ffi_dispatch;
+            // `ffi_dispatch!`'s non-`dlopen` expansion calls the wrapped function as a
+            // bare name, so this glob import is load-bearing there; its `dlopen`
+            // expansion instead goes through a function-pointer table on the handle
+            // and never references the name, so the same import is unused there.
+            // `allow` (not `expect`) because the non-`dlopen` build is the default —
+            // the one `cargo test`, `cargo clippy`, and CI's primary lint gate all
+            // exercise — and the import genuinely is used there. `expect` would
+            // break that everyday build. Do not "upgrade" this to `expect`.
+            // (Same rationale as `display.rs`'s `wl_display_create` site.)
             #[allow(unused_imports)]
             use sys::wayland_sys::server::*;
             // SAFETY: `source` came from `wl_event_loop_add_fd` (recorded by
@@ -6291,6 +6836,127 @@ impl Runtime {
         true
     }
 
+    /// The live keyboard's committed state, or `None` when no keyboard is
+    /// tracked (no device announced, or every keyboard unplugged). The
+    /// committed half of the pending/committed pair — never feed the staged
+    /// half to a committed-only path, the types make that a compile error.
+    /// Copied out of the seat's active keyboard when a seat exists, otherwise
+    /// the first tracked keyboard, matching `on_key`'s own `wlr_seat_get_keyboard`
+    /// resolution; `None` mirrors the IME state readers' miss shape.
+    pub fn keyboard_state(&self) -> Option<KeyboardState> {
+        let kb = self.keyboard_raw()?;
+        // SAFETY: `keyboard_raw` returned a live keyboard; reading its fields is a
+        // borrowed read of wlroots-owned memory, never freed by this crate.
+        let kb_ref = unsafe { &*kb.as_ptr() };
+        Some(KeyboardState::from_raw(kb_ref))
+    }
+
+    /// The staged keyboard state, or `None` when no keyboard is tracked.
+    ///
+    /// Same miss chain as [`Runtime::keyboard_state`]. wlroots 0.20 does not
+    /// double-buffer `wlr_keyboard`, so this currently reads the same live
+    /// keyboard as the committed side — a distinct type keeps the pending/committed
+    /// contract honest without adding a wlroots field that does not exist.
+    pub fn pending_keyboard_state(&self) -> Option<PendingKeyboardState> {
+        let kb = self.keyboard_raw()?;
+        // SAFETY: as for `keyboard_state`.
+        let kb_ref = unsafe { &*kb.as_ptr() };
+        Some(PendingKeyboardState::from_raw(kb_ref))
+    }
+
+    /// The `wlr_keyboard` behind a tracked [`KeyboardGroupId`], or `None` for
+    /// an unknown or destroyed id. The group owns a `wlr_keyboard` as its
+    /// first field (`wlr_keyboard_group.keyboard`), so the group's committed
+    /// state is that keyboard's state — see [`KeyboardState`].
+    /// Miss `None` matches every other by-id accessor in this crate (FIX-3).
+    pub fn keyboard_group_state(&self, id: KeyboardGroupId) -> Option<KeyboardState> {
+        let raw = self.keyboard_group_raw(id)?;
+        // SAFETY: entry is live until the group's destroy listener evicts it before
+        // wlroots frees the group; `keyboard` is an inline field, borrowing it borrows the live group.
+        let kb = unsafe { &(*raw.as_ptr()).keyboard };
+        Some(KeyboardState::from_raw(kb))
+    }
+
+    /// The live `wlr_keyboard_group` behind `id`, or `None` for an unknown id.
+    fn keyboard_group_raw(&self, id: KeyboardGroupId) -> Option<NonNull<sys::wlr_keyboard_group>> {
+        let raw = self.inner.keyboard_groups.borrow().get(&id.0)?.raw;
+        Some(raw)
+    }
+
+    /// Reverse lookup: the [`KeyboardGroupId`] for a live `wlr_keyboard_group`,
+    /// or `None` when this runtime tracks no group under it. A direct
+    /// membership check on the group's own address — the map key — so the
+    /// same shape as [`Runtime::try_tablet_tool`]: `None` for null, for a
+    /// group this runtime does not track, and for a dangling pointer
+    /// (which is UB to pass — see `# Safety`).
+    ///
+    /// # Safety
+    ///
+    /// `group` must be null or point at a live `wlr_keyboard_group`.
+    pub unsafe fn try_keyboard_group(
+        &self,
+        group: *mut sys::wlr_keyboard_group,
+    ) -> Option<KeyboardGroupId> {
+        let key = NonNull::new(group)?.as_ptr() as usize;
+        self.inner
+            .keyboard_groups
+            .borrow()
+            .contains_key(&key)
+            .then_some(KeyboardGroupId(key))
+    }
+
+    /// Debug accessor: number of tracked keyboard groups.
+    #[doc(hidden)]
+    pub fn rt_debug_keyboard_group_count(&self) -> usize {
+        self.inner.keyboard_groups.borrow().len()
+    }
+
+    /// Resolve the live keyboard for snapshots: the seat's active keyboard when
+    /// a seat exists (the same `wlr_seat_get_keyboard` `on_key` funnels through),
+    /// otherwise the first device in [`RuntimeInner::keyboards`].
+    fn keyboard_raw(&self) -> Option<NonNull<sys::wlr_keyboard>> {
+        if let Some(seat) = self.seat_ptr() {
+            // SAFETY: `seat` is live per `seat_ptr`; `wlr_seat_get_keyboard` returns a
+            // borrowed `wlr_keyboard` or null, which this crate never frees.
+            let kb = unsafe { sys::wlr_seat_get_keyboard(seat.as_ptr()) };
+            if let Some(kb) = NonNull::new(kb) {
+                return Some(kb);
+            }
+        }
+        // Copy the first entry out, drop the borrow before return — no borrow crosses FFI.
+        self.inner.keyboards.borrow().first().copied()
+    }
+
+    /// Create a `wlr_keyboard_group` and track it under a fresh
+    /// [`KeyboardGroupId`] keyed by the group's address. Returns `None` if
+    /// wlroots could not allocate the group.
+    pub fn create_keyboard_group(&self) -> Option<KeyboardGroupId> {
+        // SAFETY: `wlr_keyboard_group_create` returns a freshly allocated group.
+        let raw = unsafe { sys::wlr_keyboard_group_create() };
+        let raw = NonNull::new(raw)?;
+        let key = raw.as_ptr() as usize;
+        self.inner
+            .keyboard_groups
+            .borrow_mut()
+            .insert(key, KeyboardGroupEntry { raw });
+        Some(KeyboardGroupId(key))
+    }
+
+    /// Destroy a tracked keyboard group. `true` when a group was tracked under
+    /// `id` and is now destroyed; `false` for unknown or already-destroyed.
+    pub fn destroy_keyboard_group(&self, id: KeyboardGroupId) -> bool {
+        let entry = {
+            let mut groups = self.inner.keyboard_groups.borrow_mut();
+            match groups.remove(&id.0) {
+                Some(e) => e,
+                None => return false,
+            }
+        };
+        // SAFETY: `entry.raw` is live per the table invariant. No borrow held across FFI.
+        unsafe { sys::wlr_keyboard_group_destroy(entry.raw.as_ptr()) };
+        true
+    }
+
     /// Create the `wp_cursor_shape_manager_v1` global, letting clients name
     /// the cursor image they want instead of drawing their own. Errors if
     /// called twice.
@@ -7022,6 +7688,336 @@ impl Runtime {
             // runtime.
             unsafe { sys::wlr_idle_notifier_v1_set_inhibited(notifier.as_ptr(), inhibited) };
         }
+    }
+
+    /// Create the `zwp_keyboard_shortcuts_inhibit_manager_v1` global.
+    /// A client can bind it to inhibit the compositor's own shortcuts
+    /// while a surface has focus. Errors if called twice.
+    pub fn create_shortcuts_inhibit_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.shortcuts_inhibit_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_shortcuts_inhibit_manager called twice",
+            ));
+        }
+        // SAFETY: display live for the call; the manager is display-owned and
+        // freed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_keyboard_shortcuts_inhibit_v1_create(display.as_ptr()) };
+        let raw =
+            NonNull::new(raw).ok_or(Error::Create("wlr_keyboard_shortcuts_inhibit_v1_create"))?;
+        *self.inner.shortcuts_inhibit_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    pub(crate) fn shortcuts_inhibit_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_keyboard_shortcuts_inhibit_manager_v1>> {
+        *self.inner.shortcuts_inhibit_manager.borrow()
+    }
+
+    pub(crate) fn record_shortcuts_inhibitor(
+        &self,
+        id: ShortcutsInhibitorId,
+        raw: NonNull<sys::wlr_keyboard_shortcuts_inhibitor_v1>,
+        active: bool,
+    ) {
+        self.inner
+            .shortcuts_inhibitors
+            .borrow_mut()
+            .insert(id.0, ShortcutsInhibitorEntry { raw, active });
+    }
+
+    pub(crate) fn forget_shortcuts_inhibitor(&self, id: ShortcutsInhibitorId) {
+        self.inner.shortcuts_inhibitors.borrow_mut().remove(&id.0);
+    }
+
+    /// Drive a tracked inhibitor's wire state: call wlroots'
+    /// `wlr_keyboard_shortcuts_inhibitor_v1_{activate,deactivate}` and record
+    /// the outcome, so [`Runtime::shortcuts_inhibited`] stays truthful.
+    /// Returns `false` — changing nothing — for an unknown or destroyed id,
+    /// the same miss contract every by-id accessor in this crate keeps
+    /// (FIX-3).
+    ///
+    /// This announces nothing itself: the caller just set the state, so it
+    /// already knows it — the `ShortcutsInhibitorToggled` event announces
+    /// *lifecycle* (creation with its birth state, destroy with `false`), not
+    /// transitions the compositor drove. A compositor that gates bindings off
+    /// the event arm alone should therefore activate through creation focus
+    /// (which the backend does) or store what it set here itself.
+    pub fn set_shortcuts_inhibitor_active(&self, id: ShortcutsInhibitorId, active: bool) -> bool {
+        let raw = {
+            let mut inhibitors = self.inner.shortcuts_inhibitors.borrow_mut();
+            let Some(entry) = inhibitors.get_mut(&id.0) else {
+                return false;
+            };
+            entry.active = active;
+            entry.raw
+        };
+        // SAFETY: `raw` was live per the table invariant a moment ago, and
+        // the entry still stands — nothing between the lookup and this call
+        // could have destroyed the inhibitor (destruction runs on this same
+        // thread, through the run's destroy listener, which evicts first).
+        // No borrow is held across the FFI call: the map borrow ended above.
+        unsafe {
+            if active {
+                sys::wlr_keyboard_shortcuts_inhibitor_v1_activate(raw.as_ptr());
+            } else {
+                sys::wlr_keyboard_shortcuts_inhibitor_v1_deactivate(raw.as_ptr());
+            }
+        }
+        true
+    }
+
+    /// Whether any shortcuts inhibitor is currently active. Used by the
+    /// compositor to decide whether to skip its own key bindings.
+    pub fn shortcuts_inhibited(&self) -> bool {
+        self.inner
+            .shortcuts_inhibitors
+            .borrow()
+            .values()
+            .any(|e| e.active)
+    }
+
+    /// Create the `zwp_tablet_manager_v2` global, bridging tablet tools and
+    /// pads to the compositor. Errors if called twice.
+    pub fn create_tablet_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.tablet_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_tablet_manager called twice",
+            ));
+        }
+        // SAFETY: display live for the call; the manager is display-owned and
+        // freed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_tablet_v2_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_tablet_v2_create"))?;
+        *self.inner.tablet_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    pub(crate) fn tablet_manager_ptr(&self) -> Option<NonNull<sys::wlr_tablet_manager_v2>> {
+        *self.inner.tablet_manager.borrow()
+    }
+
+    pub(crate) fn record_tablet_tool(
+        &self,
+        tool: NonNull<sys::wlr_tablet_tool>,
+        tablet: NonNull<sys::wlr_tablet>,
+        v2_created: bool,
+    ) {
+        self.inner.tablet_tools.borrow_mut().insert(
+            tool.as_ptr() as usize,
+            TabletToolEntry { tablet, v2_created },
+        );
+    }
+
+    /// The [`TabletToolId`] for a hardware tool this runtime tracks, or
+    /// `None` for null, for a tool announced by no tracked tablet, and for
+    /// one whose device has since been destroyed (which sweeps it via
+    /// `forget_tablet_tools_for_tablet`). The same miss shape
+    /// every by-id accessor in this crate keeps (FIX-3).
+    ///
+    /// # Safety
+    ///
+    /// `tool` must be null or point at a live `wlr_tablet_tool` — the
+    /// address is compared, never dereferenced, but a dangling address
+    /// could compare equal to a recycled one.
+    pub unsafe fn try_tablet_tool(&self, tool: *mut sys::wlr_tablet_tool) -> Option<TabletToolId> {
+        let key = NonNull::new(tool)?.as_ptr() as usize;
+        self.inner
+            .tablet_tools
+            .borrow()
+            .contains_key(&key)
+            .then_some(TabletToolId(key))
+    }
+
+    /// Forget one hardware tool, called synchronously from its own destroy
+    /// emission before wlroots frees it.
+    pub(crate) fn forget_tablet_tool(&self, tool: NonNull<sys::wlr_tablet_tool>) {
+        self.inner
+            .tablet_tools
+            .borrow_mut()
+            .remove(&(tool.as_ptr() as usize));
+    }
+
+    /// Forget every tool a tablet device announced, returning their
+    /// addresses so the caller can drop their run-scoped destroy listeners
+    /// too. Called synchronously from that device's own destroy handler
+    /// before wlroots frees anything — the backstop for tools that never
+    /// got their own destroy emission.
+    pub(crate) fn take_tablet_tools_for_tablet(
+        &self,
+        tablet: NonNull<sys::wlr_tablet>,
+    ) -> Vec<NonNull<sys::wlr_tablet_tool>> {
+        let mut tools = Vec::new();
+        self.inner.tablet_tools.borrow_mut().retain(|key, entry| {
+            if entry.tablet == tablet {
+                // SAFETY: keys are addresses recorded from live `NonNull`s,
+                // compared and re-wrapped here but never dereferenced, and
+                // this `retain` removes the entry in the same breath.
+                tools.push(unsafe { NonNull::new_unchecked(*key as *mut sys::wlr_tablet_tool) });
+                false
+            } else {
+                true
+            }
+        });
+        tools
+    }
+
+    /// Debug accessor: number of tracked tablet tools.
+    #[doc(hidden)]
+    pub fn rt_debug_tablet_tool_count(&self) -> usize {
+        self.inner.tablet_tools.borrow().len()
+    }
+    /// Record a hardware tablet pad the backend announced, alongside whether
+    /// its client-facing v2 pad was created. The pad *is* its device, so
+    /// the address alone keys the set; only the address is stored, never
+    /// dereferenced, and the device-destroy handler evicts it before wlroots
+    /// frees the device.
+    pub(crate) fn record_tablet_pad(&self, pad: NonNull<sys::wlr_tablet_pad>, v2_created: bool) {
+        self.inner
+            .tablet_pads
+            .borrow_mut()
+            .insert(pad.as_ptr() as usize, TabletPadEntry { v2_created });
+    }
+
+    /// Track a hardware tablet pad, creating its client-facing
+    /// `wlr_tablet_v2_tablet_pad` when the tablet manager and a seat both
+    /// exist. The pad is always recorded, even when no v2 object could be
+    /// created (no manager, no seat, or wlroots refused): notification must
+    /// never depend on the protocol side, and the v2 object is
+    /// wlroots-owned (freed with the device) so nothing here retains it. A
+    /// later call re-attempts a skipped creation once the manager and seat
+    /// exist — the `v2_created` flag is what remembers it was skipped.
+    pub(crate) fn ensure_tablet_pad(
+        &self,
+        device: NonNull<sys::wlr_input_device>,
+        pad: NonNull<sys::wlr_tablet_pad>,
+    ) {
+        if self
+            .inner
+            .tablet_pads
+            .borrow()
+            .get(&(pad.as_ptr() as usize))
+            .is_some_and(|entry| entry.v2_created)
+        {
+            return;
+        }
+        let mut v2_created = false;
+        if let (Some(manager), Some(seat)) = (self.tablet_manager_ptr(), self.seat_ptr()) {
+            // SAFETY: manager and seat are live (display-owned and
+            // runtime-owned respectively) and `device` is the live pad
+            // device just announced. The created v2 pad is wlroots-owned —
+            // freed with the device — so this crate never frees it, and a
+            // null return (refusal) is fine: the hardware pad is still
+            // recorded below, and a later `ensure` retries. No borrow is
+            // held across the call.
+            let created = unsafe {
+                sys::wlr_tablet_pad_create(manager.as_ptr(), seat.as_ptr(), device.as_ptr())
+            };
+            v2_created = !created.is_null();
+        }
+        if let Some(entry) = self
+            .inner
+            .tablet_pads
+            .borrow_mut()
+            .get_mut(&(pad.as_ptr() as usize))
+        {
+            entry.v2_created |= v2_created;
+        } else {
+            self.record_tablet_pad(pad, v2_created);
+        }
+    }
+
+    /// The [`TabletPadId`] for a hardware pad this runtime tracks, or `None`
+    /// for null, for an unannounced pad, and for one whose device has since
+    /// been destroyed (which evicts it via `forget_tablet_pad`).
+    ///
+    /// # Safety
+    ///
+    /// As for [`Runtime::try_tablet_tool`].
+    pub unsafe fn try_tablet_pad(&self, pad: *mut sys::wlr_tablet_pad) -> Option<TabletPadId> {
+        let key = NonNull::new(pad)?.as_ptr() as usize;
+        self.inner
+            .tablet_pads
+            .borrow()
+            .contains_key(&key)
+            .then_some(TabletPadId(key))
+    }
+
+    /// Forget a tablet pad, called synchronously from its device's own
+    /// destroy handler before wlroots frees the device.
+    pub(crate) fn forget_tablet_pad(&self, pad: NonNull<sys::wlr_tablet_pad>) {
+        self.inner
+            .tablet_pads
+            .borrow_mut()
+            .remove(&(pad.as_ptr() as usize));
+    }
+
+    /// Track a hardware tablet tool, creating its client-facing
+    /// `wlr_tablet_v2_tablet_tool` when the tablet manager and a seat both
+    /// exist, and return its [`TabletToolId`]. Already-tracked tools return
+    /// their existing id — creation is idempotent, so every tool-signal
+    /// handler can call this unconditionally. A tracked tool whose v2
+    /// object was skipped (no manager, no seat, or wlroots refused) gets
+    /// its creation re-attempted here once both exist — the `v2_created`
+    /// flag is what remembers it was skipped — while the returned id never
+    /// changes.
+    ///
+    /// The hardware tool is always recorded, even when no v2 object could be
+    /// created (no manager, no seat, or wlroots refused): notification must
+    /// never depend on the protocol side, and the v2 object is wlroots-owned
+    /// (freed with the hardware tool) so nothing here retains it.
+    ///
+    /// A hardware tool shared by two tablets records under the first tablet
+    /// that announced it; the second `ensure` early-returns the same id
+    /// without creating a second v2 object. One object is the correct shape
+    /// — wlroots addresses a v2 tool to one seat — and the duplicate
+    /// announce is still notified through the shared id.
+    pub(crate) fn ensure_tablet_tool(
+        &self,
+        tool: NonNull<sys::wlr_tablet_tool>,
+        tablet: NonNull<sys::wlr_tablet>,
+    ) -> TabletToolId {
+        let key = tool.as_ptr() as usize;
+        if self
+            .inner
+            .tablet_tools
+            .borrow()
+            .get(&key)
+            .is_some_and(|entry| entry.v2_created)
+        {
+            // SAFETY: `tool` is live per the caller's signal emission (the
+            // address is compared, never dereferenced), so the `try_`
+            // contract holds.
+            return unsafe { self.try_tablet_tool(tool.as_ptr()) }
+                .expect("tracked tool with a v2 object resolves");
+        }
+        let mut v2_created = false;
+        if let (Some(manager), Some(seat)) = (self.tablet_manager_ptr(), self.seat_ptr()) {
+            // SAFETY: manager and seat are live (display-owned and
+            // runtime-owned respectively) and `tool` is the live hardware
+            // tool just announced. The created v2 tool is wlroots-owned —
+            // freed with the hardware tool — so this crate never frees it,
+            // and a null return (refusal) is fine: the hardware tool is
+            // still recorded below, and a later `ensure` retries.
+            // No borrow is held across the call: the lookups above copied
+            // their pointers out and released their borrows.
+            let created = unsafe {
+                sys::wlr_tablet_tool_create(manager.as_ptr(), seat.as_ptr(), tool.as_ptr())
+            };
+            v2_created = !created.is_null();
+        }
+        if let Some(entry) = self.inner.tablet_tools.borrow_mut().get_mut(&key) {
+            entry.v2_created |= v2_created;
+        } else {
+            self.record_tablet_tool(tool, tablet, v2_created);
+        }
+        TabletToolId(key)
+    }
+
+    /// Debug accessor: number of tracked tablet pads.
+    #[doc(hidden)]
+    pub fn rt_debug_tablet_pad_count(&self) -> usize {
+        self.inner.tablet_pads.borrow().len()
     }
 
     /// Create the `ext_session_lock_manager_v1` global. A locker (a lock
@@ -7910,6 +8906,322 @@ impl Runtime {
         &self,
     ) -> Option<NonNull<sys::wlr_virtual_pointer_manager_v1>> {
         *self.inner.virtual_pointer_manager.borrow()
+    }
+
+    /// Record a virtual keyboard the manager announced, and hand back its
+    /// stable [`VirtualKeyboardId`]. Called from `backend.rs`'s
+    /// `on_new_virtual_keyboard` with the `data` object the manager's
+    /// `new_virtual_keyboard` signal carried (creation = data, so no side
+    /// channel). Recording is idempotent — a second record of the same
+    /// object refreshes the same id — mirroring `ensure_tablet_tool`.
+    pub(crate) fn record_virtual_keyboard(
+        &self,
+        vk: NonNull<sys::wlr_virtual_keyboard_v1>,
+    ) -> VirtualKeyboardId {
+        let key = vk.as_ptr() as usize;
+        // SAFETY: `vk` names a live virtual keyboard per the creation
+        // emission; `keyboard` is its inline first field, so borrowing it
+        // borrows the live object. Only the address is stored, never read.
+        let keyboard = unsafe { NonNull::new_unchecked(&raw mut (*vk.as_ptr()).keyboard) };
+        self.inner
+            .virtual_keyboards
+            .borrow_mut()
+            .insert(key, VirtualKeyboardEntry { keyboard });
+        VirtualKeyboardId(key)
+    }
+
+    /// The [`VirtualKeyboardId`] for a live `wlr_virtual_keyboard_v1` this
+    /// runtime tracks, or `None` for null, for an unannounced object, and
+    /// for one whose device has since been destroyed (which sweeps it via
+    /// `Runtime::forget_virtual_keyboards_for_keyboard`). The same miss
+    /// shape every by-id accessor in this crate keeps (FIX-3).
+    ///
+    /// # Safety
+    ///
+    /// `vk` must be null or point at a live `wlr_virtual_keyboard_v1` — the
+    /// address is compared, never dereferenced, but a dangling address
+    /// could compare equal to a recycled one.
+    pub unsafe fn try_virtual_keyboard(
+        &self,
+        vk: *mut sys::wlr_virtual_keyboard_v1,
+    ) -> Option<VirtualKeyboardId> {
+        let key = NonNull::new(vk)?.as_ptr() as usize;
+        self.inner
+            .virtual_keyboards
+            .borrow()
+            .contains_key(&key)
+            .then_some(VirtualKeyboardId(key))
+    }
+
+    /// The [`VirtualKeyboardId`] for the virtual keyboard behind a client
+    /// `wl_resource`, or `None` when the resource names no tracked virtual
+    /// keyboard (a foreign or destroyed one). The miss contract covers both:
+    /// `wlr_virtual_keyboard_v1_from_resource` answers null for a resource
+    /// with no virtual keyboard behind it, and the id lookup misses for one
+    /// this runtime never recorded.
+    ///
+    /// # Safety
+    ///
+    /// `resource` must be null or point at a live `wl_resource`. A live
+    /// resource is only ever *read* by the lookup wlroots performs; the
+    /// returned object is compared, never dereferenced.
+    pub unsafe fn try_virtual_keyboard_from_resource(
+        &self,
+        resource: *mut sys::wl_resource,
+    ) -> Option<VirtualKeyboardId> {
+        let resource = NonNull::new(resource)?;
+        // SAFETY: `resource` is live per the caller's contract; the lookup
+        // only reads it, and a null answer (foreign resource) misses below.
+        // No borrow is held across the call: the table is only touched after
+        // it returns.
+        let vk = unsafe { sys::wlr_virtual_keyboard_v1_from_resource(resource.as_ptr()) };
+        // SAFETY: the answer is null or a live virtual keyboard per wlroots'
+        // own contract for this lookup, which is what `try_virtual_keyboard`
+        // requires.
+        unsafe { self.try_virtual_keyboard(vk) }
+    }
+
+    /// Forget every virtual keyboard whose embedded keyboard is `kb`, called
+    /// synchronously from `backend.rs`'s `on_input_destroy` — the virtual
+    /// keyboard dies with its device, and exposes no public per-object
+    /// destroy signal of its own, so this sweep *is* its destroy path (the
+    /// same backstop discipline `take_tablet_tools_for_tablet` keeps).
+    pub(crate) fn forget_virtual_keyboards_for_keyboard(&self, kb: NonNull<sys::wlr_keyboard>) {
+        self.inner
+            .virtual_keyboards
+            .borrow_mut()
+            .retain(|_, entry| entry.keyboard != kb);
+    }
+
+    /// Debug accessor: number of tracked virtual keyboards.
+    #[doc(hidden)]
+    pub fn rt_debug_virtual_keyboard_count(&self) -> usize {
+        self.inner.virtual_keyboards.borrow().len()
+    }
+
+    /// Record a virtual pointer the manager announced, and hand back its
+    /// stable [`VirtualPointerId`]. Same creation = data discipline as
+    /// [`Runtime::record_virtual_keyboard`].
+    pub(crate) fn record_virtual_pointer(
+        &self,
+        vp: NonNull<sys::wlr_virtual_pointer_v1>,
+    ) -> VirtualPointerId {
+        let key = vp.as_ptr() as usize;
+        // SAFETY: as for `record_virtual_keyboard` — `pointer` is the live
+        // object's inline field; only the address is stored, never read.
+        let pointer = unsafe { NonNull::new_unchecked(&raw mut (*vp.as_ptr()).pointer) };
+        self.inner
+            .virtual_pointers
+            .borrow_mut()
+            .insert(key, VirtualPointerEntry { pointer });
+        VirtualPointerId(key)
+    }
+
+    /// The [`VirtualPointerId`] for a live `wlr_virtual_pointer_v1` this
+    /// runtime tracks, or `None` for null, for an unannounced object, and
+    /// for one whose device has since been destroyed. Same miss shape as
+    /// [`Runtime::try_virtual_keyboard`].
+    ///
+    /// # Safety
+    ///
+    /// `vp` must be null or point at a live `wlr_virtual_pointer_v1`.
+    pub unsafe fn try_virtual_pointer(
+        &self,
+        vp: *mut sys::wlr_virtual_pointer_v1,
+    ) -> Option<VirtualPointerId> {
+        let key = NonNull::new(vp)?.as_ptr() as usize;
+        self.inner
+            .virtual_pointers
+            .borrow()
+            .contains_key(&key)
+            .then_some(VirtualPointerId(key))
+    }
+
+    /// Forget every virtual pointer whose embedded pointer is `p`; see
+    /// [`Runtime::forget_virtual_keyboards_for_keyboard`].
+    pub(crate) fn forget_virtual_pointers_for_pointer(&self, p: NonNull<sys::wlr_pointer>) {
+        self.inner
+            .virtual_pointers
+            .borrow_mut()
+            .retain(|_, entry| entry.pointer != p);
+    }
+
+    /// Debug accessor: number of tracked virtual pointers.
+    #[doc(hidden)]
+    pub fn rt_debug_virtual_pointer_count(&self) -> usize {
+        self.inner.virtual_pointers.borrow().len()
+    }
+
+    /// Advertise `wp_transient_seat_manager_v1` so a client can ask for a
+    /// seat of its own. The manager's `create_seat` event is wired in
+    /// `backend.rs`'s per-run registration to record the request and fan it
+    /// out to [`crate::SeatHandler::transient_seat_requested`], which the
+    /// compositor answers with [`Runtime::ready_transient_seat`] or refuses
+    /// with [`Runtime::destroy_transient_seat`]. Errors if called twice.
+    pub fn create_transient_seat_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.transient_seat_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_transient_seat_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_transient_seat_manager_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_transient_seat_manager_v1_create"))?;
+        *self.inner.transient_seat_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// The `wp_transient_seat_manager_v1` manager, once created via
+    /// [`Runtime::create_transient_seat_manager`] — read by `backend.rs`'s
+    /// `register_toplevel_and_input` to link the `create_seat` listener.
+    pub(crate) fn transient_seat_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_transient_seat_manager_v1>> {
+        *self.inner.transient_seat_manager.borrow()
+    }
+
+    /// Record a transient-seat request the manager announced, and hand back
+    /// its stable [`TransientSeatId`]. Called from `backend.rs`'s
+    /// `on_new_transient_seat` with the `data` object the manager's
+    /// `create_seat` signal carried (creation = data). The id names the
+    /// *pending* request: answering it consumes the entry, so a later
+    /// record of the same address mints a strictly new id (the generation
+    /// is bumped on every record) and the old id misses — allocator reuse
+    /// can never grant a new client's seat to whoever holds the old id.
+    /// A record for an address that already has a pending entry replaces
+    /// it: at most one generation stands per address, so the replaced id
+    /// misses from then on.
+    pub(crate) fn record_transient_seat(
+        &self,
+        ts: NonNull<sys::wlr_transient_seat_v1>,
+    ) -> TransientSeatId {
+        let addr = ts.as_ptr() as usize;
+        let generation = self.inner.transient_seat_gen.get().wrapping_add(1);
+        self.inner.transient_seat_gen.set(generation);
+        let mut seats = self.inner.transient_seats.borrow_mut();
+        seats.retain(|(a, _), _| *a != addr);
+        seats.insert((addr, generation), TransientSeatEntry { raw: ts });
+        TransientSeatId(addr, generation)
+    }
+
+    /// The [`TransientSeatId`] for a pending `wlr_transient_seat_v1`
+    /// request, or `None` for null, for an unannounced object, and for one
+    /// already answered (answering consumes the entry). A re-recorded
+    /// address resolves under its *new* generation only — the old id is
+    /// gone with its entry. Same miss shape as
+    /// [`Runtime::try_virtual_keyboard`].
+    ///
+    /// # Safety
+    ///
+    /// `ts` must be null or point at a live `wlr_transient_seat_v1`.
+    pub unsafe fn try_transient_seat(
+        &self,
+        ts: *mut sys::wlr_transient_seat_v1,
+    ) -> Option<TransientSeatId> {
+        let addr = NonNull::new(ts)?.as_ptr() as usize;
+        self.inner
+            .transient_seats
+            .borrow()
+            .keys()
+            .find(|(a, _)| *a == addr)
+            .map(|&(a, g)| TransientSeatId(a, g))
+    }
+
+    /// Answer a pending transient-seat request with this runtime's seat, and
+    /// forget the request.
+    ///
+    /// [`TransientSeatAnswer::Answered`] means the request went out and its
+    /// entry was consumed. [`TransientSeatAnswer::Unknown`] means the id
+    /// names no pending request — never announced, or already answered —
+    /// and nothing changed; the verdict is final, so drop the id rather
+    /// than retrying it. [`TransientSeatAnswer::NoSeatYet`] means the
+    /// request is still pending but this runtime has no seat to offer (the
+    /// compositor answers from `transient_seat_requested` before it ever
+    /// called `create_seat`, e.g.); nothing was consumed, so keep the id
+    /// and retry after creating the seat.
+    ///
+    /// Answering consumes the entry: the request lifecycle ends here, and a
+    /// transient seat exposes no public per-object destroy signal to evict
+    /// anything by afterwards — so nothing outlives the answer and nothing
+    /// survives it, and the id misses from then on.
+    pub fn ready_transient_seat(&self, id: TransientSeatId) -> TransientSeatAnswer {
+        let raw = {
+            let seats = self.inner.transient_seats.borrow();
+            let Some(entry) = seats.get(&(id.0, id.1)) else {
+                return TransientSeatAnswer::Unknown;
+            };
+            entry.raw
+        };
+        let Some(seat) = self.seat_ptr() else {
+            return TransientSeatAnswer::NoSeatYet;
+        };
+        self.inner
+            .transient_seats
+            .borrow_mut()
+            .remove(&(id.0, id.1));
+        // SAFETY: `raw` was live per the table invariant a moment ago, and
+        // the entry stood until just now — nothing between the lookup and
+        // this call could have freed the request (client destroy runs on
+        // this same thread, through the run, which has no listener that
+        // evicts these entries). `seat` is live per `seat_ptr`. No borrow
+        // is held across the FFI call: both map borrows ended above.
+        unsafe { sys::wlr_transient_seat_v1_ready(raw.as_ptr(), seat.as_ptr()) };
+        TransientSeatAnswer::Answered
+    }
+
+    /// Refuse a pending transient-seat request, and forget it. Returns
+    /// `false` — changing nothing — for an unknown or already-answered id,
+    /// the same miss contract [`Runtime::ready_transient_seat`] reports as
+    /// [`TransientSeatAnswer::Unknown`].
+    /// Refusing consumes the entry for the same reason answering does: a
+    /// transient seat exposes no public destroy signal, so the answer is
+    /// the end of everything this crate tracks.
+    pub fn destroy_transient_seat(&self, id: TransientSeatId) -> bool {
+        let entry = {
+            let mut seats = self.inner.transient_seats.borrow_mut();
+            match seats.remove(&(id.0, id.1)) {
+                Some(e) => e,
+                None => return false,
+            }
+        };
+        // SAFETY: `entry.raw` is live per the table invariant. No borrow
+        // held across FFI: the map borrow ended with the block above, so a
+        // synchronous `destroy` emission from the deny cannot observe a
+        // held borrow.
+        unsafe { sys::wlr_transient_seat_v1_deny(entry.raw.as_ptr()) };
+        true
+    }
+
+    /// Debug accessor: number of pending transient-seat requests.
+    #[doc(hidden)]
+    pub fn rt_debug_transient_seat_count(&self) -> usize {
+        self.inner.transient_seats.borrow().len()
+    }
+
+    /// Forget one pending transient-seat request by its table address, or
+    /// nothing when no entry stands under it.
+    ///
+    /// Called from `backend.rs`'s resource-destroy listener when the
+    /// client's resource dies — an ignored request, or a client that
+    /// disconnected before the compositor answered, must not leave a dead
+    /// entry naming freed memory. The listener names the request by address
+    /// (it never saw the generation), so this evicts whatever generation
+    /// stands under that address. The miss is a harmless no-op on purpose:
+    /// an answered request is already gone by the time its resource dies,
+    /// so the listener always evicts unconditionally.
+    pub(crate) fn forget_transient_seat(&self, key: usize) {
+        self.inner
+            .transient_seats
+            .borrow_mut()
+            .retain(|(a, _), _| *a != key);
+    }
+
+    /// Forget every pending transient-seat request. Called from
+    /// `backend.rs`'s manager-destroy listener: the manager's death takes
+    /// its objects with it, so any entry naming one would dangle.
+    pub(crate) fn clear_transient_seats(&self) {
+        self.inner.transient_seats.borrow_mut().clear();
     }
 
     /// The scene's root tree, for the callbacks in `backend.rs` that insert a
@@ -9493,6 +10805,11 @@ impl Runtime {
     /// (when non-null) is a live `wl_resource`; the call only reads it.
     pub(crate) unsafe fn surface_client(surface: *mut sys::wlr_surface) -> *mut sys::wl_client {
         use sys::wayland_sys::ffi_dispatch;
+        // As in `remove_fd` above (and `display.rs`'s `wl_display_create`
+        // site): `ffi_dispatch!`'s `dlopen` expansion never references the
+        // glob-imported name, so the import is unused there — `allow`, not
+        // `expect`, since the default non-`dlopen` build genuinely uses it.
+        // Do not "upgrade" this to `expect`.
         #[allow(unused_imports)]
         use sys::wayland_sys::server::*;
 
@@ -10545,6 +11862,635 @@ mod tests {
             rt.decoration_ptr(id).is_none(),
             "clear_toplevels must purge decorations at run granularity too"
         );
+    }
+
+    /// Recording a virtual keyboard makes it resolve, and the device-destroy
+    /// sweep makes it miss again — the virtual keyboard's whole destroy
+    /// path, since it exposes no public destroy signal of its own.
+    ///
+    /// The keyboard is a scratch fixture, not a live wlroots object:
+    /// zeroed heap memory (`alloc_zeroed`, never materialised as a value —
+    /// these structs embed listeners whose bare function pointers are UB to
+    /// zero-materialise, for the reason the decoration-staging test
+    /// documents). `record`/`try`/`forget` only take addresses and compare
+    /// them, so no wlroots state is ever read; the allocation is freed once
+    /// the sweep has evicted the entry naming it.
+    #[test]
+    fn virtual_keyboard_record_resolves_and_device_sweep_evicts() {
+        use std::alloc::{Layout, alloc_zeroed, dealloc};
+
+        let rt = Runtime::new().expect("runtime");
+        // SAFETY: the layout is non-zero-sized, so `alloc_zeroed` returns
+        // either null (checked below) or a suitably aligned, zeroed
+        // allocation of exactly that size, live until the `dealloc` at the
+        // end of this test.
+        let vk = unsafe { alloc_zeroed(Layout::new::<sys::wlr_virtual_keyboard_v1>()) }
+            .cast::<sys::wlr_virtual_keyboard_v1>();
+        assert!(!vk.is_null(), "allocation failed");
+        // SAFETY: non-null per the assert above; no reference is ever formed
+        // through it, only raw field addresses taken by `record` below.
+        let vk_nn = unsafe { NonNull::new_unchecked(vk) };
+
+        let id = rt.record_virtual_keyboard(vk_nn);
+        assert_eq!(rt.rt_debug_virtual_keyboard_count(), 1);
+        // SAFETY: `vk` is live; the address is compared, never dereferenced.
+        unsafe {
+            assert_eq!(rt.try_virtual_keyboard(vk_nn.as_ptr()), Some(id));
+        }
+
+        // The embedded keyboard is what `on_input_destroy` holds: sweeping
+        // for it must evict exactly this entry.
+        // SAFETY: as above — a raw field address through live scratch
+        // memory, compared but never read.
+        let kb = unsafe { NonNull::new_unchecked(&raw mut (*vk_nn.as_ptr()).keyboard) };
+        rt.forget_virtual_keyboards_for_keyboard(kb);
+        assert_eq!(rt.rt_debug_virtual_keyboard_count(), 0);
+        // SAFETY: as above.
+        unsafe {
+            assert!(rt.try_virtual_keyboard(vk_nn.as_ptr()).is_none());
+        }
+        // SAFETY: the sweep above evicted the only entry naming this
+        // allocation, so nothing resolves to it past this point; same
+        // layout as allocated.
+        unsafe { dealloc(vk.cast(), Layout::new::<sys::wlr_virtual_keyboard_v1>()) };
+    }
+
+    /// Same record/resolve/sweep round-trip for virtual pointers.
+    #[test]
+    fn virtual_pointer_record_resolves_and_device_sweep_evicts() {
+        use std::alloc::{Layout, alloc_zeroed, dealloc};
+
+        let rt = Runtime::new().expect("runtime");
+        // SAFETY: as in the keyboard test above.
+        let vp = unsafe { alloc_zeroed(Layout::new::<sys::wlr_virtual_pointer_v1>()) }
+            .cast::<sys::wlr_virtual_pointer_v1>();
+        assert!(!vp.is_null(), "allocation failed");
+        // SAFETY: as above.
+        let vp_nn = unsafe { NonNull::new_unchecked(vp) };
+
+        let id = rt.record_virtual_pointer(vp_nn);
+        assert_eq!(rt.rt_debug_virtual_pointer_count(), 1);
+        // SAFETY: `vp` is live; compared, never dereferenced.
+        unsafe {
+            assert_eq!(rt.try_virtual_pointer(vp_nn.as_ptr()), Some(id));
+        }
+
+        // SAFETY: as above.
+        let p = unsafe { NonNull::new_unchecked(&raw mut (*vp_nn.as_ptr()).pointer) };
+        rt.forget_virtual_pointers_for_pointer(p);
+        assert_eq!(rt.rt_debug_virtual_pointer_count(), 0);
+        // SAFETY: as above.
+        unsafe {
+            assert!(rt.try_virtual_pointer(vp_nn.as_ptr()).is_none());
+        }
+        // SAFETY: as above — swept first, so nothing resolves past here.
+        unsafe { dealloc(vp.cast(), Layout::new::<sys::wlr_virtual_pointer_v1>()) };
+    }
+
+    /// Recording a transient-seat request makes it resolve. Answering is
+    /// the request's end — not exercised here, since `ready`/`deny` send on
+    /// a live client resource this test cannot fabricate — but the pending
+    /// half (record, resolve, count) is plain table bookkeeping over
+    /// scratch memory, like the virtual-device tests above.
+    #[test]
+    fn transient_seat_record_resolves_while_pending() {
+        use std::alloc::{Layout, alloc_zeroed};
+
+        let rt = Runtime::new().expect("runtime");
+        // SAFETY: as in the virtual-device tests above.
+        let ts = unsafe { alloc_zeroed(Layout::new::<sys::wlr_transient_seat_v1>()) }
+            .cast::<sys::wlr_transient_seat_v1>();
+        assert!(!ts.is_null(), "allocation failed");
+        // SAFETY: as above.
+        let ts_nn = unsafe { NonNull::new_unchecked(ts) };
+
+        let id = rt.record_transient_seat(ts_nn);
+        assert_eq!(rt.rt_debug_transient_seat_count(), 1);
+        // SAFETY: `ts` is live; compared, never dereferenced.
+        unsafe {
+            assert_eq!(rt.try_transient_seat(ts_nn.as_ptr()), Some(id));
+        }
+        // The allocation outlives the test without a `dealloc`: the entry
+        // still names it, and only an answer (`ready`/`deny` on a live
+        // client resource, untestable here) consumes the entry — so freeing
+        // first would leave the table naming freed memory. The runtime (and
+        // its table) drops with the test; the scratch bytes go with the
+        // process, like the decoration fixture's.
+    }
+
+    /// Forgetting a transient-seat request evicts exactly its key, and
+    /// forgetting a missing key is a harmless no-op — the contract the
+    /// resource-destroy listener relies on, since an answered request is
+    /// already gone by the time its resource dies.
+    ///
+    /// This drives the evict function directly rather than firing a real
+    /// resource-destroy emission through the listener: no headless test in
+    /// this crate fabricates a live `wl_client`/`wl_resource` (that needs a
+    /// display connection), and the nearest emission precedent — the
+    /// tablet-destroy test — only drives `wl_signal`-based emissions, which
+    /// a resource's libwayland-private destroy list is not. The evict is
+    /// the whole of the listener's runtime effect, so this exercises the
+    /// load-bearing half exactly.
+    #[test]
+    fn forget_transient_seat_evicts_only_its_key_and_missing_is_noop() {
+        use std::alloc::{Layout, alloc_zeroed};
+
+        let rt = Runtime::new().expect("runtime");
+        // SAFETY: as in the virtual-device tests above — scratch memory,
+        // addresses only, never read or passed to FFI.
+        let alloc = |ty: Layout| unsafe { alloc_zeroed(ty) };
+        let a =
+            alloc(Layout::new::<sys::wlr_transient_seat_v1>()).cast::<sys::wlr_transient_seat_v1>();
+        let b =
+            alloc(Layout::new::<sys::wlr_transient_seat_v1>()).cast::<sys::wlr_transient_seat_v1>();
+        assert!(!a.is_null() && !b.is_null(), "allocation failed");
+        // SAFETY: non-null per the assert; no reference is ever formed.
+        let (a_nn, b_nn) = unsafe { (NonNull::new_unchecked(a), NonNull::new_unchecked(b)) };
+
+        let a_id = rt.record_transient_seat(a_nn);
+        let b_id = rt.record_transient_seat(b_nn);
+        assert_eq!(rt.rt_debug_transient_seat_count(), 2);
+
+        // Evicting a key that was never recorded changes nothing.
+        rt.forget_transient_seat(usize::MAX - 7);
+        assert_eq!(
+            rt.rt_debug_transient_seat_count(),
+            2,
+            "evict-missing must be a harmless no-op"
+        );
+
+        rt.forget_transient_seat(a_id.0);
+        assert_eq!(rt.rt_debug_transient_seat_count(), 1);
+        // SAFETY: both allocations are live; compared, never dereferenced.
+        unsafe {
+            assert!(rt.try_transient_seat(a).is_none(), "evicted key must miss");
+            assert_eq!(
+                rt.try_transient_seat(b),
+                Some(b_id),
+                "the surviving request must keep resolving"
+            );
+        }
+
+        // Double-evict is the same no-op — the answer-then-destroy ordering.
+        rt.forget_transient_seat(a_id.0);
+        assert_eq!(rt.rt_debug_transient_seat_count(), 1);
+
+        // The manager-destroy path clears whatever is still pending.
+        rt.clear_transient_seats();
+        assert_eq!(rt.rt_debug_transient_seat_count(), 0);
+        // SAFETY: as above.
+        unsafe {
+            assert!(rt.try_transient_seat(b).is_none());
+        }
+    }
+
+    /// Allocator reuse must not resurrect a stale transient-seat id: record,
+    /// evict (the answer's table effect, without the sends a live client
+    /// resource would need), re-record the same address, and the old id
+    /// must miss while the new one resolves.
+    #[test]
+    fn transient_seat_id_does_not_survive_address_reuse() {
+        use std::alloc::{Layout, alloc_zeroed};
+
+        let rt = Runtime::new().expect("runtime");
+        // SAFETY: non-zero layout; null-checked below; scratch memory whose
+        // address is only ever compared, never read or passed to FFI.
+        let ts = unsafe { alloc_zeroed(Layout::new::<sys::wlr_transient_seat_v1>()) }
+            .cast::<sys::wlr_transient_seat_v1>();
+        assert!(!ts.is_null(), "allocation failed");
+        // SAFETY: non-null per the assert; no reference is ever formed.
+        let ts_nn = unsafe { NonNull::new_unchecked(ts) };
+
+        let old = rt.record_transient_seat(ts_nn);
+        // The answer consumes the entry; `forget` is that consumption's
+        // table effect (the `ready`/`deny` sends need a live client
+        // resource no headless test can fabricate). Evicting, then
+        // re-recording the same address, is exactly what allocator reuse
+        // looks like to this table.
+        rt.forget_transient_seat(old.0);
+        let new = rt.record_transient_seat(ts_nn);
+        assert_eq!(
+            old.0, new.0,
+            "the test re-recorded the same address, so only the generation differs"
+        );
+        assert_ne!(old, new, "a re-recorded address must mint a new id");
+
+        // The stale id misses without touching FFI: the miss path returns
+        // before any pointer is read, so this is safe on scratch memory.
+        assert_eq!(
+            rt.ready_transient_seat(old),
+            TransientSeatAnswer::Unknown,
+            "the pre-reuse id must miss after address reuse"
+        );
+        // SAFETY: `ts` is live; compared, never dereferenced.
+        unsafe {
+            assert_eq!(
+                rt.try_transient_seat(ts),
+                Some(new),
+                "the address resolves under its new generation only"
+            );
+        }
+    }
+
+    /// Creating a keyboard group tracks it under its own address: it
+    /// resolves, its embedded keyboard snapshots, and destroying it evicts
+    /// it — a second destroy misses, like every other by-id destroy here.
+    #[test]
+    fn keyboard_group_create_try_state_destroy_round_trip() {
+        use std::alloc::{Layout, alloc_zeroed, dealloc};
+
+        let rt = Runtime::new().expect("runtime");
+        let id = rt
+            .create_keyboard_group()
+            .expect("wlroots allocates a keyboard group");
+        assert_eq!(
+            rt.rt_debug_keyboard_group_count(),
+            1,
+            "creating a group must track exactly one"
+        );
+
+        // The table key is the group's own address: peek it out the same
+        // way the destroy handler would recover it, so `try` is driven
+        // against the real object rather than a fabrication.
+        let raw = rt
+            .inner
+            .keyboard_groups
+            .borrow()
+            .get(&id.0)
+            .expect("just created")
+            .raw;
+        // SAFETY: `raw` is live — the entry stands until the destroy below.
+        // The address is compared, never dereferenced.
+        unsafe {
+            assert_eq!(
+                rt.try_keyboard_group(raw.as_ptr()),
+                Some(id),
+                "the created group must resolve to its id"
+            );
+        }
+        assert!(
+            rt.keyboard_group_state(id).is_some(),
+            "the group's embedded keyboard must snapshot"
+        );
+
+        assert!(
+            rt.destroy_keyboard_group(id),
+            "destroying a tracked group must report success"
+        );
+        assert_eq!(rt.rt_debug_keyboard_group_count(), 0);
+        assert!(
+            rt.keyboard_group_state(id).is_none(),
+            "a destroyed group's id must miss"
+        );
+        // SAFETY: `try` compares the address without dereferencing it, and
+        // nothing recycled it in between — the entry is gone, so this must
+        // miss rather than resolve stale.
+        unsafe {
+            assert!(
+                rt.try_keyboard_group(raw.as_ptr()).is_none(),
+                "a destroyed group's address must miss"
+            );
+        }
+        assert!(
+            !rt.destroy_keyboard_group(id),
+            "destroying the same group twice must miss the second time"
+        );
+
+        // Null misses without touching anything.
+        // SAFETY: null is the documented miss case for the lookup.
+        unsafe {
+            assert!(rt.try_keyboard_group(std::ptr::null_mut()).is_none());
+        }
+        // A live-but-untracked group misses too: allocated like the
+        // virtual-device fixtures (never materialised as a value, for the
+        // reason `record_toplevel_with_surface` documents), recorded
+        // nowhere, freed at the end of this test.
+        // SAFETY: non-zero layout; null-checked; the address is only ever
+        // compared, never read or passed to FFI.
+        let stray = unsafe { alloc_zeroed(Layout::new::<sys::wlr_keyboard_group>()) }
+            .cast::<sys::wlr_keyboard_group>();
+        assert!(!stray.is_null(), "allocation failed");
+        // SAFETY: `stray` is live and untracked; compared, never
+        // dereferenced.
+        unsafe {
+            assert!(
+                rt.try_keyboard_group(stray).is_none(),
+                "an untracked group must miss"
+            );
+        }
+        // SAFETY: `stray` was never recorded, so nothing resolves to it
+        // past this point; same layout as allocated.
+        unsafe { dealloc(stray.cast(), Layout::new::<sys::wlr_keyboard_group>()) };
+
+        // A dangling id misses on both id-taking accessors.
+        let dangling = KeyboardGroupId::dangling_nth_for_test(1);
+        assert!(
+            rt.keyboard_group_state(dangling).is_none(),
+            "an unknown group id must snapshot to nothing"
+        );
+        assert!(
+            !rt.destroy_keyboard_group(dangling),
+            "destroying an unknown group must miss"
+        );
+    }
+
+    /// The keyboard snapshot's Some-path: a scratch `wlr_keyboard` with a
+    /// valid keymap string snapshots byte-identical, a null keymap snapshots
+    /// to `None`, and spec-violating bytes degrade to replacement characters
+    /// rather than aborting the read — while `leds` and the repeat pair
+    /// round-trip verbatim.
+    ///
+    /// The keyboard is a scratch fixture, not a live wlroots object:
+    /// zeroed heap memory (`alloc_zeroed`, never materialised as a value —
+    /// the struct embeds a `wlr_input_device` with listeners, for the
+    /// reason the decoration-staging test documents). Only `leds`,
+    /// `keymap_string` and `repeat_info` are ever written, and
+    /// `wlr_keyboard_get_modifiers` only reads the inline modifier fields
+    /// (verified against this build's wlroots: no `xkb_state` deref), so a
+    /// zeroed scratch answers it with `0`. The allocation is freed at the
+    /// end of this test; the snapshots own everything they return.
+    #[test]
+    fn keyboard_snapshot_copies_keymap_leds_and_repeat_verbatim() {
+        use std::alloc::{Layout, alloc_zeroed, dealloc};
+        use std::ffi::CString;
+
+        // SAFETY: the layout is non-zero-sized, so `alloc_zeroed` returns
+        // either null (checked below) or a suitably aligned, zeroed
+        // allocation of exactly that size, live until the `dealloc` at the
+        // end of this test.
+        let kb =
+            unsafe { alloc_zeroed(Layout::new::<sys::wlr_keyboard>()) }.cast::<sys::wlr_keyboard>();
+        assert!(!kb.is_null(), "allocation failed");
+
+        // A valid keymap, held alive for the whole test: the snapshot copies
+        // it out, so every assertion below reads owned `String`s.
+        let keymap = CString::new("xkb_keymap { test };").expect("no interior NUL");
+        // SAFETY: `kb` is a live, exclusively-owned allocation; `leds`,
+        // `keymap_string` and `repeat_info` are in bounds, and the pointer
+        // stored is the live `keymap` above.
+        unsafe {
+            (*kb).leds = 0b101;
+            (*kb).repeat_info.rate = 25;
+            (*kb).repeat_info.delay = 600;
+            (*kb).keymap_string = keymap.as_ptr().cast_mut();
+        }
+        // SAFETY: `kb` is live; forming the shared borrow reads only the
+        // fields staged above plus the zeroed modifier words.
+        let kb_ref = unsafe { &*kb };
+        let committed = KeyboardState::from_raw(kb_ref);
+        let pending = PendingKeyboardState::from_raw(kb_ref);
+        assert_eq!(
+            committed.keymap,
+            Some("xkb_keymap { test };".to_string()),
+            "a valid keymap must snapshot byte-identical"
+        );
+        assert_eq!(
+            pending.keymap, committed.keymap,
+            "the pending half reads the same live keyboard"
+        );
+        assert_eq!(committed.leds, 0b101, "leds must round-trip verbatim");
+        assert_eq!(
+            (committed.repeat_rate, committed.repeat_delay),
+            (25, 600),
+            "the repeat pair must round-trip verbatim"
+        );
+        assert_eq!(
+            (pending.repeat_rate, pending.repeat_delay),
+            (25, 600),
+            "and so must the pending half's"
+        );
+        assert_eq!(
+            committed.modifiers,
+            crate::seat::Modifiers::default(),
+            "a zeroed scratch holds no modifiers"
+        );
+
+        // Null keymap: no keymap yet.
+        // SAFETY: as above; storing null is the documented `None` case.
+        unsafe {
+            (*kb).keymap_string = std::ptr::null_mut();
+        }
+        // SAFETY: as above.
+        let snap = KeyboardState::from_raw(unsafe { &*kb });
+        assert_eq!(
+            snap.keymap, None,
+            "a null keymap pointer must snapshot to None"
+        );
+
+        // Spec-violating bytes: Wayland requires valid UTF-8, so these only
+        // ever arrive from a broken client — replaced, not rejected.
+        let bad = b"\xff\xfe invalid \x80\0";
+        // SAFETY: as above; `bad` is live and NUL-terminated.
+        unsafe {
+            (*kb).keymap_string = bad.as_ptr() as *mut _;
+        }
+        // SAFETY: as above. Reaching the assertion past this call is the
+        // no-abort proof: a strict decode would panic here instead.
+        let snap = KeyboardState::from_raw(unsafe { &*kb });
+        let keymap = snap.keymap.expect("invalid UTF-8 must still snapshot");
+        assert!(
+            keymap.contains('\u{FFFD}'),
+            "spec-violating bytes must degrade to replacement characters, got {keymap:?}"
+        );
+        assert!(
+            keymap.contains("invalid"),
+            "the valid span must survive verbatim, got {keymap:?}"
+        );
+
+        drop(keymap);
+        // SAFETY: the snapshots above own their strings, so nothing borrows
+        // this allocation past this point; same layout as allocated.
+        unsafe { dealloc(kb.cast(), Layout::new::<sys::wlr_keyboard>()) };
+    }
+
+    /// The shortcuts-inhibitor table half: recording makes
+    /// `set_shortcuts_inhibitor_active` drive `shortcuts_inhibited`, and an
+    /// unknown id changes nothing.
+    ///
+    /// The inhibitor is scratch (`alloc_zeroed`, for the reason the
+    /// keyboard-snapshot test documents). `set_..._active` also sends the
+    /// client's wire event — e2e-only, like every other send here — so this
+    /// stages the C struct's own `active` flag to match each call: wlroots'
+    /// `activate`/`deactivate` early-return when the flag already holds, and
+    /// the early-return path touches no `resource` (a null one would trap
+    /// in `wl_resource_post_event`). What this pins is the table
+    /// bookkeeping around that no-op send: gutting the `entry.active` store
+    /// or the `inhibited()` scan fails it; deleting the send itself does
+    /// not (that half needs a live client).
+    #[test]
+    fn shortcuts_inhibitor_table_drives_inhibited_without_wire() {
+        use std::alloc::{Layout, alloc_zeroed, dealloc};
+
+        let rt = Runtime::new().expect("runtime");
+        // SAFETY: non-zero layout; null-checked below; scratch memory whose
+        // `active` field is staged through the raw pointer only.
+        let raw =
+            unsafe { alloc_zeroed(Layout::new::<sys::wlr_keyboard_shortcuts_inhibitor_v1>()) }
+                .cast::<sys::wlr_keyboard_shortcuts_inhibitor_v1>();
+        assert!(!raw.is_null(), "allocation failed");
+        // SAFETY: non-null per the assert; no reference is ever formed.
+        let raw_nn = unsafe { NonNull::new_unchecked(raw) };
+
+        let id = ShortcutsInhibitorId(next_id() as usize);
+        rt.record_shortcuts_inhibitor(id, raw_nn, false);
+        assert!(
+            !rt.shortcuts_inhibited(),
+            "a freshly recorded, inactive inhibitor inhibits nothing"
+        );
+
+        // Stage the C flag to match: `activate` then early-returns instead
+        // of sending on the null resource.
+        // SAFETY: `raw` is live and exclusively owned; `active` is in
+        // bounds.
+        unsafe {
+            (*raw).active = true;
+        }
+        assert!(
+            rt.set_shortcuts_inhibitor_active(id, true),
+            "activating a tracked inhibitor must report success"
+        );
+        assert!(
+            rt.shortcuts_inhibited(),
+            "an active inhibitor must read back as inhibited"
+        );
+
+        // SAFETY: as above.
+        unsafe {
+            (*raw).active = false;
+        }
+        assert!(
+            rt.set_shortcuts_inhibitor_active(id, false),
+            "deactivating a tracked inhibitor must report success"
+        );
+        assert!(
+            !rt.shortcuts_inhibited(),
+            "no active inhibitor must read back as uninhibited"
+        );
+
+        // Unknown ids miss without changing anything.
+        let dangling = ShortcutsInhibitorId::dangling_nth_for_test(1);
+        assert!(
+            !rt.set_shortcuts_inhibitor_active(dangling, true),
+            "driving an unknown inhibitor must miss"
+        );
+        assert!(
+            !rt.shortcuts_inhibited(),
+            "the miss must not have activated anything"
+        );
+
+        rt.forget_shortcuts_inhibitor(id);
+        // SAFETY: the only entry naming this allocation is gone, so nothing
+        // resolves to it past this point; same layout as allocated.
+        unsafe {
+            dealloc(
+                raw.cast(),
+                Layout::new::<sys::wlr_keyboard_shortcuts_inhibitor_v1>(),
+            )
+        };
+    }
+
+    /// `ready` with a pending id but no seat answers `NoSeatYet` and keeps
+    /// the request: the id stays retryable rather than dying with the
+    /// compositor's too-early answer.
+    ///
+    /// The `Answered` half is e2e-only: answering sends on the request's
+    /// client resource (`wl_resource_get_client` unconditionally reads it),
+    /// and a `wl_resource` is opaque even to this crate's own bindings, so
+    /// no headless test can fabricate one — the same reason the popup tests
+    /// pin their destroy counting downstream instead of here.
+    #[test]
+    fn ready_transient_seat_without_seat_keeps_the_request_pending() {
+        use std::alloc::{Layout, alloc_zeroed};
+
+        let rt = Runtime::new().expect("runtime");
+        // No seat was ever created on this runtime, so every answer must
+        // take the retryable path.
+        // SAFETY: as in the virtual-device tests — scratch memory, address
+        // only, never read or passed to FFI (the `NoSeatYet` path returns
+        // before any pointer is read).
+        let ts = unsafe { alloc_zeroed(Layout::new::<sys::wlr_transient_seat_v1>()) }
+            .cast::<sys::wlr_transient_seat_v1>();
+        assert!(!ts.is_null(), "allocation failed");
+        // SAFETY: non-null per the assert; no reference is ever formed.
+        let ts_nn = unsafe { NonNull::new_unchecked(ts) };
+
+        let id = rt.record_transient_seat(ts_nn);
+        assert_eq!(
+            rt.ready_transient_seat(id),
+            TransientSeatAnswer::NoSeatYet,
+            "a pending request with no seat to offer must stay retryable"
+        );
+        assert_eq!(
+            rt.rt_debug_transient_seat_count(),
+            1,
+            "the retryable answer must consume nothing"
+        );
+        // SAFETY: `ts` is live; compared, never dereferenced.
+        unsafe {
+            assert_eq!(
+                rt.try_transient_seat(ts),
+                Some(id),
+                "the retained request must keep resolving under its id"
+            );
+        }
+
+        // An id that was never announced is final, not retryable.
+        assert_eq!(
+            rt.ready_transient_seat(TransientSeatId::dangling_nth_for_test(1)),
+            TransientSeatAnswer::Unknown,
+            "an unknown id must miss as unknown, not as retryable"
+        );
+        // The allocation outlives the test without a `dealloc`: the entry
+        // still names it (see `transient_seat_record_resolves_while_pending`
+        // for why freeing first would leave the table naming freed memory).
+    }
+
+    /// Recording the same virtual keyboard twice refreshes the same id
+    /// rather than tracking it twice — the same idempotence
+    /// `ensure_tablet_tool` keeps for hardware tools.
+    #[test]
+    fn double_record_virtual_keyboard_refreshes_the_same_id() {
+        use std::alloc::{Layout, alloc_zeroed, dealloc};
+
+        let rt = Runtime::new().expect("runtime");
+        // SAFETY: as in `virtual_keyboard_record_resolves_and_device_sweep_evicts`.
+        let vk = unsafe { alloc_zeroed(Layout::new::<sys::wlr_virtual_keyboard_v1>()) }
+            .cast::<sys::wlr_virtual_keyboard_v1>();
+        assert!(!vk.is_null(), "allocation failed");
+        // SAFETY: non-null per the assert above; no reference is ever formed
+        // through it, only raw field addresses taken by `record` below.
+        let vk_nn = unsafe { NonNull::new_unchecked(vk) };
+
+        let first = rt.record_virtual_keyboard(vk_nn);
+        let second = rt.record_virtual_keyboard(vk_nn);
+        assert_eq!(
+            first, second,
+            "a second record of the same object must refresh the same id"
+        );
+        assert_eq!(
+            rt.rt_debug_virtual_keyboard_count(),
+            1,
+            "a second record must not track a second entry"
+        );
+        // SAFETY: `vk` is live; the address is compared, never dereferenced.
+        unsafe {
+            assert_eq!(
+                rt.try_virtual_keyboard(vk_nn.as_ptr()),
+                Some(first),
+                "the object must resolve under the refreshed id"
+            );
+        }
+
+        // Sweep through the device path so the entry is gone before the
+        // allocation is freed.
+        // SAFETY: as in the sweep test — a raw field address through live
+        // scratch memory, compared but never read.
+        let kb = unsafe { NonNull::new_unchecked(&raw mut (*vk_nn.as_ptr()).keyboard) };
+        rt.forget_virtual_keyboards_for_keyboard(kb);
+        assert_eq!(rt.rt_debug_virtual_keyboard_count(), 0);
+        // SAFETY: the sweep evicted the only entry naming this allocation;
+        // same layout as allocated.
+        unsafe { dealloc(vk.cast(), Layout::new::<sys::wlr_virtual_keyboard_v1>()) };
     }
 
     /// `set_decoration_mode`'s central hazard (see its own doc): calling

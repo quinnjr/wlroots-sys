@@ -1160,6 +1160,118 @@ pub trait SeatHandler {
     /// `f2cc8a9`, which dropped a would-be `SessionLockHandler` for the same
     /// reason a new supertrait on [`Handlers`] is not how this ships).
     fn input_method_deactivated(&mut self) {}
+
+    /// A shortcuts inhibitor announced a state. `active` is `true` when the
+    /// inhibitor became active — the compositor should skip its own key
+    /// bindings while any inhibitor is active (see
+    /// [`Runtime::shortcuts_inhibited`](crate::Runtime::shortcuts_inhibited))
+    /// — and `false` when it went inactive or was destroyed. `id` is stable
+    /// for the inhibitor's lifetime, keyed by its destroy-listener address
+    /// (FIX-3).
+    ///
+    /// Creation announces the birth state: an inhibitor naming the focused
+    /// surface is activated at once and announces `true`; any other
+    /// announces `false` until the compositor drives it with
+    /// [`Runtime::set_shortcuts_inhibitor_active`](crate::Runtime::set_shortcuts_inhibitor_active).
+    /// A deferred delivery may name an inhibitor destroyed in between; like
+    /// `popup_surface_destroyed`, the id then only tells the handler *which*
+    /// inhibitor the transition was for. Write this so an unknown id is
+    /// harmless.
+    ///
+    /// Lives on `SeatHandler` rather than a trait of its own so adding it
+    /// stays semver-additive: a new supertrait on [`Handlers`] would break
+    /// every downstream consumer that does not also implement it (see commit
+    /// `f2cc8a9`, which dropped a would-be `SessionLockHandler` for the same
+    /// reason). Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged.
+    fn shortcuts_inhibitor_toggled(&mut self, _id: crate::ShortcutsInhibitorId, _active: bool) {}
+
+    /// A tablet tool did something — proximity, motion, tip or button.
+    /// Notification only: the id names the hardware tool (keyed by its
+    /// address, FIX-3), and whatever the tool reported is forwarded to
+    /// clients through its `wlr_tablet_v2_tablet_tool`, not through here.
+    /// A deferred delivery may name a tool whose device went away in
+    /// between; like `popup_surface_destroyed`, the id then only tells the
+    /// handler *which* tool the traffic was for. Write this so an unknown
+    /// id is harmless.
+    ///
+    /// Lives on `SeatHandler` rather than a `TabletHandler` of its own for
+    /// the reason `shortcuts_inhibitor_toggled`'s own doc gives: one more
+    /// defaulted method costs an implementor nothing, whereas a new
+    /// supertrait on [`Handlers`] would be a breaking change to a frozen
+    /// list (see commit `f2cc8a9`). Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged.
+    fn tablet_tool_event(&mut self, _id: crate::TabletToolId) {}
+
+    /// A tablet pad did something — button, ring or strip. Notification
+    /// only, on the same terms as
+    /// [`tablet_tool_event`](SeatHandler::tablet_tool_event): the id names
+    /// the hardware pad, client-bound feedback is driven separately, and an
+    /// unknown id must be harmless.
+    ///
+    /// Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged (see commit
+    /// `f2cc8a9`, which dropped a would-be `SessionLockHandler` for the same
+    /// reason a new supertrait on [`Handlers`] is not how this ships).
+    fn tablet_pad_event(&mut self, _id: crate::TabletPadId) {}
+
+    /// A client injected a virtual keyboard. Notification only: the id
+    /// names the virtual keyboard (keyed by its address — creation = data),
+    /// and the seat already gained keyboard capability before this runs, so
+    /// there is nothing left here for a handler to *attach*. A deferred
+    /// delivery may name a keyboard whose device went away in between; like
+    /// `popup_surface_destroyed`, the id then only tells the handler *which*
+    /// keyboard the announcement was for. Write this so an unknown id is
+    /// harmless.
+    ///
+    /// Lives on `SeatHandler` rather than a trait of its own for the reason
+    /// `shortcuts_inhibitor_toggled`'s own doc gives: one more defaulted
+    /// method costs an implementor nothing, whereas a new supertrait on
+    /// [`Handlers`] would be a breaking change to a frozen list (see commit
+    /// `f2cc8a9`). Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged.
+    fn virtual_keyboard_created(&mut self, _id: crate::VirtualKeyboardId) {}
+
+    /// A client injected a virtual pointer. Notification only, on the same
+    /// terms as
+    /// [`virtual_keyboard_created`](SeatHandler::virtual_keyboard_created):
+    /// the id names the virtual pointer, the cursor already has the device
+    /// attached before this runs, and an unknown id must be harmless.
+    ///
+    /// Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged (see commit
+    /// `f2cc8a9`, which dropped a would-be `SessionLockHandler` for the same
+    /// reason a new supertrait on [`Handlers`] is not how this ships).
+    fn virtual_pointer_created(&mut self, _id: crate::VirtualPointerId) {}
+
+    /// A client asked for a seat of its own. The id names the *pending
+    /// request*: answer it with
+    /// [`Runtime::ready_transient_seat`](crate::Runtime::ready_transient_seat)
+    /// or refuse it with
+    /// [`Runtime::destroy_transient_seat`](crate::Runtime::destroy_transient_seat)
+    /// — either consumes the entry, and an unanswered request leaves the
+    /// client waiting. A deferred delivery may name a request already
+    /// answered; like `popup_surface_destroyed`, the id then only tells the
+    /// handler *which* request the announcement was for. Write this so an
+    /// unknown id is harmless.
+    ///
+    /// Lives on `SeatHandler` rather than a trait of its own for the reason
+    /// `shortcuts_inhibitor_toggled`'s own doc gives (see commit `f2cc8a9`).
+    /// Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged.
+    fn transient_seat_requested(&mut self, _id: crate::TransientSeatId) {}
 }
 
 /// Every handler trait at once.
