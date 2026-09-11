@@ -2445,6 +2445,19 @@ impl<'d> Backend<'d> {
                     std::ptr::null(),
                 )
             });
+            // The manager's own `destroy`:
+            // `on_virtual_keyboard_manager_destroy` clears whatever virtual
+            // keyboards are still tracked, so no entry names an object the
+            // dying manager takes with it. Same ownership and liveness
+            // reasoning as the `new_virtual_keyboard` listener above.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.destroy,
+                    on_virtual_keyboard_manager_destroy::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
         }
 
         if let Some(manager) = runtime.virtual_pointer_manager_ptr() {
@@ -2455,6 +2468,19 @@ impl<'d> Backend<'d> {
                 Registration::link_bare(
                     &raw mut (*manager.as_ptr()).events.new_virtual_pointer,
                     on_new_virtual_pointer::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+            // The manager's own `destroy`:
+            // `on_virtual_pointer_manager_destroy` clears whatever virtual
+            // pointers are still tracked, so no entry names an object the
+            // dying manager takes with it. Same ownership and liveness
+            // reasoning as the `new_virtual_pointer` listener above.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.destroy,
+                    on_virtual_pointer_manager_destroy::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     std::ptr::null(),
                 )
@@ -2511,6 +2537,19 @@ impl<'d> Backend<'d> {
                 Registration::link_bare(
                     &raw mut (*manager.as_ptr()).events.new_inhibitor,
                     on_new_shortcuts_inhibitor::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+            // The manager's own `destroy`:
+            // `on_shortcuts_inhibit_manager_destroy` clears whatever
+            // inhibitors are still tracked, so no entry names an object the
+            // dying manager takes with it. Same ownership and liveness
+            // reasoning as the `new_inhibitor` listener above.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.destroy,
+                    on_shortcuts_inhibit_manager_destroy::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     std::ptr::null(),
                 )
@@ -4883,6 +4922,7 @@ unsafe extern "C" fn on_new_shortcuts_inhibitor<S: Handlers>(
         let session = (*bound).session.cast::<Session<'_, S>>();
         let runtime = (*session).runtime;
         let inhibitor = data.cast::<sys::wlr_keyboard_shortcuts_inhibitor_v1>();
+        debug_assert!(!data.is_null(), "new_inhibitor emitted with null data");
         let Some(raw) = NonNull::new(inhibitor) else {
             return;
         };
@@ -5030,6 +5070,10 @@ unsafe extern "C" fn on_tablet_tool_destroy<S: Handlers>(
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let runtime = (*session).runtime;
+        debug_assert!(
+            (*bound).tablet_tool.is_some(),
+            "tablet-tool destroy fired without a bound tool"
+        );
         let Some(tool) = (*bound).tablet_tool else {
             return;
         };
@@ -5059,6 +5103,10 @@ fn emit_tablet_tool_event<S: Handlers>(
     tablet: *mut sys::wlr_tablet,
     tool: *mut sys::wlr_tablet_tool,
 ) {
+    debug_assert!(
+        !tablet.is_null() && !tool.is_null(),
+        "tablet tool event with null tablet/tool"
+    );
     let (Some(tablet), Some(tool)) = (NonNull::new(tablet), NonNull::new(tool)) else {
         return;
     };
@@ -5089,6 +5137,7 @@ unsafe extern "C" fn on_tablet_tool_proximity<S: Handlers>(
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_tablet_tool_proximity_event>();
+        debug_assert!(!data.is_null(), "proximity emitted with null data");
         if ev.is_null() {
             return;
         }
@@ -5108,6 +5157,7 @@ unsafe extern "C" fn on_tablet_tool_axis<S: Handlers>(
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_tablet_tool_axis_event>();
+        debug_assert!(!data.is_null(), "axis emitted with null data");
         if ev.is_null() {
             return;
         }
@@ -5127,6 +5177,7 @@ unsafe extern "C" fn on_tablet_tool_tip<S: Handlers>(
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_tablet_tool_tip_event>();
+        debug_assert!(!data.is_null(), "tip emitted with null data");
         if ev.is_null() {
             return;
         }
@@ -5146,6 +5197,7 @@ unsafe extern "C" fn on_tablet_tool_button<S: Handlers>(
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let ev = data.cast::<sys::wlr_tablet_tool_button_event>();
+        debug_assert!(!data.is_null(), "button emitted with null data");
         if ev.is_null() {
             return;
         }
@@ -5189,6 +5241,10 @@ unsafe extern "C" fn on_tablet_pad_button<S: Handlers>(
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
+        debug_assert!(
+            (*bound).tablet_pad.is_some(),
+            "tablet-pad button fired without a bound pad"
+        );
         let Some(pad) = (*bound).tablet_pad else {
             return;
         };
@@ -5206,6 +5262,10 @@ unsafe extern "C" fn on_tablet_pad_ring<S: Handlers>(
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
+        debug_assert!(
+            (*bound).tablet_pad.is_some(),
+            "tablet-pad ring fired without a bound pad"
+        );
         let Some(pad) = (*bound).tablet_pad else {
             return;
         };
@@ -5223,6 +5283,10 @@ unsafe extern "C" fn on_tablet_pad_strip<S: Handlers>(
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
+        debug_assert!(
+            (*bound).tablet_pad.is_some(),
+            "tablet-pad strip fired without a bound pad"
+        );
         let Some(pad) = (*bound).tablet_pad else {
             return;
         };
@@ -8620,6 +8684,10 @@ unsafe extern "C" fn on_new_virtual_keyboard<S: Handlers>(
         let vk = data.cast::<sys::wlr_virtual_keyboard_v1>();
         // Null-checked before the first deref: the manager contract always
         // carries the object, but a null `data` must miss rather than trap.
+        debug_assert!(
+            !data.is_null(),
+            "new_virtual_keyboard emitted with null data"
+        );
         let Some(vk) = NonNull::new(vk) else {
             return;
         };
@@ -8728,12 +8796,20 @@ unsafe extern "C" fn on_new_virtual_pointer<S: Handlers>(
         // Null-checked before the first deref, matching the virtual
         // keyboard path: a null `data` or null `new_pointer` must miss
         // rather than trap.
+        debug_assert!(
+            !data.is_null(),
+            "new_virtual_pointer emitted with null data"
+        );
         let Some(event) = NonNull::new(event) else {
             return;
         };
         // SAFETY: `event` is live per the guard above; `new_pointer` is the
         // live virtual pointer the manager announced with it.
         let vp = (*event.as_ptr()).new_pointer;
+        debug_assert!(
+            !vp.is_null(),
+            "new_virtual_pointer emitted with null new_pointer"
+        );
         let Some(vp) = NonNull::new(vp) else {
             return;
         };
@@ -8854,32 +8930,39 @@ unsafe extern "C" fn on_new_transient_seat<S: Handlers>(
         let session = (*bound).session.cast::<Session<'_, S>>();
         let runtime = (*session).runtime;
         let ts = data.cast::<sys::wlr_transient_seat_v1>();
+        debug_assert!(!data.is_null(), "create_seat emitted with null data");
         let Some(raw) = NonNull::new(ts) else {
             return;
         };
-        let id = runtime.record_transient_seat(raw);
         // SAFETY: `raw` is the live request just announced; `resource` is
         // its inline client resource, borrowed here without retaining it.
-        // A null resource (never observed — wlroots always binds one) would
-        // leave the request without a death watch, so the listener is
-        // linked only when there is something to link into.
         let resource = (*raw.as_ptr()).resource;
-        if let Some(resource) = NonNull::new(resource) {
-            // Linked into the client's own resource destroy list, with no
-            // `alive` backstop: as for the tablet-tool listener this
-            // mirrors, the resource cannot be freed by anything other than
-            // the destroy this very listener watches or the run teardown
-            // whose drop unlinks it first — so there is no "owner died
-            // first" case to guard against.
-            let destroy = Registration::link_transient_seat(
-                resource,
-                on_transient_seat_resource_destroy::<S>,
-                (*bound).session,
-                raw,
-            );
-            let key = destroy.listener_addr();
-            (*session).transient_seats.borrow_mut().insert(key, destroy);
-        }
+        debug_assert!(
+            !resource.is_null(),
+            "transient seat created with null resource"
+        );
+        // A null resource (never observed — wlroots always binds one)
+        // leaves the request without a death watch, and an unwatched entry
+        // would name freed memory on disconnect — so do not record what
+        // cannot be watched: miss before recording anything.
+        let Some(resource) = NonNull::new(resource) else {
+            return;
+        };
+        let id = runtime.record_transient_seat(raw);
+        // Linked into the client's own resource destroy list, with no
+        // `alive` backstop: as for the tablet-tool listener this
+        // mirrors, the resource cannot be freed by anything other than
+        // the destroy this very listener watches or the run teardown
+        // whose drop unlinks it first — so there is no "owner died
+        // first" case to guard against.
+        let destroy = Registration::link_transient_seat(
+            resource,
+            on_transient_seat_resource_destroy::<S>,
+            (*bound).session,
+            raw,
+        );
+        let key = destroy.listener_addr();
+        (*session).transient_seats.borrow_mut().insert(key, destroy);
         // Copy out, drop every borrow, then emit: a handler that answers the
         // request on the event (consuming the entry just recorded) must not
         // deadlock on a still-held borrow — and no borrow crosses the emit.
@@ -8913,6 +8996,10 @@ unsafe extern "C" fn on_transient_seat_resource_destroy<S: Handlers>(
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let runtime = (*session).runtime;
+        debug_assert!(
+            (*bound).transient_seat.is_some(),
+            "transient-seat resource destroy fired without a bound seat"
+        );
         let Some(ts) = (*bound).transient_seat else {
             return;
         };
@@ -8946,6 +9033,78 @@ unsafe extern "C" fn on_transient_seat_manager_destroy<S: Handlers>(
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         (*session).runtime.clear_transient_seats();
+    }
+}
+
+/// The virtual-keyboard manager is going away. Clear whatever virtual
+/// keyboards are still tracked: the manager's death takes its objects with
+/// it, so any entry naming one would dangle. No event is announced — the
+/// manager's own teardown is display teardown, and every tracked keyboard
+/// simply ceases to resolve.
+///
+/// No double-evict with the device-destroy sweep: that path evicts by
+/// embedded keyboard (`retain`), which misses harmlessly on an already
+/// cleared table.
+unsafe extern "C" fn on_virtual_keyboard_manager_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `register_toplevel_and_input` into the virtual
+    // keyboard manager's own `events.destroy`; the manager is still live
+    // memory for this emission. Nothing is read through it — clearing the
+    // table only drops borrowed pointers, never dereferences them.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        runtime.inner.virtual_keyboards.borrow_mut().clear();
+    }
+}
+
+/// The virtual-pointer manager is going away. Clear whatever virtual
+/// pointers are still tracked, for the reason
+/// [`on_virtual_keyboard_manager_destroy`] gives. No event is announced.
+///
+/// No double-evict with the device-destroy sweep, for the same reason:
+/// that path evicts by embedded pointer (`retain`), which misses
+/// harmlessly on an already cleared table.
+unsafe extern "C" fn on_virtual_pointer_manager_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `register_toplevel_and_input` into the virtual
+    // pointer manager's own `events.destroy`; the manager is still live
+    // memory for this emission. Nothing is read through it — clearing the
+    // table only drops borrowed pointers, never dereferences them.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        runtime.inner.virtual_pointers.borrow_mut().clear();
+    }
+}
+
+/// The shortcuts-inhibit manager is going away. Clear whatever inhibitors
+/// are still tracked, for the reason
+/// [`on_virtual_keyboard_manager_destroy`] gives. No event is announced.
+///
+/// No double-evict with the per-inhibitor destroy path: that path evicts
+/// by id (`HashMap::remove`), which misses harmlessly on an already
+/// cleared table.
+unsafe extern "C" fn on_shortcuts_inhibit_manager_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `register_toplevel_and_input` into the
+    // shortcuts-inhibit manager's own `events.destroy`; the manager is
+    // still live memory for this emission. Nothing is read through it —
+    // clearing the table only drops borrowed pointers, never dereferences
+    // them.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        runtime.inner.shortcuts_inhibitors.borrow_mut().clear();
     }
 }
 
@@ -9119,9 +9278,13 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
             }
             sys::wlr_input_device_type::WLR_INPUT_DEVICE_TABLET_PAD => {
                 let pad_raw = sys::wlr_tablet_pad_from_input_device(device);
-                if !pad_raw.is_null()
-                    && let Some(device_nn) = NonNull::new(device)
-                {
+                if !pad_raw.is_null() {
+                    // SAFETY: `device` is non-null by the wlroots signal
+                    // contract — the first derefs already happened upstream
+                    // (the `events.destroy` link above and the `type_` match
+                    // scrutinee), so a null device would have trapped long
+                    // before this arm.
+                    let device_nn = NonNull::new_unchecked(device);
                     // SAFETY: `pad_raw` is non-null per the check above and
                     // live for as long as `device` is — the same lifetime
                     // the keyboard/pointer arms rely on.
@@ -11588,6 +11751,7 @@ mod axis_delivery_tests {
     #[derive(Default)]
     struct Recorder {
         seen: Vec<(f64, f64, PointerAxis, f64, i32, AxisSource, u32)>,
+        pads: Vec<crate::TabletPadId>,
     }
 
     impl OutputHandler for Recorder {}
@@ -11608,6 +11772,10 @@ mod axis_delivery_tests {
         ) {
             self.seen
                 .push((x, y, axis, delta, delta_discrete, source, time_msec));
+        }
+
+        fn tablet_pad_event(&mut self, id: crate::TabletPadId) {
+            self.pads.push(id);
         }
     }
 
@@ -11650,29 +11818,51 @@ mod axis_delivery_tests {
     /// instead of hitting the stale entry and skipping its v2 creation.
     #[test]
     fn emitting_tool_destroy_evicts_that_tool_only() {
+        use std::alloc::{Layout, alloc_zeroed, dealloc};
+
         let runtime = Runtime::new().expect("runtime");
         let session = empty_session(&runtime);
 
-        // Scratch hardware tools plus the tablet announcing them. Zeroed:
+        // Scratch hardware tools plus the tablet announcing them. Zeroed
+        // heap memory (`alloc_zeroed`, never materialised as a value —
+        // these structs embed listeners whose bare function pointers are UB
+        // to zero-materialise, for the reason `ScratchOutput` documents):
         // only `events.destroy` is ever touched, and it is initialised
-        // below. Boxed so nothing moves after `wl_signal_init` makes the
-        // head point at itself — the same reason `Harness` is boxed.
-        let mut tool_a: Box<sys::wlr_tablet_tool> = Box::new(unsafe { std::mem::zeroed() });
-        let mut tool_b: Box<sys::wlr_tablet_tool> = Box::new(unsafe { std::mem::zeroed() });
-        let mut tablet: Box<sys::wlr_tablet> = Box::new(unsafe { std::mem::zeroed() });
-        // SAFETY: exclusively-owned fresh boxes; `wl_signal_init` writes
-        // only the list heads it owns; nothing moves afterwards.
-        unsafe {
-            sys::wl_signal_init(&raw mut tool_a.events.destroy);
-            sys::wl_signal_init(&raw mut tool_b.events.destroy);
-        }
-        let (tool_a_nn, tool_b_nn, tablet_nn) = (
-            NonNull::from(tool_a.as_mut()),
-            NonNull::from(tool_b.as_mut()),
-            NonNull::from(tablet.as_mut()),
+        // below. The allocations never move after `wl_signal_init` makes
+        // each head point at itself, and live until the `dealloc`s at the
+        // end of this test.
+        // SAFETY: each layout is non-zero-sized, so `alloc_zeroed` returns
+        // either null (checked below) or a suitably aligned, zeroed
+        // allocation of exactly that size.
+        let tool_a = unsafe { alloc_zeroed(Layout::new::<sys::wlr_tablet_tool>()) }
+            .cast::<sys::wlr_tablet_tool>();
+        let tool_b = unsafe { alloc_zeroed(Layout::new::<sys::wlr_tablet_tool>()) }
+            .cast::<sys::wlr_tablet_tool>();
+        let tablet =
+            unsafe { alloc_zeroed(Layout::new::<sys::wlr_tablet>()) }.cast::<sys::wlr_tablet>();
+        assert!(
+            !tool_a.is_null() && !tool_b.is_null() && !tablet.is_null(),
+            "allocation failed"
         );
-        // Raw pointers for the signal data and the lookups below; the boxes
-        // above keep them alive past the session at the bottom of this test.
+        // SAFETY: non-null per the assert above; `wl_signal_init` writes
+        // only the list heads it owns, through raw pointers — no reference
+        // is ever formed — and the allocations do not move afterwards.
+        unsafe {
+            sys::wl_signal_init(&raw mut (*tool_a).events.destroy);
+            sys::wl_signal_init(&raw mut (*tool_b).events.destroy);
+        }
+        // SAFETY: non-null per the assert above; no reference is ever
+        // formed through these pointers.
+        let (tool_a_nn, tool_b_nn, tablet_nn) = unsafe {
+            (
+                NonNull::new_unchecked(tool_a),
+                NonNull::new_unchecked(tool_b),
+                NonNull::new_unchecked(tablet),
+            )
+        };
+        // Raw pointers for the signal data and the lookups below; the
+        // allocations above keep them alive past the session at the bottom
+        // of this test.
         let (tool_a_ptr, tool_b_ptr) = (tool_a_nn.as_ptr(), tool_b_nn.as_ptr());
 
         // SAFETY: `session` outlives the calls and the emission; both tools
@@ -11695,7 +11885,7 @@ mod axis_delivery_tests {
         // SAFETY: as above; the linked destroy listener unlinks itself from
         // this very list, which `wl_signal_emit_mutable` tolerates.
         unsafe {
-            sys::wl_signal_emit_mutable(&raw mut tool_a.events.destroy, tool_a_ptr.cast());
+            sys::wl_signal_emit_mutable(&raw mut (*tool_a).events.destroy, tool_a_ptr.cast());
         }
 
         assert_eq!(
@@ -11732,6 +11922,216 @@ mod axis_delivery_tests {
         unsafe {
             assert!(runtime.try_tablet_tool(tool_a_ptr).is_some());
         }
+
+        // SAFETY: the test ends here — the runtime (and its tables) drops
+        // with it, so nothing resolves to these allocations past this
+        // point; same layouts as allocated.
+        unsafe {
+            dealloc(tool_a.cast(), Layout::new::<sys::wlr_tablet_tool>());
+            dealloc(tool_b.cast(), Layout::new::<sys::wlr_tablet_tool>());
+            dealloc(tablet.cast(), Layout::new::<sys::wlr_tablet>());
+        }
+    }
+
+    /// Tracking the same hardware tool twice returns the same id and links
+    /// a single destroy listener; sweeping one tablet device evicts only
+    /// the tools it announced, with their session listeners.
+    #[test]
+    fn tablet_tool_tracking_is_idempotent_and_swept_per_tablet() {
+        use std::alloc::{Layout, alloc_zeroed, dealloc};
+
+        let runtime = Runtime::new().expect("runtime");
+        let session = empty_session(&runtime);
+
+        // Three scratch tools across two scratch tablets. `alloc_zeroed`
+        // for the reason the destroy test above documents; only each
+        // tool's `events.destroy` is initialised, for the
+        // `track_tablet_tool` link. The tablets are only ever compared.
+        // SAFETY: each layout is non-zero-sized; null-checked below.
+        let alloc_tool = || {
+            unsafe { alloc_zeroed(Layout::new::<sys::wlr_tablet_tool>()) }
+                .cast::<sys::wlr_tablet_tool>()
+        };
+        let t1 = alloc_tool();
+        let t2 = alloc_tool();
+        let t3 = alloc_tool();
+        let tablet_a =
+            unsafe { alloc_zeroed(Layout::new::<sys::wlr_tablet>()) }.cast::<sys::wlr_tablet>();
+        let tablet_b =
+            unsafe { alloc_zeroed(Layout::new::<sys::wlr_tablet>()) }.cast::<sys::wlr_tablet>();
+        assert!(
+            !t1.is_null() && !t2.is_null() && !t3.is_null(),
+            "allocation failed"
+        );
+        assert!(
+            !tablet_a.is_null() && !tablet_b.is_null(),
+            "allocation failed"
+        );
+        // SAFETY: non-null per the asserts; `wl_signal_init` writes only
+        // the list heads it owns, through raw pointers.
+        unsafe {
+            sys::wl_signal_init(&raw mut (*t1).events.destroy);
+            sys::wl_signal_init(&raw mut (*t2).events.destroy);
+            sys::wl_signal_init(&raw mut (*t3).events.destroy);
+        }
+        // SAFETY: non-null per the asserts; no reference is ever formed.
+        let (t1_nn, t2_nn, t3_nn, tablet_a_nn, tablet_b_nn) = unsafe {
+            (
+                NonNull::new_unchecked(t1),
+                NonNull::new_unchecked(t2),
+                NonNull::new_unchecked(t3),
+                NonNull::new_unchecked(tablet_a),
+                NonNull::new_unchecked(tablet_b),
+            )
+        };
+
+        // Tracking the same tool twice is idempotent: same id, one table
+        // row, one session listener — every tool-signal handler calls this
+        // unconditionally, so a second announce must not double-link.
+        // SAFETY: the session outlives the calls; every tool and tablet is
+        // a live allocation outliving the session's use of it; no `&mut
+        // Recorder` is live (the dispatcher holds null).
+        let first = unsafe { track_tablet_tool(&session, t1_nn, tablet_a_nn) };
+        let second = unsafe { track_tablet_tool(&session, t1_nn, tablet_a_nn) };
+        assert_eq!(
+            first, second,
+            "re-tracking a tool must return its existing id"
+        );
+        assert_eq!(runtime.rt_debug_tablet_tool_count(), 1);
+        assert_eq!(
+            session.tablet_tools.borrow().len(),
+            1,
+            "re-tracking a tool must not link a second destroy listener"
+        );
+
+        // SAFETY: as above.
+        unsafe {
+            track_tablet_tool(&session, t2_nn, tablet_a_nn);
+            track_tablet_tool(&session, t3_nn, tablet_b_nn);
+        }
+        assert_eq!(runtime.rt_debug_tablet_tool_count(), 3);
+        assert_eq!(session.tablet_tools.borrow().len(), 3);
+
+        // Tablet A dies: exactly what `on_input_destroy` runs for a dying
+        // tablet device — forget every address it announced and drop each
+        // tool's run-scoped destroy listener with it.
+        for tool in runtime.take_tablet_tools_for_tablet(tablet_a_nn) {
+            session
+                .tablet_tools
+                .borrow_mut()
+                .remove(&(tool.as_ptr() as usize));
+        }
+        assert_eq!(
+            runtime.rt_debug_tablet_tool_count(),
+            1,
+            "sweeping tablet A must evict exactly its two tools"
+        );
+        // SAFETY: every allocation is still live; addresses compared, never
+        // dereferenced.
+        unsafe {
+            assert!(
+                runtime.try_tablet_tool(t1).is_none(),
+                "tablet A's first tool must miss after the sweep"
+            );
+            assert!(
+                runtime.try_tablet_tool(t2).is_none(),
+                "tablet A's second tool must miss after the sweep"
+            );
+            assert!(
+                runtime.try_tablet_tool(t3).is_some(),
+                "tablet B's tool must keep resolving after A's sweep"
+            );
+        }
+        assert_eq!(
+            session.tablet_tools.borrow().len(),
+            1,
+            "the sweep must drop exactly A's listeners"
+        );
+
+        // Tidy teardown: forget B's tool (and its listener) before freeing,
+        // so no table names freed memory even for an instant.
+        runtime.forget_tablet_tool(t3_nn);
+        session.tablet_tools.borrow_mut().remove(&(t3 as usize));
+        assert_eq!(runtime.rt_debug_tablet_tool_count(), 0);
+        // SAFETY: every entry naming these allocations is gone; same
+        // layouts as allocated.
+        unsafe {
+            dealloc(t1.cast(), Layout::new::<sys::wlr_tablet_tool>());
+            dealloc(t2.cast(), Layout::new::<sys::wlr_tablet_tool>());
+            dealloc(t3.cast(), Layout::new::<sys::wlr_tablet_tool>());
+            dealloc(tablet_a.cast(), Layout::new::<sys::wlr_tablet>());
+            dealloc(tablet_b.cast(), Layout::new::<sys::wlr_tablet>());
+        }
+    }
+
+    /// A recorded pad resolves until its device forgets it, and a pad
+    /// signal for an untracked pad announces nothing.
+    #[test]
+    fn tablet_pad_record_resolves_forget_misses_and_untracked_emit_is_silent() {
+        use std::alloc::{Layout, alloc_zeroed, dealloc};
+
+        let runtime = Runtime::new().expect("runtime");
+        // A live recorder behind the session's dispatcher — the production
+        // topology (`Backend::run` points the dispatcher at the handler
+        // state) — so an emit that delivers is observed rather than
+        // assumed. Sound: `recorder` outlives `session`, and no `&mut
+        // Recorder` is live while either emit below runs, so the
+        // dispatcher's deref aliases nothing.
+        let mut recorder = Recorder::default();
+        let mut session = empty_session(&runtime);
+        session.dispatcher = Dispatcher::new(&mut recorder);
+
+        // SAFETY: non-zero layout; null-checked below; scratch memory
+        // whose address is only ever compared, never read or passed to
+        // FFI — `record`/`try`/`forget` never dereference it.
+        let pad = unsafe { alloc_zeroed(Layout::new::<sys::wlr_tablet_pad>()) }
+            .cast::<sys::wlr_tablet_pad>();
+        assert!(!pad.is_null(), "allocation failed");
+        // SAFETY: non-null per the assert; no reference is ever formed.
+        let pad_nn = unsafe { NonNull::new_unchecked(pad) };
+
+        // Untracked: the pad signal must not announce an id that resolves
+        // to nothing.
+        emit_tablet_pad_event(&session, pad_nn);
+        assert!(
+            recorder.pads.is_empty(),
+            "an untracked pad must emit nothing"
+        );
+
+        // Recorded without a v2 object (no manager and no seat exist here,
+        // so none could be created — the honest `v2_created`): resolves,
+        // and now the same signal announces exactly it.
+        runtime.record_tablet_pad(pad_nn, false);
+        assert_eq!(runtime.rt_debug_tablet_pad_count(), 1);
+        // SAFETY: `pad` is live; compared, never dereferenced.
+        let id = unsafe { runtime.try_tablet_pad(pad) }.expect("just recorded");
+        emit_tablet_pad_event(&session, pad_nn);
+        assert_eq!(
+            recorder.pads,
+            vec![id],
+            "a tracked pad must announce exactly its id"
+        );
+
+        // Forgotten: misses again, and the signal goes silent with it.
+        runtime.forget_tablet_pad(pad_nn);
+        assert_eq!(runtime.rt_debug_tablet_pad_count(), 0);
+        // SAFETY: as above.
+        unsafe {
+            assert!(
+                runtime.try_tablet_pad(pad).is_none(),
+                "a forgotten pad must miss"
+            );
+        }
+        emit_tablet_pad_event(&session, pad_nn);
+        assert_eq!(
+            recorder.pads,
+            vec![id],
+            "a forgotten pad must emit nothing further"
+        );
+
+        // SAFETY: the only entry naming this allocation is gone; same
+        // layout as allocated.
+        unsafe { dealloc(pad.cast(), Layout::new::<sys::wlr_tablet_pad>()) };
     }
 
     /// The routing half of the feature: an `Event::PointerAxis` must reach

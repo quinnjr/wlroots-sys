@@ -500,8 +500,8 @@ behavior is byte-identical to 0.20.32.
   `wlr_keyboard_group`'s embedded keyboard. Groups are `KeyboardGroupId`
   handles (`create_keyboard_group` / `destroy_keyboard_group` returning
   `false` on a second call, `try_keyboard_group` with null → `None`, never
-  dereferenced), evicted by the group's destroy listener, so a stale id
-  misses cleanly.
+  dereferenced), keyed by the group's object address and evicted by explicit
+  `destroy_keyboard_group` only, so a stale id misses cleanly.
 - **Shortcuts-inhibit + tablet events, all id-only and defaulted.**
   `ShortcutsInhibitorId` (`InhibitorId` alias) with
   `Runtime::create_shortcuts_inhibit_manager`,
@@ -526,10 +526,13 @@ behavior is byte-identical to 0.20.32.
   embedded device-destroy sweep — a virtual keyboard has no public
   per-object destroy signal, so the run's input teardown is the backstop.
   `TransientSeatId` (`create_transient_seat_manager`,
-  `ready_transient_seat` / `destroy_transient_seat` each consuming the
-  pending request and answering `false` on a second call): answer a
+  `ready_transient_seat` answering `TransientSeatAnswer::{Answered,
+  NoSeatYet, Unknown}` — a missing seat stays retryable while a dead id
+  stays dead — / `destroy_transient_seat` consuming the pending request
+  and answering `false` on a second call): answer a
   `transient_seat_requested` announcement with one or the other, or leave
-  the client waiting.
+  the client waiting. The id carries a generation alongside the address,
+  so a freed-then-reused request address never resolves under a stale id.
 - **Blessed lossy strings, carried over.** As in 0.20.32, Wayland requires
   valid UTF-8, so a keymap that is not is spec-violating — and rather than
   failing the snapshot on it, the keymap copy replaces non-UTF-8 bytes per
@@ -552,7 +555,9 @@ new supertrait to `Handlers` would instead break every downstream consumer that
 did not also implement it, which a `0.20.z` patch release may not do (the same
 reasoning that dropped a would-be `SessionLockHandler` earlier). The new
 `Event` variants ride a `pub(crate)` enum — internal dispatch, not public
-surface. An integration test asserts the additivity as a compile-time claim.
+surface. `ShortcutsInhibitorId` and `TabletToolId` are the canonical
+spellings; `InhibitorId` and `ToolId` are compatibility aliases for the same
+types. An integration test asserts the additivity as a compile-time claim.
 
 ### Coverage
 

@@ -35,7 +35,8 @@ fn shortcuts_inhibit_and_tablet_handlers_compile() {
         }
     }
 
-    // Also via the alias names the plan's failing assertion uses.
+    // Also via the alias spellings (`InhibitorId`, `ToolId`), which must
+    // keep compiling wherever the canonical ids do.
     struct H2 {
         toggles: u32,
         tools: u32,
@@ -104,4 +105,52 @@ fn fresh_runtime_tracks_no_inhibitors_or_tablets() {
         !rt.set_shortcuts_inhibitor_active(ShortcutsInhibitorId::dangling_nth_for_test(1), true)
     );
     assert!(!rt.shortcuts_inhibited());
+}
+
+#[test]
+fn keyboard_group_create_state_destroy_round_trip() {
+    use wlr::KeyboardGroupId;
+
+    headless_env();
+    let rt = wlr::Runtime::new().unwrap();
+    assert_eq!(rt.rt_debug_keyboard_group_count(), 0);
+
+    let id = rt
+        .create_keyboard_group()
+        .expect("wlroots allocates a keyboard group");
+    assert_eq!(rt.rt_debug_keyboard_group_count(), 1);
+    assert!(
+        rt.keyboard_group_state(id).is_some(),
+        "a created group's embedded keyboard must snapshot"
+    );
+
+    assert!(
+        rt.destroy_keyboard_group(id),
+        "destroying a tracked group must report success"
+    );
+    assert_eq!(rt.rt_debug_keyboard_group_count(), 0);
+    assert!(
+        rt.keyboard_group_state(id).is_none(),
+        "a destroyed group's id must miss"
+    );
+    assert!(
+        !rt.destroy_keyboard_group(id),
+        "destroying the same group twice must miss the second time"
+    );
+
+    // Null misses without touching anything.
+    // SAFETY: null is the documented miss case for the lookup.
+    unsafe {
+        assert!(rt.try_keyboard_group(std::ptr::null_mut()).is_none());
+    }
+    // A dangling id misses on both id-taking accessors.
+    let dangling = KeyboardGroupId::dangling_nth_for_test(1);
+    assert!(
+        rt.keyboard_group_state(dangling).is_none(),
+        "an unknown group id must snapshot to nothing"
+    );
+    assert!(
+        !rt.destroy_keyboard_group(dangling),
+        "destroying an unknown group must miss"
+    );
 }

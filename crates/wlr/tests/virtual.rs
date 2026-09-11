@@ -8,7 +8,7 @@ fn headless_env() {
 
 #[test]
 fn virtual_devices_and_transient_seats_miss_cleanly() {
-    use wlr::{TransientSeatId, VirtualKeyboardId, VirtualPointerId};
+    use wlr::{TransientSeatAnswer, TransientSeatId, VirtualKeyboardId, VirtualPointerId};
 
     headless_env();
     let rt = wlr::Runtime::new().unwrap();
@@ -28,9 +28,12 @@ fn virtual_devices_and_transient_seats_miss_cleanly() {
         assert!(rt.try_transient_seat(std::ptr::null_mut()).is_none());
     }
     // Answering or destroying an unknown transient seat changes nothing.
-    assert!(
-        !rt.ready_transient_seat(TransientSeatId::dangling_nth_for_test(1)),
-        "no seat exists and no request is pending, so ready must miss"
+    // An unknown id is fatal (`Unknown`), even with no seat: the miss is
+    // about the id, not the seat.
+    assert_eq!(
+        rt.ready_transient_seat(TransientSeatId::dangling_nth_for_test(1)),
+        TransientSeatAnswer::Unknown,
+        "no request is pending, so ready must miss as unknown"
     );
     assert!(
         !rt.destroy_transient_seat(TransientSeatId::dangling_nth_for_test(1)),
