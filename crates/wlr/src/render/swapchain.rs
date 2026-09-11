@@ -108,13 +108,13 @@ impl<'a> Swapchain<'a> {
     /// Buffer width in pixels.
     pub fn width(&self) -> i32 {
         // SAFETY: this value owns a live swapchain for as long as it exists.
-        unsafe { (*self.raw.as_ptr()).width }
+        unsafe { width_of(self.raw.as_ptr()) }
     }
 
     /// Buffer height in pixels.
     pub fn height(&self) -> i32 {
-        // SAFETY: as above.
-        unsafe { (*self.raw.as_ptr()).height }
+        // SAFETY: this value owns a live swapchain for as long as it exists.
+        unsafe { height_of(self.raw.as_ptr()) }
     }
 
     /// The format the swapchain allocates in.
@@ -133,7 +133,7 @@ impl<'a> Swapchain<'a> {
     /// signal, so this is a fact rather than a cached guess.
     pub fn allocator_alive(&self) -> bool {
         // SAFETY: this value owns a live swapchain.
-        !unsafe { (*self.raw.as_ptr()).allocator }.is_null()
+        unsafe { allocator_alive_of(self.raw.as_ptr()) }
     }
 
     /// Take the next free buffer, allocating one if the slot is empty.
@@ -248,24 +248,51 @@ impl Drop for LockedBuffer<'_> {
     }
 }
 
+/// Field reads shared by the owned [`Swapchain`] and the borrowed
+/// [`SwapchainRef`], written once against a raw pointer so the two query
+/// surfaces cannot drift apart. Each caller's `SAFETY` comment establishes
+/// the liveness its own way (self-ownership vs manager borrow); these
+/// helpers only read, never retain.
+///
+/// # Safety
+///
+/// `raw` must point at a live `wlr_swapchain` for the call.
+unsafe fn width_of(raw: *mut sys::wlr_swapchain) -> i32 {
+    // SAFETY: forwarded from the caller.
+    unsafe { (*raw).width }
+}
+
+/// # Safety
+///
+/// As [`width_of`].
+unsafe fn height_of(raw: *mut sys::wlr_swapchain) -> i32 {
+    // SAFETY: forwarded from the caller.
+    unsafe { (*raw).height }
+}
+
+/// # Safety
+///
+/// As [`width_of`].
+unsafe fn allocator_alive_of(raw: *mut sys::wlr_swapchain) -> bool {
+    // SAFETY: forwarded from the caller.
+    !unsafe { (*raw).allocator }.is_null()
+}
+
 /// Acquire a buffer from a swapchain the caller does not own.
 ///
-/// The manager-owned swapchains [`crate::output::SwapchainManager`] hands out
-/// acquire exactly like owned ones; this is the shared tail both call. Any
-/// lifetime works for the returned lock: the lock itself is what keeps the
-/// buffer alive, so outliving the swapchain borrow is sound — the buffer
-/// simply survives until its last lock is released.
+/// The manager-owned swapchains [`SwapchainRef`] hands out acquire exactly
+/// like owned ones; this is the shared tail both call. Both public callers
+/// narrow the lock to their own borrow (matching the pre-existing
+/// [`Swapchain::acquire`] precedent) even though the C-level lock would
+/// permit holding the buffer past it — conservative, not load-bearing.
 ///
 /// # Safety
 ///
 /// `raw` must point at a live `wlr_swapchain` whose allocator is live, and
-/// stay so for the call. [`Swapchain::acquire`] establishes this by checking
-/// [`Swapchain::allocator_alive`] on the same thread with no wlroots call in
-/// between; [`crate::output::SwapchainRef::acquire`] by the manager's
-/// contract (the manager owns its swapchains while the manager lives, and
-/// the allocator is the backend's, which outlives the manager's backend
-/// borrow).
-pub(crate) unsafe fn acquire_raw<'x>(raw: *mut sys::wlr_swapchain) -> Result<LockedBuffer<'x>> {
+/// stay so for the call. Both callers establish this the same way: an
+/// [`allocator_alive_of`] read on the same thread with no wlroots call in
+/// between.
+unsafe fn acquire_raw<'x>(raw: *mut sys::wlr_swapchain) -> Result<LockedBuffer<'x>> {
     // SAFETY: forwarded from the caller.
     let raw = unsafe { sys::wlr_swapchain_acquire(raw) };
     if raw.is_null() {
@@ -274,6 +301,109 @@ pub(crate) unsafe fn acquire_raw<'x>(raw: *mut sys::wlr_swapchain) -> Result<Loc
     // SAFETY: non-null, and wlroots documents the returned buffer as
     // locked — the consumer reference `LockedBuffer` releases.
     Ok(unsafe { LockedBuffer::from_raw(raw) })
+}
+
+/// A manager-owned swapchain, borrowed from an output swapchain manager.
+///
+/// Unlike [`Swapchain`], dropping this destroys nothing — the manager owns
+/// the swapchain and reaps it when the manager is finished. What it shares
+/// with the owned kind is acquiring: [`acquire`](SwapchainRef::acquire) hands
+/// out the same [`LockedBuffer`] consumer reference, released the same way.
+/// Only `width`, `height`, and `acquire` are mirrored here — the manager flow
+/// acquires buffers to repaint into, so the owned kind's `format`,
+/// `has_buffer`, and `in_flight` have no caller on this path.
+pub struct SwapchainRef<'m> {
+    raw: NonNull<sys::wlr_swapchain>,
+    _manager: PhantomData<&'m ()>,
+}
+
+impl<'m> SwapchainRef<'m> {
+    /// Wrap a manager-owned swapchain.
+    ///
+    /// # Safety
+    ///
+    /// `raw` must be a live `wlr_swapchain` owned by the manager this ref
+    /// borrows, and must stay so for `'m` — exactly what the manager's
+    /// `get_swapchain` establishes by calling it only after a successful
+    /// prepare covering the output.
+    pub(crate) unsafe fn from_raw(raw: NonNull<sys::wlr_swapchain>) -> SwapchainRef<'m> {
+        SwapchainRef {
+            raw,
+            _manager: PhantomData,
+        }
+    }
+
+    /// Buffer width in pixels.
+    pub fn width(&self) -> i32 {
+        // SAFETY: the manager owns a live swapchain for as long as this
+        // borrow exists.
+        unsafe { width_of(self.raw.as_ptr()) }
+    }
+
+    /// Buffer height in pixels.
+    pub fn height(&self) -> i32 {
+        // SAFETY: the manager owns a live swapchain for as long as this
+        // borrow exists.
+        unsafe { height_of(self.raw.as_ptr()) }
+    }
+
+    /// Whether the allocator backing this swapchain is still alive.
+    ///
+    /// Same fact the owned kind reports: wlroots nulls the field from its
+    /// own listener on the allocator's destroy signal. The manager's
+    /// allocator is the backend's, which normally outlives the manager —
+    /// normally is not always, so this is checked, not assumed.
+    fn allocator_alive(&self) -> bool {
+        // SAFETY: the manager owns a live swapchain for as long as this
+        // borrow exists.
+        unsafe { allocator_alive_of(self.raw.as_ptr()) }
+    }
+
+    /// How many slots are acquired and not yet released.
+    ///
+    /// Computed from the slots, mirroring
+    /// [`Swapchain::in_flight`](Swapchain::in_flight) — kept for the
+    /// [`Debug`] impl below, so the two kinds print the same shape.
+    fn in_flight(&self) -> usize {
+        // SAFETY: the manager owns a live swapchain for as long as this
+        // borrow exists; `slots` is a fixed-size array of
+        // `WLR_SWAPCHAIN_CAP` entries, which `SWAPCHAIN_CAP` is read from.
+        let slots = unsafe { &(*self.raw.as_ptr()).slots };
+        slots.iter().filter(|slot| slot.acquired).count()
+    }
+
+    /// Take the next free buffer, allocating one if the slot is empty.
+    ///
+    /// The same lock/unlock mechanics as
+    /// [`Swapchain::acquire`](Swapchain::acquire): dropping the
+    /// [`LockedBuffer`] unlocks the buffer and frees the slot.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Destroyed`] if the allocator is gone; [`Error::Operation`]
+    /// if all [`SWAPCHAIN_CAP`] slots are still in flight or the allocation
+    /// failed. Unlike the owned kind this never reports anything else —
+    /// there is no other failure mode in the shared tail.
+    pub fn acquire(&self) -> Result<LockedBuffer<'_>> {
+        if !self.allocator_alive() {
+            return Err(Error::Destroyed("wlr_allocator"));
+        }
+        // SAFETY: allocator just checked live on this thread, with no
+        // wlroots call in between that could destroy it — the same
+        // establishment the owned [`Swapchain::acquire`] performs.
+        unsafe { acquire_raw(self.raw.as_ptr()) }
+    }
+}
+
+impl std::fmt::Debug for SwapchainRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SwapchainRef")
+            .field("width", &self.width())
+            .field("height", &self.height())
+            .field("in_flight", &self.in_flight())
+            .field("allocator_alive", &self.allocator_alive())
+            .finish()
+    }
 }
 
 #[cfg(test)]
