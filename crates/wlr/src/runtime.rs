@@ -245,7 +245,8 @@ pub struct ImePreedit {
 impl ImePreedit {
     /// Copy the C preedit out, or `None` when its `text` is null (no preedit
     /// staged — the same population check `on_input_method_commit` applies
-    /// before forwarding).
+    /// before forwarding). Non-UTF-8 bytes are replaced per `to_string_lossy`
+    /// — spec-violating input only, since Wayland requires valid UTF-8.
     pub(crate) fn from_raw(raw: &sys::wlr_input_method_v2_preedit_string) -> Option<Self> {
         if raw.text.is_null() {
             return None;
@@ -267,7 +268,9 @@ impl ImePreedit {
 
 /// Copy a wlroots-owned nullable C string into an owned `String`, `None` for
 /// null. The single site encoding the null-guarded copy every snapshot field
-/// of this shape shares.
+/// of this shape shares. Non-UTF-8 bytes are replaced per `to_string_lossy` —
+/// spec-violating input only, since the Wayland protocol requires strings to
+/// be valid UTF-8.
 fn copy_nullable_string(text: *const std::ffi::c_char) -> Option<String> {
     if text.is_null() {
         return None;
@@ -453,6 +456,9 @@ impl CommittedTextInputState {
 /// Copy relay text into a C string for a token send, truncating at the first
 /// NUL. The wire serialisation reads C strings to their terminator, so a
 /// truncating copy sends exactly what passing the untruncated pointer would.
+/// Non-UTF-8 input arrives already replaced per `to_string_lossy` at the
+/// snapshot layer — spec-violating input only, since Wayland requires strings
+/// to be valid UTF-8; valid UTF-8 is byte-identical.
 fn relay_cstring(text: &str) -> std::ffi::CString {
     let truncated = text.split('\0').next().unwrap_or("");
     // `truncated` contains no NUL by construction, so this cannot fail; the
@@ -472,9 +478,11 @@ fn relay_cstring(text: &str) -> std::ffi::CString {
 /// `Clone`, not `Copy`: the handle holds a `Runtime` (an `Rc`), which cannot
 /// be `Copy`, and a clone is the same cheap handle.
 ///
-/// `finish` is the only path to `send_done` on this side, and `deactivate`
-/// the only path to `send_deactivate` + `done`: the relay handlers never
-/// touch the raw IME sends.
+/// `finish`/`deactivate` pairing is by convention at the call sites
+/// (`on_text_input_enable`, `on_text_input_commit`, `on_text_input_disable`,
+/// `on_text_input_destroy`, `relay_keyboard_focus`): dropping a session
+/// without finishing sends nothing and still compiles — the type guides, it
+/// does not enforce. The relay handlers never touch the raw IME sends.
 #[derive(Clone)]
 pub(crate) struct ImeActivation {
     runtime: Runtime,
@@ -491,6 +499,7 @@ impl std::fmt::Debug for ImeActivation {
 impl ImeActivation {
     /// The live activation session, or `None` when no input-method is bound
     /// (stale — every caller no-ops, preserving the relay guards).
+    #[must_use]
     pub(crate) fn of(runtime: &Runtime) -> Option<Self> {
         if runtime.inner.input_method.borrow().is_none() {
             return None;
@@ -577,7 +586,7 @@ impl ImeActivation {
     }
 
     /// Deactivate the IME (`deactivate` + `done`) and consume the session:
-    /// the only path to `send_deactivate`, used by `disable`, the
+    /// the conventional path to `send_deactivate`, used by `disable`, the
     /// text-input-destroy path, and the focus-leave path. The slot cannot
     /// empty between the two sends — nothing re-enters on this thread — so
     /// the `done` half still goes out when the `deactivate` half did.
@@ -590,9 +599,9 @@ impl ImeActivation {
         self.finish();
     }
 
-    /// Complete the activation (`done`) and consume the session: the only
-    /// path to `send_done` on this side — every enable/commit-site `done`
-    /// flows through here (or through `deactivate`).
+    /// Complete the activation (`done`) and consume the session: the
+    /// conventional path to `send_done` on this side — every enable/commit-site
+    /// `done` flows through here (or through `deactivate`).
     pub(crate) fn finish(self) {
         let Some(raw) = self.runtime.input_method_raw() else {
             return;
@@ -624,8 +633,11 @@ impl ImeActivation {
 /// text-input was destroyed), preserving each call site's guard. Same
 /// no-borrow-across-FFI discipline as [`ImeActivation`].
 ///
-/// `finish` is the only path to `send_done` on this side: the relay handlers
-/// never touch the raw text-input sends.
+/// `finish` pairing is by convention at the call sites
+/// (`on_input_method_commit`, `relay_keyboard_focus`, `on_new_text_input`):
+/// dropping a session without finishing sends nothing and still compiles —
+/// the type guides, it does not enforce. The relay handlers never touch the
+/// raw text-input sends.
 #[derive(Clone)]
 pub(crate) struct EnteredTextInput {
     runtime: Runtime,
@@ -643,6 +655,7 @@ impl std::fmt::Debug for EnteredTextInput {
 impl EnteredTextInput {
     /// The live session for the tracked text-input under `key`, or `None`
     /// when its entry is gone (stale — every caller no-ops).
+    #[must_use]
     pub(crate) fn of(runtime: &Runtime, key: usize) -> Option<Self> {
         if !runtime.inner.text_inputs.borrow().contains_key(&key) {
             return None;
@@ -9570,7 +9583,9 @@ impl Runtime {
         }
 
         // Emit phase: every borrow above has ended. Each session resolves its
-        // own object and no-ops when stale.
+        // own object and no-ops when stale. The entries cannot empty between
+        // collect and emit — nothing re-enters on this thread — so every
+        // collected key still resolves.
         for key in leaving {
             if let Some(entered) = EnteredTextInput::of(self, key) {
                 // SAFETY: `entered` resolved a live text-input whose

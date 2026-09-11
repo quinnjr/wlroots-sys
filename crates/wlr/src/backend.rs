@@ -5182,17 +5182,26 @@ unsafe extern "C" fn on_text_input_enable<S: Handlers>(
         if (*ti).focused_surface != (*seat.as_ptr()).keyboard_state.focused_surface {
             return;
         }
-        let mut im = runtime.inner.input_method.borrow_mut();
-        let Some(entry) = im.as_mut() else {
-            // Focused, but no input-method is bound: nothing to activate.
+        // Resolve the session before recording focus: if the slot emptied,
+        // the handler no-ops without leaving `focused_text_input` pointing at
+        // a text-input no session exists for. Unreachable today (the slot is
+        // live per the entry check below, and nothing runs between), but the
+        // order keeps the state consistent if it is ever reached.
+        let Some(activation) = crate::runtime::ImeActivation::of(runtime) else {
             return;
         };
-        // Record which text-input is driving activation, by its map key, so the
-        // text-input destroy handler can clear this back-reference. `ti` fired a
-        // listener `on_new_text_input` linked, so it is in the map; the key is
-        // `Some`. The borrow is dropped below, before any emit.
-        entry.focused_text_input = runtime.text_input_key_for(ti);
-        drop(im);
+        {
+            let mut im = runtime.inner.input_method.borrow_mut();
+            let Some(entry) = im.as_mut() else {
+                // Focused, but no input-method is bound: nothing to activate.
+                return;
+            };
+            // Record which text-input is driving activation, by its map key, so the
+            // text-input destroy handler can clear this back-reference. `ti` fired a
+            // listener `on_new_text_input` linked, so it is in the map; the key is
+            // `Some`. The borrow ends with this block, before any emit.
+            entry.focused_text_input = runtime.text_input_key_for(ti);
+        }
         // Payloads come from the committed text-input snapshot (the M8-1
         // readers); the feature gates stay on the live text-input, which the
         // snapshots deliberately do not carry.
@@ -5200,11 +5209,6 @@ unsafe extern "C" fn on_text_input_enable<S: Handlers>(
         // `current.features` is a field read, and the snapshot copies out.
         let features = (*ti).current.features;
         let snap = runtime.committed_text_input_state();
-        // The entry existed a moment ago and nothing runs between, so the
-        // session resolves; the `else` is the stale no-op, never taken here.
-        let Some(activation) = crate::runtime::ImeActivation::of(runtime) else {
-            return;
-        };
         activation.send_activate();
         if let Some(ref state) = snap {
             activation.send_text_input_state(state, features);
@@ -5411,6 +5415,7 @@ unsafe extern "C" fn on_input_method_commit<S: Handlers>(
         if snap.delete_before != 0 || snap.delete_after != 0 {
             entered.send_delete(snap.delete_before, snap.delete_after);
         }
+        // The serial is minted for a later generation-ordering use; discarded here.
         let _serial = entered.finish();
     }
 }
