@@ -167,9 +167,8 @@ milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_buffer_lock"
-reason    = "not-yet"
-note      = "Buffer type the render pipeline hands around."
-milestone = "M5"
+reason    = "internal"
+note      = "buffers arrive already owned (allocator hands out producer refs, swapchain hands out locked consumer refs); the crate never takes an extra lock on a borrowed buffer, so wlr_buffer_lock is unreachable."
 
 [[waived]]
 symbol    = "wlr_buffer_register_resource_interface"
@@ -197,9 +196,8 @@ milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_client_buffer"
-reason    = "not-yet"
-note      = "Buffer type the render pipeline hands around."
-milestone = "M5"
+reason    = "internal"
+note      = "opaque to the safe API; a client buffer is viewed through its first-field base wlr_buffer (Buffer) and the scene objects holding that buffer, so the struct itself is never named."
 
 [[waived]]
 symbol    = "wlr_client_buffer_get"
@@ -413,9 +411,8 @@ milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_damage_ring_buffer"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
+reason    = "internal"
+note      = "damage-ring internals driven through wlr_scene_output_commit, which the crate already wraps."
 
 [[waived]]
 symbol    = "wlr_data_control_device_v1"
@@ -2361,9 +2358,8 @@ milestone = "M11"
 
 [[waived]]
 symbol    = "wlr_readonly_data_buffer"
-reason    = "not-yet"
-note      = "Buffer type the render pipeline hands around."
-milestone = "M5"
+reason    = "internal"
+note      = "data-backed buffer impl detail never named by the safe API."
 
 [[waived]]
 symbol    = "wlr_region_from_resource"
@@ -2454,9 +2450,8 @@ note      = "Selected by the WLR_SCENE_DEBUG_DAMAGE environment variable, not by
 
 [[waived]]
 symbol    = "wlr_scene_output_build_state"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
+reason    = "internal"
+note      = "reached only through wlr_scene_output_commit, which the crate wraps; never called directly. Cf. wlr_xdg_popup_grab."
 
 [[waived]]
 symbol    = "wlr_scene_set_color_manager_v1"
@@ -2472,9 +2467,8 @@ milestone = "M10"
 
 [[waived]]
 symbol    = "wlr_scene_surface_create"
-reason    = "not-yet"
-note      = "Deep wlr_scene / damage_ring surface."
-milestone = "M5"
+reason    = "internal"
+note      = "scene surfaces in this crate's graphs arrive via the wrapped xdg/layer helpers and subsurface trees, which build on it; the raw constructor is never called directly (zero sys:: uses)."
 
 [[waived]]
 symbol    = "wlr_screencopy_frame_v1"
