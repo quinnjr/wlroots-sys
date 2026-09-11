@@ -132,7 +132,10 @@ pub use render::{
 pub use render::{Gles2, Gles2TextureAttribs};
 #[cfg(wlr_has_vulkan_renderer)]
 pub use render::{Vk, VkImageAttribs};
-pub use runtime::{Band, InputPopupSurfaceId, Runtime};
+pub use runtime::{
+    Band, CommittedImeState, CommittedTextInputState, ImePreedit, InputPopupSurfaceId,
+    PendingImeState, PendingTextInputState, Runtime,
+};
 pub use scene::{
     DamageRing, DamageRingRef, NodeId, NodeKind, RectId, SceneBuffer, SceneBufferOptions,
     SceneNode, SceneOutput, SceneOutputId, SceneOutputStateOptions, SceneRect, SceneSurface,

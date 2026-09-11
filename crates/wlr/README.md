@@ -474,6 +474,88 @@ pre-map commit listener that calls the new
 `Runtime::schedule_frame_all(&self) -> usize` so XWayland's handshake frame
 callback is answered. Bounded to the handshake commits; never busy-loops.
 
+## 0.20.32 — IME/text-input depth (M8)
+
+The relay 0.20.30 stood up and the popups 0.20.31 added get their observable
+depth: a compositor can now **read** what both sides said (the double-buffered
+IME and text-input states, as owned snapshots), gets told **when** the
+interesting moments happen (three notification hooks), and keeps paying nothing
+for either — the wire behavior is byte-identical to 0.20.31.
+
+### What you get
+
+- **Snapshot pairs.** Four owned types with `pub(crate)` constructors and `pub`
+  fields, so staged data can never be mistaken for committed:
+  `PendingImeState` / `CommittedImeState` (the IME side, with `ImePreedit` —
+  a `None` preedit means none was offered, distinct from an empty string the
+  relay still forwards) and `PendingTextInputState` /
+  `CommittedTextInputState` (the editable-field side; the committed half also
+  carries the `cursor_rectangle` popup-placement anchor). Read them through
+  `Runtime::{pending_ime_state, committed_ime_state, pending_text_input_state,
+  committed_text_input_state}` — each answers `None` when nothing is bound or
+  the table misses. Plus the two readers the relay needed:
+  `Runtime::try_input_popup_surface` (null → `None`, never dereferenced;
+  otherwise a reverse lookup over the popup entries) and
+  `Runtime::destroy_keyboard_grab` (`true` when a grab registration was taken
+  and cleared, `false` when absent).
+- **Session-typed relay sends — by convention, not by lock.** The handlers no
+  longer call the raw `sys::send_*` sites; everything flows through two
+  crate-internal (`pub(crate)`) sessions: `ImeActivation` toward the bound
+  input-method (`send_surrounding`, `send_content_type`, `send_change_cause`,
+  with `finish` the conventional path to `send_done` and `deactivate` the
+  `deactivate` + `done` pair) and `EnteredTextInput` toward one entered
+  text-input (`send_preedit`, `send_commit`, `send_delete`, with `finish`
+  returning the `CommitSerial`). Honestly stated: dropping a session without
+  finishing sends nothing and still compiles — the type guides, it does not
+  enforce. What it buys is a single auditable surface: every raw send lives
+  inside the token `impl` blocks and every send re-resolves its object through
+  the tables, no-op'ing on stale instead of calling into a destroyed object.
+  The proof is the relay suite passing unmodified.
+- **Three notification hooks, all defaulted no-ops on `SeatHandler`.**
+  `popup_repositioned(popup)` — the focused text-input committed, so re-run
+  the popup placement math (fresh anchor from
+  `focused_text_input_cursor_rectangle`, extent from the new
+  `Runtime::input_popup_size`, which answers `Some((w, h))` from the committed
+  surface size and `None` for an unknown or destroyed id);
+  `input_method_committed` — the bound IME committed, relay already forwarded,
+  read what it said via `committed_ime_state`; `input_method_deactivated` —
+  `deactivate` + `done` already went out, hide whatever overlay the committed
+  state was showing. Notification-only in all three cases: there is nothing
+  left for a handler to forward.
+- **Blessed lossy strings.** Wayland requires valid UTF-8, so a client that
+  sends anything else is spec-violating — and rather than failing the relay on
+  it, the snapshots replace non-UTF-8 bytes per `to_string_lossy` at the
+  copy-out boundary (and relay text truncates at the first NUL, which is
+  exactly what the wire serialisation would send anyway). Valid UTF-8 is
+  byte-identical; invalid UTF-8 degrades to replacement characters instead of
+  aborting the session.
+
+### Additive
+
+No trait was added and no supertrait changed. The three hooks live on the
+existing `SeatHandler` as defaulted no-ops, so an empty `SeatHandler` impl
+written against 0.20.31 still compiles and still satisfies `Handlers` — adding a
+new supertrait to `Handlers` would instead break every downstream consumer that
+did not also implement it, which a `0.20.z` patch release may not do (the same
+reasoning that dropped a would-be `SessionLockHandler` earlier). The new
+`Event` variants ride a `pub(crate)` enum — internal dispatch, not public
+surface — and the token types are `pub(crate)`, so no consumer names them. An
+integration test asserts the additivity as a compile-time claim.
+
+### Coverage
+
+The six M8-deferred symbols moved waived → wrapped: the aggregate `_state`
+accessors and payload structs (`wlr_input_method_v2_state` →
+`PendingImeState`, `wlr_input_method_v2_preedit_string` → `ImePreedit`,
+`wlr_input_method_v2_delete_surrounding_text` → `PendingImeState`,
+`wlr_text_input_v3_state` → `PendingTextInputState`), the popup downcast
+(`wlr_input_popup_surface_v2_try_from_wlr_surface` →
+`Runtime::try_input_popup_surface`), and the grab's explicit destroy
+(`wlr_input_method_keyboard_grab_v2_destroy` →
+`Runtime::destroy_keyboard_grab`). The commit/deactivate notification hooks
+added no FFI symbols — Rust-side events and defaulted methods — so the ledgers
+did not move for them. No dead FFI was added to reach 100% on paper.
+
 ## 0.20.31 — input-method popups + keyboard grab
 
 The second half of the input-method work (A6.2). 0.20.30 stood up the

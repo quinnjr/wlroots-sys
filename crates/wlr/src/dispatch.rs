@@ -241,6 +241,35 @@ pub(crate) enum Event {
     /// so the id is stale for resolution and serves only to tell the handler
     /// *which* popup went away.
     InputMethodPopupDestroyed(InputPopupSurfaceId),
+    /// A tracked input-method candidate popup surface needs re-placing: the
+    /// focused text-input committed, so the cursor rectangle the compositor
+    /// placed the popup against may have moved. Carries the crate's own
+    /// [`InputPopupSurfaceId`] — an opaque, `Copy`/`Eq` id like every other id
+    /// here. One is emitted per tracked popup, after the relay to the
+    /// input-method has settled, so observers see a finished forward rather
+    /// than a half-applied one. A deferred delivery may name a popup destroyed
+    /// in between; like `InputMethodPopupDestroyed`, the id then only tells
+    /// the handler *which* popup the reposition was for.
+    InputMethodPopupRepositioned(InputPopupSurfaceId),
+
+    /// The bound input-method committed. Carries no data — the committed
+    /// generation is owned state (`String`s) that cannot ride in a `Copy`,
+    /// `Eq` enum, so the handler reads it back via
+    /// [`Runtime::committed_ime_state`](crate::Runtime::committed_ime_state)
+    /// instead (the same "carry nothing, resolve at delivery" shape
+    /// `OutputConfigurationApplied` uses). Emitted once per commit, after the
+    /// relay to the focused text-input has settled, so observers see a
+    /// finished forward rather than a half-applied one.
+    InputMethodCommitted,
+
+    /// The bound input-method deactivated. Carries no data — a deactivate
+    /// names no generation, so there is nothing to snapshot; it is purely the
+    /// compositor's cue to hide whatever overlay the committed state was
+    /// showing. Emitted once per deactivate, after the `deactivate` + `done`
+    /// sends have settled, so observers see a finished transition rather
+    /// than a half-applied one (the same "carry nothing" shape
+    /// `InputMethodCommitted` uses).
+    InputMethodDeactivated,
 
     /// A client's `zwlr_output_manager_v1` configuration was applied. Carries
     /// no data — the owned `Vec<AppliedHead>` payload cannot ride in a `Copy`,

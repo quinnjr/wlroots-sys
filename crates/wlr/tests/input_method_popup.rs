@@ -5,7 +5,7 @@
 //! integration binary has no client library and no way to bind
 //! `zwp_input_method_v2`, let alone drive it into creating a popup surface
 //! (`wlr-sys` is deliberately not a dev-dependency). What is provable here is
-//! that the two popup callbacks are additive — an empty `SeatHandler` impl
+//! that the three popup callbacks are additive — an empty `SeatHandler` impl
 //! written against the previous release still compiles, because they are
 //! defaulted — that they are overridable with the signature this release
 //! froze, and that installing them changes nothing about the ordinary run
@@ -20,15 +20,15 @@
 //!
 //! The two halves it cannot reach are covered elsewhere:
 //!
-//! * Event routing — an `Event::InputMethodPopupCreated`/`Destroyed` reaching
-//!   the handler — rides the same `deliver_all` arm every other event uses; it
-//!   is wired beside `SessionLockChanged`.
+//! * Event routing — an `Event::InputMethodPopupCreated`/`Destroyed`/
+//!   `Repositioned` reaching the handler — rides the same `deliver_all` arm
+//!   every other event uses; it is wired beside `SessionLockChanged`.
 //! * The end-to-end proof that a *real* input-method popup reaches the handler
 //!   and is placed in the scene is icedtea's harness tests 8-10 (contract B9),
 //!   which drive a real IME client under the harness compositor.
 
 /// A `SeatHandler` written against the release before this one, with an empty
-/// body, must still compile and still be usable now: the two popup methods are
+/// body, must still compile and still be usable now: the three popup methods are
 /// defaulted, so they do not appear in a legacy impl. That is the additivity
 /// claim of this release, and it is a compile-time claim, so the test that
 /// asserts it is a type that exists.
@@ -36,7 +36,7 @@ struct LegacyHandler;
 
 impl wlr::SeatHandler for LegacyHandler {}
 
-/// A handler that overrides both new methods, proving the signatures are what
+/// A handler that overrides all three methods, proving the signatures are what
 /// the contract froze and that `InputPopupSurfaceId` is nameable from outside
 /// the crate.
 #[derive(Default)]
@@ -51,6 +51,10 @@ impl wlr::SeatHandler for PopupHandler {
 
     fn popup_surface_destroyed(&mut self, popup: wlr::InputPopupSurfaceId) {
         self.seen.push(format!("destroyed {popup:?}"));
+    }
+
+    fn popup_repositioned(&mut self, popup: wlr::InputPopupSurfaceId) {
+        self.seen.push(format!("repositioned {popup:?}"));
     }
 }
 
@@ -116,6 +120,10 @@ fn a_run_with_an_input_method_popup_handler_starts_and_stops_cleanly() {
         fn popup_surface_destroyed(&mut self, _popup: wlr::InputPopupSurfaceId) {
             self.popups += 1;
         }
+
+        fn popup_repositioned(&mut self, _popup: wlr::InputPopupSurfaceId) {
+            self.popups += 1;
+        }
     }
 
     let display = wlr::Display::new().expect("display");
@@ -173,6 +181,10 @@ fn unknown_popup_ids_and_no_ime_miss_cleanly() {
     assert!(
         runtime.rt_debug_input_popup_node(bogus).is_none(),
         "unknown popup id must track no node"
+    );
+    assert!(
+        runtime.input_popup_size(bogus).is_none(),
+        "unknown popup id must report no size"
     );
     assert!(
         runtime.focused_text_input_cursor_rectangle().is_none(),
