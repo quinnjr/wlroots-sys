@@ -11703,6 +11703,27 @@ mod tests {
         read
     }
 
+    /// The lossy boundary every snapshot string copy shares: null misses,
+    /// valid UTF-8 round-trips byte-identical, invalid bytes become
+    /// U+FFFD rather than aborting. Snapshot field mapping (`KeyboardState`
+    /// and friends) builds on this plus plain field copies, which need no
+    /// separate oracle.
+    #[test]
+    fn copy_nullable_string_maps_null_valid_and_invalid() {
+        use std::ffi::CString;
+        assert_eq!(copy_nullable_string(std::ptr::null()), None);
+        let valid = CString::new("us").expect("CString");
+        assert_eq!(copy_nullable_string(valid.as_ptr()), Some("us".to_string()));
+        // Invalid UTF-8 by design: replacement, not abort or rejection.
+        let bytes: &[u8] = &[b'x', 0xFF, b'y', 0];
+        // SAFETY: nul-terminated by construction; only read to the terminator.
+        let invalid = unsafe { std::ffi::CStr::from_bytes_with_nul_unchecked(bytes) };
+        assert_eq!(
+            copy_nullable_string(invalid.as_ptr()),
+            Some("x\u{FFFD}y".to_string())
+        );
+    }
+
     #[test]
     fn ids_are_unique_and_resolve_to_the_fd_they_were_issued_for() {
         let rt = Runtime::new().expect("runtime");

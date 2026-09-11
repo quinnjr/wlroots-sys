@@ -472,7 +472,7 @@ impl<'h> Output<'h> {
     /// is by type (`Buffer`/`Region` carry non-null pointers; scalars pass
     /// through for wlroots to accept or reject) — and [`commit`](OutputState::commit)
     /// consumes the transaction, which is the single fallible boundary.
-    pub fn state(&self) -> OutputState<'_> {
+    pub fn state(&self) -> OutputState<'_, '_> {
         OutputState::new(self)
     }
 
@@ -748,12 +748,18 @@ impl PresentEvent {
 /// once. Created by [`Output::state`]; [`commit`](OutputState::commit)
 /// consumes it. Dropping an uncommitted transaction finishes (abandons)
 /// the staged state without committing anything.
-pub struct OutputState<'a> {
+///
+/// The second lifetime ties a staged buffer to the transaction: `set_buffer`
+/// stores the borrow, so the buffer must outlive every later use of the
+/// transaction (including `commit`), and dropping the buffer first is a
+/// compile error rather than a dangling staged pointer.
+pub struct OutputState<'a, 'b> {
     output: &'a Output<'a>,
     state: Option<sys::wlr_output_state>,
+    staged_buffer: Option<&'b Buffer<'b>>,
 }
 
-impl Drop for OutputState<'_> {
+impl Drop for OutputState<'_, '_> {
     fn drop(&mut self) {
         if let Some(mut state) = self.state.take() {
             // SAFETY: the state was initialised by `OutputState::new` and
@@ -767,7 +773,7 @@ impl Drop for OutputState<'_> {
     }
 }
 
-impl<'a> OutputState<'a> {
+impl<'a, 'b> OutputState<'a, 'b> {
     fn new(output: &'a Output<'a>) -> Self {
         // SAFETY: `state` starts uninitialised rather than zeroed for the
         // same reason `Output::commit` documents: nothing reads it before
@@ -781,6 +787,7 @@ impl<'a> OutputState<'a> {
         OutputState {
             output,
             state: Some(state),
+            staged_buffer: None,
         }
     }
 
@@ -811,14 +818,19 @@ impl<'a> OutputState<'a> {
     /// Copy another transaction's staged fields into this one. Reports
     /// whether the copy ran: `false` when either side was already consumed
     /// (committed), so a silently half-copied state can never pass for a
-    /// complete one.
-    pub fn copy_from(&mut self, src: &OutputState<'_>) -> bool {
+    /// complete one. A staged buffer guard travels with the copy, so the
+    /// destination inherits the source's lifetime constraint.
+    pub fn copy_from(&mut self, src: &OutputState<'_, 'b>) -> bool {
         // SAFETY: both states are initialised (constructor invariant;
         // committed states are taken, never re-staged). `wlr_output_state_copy`
         // only reads the source.
         unsafe {
-            if let (Some(dst), Some(src)) = (self.state.as_mut(), src.state.as_ref()) {
-                sys::wlr_output_state_copy(dst as *mut _, src as *const _)
+            if let (Some(dst), Some(src_state)) = (self.state.as_mut(), src.state.as_ref()) {
+                let ok = sys::wlr_output_state_copy(dst as *mut _, src_state as *const _);
+                if ok {
+                    self.staged_buffer = src.staged_buffer;
+                }
+                ok
             } else {
                 false
             }
@@ -921,18 +933,20 @@ impl<'a> OutputState<'a> {
 
     /// Stage the buffer to scan out or render from.
     ///
-    /// The borrow ties the buffer's lifetime to every later use of this
-    /// transaction, including [`commit`](OutputState::commit): the staged
-    /// pointer is only a borrow, and wlroots takes its own reference no
-    /// earlier than commit, so letting the buffer drop first would stage a
-    /// dangling pointer.
-    pub fn set_buffer<'b>(&'b mut self, buffer: &'b Buffer<'_>) {
+    /// The borrow is stored on the transaction (`staged_buffer`), so the
+    /// buffer must outlive every later use of `self`, including
+    /// [`commit`](OutputState::commit): dropping the buffer first is a
+    /// compile error, not a dangling staged pointer. (The C struct holds
+    /// only a borrow; wlroots takes its own reference no earlier than
+    /// commit.)
+    pub fn set_buffer(&mut self, buffer: &'b Buffer<'b>) {
         // SAFETY: as in `set_enabled`, plus the lifetime above.
         unsafe {
             if let Some(state) = self.state.as_mut() {
                 sys::wlr_output_state_set_buffer(state as *mut _, buffer.as_ptr());
             }
         }
+        self.staged_buffer = Some(buffer);
     }
 
     /// Stage the damaged region (buffer-local coordinates) for a partial
@@ -1299,6 +1313,76 @@ mod tests {
             Some(AdaptiveSyncStatus::Enabled)
         );
         assert_eq!(AdaptiveSyncStatus::from_raw(99), None);
+    }
+
+    /// Bitmask values pinned against the headers: a swapped discriminant
+    /// would read every present/field decision backwards silently.
+    #[test]
+    fn present_and_field_bits_match_wlroots() {
+        for (ours, theirs) in [
+            (
+                PresentFlags::VSYNC.bits(),
+                sys::wlr_output_present_flag::WLR_OUTPUT_PRESENT_VSYNC.0,
+            ),
+            (
+                PresentFlags::HW_CLOCK.bits(),
+                sys::wlr_output_present_flag::WLR_OUTPUT_PRESENT_HW_CLOCK.0,
+            ),
+            (
+                PresentFlags::HW_COMPLETION.bits(),
+                sys::wlr_output_present_flag::WLR_OUTPUT_PRESENT_HW_COMPLETION.0,
+            ),
+            (
+                PresentFlags::ZERO_COPY.bits(),
+                sys::wlr_output_present_flag::WLR_OUTPUT_PRESENT_ZERO_COPY.0,
+            ),
+        ] {
+            assert_eq!(ours, theirs);
+        }
+        for (ours, theirs) in [
+            (
+                CommittedFields::BUFFER.bits(),
+                sys::wlr_output_state_field::WLR_OUTPUT_STATE_BUFFER.0,
+            ),
+            (
+                CommittedFields::DAMAGE.bits(),
+                sys::wlr_output_state_field::WLR_OUTPUT_STATE_DAMAGE.0,
+            ),
+            (
+                CommittedFields::MODE.bits(),
+                sys::wlr_output_state_field::WLR_OUTPUT_STATE_MODE.0,
+            ),
+            (
+                CommittedFields::ENABLED.bits(),
+                sys::wlr_output_state_field::WLR_OUTPUT_STATE_ENABLED.0,
+            ),
+            (
+                CommittedFields::SCALE.bits(),
+                sys::wlr_output_state_field::WLR_OUTPUT_STATE_SCALE.0,
+            ),
+            (
+                CommittedFields::TRANSFORM.bits(),
+                sys::wlr_output_state_field::WLR_OUTPUT_STATE_TRANSFORM.0,
+            ),
+            (
+                CommittedFields::ADAPTIVE_SYNC_ENABLED.bits(),
+                sys::wlr_output_state_field::WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED.0,
+            ),
+            (
+                CommittedFields::RENDER_FORMAT.bits(),
+                sys::wlr_output_state_field::WLR_OUTPUT_STATE_RENDER_FORMAT.0,
+            ),
+            (
+                CommittedFields::SUBPIXEL.bits(),
+                sys::wlr_output_state_field::WLR_OUTPUT_STATE_SUBPIXEL.0,
+            ),
+        ] {
+            assert_eq!(ours, theirs);
+        }
+        assert!(CommittedFields::NONE.is_empty());
+        assert!(!CommittedFields::SCALE.is_empty());
+        assert!(CommittedFields::SCALE.contains(CommittedFields::SCALE));
+        assert!(!CommittedFields::SCALE.contains(CommittedFields::MODE));
     }
 
     /// Flag combinators behave as a set algebra; unknown bits round-trip

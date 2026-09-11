@@ -8,9 +8,7 @@
 //! would abort through C.
 
 use std::sync::Once;
-use wlr::{
-    Backend, CommittedFields, Display, ModeType, Region, Runtime, Transform, Until,
-};
+use wlr::{Backend, CommittedFields, Display, ModeType, Region, Runtime, Transform, Until};
 
 /// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
 /// any test in this binary calls `Backend::autocreate`. See `axis.rs`'s
@@ -116,6 +114,15 @@ impl wlr::OutputHandler for App {
         output.update_needs_frame();
         let _ = output.needs_frame();
         output.send_frame();
+        output.schedule_done();
+        output.send_present(&wlr::PresentEvent {
+            commit_seq: 0,
+            presented: true,
+            when: std::time::Duration::new(1, 0),
+            seq: 0,
+            refresh: 60_000,
+            flags: wlr::PresentFlags::VSYNC,
+        });
         output.lock_attach_render(true);
         output.lock_attach_render(false);
         output.lock_software_cursors(true);
