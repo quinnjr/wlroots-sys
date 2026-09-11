@@ -656,11 +656,14 @@ impl<'h> Output<'h> {
     /// the compositor positions itself (drm planes, hardware overlays).
     /// Destroy explicitly with [`OutputLayer::destroy`] before the output
     /// goes away.
-    pub fn create_layer(&self) -> Option<OutputLayer> {
+    pub fn create_layer(&self) -> Option<OutputLayer<'_>> {
         // SAFETY: as in `create_cursor`.
         unsafe {
             let raw = sys::wlr_output_layer_create(self.raw.as_ptr());
-            NonNull::new(raw).map(|raw| OutputLayer { raw })
+            NonNull::new(raw).map(|raw| OutputLayer {
+                raw,
+                _marker: PhantomData,
+            })
         }
     }
 }
@@ -672,6 +675,7 @@ impl<'h> Output<'h> {
 /// ordering would be the use-after-free this discipline avoids).
 pub struct OutputCursor<'b> {
     raw: NonNull<sys::wlr_output_cursor>,
+    // Write-only borrow guard: never read, only stored — keeps the staged buffer alive past the call.
     staged: Option<&'b Buffer<'b>>,
 }
 
@@ -733,11 +737,12 @@ impl<'b> OutputCursor<'b> {
 /// [`Output::create_layer`], destroyed explicitly by [`destroy`](OutputLayer::destroy)
 /// before the output goes away. Same owned-handle discipline as
 /// [`OutputCursor`].
-pub struct OutputLayer {
+pub struct OutputLayer<'o> {
     raw: NonNull<sys::wlr_output_layer>,
+    _marker: PhantomData<&'o ()>,
 }
 
-impl OutputLayer {
+impl OutputLayer<'_> {
     /// Destroy the layer, releasing it. Consumes the handle.
     pub fn destroy(self) {
         // SAFETY: `raw` names a live layer: created by `create_layer`,
@@ -749,12 +754,15 @@ impl OutputLayer {
 }
 
 /// One layer entry of an atomic [`OutputState`]: which layer, what to show
-/// in it, and where. All borrows must outlive the transaction's commit —
-/// `set_layers` stores them exactly like [`OutputState::set_buffer`]'s
-/// guard, so a dropped buffer/region is a compile error.
-pub struct LayerState<'l> {
+/// in it, and where. `'l` borrows the entry (with its buffer and damage
+/// region) for the transaction; `'o` ties the layer handle to the output it
+/// was created on. [`OutputState::set_layers`] constrains both to outlive
+/// the transaction and STORES the entry refs (plus the array built from
+/// them) on it, so a dropped layer, buffer, or region is a compile error
+/// rather than a dangling staged pointer.
+pub struct LayerState<'l, 'o> {
     /// The layer being described.
-    pub layer: &'l OutputLayer,
+    pub layer: &'l OutputLayer<'o>,
     /// Buffer to show, or `None` to leave the layer's buffer unchanged.
     pub buffer: Option<&'l Buffer<'l>>,
     /// Source box within the buffer.
@@ -880,6 +888,14 @@ impl PresentEvent {
     }
 }
 
+/// Stored guard for [`OutputState::set_layers`]: the array C retains until
+/// `wlr_output_state_finish` (plus the entry refs keeping every layer,
+/// buffer, and region alive that long).
+struct StagedLayers<'b> {
+    array: Vec<sys::wlr_output_layer_state>,
+    _entries: Vec<&'b LayerState<'b, 'b>>,
+}
+
 /// An atomic state transaction on an output: stage several fields, commit
 /// once. Created by [`Output::state`]; [`commit`](OutputState::commit)
 /// consumes it. Dropping an uncommitted transaction finishes (abandons)
@@ -893,6 +909,7 @@ pub struct OutputState<'a, 'b> {
     output: &'a Output<'a>,
     state: Option<sys::wlr_output_state>,
     staged_buffer: Option<&'b Buffer<'b>>,
+    staged_layers: Option<StagedLayers<'b>>,
 }
 
 impl Drop for OutputState<'_, '_> {
@@ -924,6 +941,7 @@ impl<'a, 'b> OutputState<'a, 'b> {
             output,
             state: Some(state),
             staged_buffer: None,
+            staged_layers: None,
         }
     }
 
@@ -954,8 +972,8 @@ impl<'a, 'b> OutputState<'a, 'b> {
     /// Copy another transaction's staged fields into this one. Reports
     /// whether the copy ran: `false` when either side was already consumed
     /// (committed), so a silently half-copied state can never pass for a
-    /// complete one. A staged buffer guard travels with the copy, so the
-    /// destination inherits the source's lifetime constraint.
+    /// complete one. The staged buffer and layers guards travel with the
+    /// copy, so the destination inherits the source's lifetime constraints.
     pub fn copy_from(&mut self, src: &OutputState<'_, 'b>) -> bool {
         // SAFETY: both states are initialised (constructor invariant;
         // committed states are taken, never re-staged). `wlr_output_state_copy`
@@ -965,6 +983,12 @@ impl<'a, 'b> OutputState<'a, 'b> {
                 let ok = sys::wlr_output_state_copy(dst as *mut _, src_state as *const _);
                 if ok {
                     self.staged_buffer = src.staged_buffer;
+                    // Fresh Vecs, so the destination's guard never aliases
+                    // the source's array allocation.
+                    self.staged_layers = src.staged_layers.as_ref().map(|guard| StagedLayers {
+                        array: guard.array.clone(),
+                        _entries: guard._entries.clone(),
+                    });
                 }
                 ok
             } else {
@@ -1102,46 +1126,65 @@ impl<'a, 'b> OutputState<'a, 'b> {
     /// guard discipline as [`set_buffer`](OutputState::set_buffer)), and the
     /// whole slice must outlive `commit` — dropping any of them first is a
     /// compile error.
-    pub fn set_layers<'s, 'l>(&mut self, layers: &'s [LayerState<'l>])
+    ///
+    /// The entry refs and the array built from them are STORED on the
+    /// transaction (`staged_layers`): C retains the array pointer until
+    /// `wlr_output_state_finish` (and every copy of the state must be
+    /// finished too), so a stack temporary dying at the end of this call
+    /// would be use-after-free.
+    pub fn set_layers<'s, 'l, 'o>(&mut self, layers: &'s [LayerState<'l, 'o>])
     where
         's: 'b,
         'l: 'b,
+        'o: 'b,
     {
-        // SAFETY: as in `set_enabled`. The stack array outlives the call;
-        // every pointer inside it is either a table-held layer (live while
-        // its `OutputLayer` handle stands, which outlives `'l`) or a
-        // caller borrow valid for `'b`. wlroots copies the array contents
-        // into the state on return.
+        // SAFETY: as in `set_enabled`, plus: `wlr_output_state_set_layers`
+        // retains the array pointer until `wlr_output_state_finish`, so the
+        // array is stored in `staged_layers` below (with the entry refs that
+        // keep every pointed-to layer, buffer, and region alive that long)
+        // instead of dying on the stack here. Drop order: `commit()` and
+        // `Drop` finish `state` explicitly before fields drop, and fields
+        // drop at scope end after that finish call, so `staged_layers` drops
+        // AFTER the state it backs is finished.
+        if layers.is_empty() {
+            unsafe {
+                if let Some(state) = self.state.as_mut() {
+                    sys::wlr_output_state_set_layers(state as *mut _, std::ptr::null_mut(), 0);
+                }
+            }
+            self.staged_layers = None;
+            return;
+        }
+        let mut array: Vec<sys::wlr_output_layer_state> = layers
+            .iter()
+            .map(|l| sys::wlr_output_layer_state {
+                layer: l.layer.raw.as_ptr(),
+                buffer: l.buffer.map(|b| b.as_ptr()).unwrap_or(std::ptr::null_mut()),
+                src_box: sys::wlr_fbox {
+                    x: l.src.x,
+                    y: l.src.y,
+                    width: l.src.width,
+                    height: l.src.height,
+                },
+                dst_box: sys::wlr_box {
+                    x: l.dst.x,
+                    y: l.dst.y,
+                    width: l.dst.width,
+                    height: l.dst.height,
+                },
+                damage: l.damage.as_ptr(),
+                accepted: l.accepted,
+            })
+            .collect();
         unsafe {
             if let Some(state) = self.state.as_mut() {
-                let mut raw: Vec<sys::wlr_output_layer_state> = layers
-                    .iter()
-                    .map(|l| sys::wlr_output_layer_state {
-                        layer: l.layer.raw.as_ptr(),
-                        buffer: l.buffer.map(|b| b.as_ptr()).unwrap_or(std::ptr::null_mut()),
-                        src_box: sys::wlr_fbox {
-                            x: l.src.x,
-                            y: l.src.y,
-                            width: l.src.width,
-                            height: l.src.height,
-                        },
-                        dst_box: sys::wlr_box {
-                            x: l.dst.x,
-                            y: l.dst.y,
-                            width: l.dst.width,
-                            height: l.dst.height,
-                        },
-                        damage: l.damage.as_ptr(),
-                        accepted: l.accepted,
-                    })
-                    .collect();
-                sys::wlr_output_state_set_layers(state as *mut _, raw.as_mut_ptr(), raw.len());
+                sys::wlr_output_state_set_layers(state as *mut _, array.as_mut_ptr(), array.len());
+                self.staged_layers = Some(StagedLayers {
+                    array,
+                    _entries: layers.iter().collect(),
+                });
             }
         }
-        // No stored guard is needed beyond the signature above: `&'s [..]`
-        // with `'s: 'b, 'l: 'b` already forces every layer, buffer, and
-        // region borrow to outlive every later use of `self`, exactly like
-        // the stored `staged_buffer` guard does for `set_buffer`.
     }
 }
 
