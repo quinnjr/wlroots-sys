@@ -322,6 +322,17 @@ struct Bound {
     /// destroy signal happens to pass — so the handler reads the tool here
     /// instead. Set at link time by [`Registration::link_tablet_tool`].
     tablet_tool: Option<NonNull<sys::wlr_tablet_tool>>,
+
+    /// The transient seat this listener belongs to, for the per-request
+    /// resource-destroy listener `on_new_transient_seat` links; `None` for
+    /// every other listener in this file.
+    ///
+    /// A raw object pointer, for the reason `text_input`'s own doc gives:
+    /// the resource-destroy emission carries the resource, never the
+    /// transient seat, and FIX-3 recovery must not depend on what a destroy
+    /// signal happens to pass — so the handler reads the request here
+    /// instead. Set at link time by [`Registration::link_transient_seat`].
+    transient_seat: Option<NonNull<sys::wlr_transient_seat_v1>>,
 }
 
 // `bound_of`'s cast is sound only while `listener` is `Bound`'s first field, at
@@ -395,6 +406,7 @@ impl Registration {
             input_method: None,
             tablet_pad: None,
             tablet_tool: None,
+            transient_seat: None,
         });
 
         // SAFETY: the caller guarantees `signal` is an initialised `wl_signal`,
@@ -454,6 +466,7 @@ impl Registration {
             input_method: None,
             tablet_pad: None,
             tablet_tool: None,
+            transient_seat: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -721,6 +734,7 @@ impl Registration {
             input_method: None,
             tablet_pad: None,
             tablet_tool: None,
+            transient_seat: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -787,6 +801,7 @@ impl Registration {
             input_method: None,
             tablet_pad: None,
             tablet_tool: None,
+            transient_seat: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -845,6 +860,7 @@ impl Registration {
             input_method: Some(input_method),
             tablet_pad: None,
             tablet_tool: None,
+            transient_seat: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -904,6 +920,7 @@ impl Registration {
             input_method: None,
             tablet_pad: Some(tablet_pad),
             tablet_tool: None,
+            transient_seat: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per
@@ -966,12 +983,92 @@ impl Registration {
             input_method: None,
             tablet_pad: None,
             tablet_tool: Some(tablet_tool),
+            transient_seat: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per
         // the caller's contract, and the listener is a freshly boxed one
         // whose address stays put until this `Registration` drops.
         unsafe { sys::wl_signal_add(signal, &raw mut bound.listener) };
+
+        Registration { bound }
+    }
+
+    /// Link a per-request resource-destroy listener, carrying the raw
+    /// `wlr_transient_seat_v1` its callback reads back from
+    /// [`Bound::transient_seat`]. Every other slot is `None`.
+    ///
+    /// A dedicated constructor for the same reason `link_tablet_tool` is,
+    /// and load-bearing for the same reason: the resource-destroy emission
+    /// carries the resource, never the request, so per-request identity
+    /// must not depend on the signal's `data` (see
+    /// [`Bound::transient_seat`]).
+    ///
+    /// Unlike every other constructor here this links through libwayland,
+    /// not wlroots: a client resource exposes no `wl_signal` field to link
+    /// into (its destroy list is private to libwayland), so this reaches
+    /// `wl_resource_add_destroy_listener` through `ffi_dispatch!` exactly
+    /// as `on_new_text_input` reaches `wl_resource_get_client`.
+    ///
+    /// `alive` is null — the **stronger** claim (see [`Registration::drop`]):
+    /// this is dropped from inside the resource's own destroy emission or
+    /// while the run still stands, and sound for the same reason as the
+    /// tablet-tool listener: libwayland emits the destroy listeners before
+    /// it frees the resource, so reaching `Drop` at all proves a live
+    /// owner.
+    ///
+    /// # Safety
+    ///
+    /// `resource` must be a live `wl_resource`; `session` must be a
+    /// `*const Session<S>` for the `S` `notify` casts it back to, valid for
+    /// as long as the registration lives.
+    unsafe fn link_transient_seat(
+        resource: NonNull<sys::wl_resource>,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        transient_seat: NonNull<sys::wlr_transient_seat_v1>,
+    ) -> Self {
+        use sys::wayland_sys::ffi_dispatch;
+        #[allow(unused_imports)]
+        use sys::wayland_sys::server::*;
+
+        let mut bound = Box::new(Bound {
+            listener: sys::wl_listener {
+                link: sys::wl_list {
+                    prev: std::ptr::null_mut(),
+                    next: std::ptr::null_mut(),
+                },
+                notify,
+            },
+            session,
+            alive: std::ptr::null(),
+            flag: std::ptr::null(),
+            id: None,
+            toplevel: None,
+            layer: None,
+            node: None,
+            popup: None,
+            #[cfg(wlr_has_xwayland)]
+            xwayland: None,
+            text_input: None,
+            input_method: None,
+            tablet_pad: None,
+            tablet_tool: None,
+            transient_seat: Some(transient_seat),
+        });
+
+        // SAFETY: `resource` is live per the caller's contract, and the
+        // listener is a freshly boxed one whose address stays put until
+        // this `Registration` drops — which unlinks it before the box is
+        // freed, exactly as for `link`.
+        unsafe {
+            ffi_dispatch!(
+                sys::wayland_sys::server::wayland_server_handle(),
+                wl_resource_add_destroy_listener,
+                resource.as_ptr(),
+                &raw mut bound.listener
+            )
+        };
 
         Registration { bound }
     }
@@ -1150,6 +1247,19 @@ struct Session<'r, S> {
     /// `on_input_destroy` — before wlroots frees the tool, mirroring
     /// `shortcuts_inhibitors` above.
     tablet_tools: RefCell<HashMap<usize, Registration>>,
+
+    /// This run's resource-destroy listener on every pending transient-seat
+    /// request, keyed by the listener's own address (as `usize`) — NOT the
+    /// request object's, because libwayland emits the resource's destroy
+    /// with the resource as `data` (never the request), so the handler
+    /// recovers the request from the bound slot and its own key from the
+    /// firing `wl_listener` `l` instead. Removed, and so unlinked, from
+    /// `on_transient_seat_resource_destroy` before libwayland frees the
+    /// resource, mirroring `shortcuts_inhibitors` above. An answered
+    /// request keeps its entry here until the run ends — the answer paths
+    /// cannot reach this run-scoped map, so a late destroy emission evicts
+    /// an already-missing runtime entry as a harmless no-op instead.
+    transient_seats: RefCell<HashMap<usize, Registration>>,
 
     /// This run's `new_surface`/`unlock`/`destroy` listeners on every live
     /// `wlr_session_lock_v1`, keyed by the `destroy` listener's own address
@@ -1904,6 +2014,7 @@ impl<'d> Backend<'d> {
             idle_inhibitors: RefCell::new(HashMap::new()),
             shortcuts_inhibitors: RefCell::new(HashMap::new()),
             tablet_tools: RefCell::new(HashMap::new()),
+            transient_seats: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
             pointer_constraints: RefCell::new(HashMap::new()),
@@ -2361,6 +2472,18 @@ impl<'d> Backend<'d> {
                 Registration::link_bare(
                     &raw mut (*manager.as_ptr()).events.create_seat,
                     on_new_transient_seat::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+            // The manager's own `destroy`: `on_transient_seat_manager_destroy`
+            // clears whatever requests are still pending, so no entry names
+            // an object the dying manager takes with it. Same ownership and
+            // liveness reasoning as the `create_seat` listener above.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.destroy,
+                    on_transient_seat_manager_destroy::<S>,
                     (session as *const Session<'_, S>).cast::<()>(),
                     std::ptr::null(),
                 )
@@ -8495,8 +8618,13 @@ unsafe extern "C" fn on_new_virtual_keyboard<S: Handlers>(
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let vk = data.cast::<sys::wlr_virtual_keyboard_v1>();
-        let kb = &raw mut (*vk).keyboard;
-        let device = &raw mut (*vk).keyboard.base;
+        // Null-checked before the first deref: the manager contract always
+        // carries the object, but a null `data` must miss rather than trap.
+        let Some(vk) = NonNull::new(vk) else {
+            return;
+        };
+        let kb = &raw mut (*vk.as_ptr()).keyboard;
+        let device = &raw mut (*vk.as_ptr()).keyboard.base;
         let runtime = (*session).runtime;
 
         // Single-seat assumption: the injected keyboard is attached to this
@@ -8564,8 +8692,8 @@ unsafe extern "C" fn on_new_virtual_keyboard<S: Handlers>(
         // announce it. No borrow is held: the table insert above ended its
         // borrow, so a handler reaching back into the virtual-keyboard
         // table on the event cannot deadlock.
-        if let Some(vk_nn) = NonNull::new(vk) {
-            let id = runtime.record_virtual_keyboard(vk_nn);
+        {
+            let id = runtime.record_virtual_keyboard(vk);
             let deliver = (*session).deliver;
             (*session).dispatcher.emit(
                 &*session,
@@ -8597,9 +8725,20 @@ unsafe extern "C" fn on_new_virtual_pointer<S: Handlers>(
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let event = data.cast::<sys::wlr_virtual_pointer_v1_new_pointer_event>();
-        let vp = (*event).new_pointer;
-        let pointer = &raw mut (*vp).pointer;
-        let device = &raw mut (*vp).pointer.base;
+        // Null-checked before the first deref, matching the virtual
+        // keyboard path: a null `data` or null `new_pointer` must miss
+        // rather than trap.
+        let Some(event) = NonNull::new(event) else {
+            return;
+        };
+        // SAFETY: `event` is live per the guard above; `new_pointer` is the
+        // live virtual pointer the manager announced with it.
+        let vp = (*event.as_ptr()).new_pointer;
+        let Some(vp) = NonNull::new(vp) else {
+            return;
+        };
+        let pointer = &raw mut (*vp.as_ptr()).pointer;
+        let device = &raw mut (*vp.as_ptr()).pointer.base;
         let runtime = (*session).runtime;
 
         // Single-seat assumption: the injected pointer is attached to this
@@ -8671,8 +8810,8 @@ unsafe extern "C" fn on_new_virtual_pointer<S: Handlers>(
         // Mint the stable id from the event's object (creation = data) and
         // announce it. No borrow is held, for the reason the virtual
         // keyboard path above gives.
-        if let Some(vp_nn) = NonNull::new(vp) {
-            let id = runtime.record_virtual_pointer(vp_nn);
+        {
+            let id = runtime.record_virtual_pointer(vp);
             let deliver = (*session).deliver;
             (*session).dispatcher.emit(
                 &*session,
@@ -8690,12 +8829,18 @@ unsafe extern "C" fn on_new_virtual_pointer<S: Handlers>(
 /// [`Runtime::destroy_transient_seat`](crate::Runtime::destroy_transient_seat) —
 /// an unanswered request leaves the client waiting.
 ///
-/// No per-object destroy listener is linked here, and no `Session` map entry
-/// is kept: a transient seat exposes no public destroy signal, so there is
-/// nothing to link into. The request lifecycle ends at the answer, which
-/// consumes the runtime entry — FIX-3's listener-address recovery has no
-/// per-object signal to recover from here, and needs none: creation carries
-/// the object in `data`, and answering ends the tracking.
+/// Two listeners bound this request's lifetime. The per-request
+/// resource-destroy listener (linked below into the request's own client
+/// resource) evicts the runtime entry when the client goes away — an
+/// ignored request, or a disconnect before the answer, must not leave a
+/// dead entry naming freed memory — and the manager-destroy listener (linked
+/// once per run in `register_toplevel_and_input`) clears whatever is still
+/// pending when the manager itself dies. A transient seat exposes no public
+/// destroy signal of its own, so without these two there would be nothing
+/// to link into; FIX-3's listener-address recovery has no per-object signal
+/// to recover from here, and needs none: creation carries the object in
+/// `data`, and every end of the tracking (answer, resource death, manager
+/// death) evicts by key.
 unsafe extern "C" fn on_new_transient_seat<S: Handlers>(
     l: *mut sys::wl_listener,
     data: *mut std::ffi::c_void,
@@ -8713,6 +8858,28 @@ unsafe extern "C" fn on_new_transient_seat<S: Handlers>(
             return;
         };
         let id = runtime.record_transient_seat(raw);
+        // SAFETY: `raw` is the live request just announced; `resource` is
+        // its inline client resource, borrowed here without retaining it.
+        // A null resource (never observed — wlroots always binds one) would
+        // leave the request without a death watch, so the listener is
+        // linked only when there is something to link into.
+        let resource = (*raw.as_ptr()).resource;
+        if let Some(resource) = NonNull::new(resource) {
+            // Linked into the client's own resource destroy list, with no
+            // `alive` backstop: as for the tablet-tool listener this
+            // mirrors, the resource cannot be freed by anything other than
+            // the destroy this very listener watches or the run teardown
+            // whose drop unlinks it first — so there is no "owner died
+            // first" case to guard against.
+            let destroy = Registration::link_transient_seat(
+                resource,
+                on_transient_seat_resource_destroy::<S>,
+                (*bound).session,
+                raw,
+            );
+            let key = destroy.listener_addr();
+            (*session).transient_seats.borrow_mut().insert(key, destroy);
+        }
         // Copy out, drop every borrow, then emit: a handler that answers the
         // request on the event (consuming the entry just recorded) must not
         // deadlock on a still-held borrow — and no borrow crosses the emit.
@@ -8722,6 +8889,63 @@ unsafe extern "C" fn on_new_transient_seat<S: Handlers>(
             crate::dispatch::Event::TransientSeatRequested(id),
             deliver,
         );
+    }
+}
+
+/// A pending transient-seat request's client resource is going away — the
+/// client disconnected, destroyed it, or was denied and torn down. Evict
+/// the request so no entry names freed memory afterwards.
+///
+/// The runtime evict is unconditional and may miss: an answered request is
+/// already gone by the time its resource dies, and the answer paths cannot
+/// reach this run-scoped map — so the miss is the same harmless no-op
+/// `Runtime::forget_transient_seat` documents, not a state error.
+unsafe extern "C" fn on_transient_seat_resource_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_transient_seat` into one client resource's
+    // destroy listeners via `wl_resource_add_destroy_listener`; the resource
+    // is still live for this emission. `data` is intentionally unread
+    // (FIX-3): the request comes from the bound slot, and this entry's own
+    // key from the firing listener.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let Some(ts) = (*bound).transient_seat else {
+            return;
+        };
+        runtime.forget_transient_seat(ts.as_ptr() as usize);
+        // Removed, not merely looked up: dropping the entry unlinks this
+        // very listener. Sound — only the firing listener itself is
+        // unlinked, and advancing from a removed current node still reaches
+        // the next element, so the emission continues correctly; this is
+        // the same self-unlink every destroy listener in this file relies
+        // on.
+        let key = l as usize;
+        let removed = (*session).transient_seats.borrow_mut().remove(&key);
+        drop(removed);
+    }
+}
+
+/// The transient-seat manager is going away. Clear whatever requests are
+/// still pending: the manager's death takes its objects with it, so any
+/// entry naming one would dangle. No event is announced — the manager's own
+/// teardown is display teardown, and every pending request simply ceases
+/// to be answerable.
+unsafe extern "C" fn on_transient_seat_manager_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `register_toplevel_and_input` into the transient
+    // seat manager's own `events.destroy`; the manager is still live memory
+    // for this emission. Nothing is read through it — clearing the table
+    // only drops borrowed pointers, never dereferences them.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        (*session).runtime.clear_transient_seats();
     }
 }
 
@@ -10392,6 +10616,7 @@ mod tests {
                 idle_inhibitors: RefCell::new(HashMap::new()),
                 shortcuts_inhibitors: RefCell::new(HashMap::new()),
                 tablet_tools: RefCell::new(HashMap::new()),
+                transient_seats: RefCell::new(HashMap::new()),
                 session_locks: RefCell::new(HashMap::new()),
                 lock_surfaces: RefCell::new(HashMap::new()),
                 scene_buffers: RefCell::new(HashMap::new()),
@@ -10574,6 +10799,7 @@ mod tests {
             idle_inhibitors: RefCell::new(HashMap::new()),
             shortcuts_inhibitors: RefCell::new(HashMap::new()),
             tablet_tools: RefCell::new(HashMap::new()),
+            transient_seats: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
@@ -10642,6 +10868,7 @@ mod tests {
                 idle_inhibitors: RefCell::new(HashMap::new()),
                 shortcuts_inhibitors: RefCell::new(HashMap::new()),
                 tablet_tools: RefCell::new(HashMap::new()),
+                transient_seats: RefCell::new(HashMap::new()),
                 session_locks: RefCell::new(HashMap::new()),
                 lock_surfaces: RefCell::new(HashMap::new()),
                 scene_buffers: RefCell::new(HashMap::new()),
@@ -11402,6 +11629,7 @@ mod axis_delivery_tests {
             idle_inhibitors: RefCell::new(HashMap::new()),
             shortcuts_inhibitors: RefCell::new(HashMap::new()),
             tablet_tools: RefCell::new(HashMap::new()),
+            transient_seats: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
             scene_buffers: RefCell::new(HashMap::new()),
@@ -11575,6 +11803,7 @@ mod axis_delivery_tests {
             idle_inhibitors: RefCell::new(HashMap::new()),
             shortcuts_inhibitors: RefCell::new(HashMap::new()),
             tablet_tools: RefCell::new(HashMap::new()),
+            transient_seats: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
             scene_buffers: RefCell::new(HashMap::new()),

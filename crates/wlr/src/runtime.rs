@@ -748,9 +748,12 @@ impl VirtualPointerId {
 /// channel. The id names the *pending request*, not a lasting object:
 /// answering it — [`Runtime::ready_transient_seat`] or
 /// [`Runtime::destroy_transient_seat`] — consumes the entry, and the id
-/// misses afterwards. There is no public per-object destroy signal on a
-/// transient seat to evict anything by, which is exactly why nothing
-/// outlives the answer.
+/// misses afterwards; so does a request whose client went away or whose
+/// manager died first (both evict — see `TransientSeatEntry`'s own doc).
+/// There is
+/// no public per-object destroy signal on a transient seat to evict
+/// anything by, which is exactly why the resource and manager listeners
+/// exist.
 ///
 /// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
 /// reasons [`TabletToolId`]'s doc gives.
@@ -795,10 +798,13 @@ pub(crate) struct VirtualPointerEntry {
 ///
 /// Keyed in the map by the transient seat's own address (the
 /// [`TransientSeatId`] wraps that key directly). `raw` is a borrowed
-/// wlroots pointer, never owned — the request lives until the compositor
-/// answers it with [`Runtime::ready_transient_seat`] or
-/// [`Runtime::destroy_transient_seat`], both of which evict this entry, so
-/// no entry outlives its object and none survives its answer.
+/// wlroots pointer, never owned — the entry is evicted by whichever comes
+/// first: the compositor's answer ([`Runtime::ready_transient_seat`] or
+/// [`Runtime::destroy_transient_seat`]), the client's resource dying
+/// (`backend.rs`'s resource-destroy listener, linked at record time), or
+/// the manager itself going away (`backend.rs`'s manager-destroy listener
+/// clears the whole table). No entry outlives its object, and none survives
+/// longer than the run that recorded it needs.
 pub(crate) struct TransientSeatEntry {
     pub(crate) raw: NonNull<sys::wlr_transient_seat_v1>,
 }
@@ -9039,6 +9045,26 @@ impl Runtime {
         self.inner.transient_seats.borrow().len()
     }
 
+    /// Forget one pending transient-seat request by its table key, or
+    /// nothing when no entry stands under it.
+    ///
+    /// Called from `backend.rs`'s resource-destroy listener when the
+    /// client's resource dies — an ignored request, or a client that
+    /// disconnected before the compositor answered, must not leave a dead
+    /// entry naming freed memory. The miss is a harmless no-op on purpose:
+    /// an answered request is already gone by the time its resource dies,
+    /// so the listener always evicts unconditionally.
+    pub(crate) fn forget_transient_seat(&self, key: usize) {
+        self.inner.transient_seats.borrow_mut().remove(&key);
+    }
+
+    /// Forget every pending transient-seat request. Called from
+    /// `backend.rs`'s manager-destroy listener: the manager's death takes
+    /// its objects with it, so any entry naming one would dangle.
+    pub(crate) fn clear_transient_seats(&self) {
+        self.inner.transient_seats.borrow_mut().clear();
+    }
+
     /// The scene's root tree, for the callbacks in `backend.rs` that insert a
     /// toplevel into it.
     ///
@@ -11793,6 +11819,72 @@ mod tests {
         // first would leave the table naming freed memory. The runtime (and
         // its table) drops with the test; the scratch bytes go with the
         // process, like the decoration fixture's.
+    }
+
+    /// Forgetting a transient-seat request evicts exactly its key, and
+    /// forgetting a missing key is a harmless no-op — the contract the
+    /// resource-destroy listener relies on, since an answered request is
+    /// already gone by the time its resource dies.
+    ///
+    /// This drives the evict function directly rather than firing a real
+    /// resource-destroy emission through the listener: no headless test in
+    /// this crate fabricates a live `wl_client`/`wl_resource` (that needs a
+    /// display connection), and the nearest emission precedent — the
+    /// tablet-destroy test — only drives `wl_signal`-based emissions, which
+    /// a resource's libwayland-private destroy list is not. The evict is
+    /// the whole of the listener's runtime effect, so this exercises the
+    /// load-bearing half exactly.
+    #[test]
+    fn forget_transient_seat_evicts_only_its_key_and_missing_is_noop() {
+        use std::alloc::{Layout, alloc_zeroed};
+
+        let rt = Runtime::new().expect("runtime");
+        // SAFETY: as in the virtual-device tests above — scratch memory,
+        // addresses only, never read or passed to FFI.
+        let alloc = |ty: Layout| unsafe { alloc_zeroed(ty) };
+        let a =
+            alloc(Layout::new::<sys::wlr_transient_seat_v1>()).cast::<sys::wlr_transient_seat_v1>();
+        let b =
+            alloc(Layout::new::<sys::wlr_transient_seat_v1>()).cast::<sys::wlr_transient_seat_v1>();
+        assert!(!a.is_null() && !b.is_null(), "allocation failed");
+        // SAFETY: non-null per the assert; no reference is ever formed.
+        let (a_nn, b_nn) = unsafe { (NonNull::new_unchecked(a), NonNull::new_unchecked(b)) };
+
+        let a_id = rt.record_transient_seat(a_nn);
+        let b_id = rt.record_transient_seat(b_nn);
+        assert_eq!(rt.rt_debug_transient_seat_count(), 2);
+
+        // Evicting a key that was never recorded changes nothing.
+        rt.forget_transient_seat(usize::MAX - 7);
+        assert_eq!(
+            rt.rt_debug_transient_seat_count(),
+            2,
+            "evict-missing must be a harmless no-op"
+        );
+
+        rt.forget_transient_seat(a_id.0);
+        assert_eq!(rt.rt_debug_transient_seat_count(), 1);
+        // SAFETY: both allocations are live; compared, never dereferenced.
+        unsafe {
+            assert!(rt.try_transient_seat(a).is_none(), "evicted key must miss");
+            assert_eq!(
+                rt.try_transient_seat(b),
+                Some(b_id),
+                "the surviving request must keep resolving"
+            );
+        }
+
+        // Double-evict is the same no-op — the answer-then-destroy ordering.
+        rt.forget_transient_seat(a_id.0);
+        assert_eq!(rt.rt_debug_transient_seat_count(), 1);
+
+        // The manager-destroy path clears whatever is still pending.
+        rt.clear_transient_seats();
+        assert_eq!(rt.rt_debug_transient_seat_count(), 0);
+        // SAFETY: as above.
+        unsafe {
+            assert!(rt.try_transient_seat(b).is_none());
+        }
     }
 
     /// `set_decoration_mode`'s central hazard (see its own doc): calling
