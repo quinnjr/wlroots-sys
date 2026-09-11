@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 use std::ptr::NonNull;
 
 use crate::buffer::Buffer;
-use crate::geom::{Subpixel, Transform};
+use crate::geom::{Box2D, FBox, Subpixel, Transform};
 use crate::id::{OutputId, find_id};
 use crate::region::Region;
 use crate::{Error, Result, sys};
@@ -637,6 +637,142 @@ impl<'h> Output<'h> {
             sys::wlr_output_lock_software_cursors(self.raw.as_ptr(), lock);
         }
     }
+
+    /// Create a hardware cursor on this output. The cursor starts invisible
+    /// with no buffer; show it with [`OutputCursor::set_buffer`] and place
+    /// it with [`OutputCursor::move_to`]. Destroy explicitly with
+    /// [`OutputCursor::destroy`] before the output goes away.
+    pub fn create_cursor(&self) -> Option<OutputCursor<'_>> {
+        // SAFETY: the handle's lifetime guarantees the output is live, which
+        // is what the cursor is created on. Null means wlroots refused
+        // (allocation failure), mapped to `None`.
+        unsafe {
+            let raw = sys::wlr_output_cursor_create(self.raw.as_ptr());
+            NonNull::new(raw).map(|raw| OutputCursor { raw, staged: None })
+        }
+    }
+
+    /// Create an output layer on this output: a scene-graph-adjacent plane
+    /// the compositor positions itself (drm planes, hardware overlays).
+    /// Destroy explicitly with [`OutputLayer::destroy`] before the output
+    /// goes away.
+    pub fn create_layer(&self) -> Option<OutputLayer<'_>> {
+        // SAFETY: as in `create_cursor`.
+        unsafe {
+            let raw = sys::wlr_output_layer_create(self.raw.as_ptr());
+            NonNull::new(raw).map(|raw| OutputLayer {
+                raw,
+                _marker: PhantomData,
+            })
+        }
+    }
+}
+
+/// A hardware cursor owned by its output: created by
+/// [`Output::create_cursor`], destroyed explicitly by [`destroy`](OutputCursor::destroy)
+/// before the output goes away. Dropping without destroying leaks the C
+/// object (deliberately: a `Drop` that frees during wlroots' own teardown
+/// ordering would be the use-after-free this discipline avoids).
+pub struct OutputCursor<'b> {
+    raw: NonNull<sys::wlr_output_cursor>,
+    // Write-only borrow guard: never read, only stored — keeps the staged buffer alive past the call.
+    staged: Option<&'b Buffer<'b>>,
+}
+
+impl<'b> OutputCursor<'b> {
+    /// Destroy the cursor, releasing it. Consumes the handle so a destroyed
+    /// cursor cannot be used again.
+    pub fn destroy(self) {
+        // SAFETY: `raw` names a live cursor: created by `create_cursor`,
+        // consumable exactly once by this method, and the output it belongs
+        // to outlives the call per the documented discipline.
+        unsafe {
+            sys::wlr_output_cursor_destroy(self.raw.as_ptr());
+        }
+    }
+
+    /// Stage a buffer as the cursor image with the given hotspot (the pixel
+    /// within the image that sits at the pointer position). The borrow is
+    /// stored on the cursor, so the buffer must outlive every later use of
+    /// it — the same guard as [`OutputState::set_buffer`].
+    pub fn set_buffer(&mut self, buffer: &'b Buffer<'b>, hotspot_x: i32, hotspot_y: i32) {
+        // SAFETY: `raw` is live per above; the buffer borrow is stored
+        // below, extending its life past this call.
+        unsafe {
+            sys::wlr_output_cursor_set_buffer(
+                self.raw.as_ptr(),
+                buffer.as_ptr(),
+                hotspot_x,
+                hotspot_y,
+            );
+        }
+        self.staged = Some(buffer);
+    }
+
+    /// Move the cursor to output-local `(x, y)`, which also places the
+    /// hotspot set by the last `set_buffer`. Reports whether wlroots
+    /// accepted the move.
+    pub fn move_to(&self, x: f64, y: f64) -> bool {
+        // SAFETY: `raw` is live per `destroy`'s discipline.
+        unsafe { sys::wlr_output_cursor_move(self.raw.as_ptr(), x, y) }
+    }
+
+    /// The cursor image size in pixels.
+    pub fn size(&self) -> (u32, u32) {
+        // SAFETY: `raw` is live per above; read-only scalar fields.
+        unsafe {
+            let raw = self.raw.as_ptr();
+            ((*raw).width, (*raw).height)
+        }
+    }
+
+    /// Whether the cursor is currently enabled (has a buffer).
+    pub fn is_enabled(&self) -> bool {
+        // SAFETY: as in `size`.
+        unsafe { (*self.raw.as_ptr()).enabled }
+    }
+}
+
+/// An output layer owned by its output: created by
+/// [`Output::create_layer`], destroyed explicitly by [`destroy`](OutputLayer::destroy)
+/// before the output goes away. Same owned-handle discipline as
+/// [`OutputCursor`].
+pub struct OutputLayer<'o> {
+    raw: NonNull<sys::wlr_output_layer>,
+    _marker: PhantomData<&'o ()>,
+}
+
+impl OutputLayer<'_> {
+    /// Destroy the layer, releasing it. Consumes the handle.
+    pub fn destroy(self) {
+        // SAFETY: `raw` names a live layer: created by `create_layer`,
+        // consumable exactly once, output discipline as in `OutputCursor`.
+        unsafe {
+            sys::wlr_output_layer_destroy(self.raw.as_ptr());
+        }
+    }
+}
+
+/// One layer entry of an atomic [`OutputState`]: which layer, what to show
+/// in it, and where. `'l` borrows the entry (with its buffer and damage
+/// region) for the transaction; `'o` ties the layer handle to the output it
+/// was created on. [`OutputState::set_layers`] constrains both to outlive
+/// the transaction and STORES the entry refs (plus the array built from
+/// them) on it, so a dropped layer, buffer, or region is a compile error
+/// rather than a dangling staged pointer.
+pub struct LayerState<'l, 'o> {
+    /// The layer being described.
+    pub layer: &'l OutputLayer<'o>,
+    /// Buffer to show, or `None` to leave the layer's buffer unchanged.
+    pub buffer: Option<&'l Buffer<'l>>,
+    /// Source box within the buffer.
+    pub src: FBox,
+    /// Destination box on the output.
+    pub dst: Box2D,
+    /// Damaged region (buffer-local) for a partial update.
+    pub damage: &'l Region,
+    /// Whether the compositor accepts this layer.
+    pub accepted: bool,
 }
 
 /// Adaptive-sync status of an output: whether variable refresh is active.
@@ -752,6 +888,14 @@ impl PresentEvent {
     }
 }
 
+/// Stored guard for [`OutputState::set_layers`]: the array C retains until
+/// `wlr_output_state_finish` (plus the entry refs keeping every layer,
+/// buffer, and region alive that long).
+struct StagedLayers<'b> {
+    array: Vec<sys::wlr_output_layer_state>,
+    _entries: Vec<&'b LayerState<'b, 'b>>,
+}
+
 /// An atomic state transaction on an output: stage several fields, commit
 /// once. Created by [`Output::state`]; [`commit`](OutputState::commit)
 /// consumes it. Dropping an uncommitted transaction finishes (abandons)
@@ -765,6 +909,7 @@ pub struct OutputState<'a, 'b> {
     output: &'a Output<'a>,
     state: Option<sys::wlr_output_state>,
     staged_buffer: Option<&'b Buffer<'b>>,
+    staged_layers: Option<StagedLayers<'b>>,
 }
 
 impl Drop for OutputState<'_, '_> {
@@ -796,6 +941,7 @@ impl<'a, 'b> OutputState<'a, 'b> {
             output,
             state: Some(state),
             staged_buffer: None,
+            staged_layers: None,
         }
     }
 
@@ -826,8 +972,8 @@ impl<'a, 'b> OutputState<'a, 'b> {
     /// Copy another transaction's staged fields into this one. Reports
     /// whether the copy ran: `false` when either side was already consumed
     /// (committed), so a silently half-copied state can never pass for a
-    /// complete one. A staged buffer guard travels with the copy, so the
-    /// destination inherits the source's lifetime constraint.
+    /// complete one. The staged buffer and layers guards travel with the
+    /// copy, so the destination inherits the source's lifetime constraints.
     pub fn copy_from(&mut self, src: &OutputState<'_, 'b>) -> bool {
         // SAFETY: both states are initialised (constructor invariant;
         // committed states are taken, never re-staged). `wlr_output_state_copy`
@@ -837,6 +983,12 @@ impl<'a, 'b> OutputState<'a, 'b> {
                 let ok = sys::wlr_output_state_copy(dst as *mut _, src_state as *const _);
                 if ok {
                     self.staged_buffer = src.staged_buffer;
+                    // Fresh Vecs, so the destination's guard never aliases
+                    // the source's array allocation.
+                    self.staged_layers = src.staged_layers.as_ref().map(|guard| StagedLayers {
+                        array: guard.array.clone(),
+                        _entries: guard._entries.clone(),
+                    });
                 }
                 ok
             } else {
@@ -968,6 +1120,72 @@ impl<'a, 'b> OutputState<'a, 'b> {
             }
         }
     }
+
+    /// Stage the output layers for an atomic commit. Each entry borrows its
+    /// layer, buffer, and damage region for the transaction's lifetime (same
+    /// guard discipline as [`set_buffer`](OutputState::set_buffer)), and the
+    /// whole slice must outlive `commit` — dropping any of them first is a
+    /// compile error.
+    ///
+    /// The entry refs and the array built from them are STORED on the
+    /// transaction (`staged_layers`): C retains the array pointer until
+    /// `wlr_output_state_finish` (and every copy of the state must be
+    /// finished too), so a stack temporary dying at the end of this call
+    /// would be use-after-free.
+    pub fn set_layers<'s, 'l, 'o>(&mut self, layers: &'s [LayerState<'l, 'o>])
+    where
+        's: 'b,
+        'l: 'b,
+        'o: 'b,
+    {
+        // SAFETY: as in `set_enabled`, plus: `wlr_output_state_set_layers`
+        // retains the array pointer until `wlr_output_state_finish`, so the
+        // array is stored in `staged_layers` below (with the entry refs that
+        // keep every pointed-to layer, buffer, and region alive that long)
+        // instead of dying on the stack here. Drop order: `commit()` and
+        // `Drop` finish `state` explicitly before fields drop, and fields
+        // drop at scope end after that finish call, so `staged_layers` drops
+        // AFTER the state it backs is finished.
+        if layers.is_empty() {
+            unsafe {
+                if let Some(state) = self.state.as_mut() {
+                    sys::wlr_output_state_set_layers(state as *mut _, std::ptr::null_mut(), 0);
+                }
+            }
+            self.staged_layers = None;
+            return;
+        }
+        let mut array: Vec<sys::wlr_output_layer_state> = layers
+            .iter()
+            .map(|l| sys::wlr_output_layer_state {
+                layer: l.layer.raw.as_ptr(),
+                buffer: l.buffer.map(|b| b.as_ptr()).unwrap_or(std::ptr::null_mut()),
+                src_box: sys::wlr_fbox {
+                    x: l.src.x,
+                    y: l.src.y,
+                    width: l.src.width,
+                    height: l.src.height,
+                },
+                dst_box: sys::wlr_box {
+                    x: l.dst.x,
+                    y: l.dst.y,
+                    width: l.dst.width,
+                    height: l.dst.height,
+                },
+                damage: l.damage.as_ptr(),
+                accepted: l.accepted,
+            })
+            .collect();
+        unsafe {
+            if let Some(state) = self.state.as_mut() {
+                sys::wlr_output_state_set_layers(state as *mut _, array.as_mut_ptr(), array.len());
+                self.staged_layers = Some(StagedLayers {
+                    array,
+                    _entries: layers.iter().collect(),
+                });
+            }
+        }
+    }
 }
 
 /// Which fields an [`OutputState`] transaction has staged: the
@@ -1005,6 +1223,9 @@ impl CommittedFields {
     /// A subpixel geometry is staged.
     pub const SUBPIXEL: CommittedFields =
         CommittedFields(sys::wlr_output_state_field::WLR_OUTPUT_STATE_SUBPIXEL.0);
+    /// Whether output layers are staged.
+    pub const LAYERS: CommittedFields =
+        CommittedFields(sys::wlr_output_state_field::WLR_OUTPUT_STATE_LAYERS.0);
 
     /// No fields staged.
     pub const NONE: CommittedFields = CommittedFields(0);
@@ -1391,6 +1612,18 @@ mod tests {
         assert!(!CommittedFields::SCALE.is_empty());
         assert!(CommittedFields::SCALE.contains(CommittedFields::SCALE));
         assert!(!CommittedFields::SCALE.contains(CommittedFields::MODE));
+    }
+
+    /// The LAYERS bit pinned against the header like every other staged
+    /// bit: a swapped discriminant would misreport layer staging silently.
+    #[test]
+    fn layers_bit_matches_wlroots() {
+        assert_eq!(
+            CommittedFields::LAYERS.bits(),
+            sys::wlr_output_state_field::WLR_OUTPUT_STATE_LAYERS.0
+        );
+        assert!(!CommittedFields::LAYERS.is_empty());
+        assert!(!CommittedFields::LAYERS.contains(CommittedFields::MODE));
     }
 
     /// Flag combinators behave as a set algebra; unknown bits round-trip

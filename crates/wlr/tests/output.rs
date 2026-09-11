@@ -8,7 +8,10 @@
 //! would abort through C.
 
 use std::sync::Once;
-use wlr::{Backend, CommittedFields, Display, ModeType, Region, Runtime, Transform, Until};
+use wlr::{
+    Allocator, Backend, Box2D, CommittedFields, Display, DrmFormat, FBox, FourCc, ModeType,
+    Modifier, OwnedBuffer, Region, Renderer, Runtime, Transform, Until,
+};
 
 /// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
 /// any test in this binary calls `Backend::autocreate`. See `axis.rs`'s
@@ -26,6 +29,13 @@ fn headless_env() {
             std::env::set_var("WLR_RENDERER", "pixman");
         }
     });
+}
+
+/// The linear ARGB8888 format cursor buffers are allocated in — the same
+/// choice as `tests/render.rs`'s `argb()`, so the pixman allocator hands out
+/// mappable buffers a cursor can take.
+fn argb() -> DrmFormat {
+    DrmFormat::new(FourCc::ARGB8888, [Modifier::LINEAR])
 }
 
 #[derive(Default)]
@@ -303,5 +313,398 @@ fn output_state_copy_carries_staged_fields() {
         app.empty_fields,
         Some(CommittedFields::NONE),
         "copying an empty transaction stages nothing"
+    );
+}
+
+/// Hardware cursor create/move/set_buffer/destroy round-trips on a headless
+/// output, and output layers stage through an atomic transaction. A destroyed
+/// cursor cannot be used again (the handle is consumed), so the
+/// destroy-twice path is a compile error, not a runtime case.
+#[test]
+fn output_cursor_and_layers_round_trip() {
+    headless_env();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+
+    // The cursor image, built exactly as `tests/render.rs`'s
+    // `an_allocator_hands_out_buffers_a_pass_can_draw_into` does: a pixman
+    // renderer (no GPU needed) plus `Allocator::autocreate` on this backend,
+    // then an 8x8 linear ARGB8888 buffer. If `autocreate` fails headless this
+    // is a STOP, not something to fake with another allocator: the cursor
+    // needs a real wlroots buffer.
+    let renderer = Renderer::pixman().expect("pixman renderer");
+    let allocator = Allocator::autocreate(&backend, &renderer).expect("allocator");
+    let cursor_buf = allocator.create_buffer(8, 8, &argb()).expect("buffer");
+
+    /// What the cursor episode in `new_output` records, kept as one value so
+    /// the handler can borrow `self.cursor_buf` for the whole episode and
+    /// write `self` only after the borrowing cursor is destroyed.
+    struct CursorProbe {
+        fresh_enabled: bool,
+        fresh_moved: bool,
+        fresh_size_zero: bool,
+        buffered_enabled: bool,
+        buffered_size: (u32, u32),
+    }
+
+    struct CursorApp<'a> {
+        cursor_buf: OwnedBuffer<'a>,
+        runtime: Runtime,
+        output_enabled: Option<bool>,
+        output_init: Option<bool>,
+        moved: Option<bool>,
+        size_zero: Option<bool>,
+        enabled_after_create: Option<bool>,
+        cursor_enabled_after_buffer: Option<bool>,
+        cursor_size_after_buffer: Option<(u32, u32)>,
+        layers_bit: Option<CommittedFields>,
+        layers_buffered_fields: Option<CommittedFields>,
+        layers_buffered_commit_ok: Option<bool>,
+        empty_layers_fields: Option<CommittedFields>,
+        empty_layers_commit_ok: Option<bool>,
+        two_layers_fields: Option<CommittedFields>,
+        two_layers_commit_ok: Option<bool>,
+    }
+    impl wlr::OutputHandler for CursorApp<'_> {
+        fn new_output(&mut self, output: &wlr::Output<'_>) {
+            // No expect() here: a panic inside a handler aborts through C
+            // rather than failing the test. Record and assert afterwards.
+            //
+            // Enable + init render first: `wlr_output_cursor_set_buffer`
+            // asserts `output->renderer != NULL`, which only
+            // `Runtime::init_output` (`wlr_output_init_render`) establishes —
+            // and init_output wants an enabled output. Both report Results,
+            // so their outcomes join the locals below, never a panic.
+            let enabled_ok = output.enable_with_preferred_mode().is_ok();
+            let init_ok = self.runtime.init_output(output).is_ok();
+            //
+            // The cursor episode borrows `self.cursor_buf`, so everything it
+            // learns goes to locals first and reaches `self` only after the
+            // cursor (which holds that borrow) is destroyed. The image borrow
+            // opens before `create_cursor` so the `&'b Buffer<'b>` outlives
+            // the cursor it is staged on — image older than cursor, as usual.
+            let cursor_outcome: Option<CursorProbe> = {
+                let buf: &wlr::Buffer = &self.cursor_buf;
+                if let Some(mut cursor) = output.create_cursor() {
+                    let fresh_enabled = cursor.is_enabled();
+                    let fresh_moved = cursor.move_to(10.0, 20.0);
+                    // No buffer staged yet, so no size: a fresh cursor reads
+                    // (0, 0), gaining extents only once a buffer is set.
+                    let fresh_size_zero = cursor.size() == (0, 0);
+                    cursor.set_buffer(buf, 1, 2);
+                    let buffered_enabled = cursor.is_enabled();
+                    let buffered_size = cursor.size();
+                    cursor.destroy();
+                    Some(CursorProbe {
+                        fresh_enabled,
+                        fresh_moved,
+                        fresh_size_zero,
+                        buffered_enabled,
+                        buffered_size,
+                    })
+                } else {
+                    None
+                }
+            };
+            match cursor_outcome {
+                Some(probe) => {
+                    self.output_enabled = Some(enabled_ok);
+                    self.output_init = Some(init_ok);
+                    self.enabled_after_create = Some(probe.fresh_enabled);
+                    self.moved = Some(probe.fresh_moved);
+                    self.size_zero = Some(probe.fresh_size_zero);
+                    self.cursor_enabled_after_buffer = Some(probe.buffered_enabled);
+                    self.cursor_size_after_buffer = Some(probe.buffered_size);
+                }
+                None => {
+                    self.output_enabled = Some(enabled_ok);
+                    self.output_init = Some(init_ok);
+                    self.enabled_after_create = Some(true);
+                    self.moved = Some(false);
+                    self.size_zero = Some(false);
+                    self.cursor_enabled_after_buffer = Some(false);
+                    self.cursor_size_after_buffer = Some((0, 0));
+                }
+            }
+
+            let Some(layer) = output.create_layer() else {
+                self.layers_bit = Some(CommittedFields::NONE);
+                self.layers_buffered_fields = Some(CommittedFields::NONE);
+                self.layers_buffered_commit_ok = Some(false);
+                self.empty_layers_fields = Some(CommittedFields::from_bits(u32::MAX));
+                self.empty_layers_commit_ok = Some(false);
+                self.two_layers_fields = Some(CommittedFields::NONE);
+                self.two_layers_commit_ok = Some(false);
+                return;
+            };
+            // Scoped so every borrow of `layer` ends before `destroy()`:
+            // `set_layers` copies the array synchronously, so nothing
+            // staged outlives this block.
+            {
+                let region = Region::new();
+                let entry = wlr::LayerState {
+                    layer: &layer,
+                    buffer: None,
+                    src: FBox {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 100.0,
+                        height: 100.0,
+                    },
+                    dst: Box2D {
+                        x: 0,
+                        y: 0,
+                        width: 64,
+                        height: 64,
+                    },
+                    damage: &region,
+                    accepted: true,
+                };
+                let mut st = output.state();
+                st.set_layers(std::slice::from_ref(&entry));
+                self.layers_bit = Some(st.committed_fields());
+            }
+            layer.destroy();
+
+            // A buffer-bearing entry, committed: commit success is the
+            // well-formedness oracle — it proves the staged array marshalled
+            // into something wlroots accepts. Its limit is acknowledged: a
+            // src/dst transpose would still commit, so transposition risk
+            // stays covered e2e, not by this bit.
+            let buffered: Option<(CommittedFields, bool)> = {
+                let buf: &wlr::Buffer = &self.cursor_buf;
+                if let Some(layer) = output.create_layer() {
+                    let region = Region::new();
+                    let entry = wlr::LayerState {
+                        layer: &layer,
+                        buffer: Some(buf),
+                        src: FBox {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 8.0,
+                            height: 8.0,
+                        },
+                        dst: Box2D {
+                            x: 0,
+                            y: 0,
+                            width: 8,
+                            height: 8,
+                        },
+                        damage: &region,
+                        accepted: true,
+                    };
+                    let mut st = output.state();
+                    st.set_layers(std::slice::from_ref(&entry));
+                    let fields = st.committed_fields();
+                    let ok = st.commit().is_ok();
+                    layer.destroy();
+                    Some((fields, ok))
+                } else {
+                    None
+                }
+            };
+            match buffered {
+                Some((fields, ok)) => {
+                    self.layers_buffered_fields = Some(fields);
+                    self.layers_buffered_commit_ok = Some(ok);
+                }
+                None => {
+                    self.layers_buffered_fields = Some(CommittedFields::NONE);
+                    self.layers_buffered_commit_ok = Some(false);
+                }
+            }
+
+            // An empty slice still stages the LAYERS bit: an explicit "no
+            // layers" is still a layers statement, and LAYERS is in
+            // `WLR_OUTPUT_STATE_BACKEND_OPTIONAL`
+            // (`wlr/interfaces/wlr_output.h`), which backends may ignore —
+            // so the commit succeeds headless.
+            let (empty_fields, empty_ok) = {
+                let mut st = output.state();
+                st.set_layers(&[]);
+                (st.committed_fields(), st.commit().is_ok())
+            };
+            self.empty_layers_fields = Some(empty_fields);
+            self.empty_layers_commit_ok = Some(empty_ok);
+
+            // Two entries from two handles: one LAYERS bit, one clean commit.
+            let two: Option<(CommittedFields, bool)> = {
+                if let (Some(first), Some(second)) = (output.create_layer(), output.create_layer())
+                {
+                    let first_region = Region::new();
+                    let second_region = Region::new();
+                    let first_entry = wlr::LayerState {
+                        layer: &first,
+                        buffer: None,
+                        src: FBox {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 100.0,
+                            height: 100.0,
+                        },
+                        dst: Box2D {
+                            x: 0,
+                            y: 0,
+                            width: 64,
+                            height: 64,
+                        },
+                        damage: &first_region,
+                        accepted: true,
+                    };
+                    let second_entry = wlr::LayerState {
+                        layer: &second,
+                        buffer: None,
+                        src: FBox {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 50.0,
+                            height: 50.0,
+                        },
+                        dst: Box2D {
+                            x: 64,
+                            y: 0,
+                            width: 32,
+                            height: 32,
+                        },
+                        damage: &second_region,
+                        accepted: false,
+                    };
+                    let entries = [first_entry, second_entry];
+                    let mut st = output.state();
+                    st.set_layers(&entries);
+                    let fields = st.committed_fields();
+                    let ok = st.commit().is_ok();
+                    first.destroy();
+                    second.destroy();
+                    Some((fields, ok))
+                } else {
+                    None
+                }
+            };
+            match two {
+                Some((fields, ok)) => {
+                    self.two_layers_fields = Some(fields);
+                    self.two_layers_commit_ok = Some(ok);
+                }
+                None => {
+                    self.two_layers_fields = Some(CommittedFields::NONE);
+                    self.two_layers_commit_ok = Some(false);
+                }
+            }
+        }
+    }
+    impl wlr::ToplevelHandler for CursorApp<'_> {}
+    impl wlr::SeatHandler for CursorApp<'_> {}
+    impl wlr::FdHandler for CursorApp<'_> {}
+    impl wlr::LoopHandler for CursorApp<'_> {
+        fn should_stop(&mut self) -> bool {
+            true
+        }
+    }
+
+    let mut app = CursorApp {
+        cursor_buf,
+        runtime: runtime.clone(),
+        output_enabled: None,
+        output_init: None,
+        moved: None,
+        size_zero: None,
+        enabled_after_create: None,
+        cursor_enabled_after_buffer: None,
+        cursor_size_after_buffer: None,
+        layers_bit: None,
+        layers_buffered_fields: None,
+        layers_buffered_commit_ok: None,
+        empty_layers_fields: None,
+        empty_layers_commit_ok: None,
+        two_layers_fields: None,
+        two_layers_commit_ok: None,
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Turns(4))
+        .expect("run_all");
+    // The output must be enabled and render-initialised before any cursor
+    // buffer work: `init_output` is what gives the output the renderer
+    // `wlr_output_cursor_set_buffer` asserts on.
+    assert_eq!(
+        app.output_enabled,
+        Some(true),
+        "headless output must enable at its preferred mode"
+    );
+    assert_eq!(
+        app.output_init,
+        Some(true),
+        "init_output must give the output a renderer"
+    );
+    // `wlr_output_cursor_move` on a fresh headless output: headless
+    // `wlr_output_impl` provides no `move_cursor`, so the cursor never
+    // becomes the hardware cursor and the move takes the software-cursor
+    // path in `types/output/cursor.c`, which returns true (same-position
+    // early-true, still-hidden early-true, damage-and-true). False comes
+    // only from a backend `move_cursor` impl returning false, which no
+    // headless run reaches — so assert the reachable true and note the
+    // false branch stays untracked rather than forcing a false that is
+    // not real.
+    assert_eq!(
+        app.moved,
+        Some(true),
+        "cursor move must be accepted headless"
+    );
+    assert_eq!(
+        app.size_zero,
+        Some(true),
+        "fresh cursor with no buffer must report (0, 0)"
+    );
+    assert_eq!(
+        app.enabled_after_create,
+        Some(false),
+        "cursor with no buffer is not enabled"
+    );
+    assert_eq!(
+        app.cursor_enabled_after_buffer,
+        Some(true),
+        "set_buffer must enable the cursor"
+    );
+    assert_eq!(
+        app.cursor_size_after_buffer,
+        Some((8, 8)),
+        "cursor image size must match the staged buffer"
+    );
+    assert_eq!(
+        app.layers_bit,
+        Some(CommittedFields::LAYERS),
+        "set_layers must stage exactly the layers bit"
+    );
+    assert_eq!(
+        app.layers_buffered_fields,
+        Some(CommittedFields::LAYERS),
+        "a buffer-bearing entry must stage exactly the layers bit"
+    );
+    assert_eq!(
+        app.layers_buffered_commit_ok,
+        Some(true),
+        "buffer-bearing layers must commit headless (well-formedness oracle)"
+    );
+    assert_eq!(
+        app.empty_layers_fields,
+        Some(CommittedFields::LAYERS),
+        "an empty set_layers still stages the layers bit"
+    );
+    assert_eq!(
+        app.empty_layers_commit_ok,
+        Some(true),
+        "empty layers must commit headless"
+    );
+    assert_eq!(
+        app.two_layers_fields,
+        Some(CommittedFields::LAYERS),
+        "two entries must stage exactly the layers bit"
+    );
+    assert_eq!(
+        app.two_layers_commit_ok,
+        Some(true),
+        "two entries must commit headless"
     );
 }
