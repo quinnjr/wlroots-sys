@@ -525,6 +525,10 @@ impl<'h> Output<'h> {
     }
 
     /// Whether this output is driven by the DRM backend.
+    ///
+    /// Only available with the `drm-backend` feature: without it the
+    /// predicate has nothing to ask.
+    #[cfg(wlr_has_drm_backend)]
     pub fn is_drm(&self) -> bool {
         // SAFETY: the handle's lifetime guarantees the output is live.
         unsafe { sys::wlr_output_is_drm(self.raw.as_ptr()) }
@@ -543,6 +547,10 @@ impl<'h> Output<'h> {
     }
 
     /// Whether this output is driven by the nested X11 backend.
+    ///
+    /// Only available with the `x11-backend` feature: without it the
+    /// predicate has nothing to ask.
+    #[cfg(wlr_has_x11_backend)]
     pub fn is_x11(&self) -> bool {
         // SAFETY: the handle's lifetime guarantees the output is live.
         unsafe { sys::wlr_output_is_x11(self.raw.as_ptr()) }

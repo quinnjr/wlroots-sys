@@ -38,6 +38,9 @@ struct App {
     commit_ok: Option<bool>,
     commit_after_abandon_ok: Option<bool>,
     headless: Option<bool>,
+    // Written and read only where the backend predicates exist (see the
+    // cfg gates below); allow dead otherwise rather than cfg'ing the shape.
+    #[cfg_attr(not(all(wlr_has_drm_backend, wlr_has_x11_backend)), allow(dead_code))]
     backends: Option<(bool, bool, bool)>,
     adaptive_some: Option<bool>,
     name_round_trip: Option<bool>,
@@ -84,7 +87,12 @@ impl wlr::OutputHandler for App {
         self.staged_all = self.staged_fields;
 
         self.headless = Some(output.is_headless());
-        self.backends = Some((output.is_drm(), output.is_wl(), output.is_x11()));
+        // Backend predicates exist only with their backend features (see the
+        // methods' cfg gates); headless + Wayland glue are always bound.
+        #[cfg(all(wlr_has_drm_backend, wlr_has_x11_backend))]
+        {
+            self.backends = Some((output.is_drm(), output.is_wl(), output.is_x11()));
+        }
         self.adaptive_some = Some(output.adaptive_sync_status().is_some());
         self.name_round_trip = Some(
             output.set_name("m6-output-test").is_ok()
@@ -192,6 +200,9 @@ fn output_state_stages_fields_and_commits_atomically() {
         "committing right after an abandoned transaction must still succeed"
     );
     assert_eq!(app.headless, Some(true), "headless backend headless");
+    // Backend predicates exist only with their features (see the methods'
+    // cfg gates); without drm/x11 backends there is nothing to assert.
+    #[cfg(all(wlr_has_drm_backend, wlr_has_x11_backend))]
     assert_eq!(
         app.backends,
         Some((false, false, false)),
