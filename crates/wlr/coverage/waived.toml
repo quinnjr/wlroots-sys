@@ -1391,35 +1391,7 @@ reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
 
-[[waived]]
-symbol    = "wlr_keyboard_shortcuts_inhibit_manager_v1"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
 
-[[waived]]
-symbol    = "wlr_keyboard_shortcuts_inhibit_v1_create"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_keyboard_shortcuts_inhibitor_v1"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_keyboard_shortcuts_inhibitor_v1_activate"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_keyboard_shortcuts_inhibitor_v1_deactivate"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_layer_surface_v1_destroy"
@@ -3359,11 +3331,6 @@ reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
 
-[[waived]]
-symbol    = "wlr_tablet"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_tablet_client_v2"
@@ -3383,11 +3350,6 @@ reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
 milestone = "M13"
 
-[[waived]]
-symbol    = "wlr_tablet_from_input_device"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_tablet_impl"
@@ -3401,17 +3363,6 @@ reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
 milestone = "M13"
 
-[[waived]]
-symbol    = "wlr_tablet_manager_v2"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_tablet_pad"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_tablet_pad_button_event"
@@ -3425,11 +3376,6 @@ reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
 
-[[waived]]
-symbol    = "wlr_tablet_pad_create"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_tablet_pad_finish"
@@ -3437,11 +3383,6 @@ reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
 milestone = "M13"
 
-[[waived]]
-symbol    = "wlr_tablet_pad_from_input_device"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_tablet_pad_group"
@@ -3497,11 +3438,6 @@ reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
 
-[[waived]]
-symbol    = "wlr_tablet_tool"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_tablet_tool_axes"
@@ -3509,17 +3445,7 @@ reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
 
-[[waived]]
-symbol    = "wlr_tablet_tool_axis_event"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
 
-[[waived]]
-symbol    = "wlr_tablet_tool_button_event"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_tablet_tool_client_v2"
@@ -3527,17 +3453,7 @@ reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
 
-[[waived]]
-symbol    = "wlr_tablet_tool_create"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
 
-[[waived]]
-symbol    = "wlr_tablet_tool_proximity_event"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_tablet_tool_proximity_state"
@@ -3545,11 +3461,6 @@ reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
 
-[[waived]]
-symbol    = "wlr_tablet_tool_tip_event"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_tablet_tool_tip_state"
@@ -3600,12 +3511,6 @@ note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
 
 [[waived]]
-symbol    = "wlr_tablet_v2_create"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
 symbol    = "wlr_tablet_v2_end_grab"
 reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
@@ -3631,12 +3536,6 @@ milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_tablet_v2_tablet"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_tablet_v2_tablet_pad"
 reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
@@ -3673,12 +3572,6 @@ milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_tablet_v2_tablet_pad_notify_strip"
-reason    = "not-yet"
-note      = "Keyboard depth, tablet, and the input-method/text-input pair."
-milestone = "M8"
-
-[[waived]]
-symbol    = "wlr_tablet_v2_tablet_tool"
 reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
@@ -4713,3 +4606,15 @@ symbol    = "wlr_xwm"
 reason    = "not-yet"
 note      = "Xwayland, feature-gated."
 milestone = "M12"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_pad"
+reason    = "not-yet"
+note      = "Tablet v2 protocol objects: creation is wrapped, sends land later."
+milestone = "M8"
+
+[[waived]]
+symbol    = "wlr_tablet_v2_tablet_tool"
+reason    = "not-yet"
+note      = "Tablet v2 protocol objects: creation is wrapped, sends land later."
+milestone = "M8"

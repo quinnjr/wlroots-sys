@@ -28,7 +28,7 @@
 //! which the thread-scoped dispatch guard in `dispatch.rs` depends on.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -566,6 +566,133 @@ impl KeyboardGroupId {
 /// One tracked `wlr_keyboard_group`.
 pub(crate) struct KeyboardGroupEntry {
     pub(crate) raw: NonNull<sys::wlr_keyboard_group>,
+}
+
+/// A stable handle for one tracked `wlr_keyboard_shortcuts_inhibitor_v1`.
+///
+/// Opaque to consumers, like [`KeyboardGroupId`]: the compositor receives one
+/// when an inhibitor is created and hands it back to query it. The wrapped
+/// value is the inhibitor's destroy-listener address, which keys the map
+/// (the destroy handler recovers the same key from the firing listener).
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`KeyboardGroupId`]:
+/// an opaque id's ordering would promise creation-order semantics nobody
+/// asked for.
+///
+/// `Debug` is redacted: the wrapped value is a heap address and every other
+/// id is a counter that leaks nothing — printing this would hand out an
+/// ASLR oracle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ShortcutsInhibitorId(pub(crate) usize);
+
+impl std::fmt::Debug for ShortcutsInhibitorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ShortcutsInhibitorId(..)")
+    }
+}
+
+impl ShortcutsInhibitorId {
+    /// An id that names no inhibitor, for negative tests.
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
+/// Compatibility alias for the `InhibitorId` name used by the failing
+/// compile assertion in Task 2.
+pub type InhibitorId = ShortcutsInhibitorId;
+
+/// One tracked `wlr_keyboard_shortcuts_inhibitor_v1`.
+pub(crate) struct ShortcutsInhibitorEntry {
+    pub(crate) raw: NonNull<sys::wlr_keyboard_shortcuts_inhibitor_v1>,
+    pub(crate) active: bool,
+}
+
+/// A stable handle for one tracked tablet tool.
+///
+/// Opaque to consumers, like [`ShortcutsInhibitorId`]: the wrapped value is
+/// the hardware `wlr_tablet_tool`'s address — the identity every tablet-tool
+/// signal (`axis`, `proximity`, `tip`, `button`) carries in its event, so a
+/// handler recovers the id from the event itself rather than from a signal
+/// `data` that may be NULL (FIX-3, the same discipline the inhibitor ids
+/// follow).
+///
+/// Keyed by the hardware tool rather than the `wlr_tablet_v2_tablet_tool`
+/// the crate creates for it: the v2 object exposes no public destroy signal
+/// (only `set_cursor`), so nothing could evict a v2-keyed entry, while the
+/// hardware tool's lifetime ends with its tablet device's — whose destroy
+/// handler sweeps these entries synchronously.
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`KeyboardGroupId`]: an
+/// opaque id's ordering would promise creation-order semantics nobody asked
+/// for.
+///
+/// `Debug` is redacted: the wrapped value is a heap address and every other
+/// id is a counter that leaks nothing — printing this would hand out an
+/// ASLR oracle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TabletToolId(pub(crate) usize);
+
+impl std::fmt::Debug for TabletToolId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TabletToolId(..)")
+    }
+}
+
+impl TabletToolId {
+    /// An id that names no tool, for negative tests.
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
+/// Compatibility alias for the `ToolId` name used by the failing compile
+/// assertion in Task 2.
+pub type ToolId = TabletToolId;
+
+/// A stable handle for one tracked tablet pad.
+///
+/// Opaque to consumers, like [`TabletToolId`]: the wrapped value is the
+/// hardware `wlr_tablet_pad`'s address. Pad signals (`button`, `ring`,
+/// `strip`) carry no pad pointer in their events — unlike the tool signals,
+/// which name their tool — so per-pad listeners recover it from the
+/// listener slot set at link time instead (the same reason the text-input
+/// listeners carry their object there). Evicted
+/// synchronously by the pad device's own destroy handler.
+///
+/// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
+/// reasons [`TabletToolId`]'s doc gives.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TabletPadId(pub(crate) usize);
+
+impl std::fmt::Debug for TabletPadId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TabletPadId(..)")
+    }
+}
+
+impl TabletPadId {
+    /// An id that names no pad, for negative tests.
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
+/// One tracked hardware tablet tool: the tablet device that announced it.
+///
+/// Keyed in the map by the hardware tool's own address (the [`TabletToolId`]
+/// wraps that key directly, so lookup is a membership check, not a search).
+/// The `wlr_tablet_v2_tablet_tool` the crate creates for clients is
+/// deliberately *not* stored: wlroots owns it and frees it with the hardware
+/// tool, and no public destroy signal could evict a v2-keyed entry — while
+/// this entry is evicted synchronously by the tablet device's destroy
+/// handler (hardware tools live and die with their device) via
+/// [`Runtime::forget_tablet_tools_for_tablet`].
+pub(crate) struct TabletToolEntry {
+    pub(crate) tablet: NonNull<sys::wlr_tablet>,
 }
 
 /// Copy relay text into a C string for a token send, truncating at the first
@@ -1387,6 +1514,42 @@ pub(crate) struct RuntimeInner {
     /// only if no group exists.
     pub(crate) keyboard_groups: RefCell<HashMap<usize, KeyboardGroupEntry>>,
 
+    /// The `zwp_keyboard_shortcuts_inhibit_manager_v1` global, once created —
+    /// lets a client ask that the compositor not handle its own shortcuts
+    /// while a surface has focus. `Option` for the same reason
+    /// `xdg_shell` is: a consumer that never calls
+    /// [`Runtime::create_shortcuts_inhibit_manager`] never advertises the
+    /// global.
+    pub(crate) shortcuts_inhibit_manager:
+        RefCell<Option<NonNull<sys::wlr_keyboard_shortcuts_inhibit_manager_v1>>>,
+
+    /// Every live `wlr_keyboard_shortcuts_inhibitor_v1` this runtime tracks,
+    /// keyed by the inhibitor's destroy-listener address (the same discipline
+    /// as `keyboard_groups` and `text_inputs`). Empty until an inhibitor is
+    /// created; pruned via listener address (FIX-3).
+    pub(crate) shortcuts_inhibitors: RefCell<HashMap<usize, ShortcutsInhibitorEntry>>,
+
+    /// The `zwp_tablet_manager_v2` global, once created — bridges tablet
+    /// tools and pads to the compositor. `Option` for the same reason as the
+    /// other manager globals.
+    pub(crate) tablet_manager: RefCell<Option<NonNull<sys::wlr_tablet_manager_v2>>>,
+
+    /// Every hardware tablet tool announced via a tablet device's
+    /// `proximity`/`axis`/`tip`/`button` signals, keyed by the hardware
+    /// tool's own address (which [`TabletToolId`] wraps directly). The entry
+    /// names the tablet device that announced it, for the device-destroy
+    /// sweep — hardware tools live and die with their device, so the sweep
+    /// in [`Runtime::forget_tablet_tools_for_tablet`] evicts them
+    /// synchronously and no entry outlives its tool.
+    pub(crate) tablet_tools: RefCell<HashMap<usize, TabletToolEntry>>,
+
+    /// Every hardware tablet pad announced as an input device, as bare
+    /// addresses (which [`TabletPadId`] wraps directly). The pad *is* its
+    /// device, so the device-destroy handler recovers the key from the
+    /// device pointer itself and no per-pad payload is needed — hence a set
+    /// rather than a map.
+    pub(crate) tablet_pads: RefCell<HashSet<usize>>,
+
     /// Test-only: whether [`Runtime::enable_test_touch`] has been called.
     /// There is no touch input device and never will be one recorded here —
     /// unlike `keyboards`/`pointers`, this is not counting anything real, it
@@ -2035,6 +2198,11 @@ impl Runtime {
                 keyboards: RefCell::new(Vec::new()),
                 pointers: RefCell::new(Vec::new()),
                 keyboard_groups: RefCell::new(HashMap::new()),
+                shortcuts_inhibit_manager: RefCell::new(None),
+                shortcuts_inhibitors: RefCell::new(HashMap::new()),
+                tablet_manager: RefCell::new(None),
+                tablet_tools: RefCell::new(HashMap::new()),
+                tablet_pads: RefCell::new(HashSet::new()),
                 test_touch_enabled: std::cell::Cell::new(false),
                 outputs: RefCell::new(HashMap::new()),
                 drag_icon_tree: RefCell::new(None),
@@ -7270,6 +7438,263 @@ impl Runtime {
             // runtime.
             unsafe { sys::wlr_idle_notifier_v1_set_inhibited(notifier.as_ptr(), inhibited) };
         }
+    }
+
+    /// Create the `zwp_keyboard_shortcuts_inhibit_manager_v1` global.
+    /// A client can bind it to inhibit the compositor's own shortcuts
+    /// while a surface has focus. Errors if called twice.
+    pub fn create_shortcuts_inhibit_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.shortcuts_inhibit_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_shortcuts_inhibit_manager called twice",
+            ));
+        }
+        // SAFETY: display live for the call; the manager is display-owned and
+        // freed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_keyboard_shortcuts_inhibit_v1_create(display.as_ptr()) };
+        let raw =
+            NonNull::new(raw).ok_or(Error::Create("wlr_keyboard_shortcuts_inhibit_v1_create"))?;
+        *self.inner.shortcuts_inhibit_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    pub(crate) fn shortcuts_inhibit_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_keyboard_shortcuts_inhibit_manager_v1>> {
+        *self.inner.shortcuts_inhibit_manager.borrow()
+    }
+
+    pub(crate) fn record_shortcuts_inhibitor(
+        &self,
+        id: ShortcutsInhibitorId,
+        raw: NonNull<sys::wlr_keyboard_shortcuts_inhibitor_v1>,
+        active: bool,
+    ) {
+        self.inner
+            .shortcuts_inhibitors
+            .borrow_mut()
+            .insert(id.0, ShortcutsInhibitorEntry { raw, active });
+    }
+
+    pub(crate) fn forget_shortcuts_inhibitor(&self, id: ShortcutsInhibitorId) {
+        self.inner.shortcuts_inhibitors.borrow_mut().remove(&id.0);
+    }
+
+    /// Drive a tracked inhibitor's wire state: call wlroots'
+    /// `wlr_keyboard_shortcuts_inhibitor_v1_{activate,deactivate}` and record
+    /// the outcome, so [`Runtime::shortcuts_inhibited`] stays truthful.
+    /// Returns `false` — changing nothing — for an unknown or destroyed id,
+    /// the same miss contract every by-id accessor in this crate keeps
+    /// (FIX-3).
+    ///
+    /// This announces nothing itself: the caller just set the state, so it
+    /// already knows it — the `ShortcutsInhibitorToggled` event announces
+    /// *lifecycle* (creation with its birth state, destroy with `false`), not
+    /// transitions the compositor drove. A compositor that gates bindings off
+    /// the event arm alone should therefore activate through creation focus
+    /// (which the backend does) or store what it set here itself.
+    pub fn set_shortcuts_inhibitor_active(&self, id: ShortcutsInhibitorId, active: bool) -> bool {
+        let raw = {
+            let mut inhibitors = self.inner.shortcuts_inhibitors.borrow_mut();
+            let Some(entry) = inhibitors.get_mut(&id.0) else {
+                return false;
+            };
+            entry.active = active;
+            entry.raw
+        };
+        // SAFETY: `raw` was live per the table invariant a moment ago, and
+        // the entry still stands — nothing between the lookup and this call
+        // could have destroyed the inhibitor (destruction runs on this same
+        // thread, through the run's destroy listener, which evicts first).
+        // No borrow is held across the FFI call: the map borrow ended above.
+        unsafe {
+            if active {
+                sys::wlr_keyboard_shortcuts_inhibitor_v1_activate(raw.as_ptr());
+            } else {
+                sys::wlr_keyboard_shortcuts_inhibitor_v1_deactivate(raw.as_ptr());
+            }
+        }
+        true
+    }
+
+    /// Whether any shortcuts inhibitor is currently active. Used by the
+    /// compositor to decide whether to skip its own key bindings.
+    pub fn shortcuts_inhibited(&self) -> bool {
+        self.inner
+            .shortcuts_inhibitors
+            .borrow()
+            .values()
+            .any(|e| e.active)
+    }
+
+    /// Create the `zwp_tablet_manager_v2` global, bridging tablet tools and
+    /// pads to the compositor. Errors if called twice.
+    pub fn create_tablet_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.tablet_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_tablet_manager called twice",
+            ));
+        }
+        // SAFETY: display live for the call; the manager is display-owned and
+        // freed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_tablet_v2_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_tablet_v2_create"))?;
+        *self.inner.tablet_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    pub(crate) fn tablet_manager_ptr(&self) -> Option<NonNull<sys::wlr_tablet_manager_v2>> {
+        *self.inner.tablet_manager.borrow()
+    }
+
+    pub(crate) fn record_tablet_tool(
+        &self,
+        tool: NonNull<sys::wlr_tablet_tool>,
+        tablet: NonNull<sys::wlr_tablet>,
+    ) {
+        self.inner
+            .tablet_tools
+            .borrow_mut()
+            .insert(tool.as_ptr() as usize, TabletToolEntry { tablet });
+    }
+
+    /// The [`TabletToolId`] for a hardware tool this runtime tracks, or
+    /// `None` for null, for a tool announced by no tracked tablet, and for
+    /// one whose device has since been destroyed (which sweeps it via
+    /// `forget_tablet_tools_for_tablet`). The same miss shape
+    /// every by-id accessor in this crate keeps (FIX-3).
+    ///
+    /// # Safety
+    ///
+    /// `tool` must be null or point at a live `wlr_tablet_tool` — the
+    /// address is compared, never dereferenced, but a dangling address
+    /// could compare equal to a recycled one.
+    pub unsafe fn try_tablet_tool(&self, tool: *mut sys::wlr_tablet_tool) -> Option<TabletToolId> {
+        let key = NonNull::new(tool)?.as_ptr() as usize;
+        self.inner
+            .tablet_tools
+            .borrow()
+            .contains_key(&key)
+            .then_some(TabletToolId(key))
+    }
+
+    /// Forget every tool a tablet device announced, called synchronously
+    /// from that device's own destroy handler before wlroots frees anything.
+    /// Hardware tools live and die with their device, so this — not a
+    /// per-tool destroy listener — is what keeps the table from outliving
+    /// its tools.
+    pub(crate) fn forget_tablet_tools_for_tablet(&self, tablet: NonNull<sys::wlr_tablet>) {
+        self.inner
+            .tablet_tools
+            .borrow_mut()
+            .retain(|_, entry| entry.tablet != tablet);
+    }
+
+    /// Debug accessor: number of tracked tablet tools.
+    #[doc(hidden)]
+    pub fn rt_debug_tablet_tool_count(&self) -> usize {
+        self.inner.tablet_tools.borrow().len()
+    }
+    /// Record a hardware tablet pad the backend announced. The pad *is* its
+    /// device, so the address alone keys the set; only the address is
+    /// stored, never dereferenced, and the device-destroy handler evicts it
+    /// before wlroots frees the device.
+    pub(crate) fn record_tablet_pad(&self, pad: NonNull<sys::wlr_tablet_pad>) {
+        self.inner
+            .tablet_pads
+            .borrow_mut()
+            .insert(pad.as_ptr() as usize);
+    }
+
+    /// Track a hardware tablet pad, creating its client-facing
+    /// `wlr_tablet_v2_tablet_pad` when the tablet manager and a seat both
+    /// exist. The pad is always recorded, even when no v2 object could be
+    /// created (no manager, no seat, or wlroots refused): notification must
+    /// never depend on the protocol side, and the v2 object is
+    /// wlroots-owned (freed with the device) so nothing here retains it.
+    pub(crate) fn ensure_tablet_pad(
+        &self,
+        device: NonNull<sys::wlr_input_device>,
+        pad: NonNull<sys::wlr_tablet_pad>,
+    ) {
+        self.record_tablet_pad(pad);
+        if let (Some(manager), Some(seat)) = (self.tablet_manager_ptr(), self.seat_ptr()) {
+            // SAFETY: manager and seat are live (display-owned and
+            // runtime-owned respectively) and `device` is the live pad
+            // device just announced. The created v2 pad is wlroots-owned —
+            // freed with the device — so this crate never frees it, and a
+            // null return (refusal) is fine: the hardware pad is still
+            // recorded above. No borrow is held across the call.
+            unsafe { sys::wlr_tablet_pad_create(manager.as_ptr(), seat.as_ptr(), device.as_ptr()) };
+        }
+    }
+
+    /// The [`TabletPadId`] for a hardware pad this runtime tracks, or `None`
+    /// for null, for an unannounced pad, and for one whose device has since
+    /// been destroyed (which evicts it via `forget_tablet_pad`).
+    ///
+    /// # Safety
+    ///
+    /// As for [`Runtime::try_tablet_tool`].
+    pub unsafe fn try_tablet_pad(&self, pad: *mut sys::wlr_tablet_pad) -> Option<TabletPadId> {
+        let key = NonNull::new(pad)?.as_ptr() as usize;
+        self.inner
+            .tablet_pads
+            .borrow()
+            .contains(&key)
+            .then_some(TabletPadId(key))
+    }
+
+    /// Forget a tablet pad, called synchronously from its device's own
+    /// destroy handler before wlroots frees the device.
+    pub(crate) fn forget_tablet_pad(&self, pad: NonNull<sys::wlr_tablet_pad>) {
+        self.inner
+            .tablet_pads
+            .borrow_mut()
+            .remove(&(pad.as_ptr() as usize));
+    }
+
+    /// Track a hardware tablet tool, creating its client-facing
+    /// `wlr_tablet_v2_tablet_tool` when the tablet manager and a seat both
+    /// exist, and return its [`TabletToolId`]. Already-tracked tools return
+    /// their existing id — creation is idempotent, so every tool-signal
+    /// handler can call this unconditionally.
+    ///
+    /// The hardware tool is always recorded, even when no v2 object could be
+    /// created (no manager, no seat, or wlroots refused): notification must
+    /// never depend on the protocol side, and the v2 object is wlroots-owned
+    /// (freed with the hardware tool) so nothing here retains it.
+    pub(crate) fn ensure_tablet_tool(
+        &self,
+        tool: NonNull<sys::wlr_tablet_tool>,
+        tablet: NonNull<sys::wlr_tablet>,
+    ) -> TabletToolId {
+        let key = tool.as_ptr() as usize;
+        // SAFETY: `tool` is live per the caller's signal emission (the
+        // address is compared, never dereferenced), so the `try_` contract
+        // holds.
+        if let Some(id) = unsafe { self.try_tablet_tool(tool.as_ptr()) } {
+            return id;
+        }
+        if let (Some(manager), Some(seat)) = (self.tablet_manager_ptr(), self.seat_ptr()) {
+            // SAFETY: manager and seat are live (display-owned and
+            // runtime-owned respectively) and `tool` is the live hardware
+            // tool just announced. The created v2 tool is wlroots-owned —
+            // freed with the hardware tool — so this crate never frees it,
+            // and a null return (refusal) is fine: the hardware tool is
+            // still recorded below.
+            // No borrow is held across the call: the lookups above copied
+            // their pointers out and released their borrows.
+            unsafe { sys::wlr_tablet_tool_create(manager.as_ptr(), seat.as_ptr(), tool.as_ptr()) };
+        }
+        self.record_tablet_tool(tool, tablet);
+        TabletToolId(key)
+    }
+
+    /// Debug accessor: number of tracked tablet pads.
+    #[doc(hidden)]
+    pub fn rt_debug_tablet_pad_count(&self) -> usize {
+        self.inner.tablet_pads.borrow().len()
     }
 
     /// Create the `ext_session_lock_manager_v1` global. A locker (a lock

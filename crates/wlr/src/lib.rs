@@ -133,9 +133,9 @@ pub use render::{Gles2, Gles2TextureAttribs};
 #[cfg(wlr_has_vulkan_renderer)]
 pub use render::{Vk, VkImageAttribs};
 pub use runtime::{
-    Band, CommittedImeState, CommittedTextInputState, ImePreedit, InputPopupSurfaceId,
+    Band, CommittedImeState, CommittedTextInputState, ImePreedit, InhibitorId, InputPopupSurfaceId,
     KeyboardGroupId, KeyboardState, PendingImeState, PendingKeyboardState, PendingTextInputState,
-    Runtime,
+    Runtime, ShortcutsInhibitorId, TabletPadId, TabletToolId, ToolId,
 };
 pub use scene::{
     DamageRing, DamageRingRef, NodeId, NodeKind, RectId, SceneBuffer, SceneBufferOptions,

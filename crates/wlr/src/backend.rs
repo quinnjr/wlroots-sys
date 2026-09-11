@@ -300,6 +300,17 @@ struct Bound {
     /// `on_input_method_commit` must recover the object here rather than from
     /// the signal. Set at link time by [`Registration::link_input_method`].
     input_method: Option<NonNull<sys::wlr_input_method_v2>>,
+
+    /// The tablet pad this listener belongs to, for the three per-pad
+    /// listeners `on_new_input` links (`button`/`ring`/`strip` on the pad's
+    /// own `events`); `None` for every other listener in this file.
+    ///
+    /// A raw object pointer, for the reason `text_input`'s own doc gives:
+    /// `wlr_tablet_pad_{button,ring,strip}_event` carry no pad or device
+    /// pointer at all — only time, button-or-position and mode — so the pad
+    /// an event is about is unrecoverable from the signal and must ride
+    /// along. Set at link time by [`Registration::link_tablet_pad`].
+    tablet_pad: Option<NonNull<sys::wlr_tablet_pad>>,
 }
 
 // `bound_of`'s cast is sound only while `listener` is `Bound`'s first field, at
@@ -371,6 +382,7 @@ impl Registration {
             xwayland: None,
             text_input: None,
             input_method: None,
+            tablet_pad: None,
         });
 
         // SAFETY: the caller guarantees `signal` is an initialised `wl_signal`,
@@ -428,6 +440,7 @@ impl Registration {
             xwayland: Some(xwayland),
             text_input: None,
             input_method: None,
+            tablet_pad: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -693,6 +706,7 @@ impl Registration {
             xwayland: None,
             text_input: None,
             input_method: None,
+            tablet_pad: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -757,6 +771,7 @@ impl Registration {
             xwayland: None,
             text_input: Some(text_input),
             input_method: None,
+            tablet_pad: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -813,11 +828,70 @@ impl Registration {
             xwayland: None,
             text_input: None,
             input_method: Some(input_method),
+            tablet_pad: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
         // caller's contract, and the listener is a freshly boxed one whose
         // address stays put until this `Registration` drops.
+        unsafe { sys::wl_signal_add(signal, &raw mut bound.listener) };
+
+        Registration { bound }
+    }
+
+    /// Link a per-tablet-pad listener, carrying the raw `wlr_tablet_pad` its
+    /// callback reads back from [`Bound::tablet_pad`]. Every other slot is
+    /// `None`.
+    ///
+    /// A dedicated constructor for the same reason `link_text_input` is, and
+    /// load-bearing for the same reason: the pad button/ring/strip events
+    /// name no pad (see [`Bound::tablet_pad`]).
+    ///
+    /// Unlike `link_input_method`, `alive` is the owning device's liveness
+    /// flag, not null: these listeners live in the device's
+    /// [`InputDevice`] entry, and the pad (which *is* the device) can die
+    /// first — `on_input_destroy` drops the entry, and `Drop` consults this
+    /// flag before unlinking.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`]: `signal` must point at an initialised
+    /// `wl_signal` on the given pad, `session` must be a `*const Session<S>`
+    /// for the `S` `notify` casts it back to, and `alive` must outlive the
+    /// returned `Registration`.
+    unsafe fn link_tablet_pad(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        alive: *const Cell<bool>,
+        tablet_pad: NonNull<sys::wlr_tablet_pad>,
+    ) -> Self {
+        let mut bound = Box::new(Bound {
+            listener: sys::wl_listener {
+                link: sys::wl_list {
+                    prev: std::ptr::null_mut(),
+                    next: std::ptr::null_mut(),
+                },
+                notify,
+            },
+            session,
+            alive,
+            flag: std::ptr::null(),
+            id: None,
+            toplevel: None,
+            layer: None,
+            node: None,
+            popup: None,
+            #[cfg(wlr_has_xwayland)]
+            xwayland: None,
+            text_input: None,
+            input_method: None,
+            tablet_pad: Some(tablet_pad),
+        });
+
+        // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per
+        // the caller's contract, and the listener is a freshly boxed one
+        // whose address stays put until this `Registration` drops.
         unsafe { sys::wl_signal_add(signal, &raw mut bound.listener) };
 
         Registration { bound }
@@ -983,6 +1057,12 @@ struct Session<'r, S> {
     /// inhibitor is destroyed, without touching any other live inhibitor's
     /// listener.
     idle_inhibitors: RefCell<HashMap<usize, Registration>>,
+
+    /// This run's destroy listener on every shortcuts inhibitor currently
+    /// live, keyed by the `destroy` listener's own address (as `usize`) —
+    /// same discipline as `idle_inhibitors` (wlroots emits with surface as
+    /// `data`). The active flag is tracked in the runtime map.
+    shortcuts_inhibitors: RefCell<HashMap<usize, Registration>>,
 
     /// This run's `new_surface`/`unlock`/`destroy` listeners on every live
     /// `wlr_session_lock_v1`, keyed by the `destroy` listener's own address
@@ -1735,6 +1815,7 @@ impl<'d> Backend<'d> {
             drags: RefCell::new(HashMap::new()),
             scene_buffers: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
+            shortcuts_inhibitors: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
             pointer_constraints: RefCell::new(HashMap::new()),
@@ -2194,6 +2275,26 @@ impl<'d> Backend<'d> {
                 )
             });
         }
+
+        if let Some(manager) = runtime.shortcuts_inhibit_manager_ptr() {
+            // SAFETY: `create_shortcuts_inhibit_manager` returned a non-null
+            // manager owned by the display — same reasoning, null liveness.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.new_inhibitor,
+                    on_new_shortcuts_inhibitor::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
+        // The tablet manager has no `new_*` signal of its own: tools and pads
+        // arrive as input devices (`WLR_INPUT_DEVICE_TABLET` /
+        // `WLR_INPUT_DEVICE_TABLET_PAD`), wired up in `on_new_input`, which
+        // consults the manager through `tablet_manager_ptr` when creating
+        // their v2 objects. Nothing to link here; the manager is
+        // display-owned like every other manager global.
 
         if let Some(manager) = runtime.session_lock_manager_ptr() {
             // SAFETY: `create_session_lock_manager` returned a non-null manager
@@ -2773,6 +2874,11 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         Event::InputMethodPopupRepositioned(popup) => state.popup_repositioned(popup),
         Event::InputMethodCommitted => state.input_method_committed(),
         Event::InputMethodDeactivated => state.input_method_deactivated(),
+        Event::ShortcutsInhibitorToggled(id, active) => {
+            state.shortcuts_inhibitor_toggled(id, active)
+        }
+        Event::TabletToolUpdate(id) => state.tablet_tool_event(id),
+        Event::TabletPadUpdate(id) => state.tablet_pad_event(id),
         Event::OutputConfigurationApplied => {
             // Pop the owned payload staged alongside this marker. FIFO, so the
             // `Vec` popped here is the one `on_output_manager_apply` pushed for
@@ -4516,6 +4622,306 @@ unsafe extern "C" fn on_idle_inhibitor_destroy<S: Handlers>(
         let key = l as usize;
         let removed = (*session).idle_inhibitors.borrow_mut().remove(&key);
         drop(removed);
+    }
+}
+
+/// A client asked to inhibit shortcuts for one of its surfaces. Track the
+/// inhibitor and announce it with its birth state — then activate it right
+/// away when it names the surface that already has keyboard focus.
+///
+/// wlroots births every inhibitor inactive (`active` starts `false`; only a
+/// compositor `activate` call flips it), so an unconditional "active" here
+/// would block bindings for a background surface that merely *might* take
+/// focus later. The focus gate below reads the seat's live
+/// `keyboard_state.focused_surface` — the same field read the text-input
+/// enter path consults — and activates only on a seat-and-surface match, so
+/// the announced state is the enforced one: the client sees `active` iff the
+/// compositor's gate will treat it as active. Focus arriving later is the
+/// compositor's `set_shortcuts_inhibitor_active` call (Task 4's gate owns
+/// focus); losing focus the same in reverse.
+unsafe extern "C" fn on_new_shortcuts_inhibitor<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked into `wlr_keyboard_shortcuts_inhibit_manager_v1.events.new_inhibitor`,
+    // whose signal carries a live `*mut wlr_keyboard_shortcuts_inhibitor_v1`
+    // (the manager passes the object, not a surface — unlike the per-object
+    // destroy signal, which is why only the destroy path needs FIX-3).
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let inhibitor = data.cast::<sys::wlr_keyboard_shortcuts_inhibitor_v1>();
+        let Some(raw) = NonNull::new(inhibitor) else {
+            return;
+        };
+        let destroy = Registration::link_bare(
+            &raw mut (*inhibitor).events.destroy,
+            on_shortcuts_inhibitor_destroy::<S>,
+            (*bound).session,
+            std::ptr::null(),
+        );
+        let key = destroy.listener_addr();
+        let id = crate::ShortcutsInhibitorId(key);
+        // Birth state, read not assumed: wlroots inits `active` to false.
+        // SAFETY: `raw` is the live inhibitor just announced; reading two
+        // pointer fields and one bool borrows wlroots-owned memory without
+        // retaining it.
+        let (mut active, seat, surface) = (
+            (*raw.as_ptr()).active,
+            (*raw.as_ptr()).seat,
+            (*raw.as_ptr()).surface,
+        );
+        if !active
+            && !surface.is_null()
+            && let Some(focused) = focused_keyboard_surface(runtime)
+            && focused.0 == seat
+            && focused.1 == surface
+        {
+            // SAFETY: `raw` is live per above; `activate` only sends the
+            // client its `active` event and flips the flag — no borrow is
+            // held (the runtime map is untouched so far).
+            sys::wlr_keyboard_shortcuts_inhibitor_v1_activate(raw.as_ptr());
+            active = true;
+        }
+        runtime.record_shortcuts_inhibitor(id, raw, active);
+        (*session)
+            .shortcuts_inhibitors
+            .borrow_mut()
+            .insert(key, destroy);
+        // Copy out, drop every borrow, then emit: a handler that reaches
+        // back into the inhibitor table on the event must not deadlock on a
+        // still-held borrow — and no borrow crosses the FFI `activate` above
+        // or the emit below.
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            crate::dispatch::Event::ShortcutsInhibitorToggled(id, active),
+            deliver,
+        );
+    }
+}
+
+/// The seat (if any) and the surface holding its keyboard focus, each as a
+/// raw pointer for address comparison only — never dereferenced here.
+fn focused_keyboard_surface(
+    runtime: &Runtime,
+) -> Option<(*mut sys::wlr_seat, *mut sys::wlr_surface)> {
+    let seat = runtime.seat_ptr()?;
+    // SAFETY: `seat_ptr` returned a live seat; reading
+    // `keyboard_state.focused_surface` borrows wlroots-owned memory without
+    // retaining it.
+    let focused = unsafe { (*seat.as_ptr()).keyboard_state.focused_surface };
+    Some((seat.as_ptr(), focused))
+}
+
+unsafe extern "C" fn on_shortcuts_inhibitor_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_shortcuts_inhibitor` into the inhibitor's
+    // `events.destroy`; inhibitor still live for this emission.
+    // wlroots emits with surface as data, so identity from `l`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let key = l as usize;
+        let id = crate::ShortcutsInhibitorId(key);
+        runtime.forget_shortcuts_inhibitor(id);
+        let removed = (*session).shortcuts_inhibitors.borrow_mut().remove(&key);
+        drop(removed);
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            crate::dispatch::Event::ShortcutsInhibitorToggled(id, false),
+            deliver,
+        );
+    }
+}
+
+/// Announce one tablet-tool signal as an id-only `TabletToolUpdate`.
+///
+/// Notification only, deliberately: wlroots forwards nothing itself — a
+/// `wlr_tablet.events.*` emission reaches no client until the compositor
+/// drives the tool's `wlr_tablet_v2_tablet_tool` with the matching
+/// `wlr_send_tablet_v2_*` call (future safe wrappers), so there is no
+/// forward here to gate and no client state to settle first. What the
+/// handler *does* settle is tracking: `ensure_tablet_tool` records the
+/// hardware tool (creating its v2 object when manager and seat exist) and
+/// its borrow ends before the emit below, so a handler reaching back into
+/// the tablet table never deadlocks — and no borrow crosses the emit.
+fn emit_tablet_tool_event<S: Handlers>(
+    session: &Session<'_, S>,
+    tablet: *mut sys::wlr_tablet,
+    tool: *mut sys::wlr_tablet_tool,
+) {
+    let (Some(tablet), Some(tool)) = (NonNull::new(tablet), NonNull::new(tool)) else {
+        return;
+    };
+    let id = session.runtime.ensure_tablet_tool(tool, tablet);
+    let deliver = session.deliver;
+    // SAFETY: `emit`'s contract — `session` outlives the call and no `&mut S`
+    // is live (any reentrant emit defers). The same call every other
+    // `on_*` handler in this file makes.
+    unsafe {
+        session
+            .dispatcher
+            .emit(session, Event::TabletToolUpdate(id), deliver);
+    }
+}
+
+/// A tablet tool entered or left proximity. Carries the tool (and tablet)
+/// in its event, so identity needs no side channel.
+unsafe extern "C" fn on_tablet_tool_proximity<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live tablet's
+    // `events.proximity`, whose data is a live
+    // `wlr_tablet_tool_proximity_event` for the duration of the emission.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_tablet_tool_proximity_event>();
+        if ev.is_null() {
+            return;
+        }
+        emit_tablet_tool_event(&*session, (*ev).tablet, (*ev).tool);
+    }
+}
+
+/// A tablet tool moved, changed pressure/tilt, or scrolled its wheel. Same
+/// shape as proximity: the event names the tool.
+unsafe extern "C" fn on_tablet_tool_axis<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live tablet's `events.axis`,
+    // whose data is a live `wlr_tablet_tool_axis_event` for the emission.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_tablet_tool_axis_event>();
+        if ev.is_null() {
+            return;
+        }
+        emit_tablet_tool_event(&*session, (*ev).tablet, (*ev).tool);
+    }
+}
+
+/// A tablet tool tip touched down or lifted. Same shape as proximity: the
+/// event names the tool.
+unsafe extern "C" fn on_tablet_tool_tip<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live tablet's `events.tip`,
+    // whose data is a live `wlr_tablet_tool_tip_event` for the emission.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_tablet_tool_tip_event>();
+        if ev.is_null() {
+            return;
+        }
+        emit_tablet_tool_event(&*session, (*ev).tablet, (*ev).tool);
+    }
+}
+
+/// A tablet tool button pressed or released. Same shape as proximity: the
+/// event names the tool.
+unsafe extern "C" fn on_tablet_tool_button<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live tablet's `events.button`,
+    // whose data is a live `wlr_tablet_tool_button_event` for the emission.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_tablet_tool_button_event>();
+        if ev.is_null() {
+            return;
+        }
+        emit_tablet_tool_event(&*session, (*ev).tablet, (*ev).tool);
+    }
+}
+
+/// Announce one tablet-pad signal as an id-only `TabletPadUpdate`.
+///
+/// Notification only, for the same reason `emit_tablet_tool_event` gives:
+/// pad feedback flows through the pad's `wlr_tablet_v2_tablet_pad` grabs,
+/// driven by the compositor. The pad is recovered from the bound slot —
+/// pad events name no pad — and an untracked pad (its device was announced
+/// before any tablet manager existed, say) is skipped rather than announced
+/// with an id that resolves to nothing.
+fn emit_tablet_pad_event<S: Handlers>(session: &Session<'_, S>, pad: NonNull<sys::wlr_tablet_pad>) {
+    // SAFETY: the slot was set at link time from the live pad, and the
+    // listener is owned by the pad device's own entry — unlinked
+    // synchronously on device destroy — so the pad outlives any emission.
+    // Only compared, never dereferenced.
+    let id = unsafe { session.runtime.try_tablet_pad(pad.as_ptr()) };
+    let Some(id) = id else { return };
+    let deliver = session.deliver;
+    // SAFETY: as for `emit_tablet_tool_event`.
+    unsafe {
+        session
+            .dispatcher
+            .emit(session, Event::TabletPadUpdate(id), deliver);
+    }
+}
+
+/// A tablet pad button pressed or released.
+unsafe extern "C" fn on_tablet_pad_button<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` via `link_tablet_pad` into one pad's
+    // `events.button`. `data` is intentionally unread: pad events carry no
+    // pad pointer, so identity comes from the bound slot (see
+    // [`Bound::tablet_pad`]).
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(pad) = (*bound).tablet_pad else {
+            return;
+        };
+        emit_tablet_pad_event(&*session, pad);
+    }
+}
+
+/// A tablet pad ring rotated.
+unsafe extern "C" fn on_tablet_pad_ring<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_tablet_pad_button`, into the same pad's
+    // `events.ring`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(pad) = (*bound).tablet_pad else {
+            return;
+        };
+        emit_tablet_pad_event(&*session, pad);
+    }
+}
+
+/// A tablet pad strip slid.
+unsafe extern "C" fn on_tablet_pad_strip<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_tablet_pad_button`, into the same pad's
+    // `events.strip`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(pad) = (*bound).tablet_pad else {
+            return;
+        };
+        emit_tablet_pad_event(&*session, pad);
     }
 }
 
@@ -7772,12 +8178,21 @@ struct InputDevice {
     keyboard: Option<NonNull<sys::wlr_keyboard>>,
     /// As `keyboard`, for [`Runtime::forget_pointer`]/[`Runtime::has_pointer`].
     pointer: Option<NonNull<sys::wlr_pointer>>,
+    /// This device's tablet identity, if it is one — recorded so
+    /// `on_input_destroy` can sweep the tools it announced out of the
+    /// runtime's tablet table before wlroots frees the device.
+    tablet: Option<NonNull<sys::wlr_tablet>>,
+    /// This device's pad identity, if it is one — recorded so
+    /// `on_input_destroy` can evict it from the runtime's pad set.
+    pad: Option<NonNull<sys::wlr_tablet_pad>>,
     _destroy: Registration,
     /// The device's own signals: two for a keyboard (`key`, `modifiers`),
-    /// three for a pointer (`motion`, `motion_absolute`, `button`), zero for
-    /// a device type this crate does not yet wire up (the destroy watch
-    /// above is still linked, so this entry is still found and removed on
-    /// destroy even for an ignored device type).
+    /// four for a pointer (`motion`, `motion_absolute`, `button`, `axis`),
+    /// four for a tablet (`axis`, `proximity`, `tip`, `button`), three for a
+    /// pad (`button`, `ring`, `strip`), zero for a device type this crate
+    /// does not yet wire up (the destroy watch above is still linked, so
+    /// this entry is still found and removed on destroy even for an ignored
+    /// device type).
     _listeners: Vec<Registration>,
     /// See this struct's own doc for why this is a backstop, not the
     /// primary mechanism.
@@ -7954,6 +8369,8 @@ unsafe extern "C" fn on_new_virtual_keyboard<S: Handlers>(
                 alive,
                 keyboard: Some(kb_nn),
                 pointer: None,
+                tablet: None,
+                pad: None,
                 _destroy: destroy,
                 _listeners: listeners,
             },
@@ -8045,6 +8462,8 @@ unsafe extern "C" fn on_new_virtual_pointer<S: Handlers>(
             InputDevice {
                 keyboard: None,
                 pointer: Some(p_nn),
+                tablet: None,
+                pad: None,
                 _destroy: destroy,
                 _listeners: listeners,
                 alive,
@@ -8093,6 +8512,8 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
         let mut listeners = Vec::new();
         let mut keyboard = None;
         let mut pointer = None;
+        let mut tablet = None;
+        let mut pad = None;
 
         match (*device).type_ {
             sys::wlr_input_device_type::WLR_INPUT_DEVICE_KEYBOARD => {
@@ -8177,6 +8598,88 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                     ));
                 }
             }
+            sys::wlr_input_device_type::WLR_INPUT_DEVICE_TABLET => {
+                let tab = sys::wlr_tablet_from_input_device(device);
+                if !tab.is_null() {
+                    // A tablet moves the cursor exactly like a pointer —
+                    // attach it so the cursor follows the pen without the
+                    // compositor repeating the pointer arm's call.
+                    if let Some(cursor) = runtime.cursor_ptr() {
+                        // SAFETY: `device` is the live input device just
+                        // announced, and `cursor` is this runtime's own live
+                        // cursor; attaching only records the device, which
+                        // `on_input_destroy` detaches by dropping this entry.
+                        sys::wlr_cursor_attach_input_device(cursor.as_ptr(), device);
+                    }
+                    // SAFETY: `tab` is non-null per the check above and live
+                    // for as long as `device` is — the same lifetime the
+                    // keyboard/pointer arms rely on for their own listeners.
+                    let tab_nn = NonNull::new_unchecked(tab);
+                    tablet = Some(tab_nn);
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*tab).events.axis,
+                        on_tablet_tool_axis::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*tab).events.proximity,
+                        on_tablet_tool_proximity::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*tab).events.tip,
+                        on_tablet_tool_tip::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*tab).events.button,
+                        on_tablet_tool_button::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                }
+            }
+            sys::wlr_input_device_type::WLR_INPUT_DEVICE_TABLET_PAD => {
+                let pad_raw = sys::wlr_tablet_pad_from_input_device(device);
+                if !pad_raw.is_null()
+                    && let Some(device_nn) = NonNull::new(device)
+                {
+                    // SAFETY: `pad_raw` is non-null per the check above and
+                    // live for as long as `device` is — the same lifetime
+                    // the keyboard/pointer arms rely on.
+                    let pad_nn = NonNull::new_unchecked(pad_raw);
+                    pad = Some(pad_nn);
+                    // Records unconditionally; creates the v2 pad for
+                    // clients when manager and seat exist (best-effort —
+                    // managers precede input in every real setup, and the
+                    // id resolves either way).
+                    runtime.ensure_tablet_pad(device_nn, pad_nn);
+                    listeners.push(Registration::link_tablet_pad(
+                        &raw mut (*pad_raw).events.button,
+                        on_tablet_pad_button::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                        pad_nn,
+                    ));
+                    listeners.push(Registration::link_tablet_pad(
+                        &raw mut (*pad_raw).events.ring,
+                        on_tablet_pad_ring::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                        pad_nn,
+                    ));
+                    listeners.push(Registration::link_tablet_pad(
+                        &raw mut (*pad_raw).events.strip,
+                        on_tablet_pad_strip::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                        pad_nn,
+                    ));
+                }
+            }
             _ => {}
         }
 
@@ -8191,6 +8694,8 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                 alive,
                 keyboard,
                 pointer,
+                tablet,
+                pad,
                 _destroy: destroy,
                 _listeners: listeners,
             },
@@ -8241,6 +8746,12 @@ unsafe extern "C" fn on_input_destroy<S: Handlers>(
             }
             if let Some(p) = entry.pointer {
                 runtime.forget_pointer(p);
+            }
+            if let Some(tab) = entry.tablet {
+                runtime.forget_tablet_tools_for_tablet(tab);
+            }
+            if let Some(pad) = entry.pad {
+                runtime.forget_tablet_pad(pad);
             }
             drop(entry);
         }
@@ -9156,7 +9667,12 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::InputMethodDeactivated
         // Unreachable: `run` never registers an output manager either, for the
         // same reason — so no `apply` can fire on this path.
-        | Event::OutputConfigurationApplied => {}
+        | Event::OutputConfigurationApplied
+        // Unreachable: `run` never registers shortcuts inhibit or tablet
+        // managers either.
+        | Event::ShortcutsInhibitorToggled(..)
+        | Event::TabletToolUpdate(..)
+        | Event::TabletPadUpdate(..) => {}
         // Unreachable: `run` never creates the Xwayland manager either
         // (`register_toplevel_and_input` is `run_all`'s hook; `run` uses
         // `no_extra`), so none of these can be produced on this path. Dropped
@@ -9599,6 +10115,7 @@ mod tests {
                 inputs: RefCell::new(HashMap::new()),
                 drags: RefCell::new(HashMap::new()),
                 idle_inhibitors: RefCell::new(HashMap::new()),
+                shortcuts_inhibitors: RefCell::new(HashMap::new()),
                 session_locks: RefCell::new(HashMap::new()),
                 lock_surfaces: RefCell::new(HashMap::new()),
                 scene_buffers: RefCell::new(HashMap::new()),
@@ -9779,6 +10296,7 @@ mod tests {
             popups: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
+            shortcuts_inhibitors: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
@@ -9845,6 +10363,7 @@ mod tests {
                 inputs: RefCell::new(HashMap::new()),
                 drags: RefCell::new(HashMap::new()),
                 idle_inhibitors: RefCell::new(HashMap::new()),
+                shortcuts_inhibitors: RefCell::new(HashMap::new()),
                 session_locks: RefCell::new(HashMap::new()),
                 lock_surfaces: RefCell::new(HashMap::new()),
                 scene_buffers: RefCell::new(HashMap::new()),
@@ -10603,6 +11122,7 @@ mod axis_delivery_tests {
             inputs: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
+            shortcuts_inhibitors: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
             scene_buffers: RefCell::new(HashMap::new()),
@@ -10684,6 +11204,7 @@ mod axis_delivery_tests {
             inputs: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
+            shortcuts_inhibitors: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
             scene_buffers: RefCell::new(HashMap::new()),

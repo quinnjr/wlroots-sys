@@ -2448,3 +2448,93 @@ item   = "Runtime::create_keyboard_group"
 symbol = "wlr_keyboard_group_destroy"
 module = "runtime"
 item   = "Runtime::destroy_keyboard_group"
+
+[[wrapped]]
+symbol = "wlr_keyboard_shortcuts_inhibit_manager_v1"
+module = "runtime"
+item   = "Runtime::create_shortcuts_inhibit_manager"
+
+[[wrapped]]
+symbol = "wlr_keyboard_shortcuts_inhibit_v1_create"
+module = "runtime"
+item   = "Runtime::create_shortcuts_inhibit_manager"
+
+[[wrapped]]
+symbol = "wlr_keyboard_shortcuts_inhibitor_v1"
+module = "runtime"
+item   = "ShortcutsInhibitorId"
+
+[[wrapped]]
+symbol = "wlr_tablet_manager_v2"
+module = "runtime"
+item   = "Runtime::create_tablet_manager"
+
+[[wrapped]]
+symbol = "wlr_tablet_v2_create"
+module = "runtime"
+item   = "Runtime::create_tablet_manager"
+
+[[wrapped]]
+symbol = "wlr_keyboard_shortcuts_inhibitor_v1_activate"
+module = "runtime"
+item   = "Runtime::set_shortcuts_inhibitor_active"
+
+[[wrapped]]
+symbol = "wlr_keyboard_shortcuts_inhibitor_v1_deactivate"
+module = "runtime"
+item   = "Runtime::set_shortcuts_inhibitor_active"
+
+[[wrapped]]
+symbol = "wlr_tablet"
+module = "backend"
+item   = "SeatHandler::tablet_tool_event"
+
+[[wrapped]]
+symbol = "wlr_tablet_from_input_device"
+module = "backend"
+item   = "SeatHandler::tablet_tool_event"
+
+[[wrapped]]
+symbol = "wlr_tablet_pad"
+module = "backend"
+item   = "SeatHandler::tablet_pad_event"
+
+[[wrapped]]
+symbol = "wlr_tablet_pad_create"
+module = "runtime"
+item   = "Runtime::ensure_tablet_pad"
+
+[[wrapped]]
+symbol = "wlr_tablet_pad_from_input_device"
+module = "backend"
+item   = "SeatHandler::tablet_pad_event"
+
+[[wrapped]]
+symbol = "wlr_tablet_tool"
+module = "backend"
+item   = "SeatHandler::tablet_tool_event"
+
+[[wrapped]]
+symbol = "wlr_tablet_tool_axis_event"
+module = "backend"
+item   = "SeatHandler::tablet_tool_event"
+
+[[wrapped]]
+symbol = "wlr_tablet_tool_button_event"
+module = "backend"
+item   = "SeatHandler::tablet_tool_event"
+
+[[wrapped]]
+symbol = "wlr_tablet_tool_create"
+module = "runtime"
+item   = "Runtime::ensure_tablet_tool"
+
+[[wrapped]]
+symbol = "wlr_tablet_tool_proximity_event"
+module = "backend"
+item   = "SeatHandler::tablet_tool_event"
+
+[[wrapped]]
+symbol = "wlr_tablet_tool_tip_event"
+module = "backend"
+item   = "SeatHandler::tablet_tool_event"
