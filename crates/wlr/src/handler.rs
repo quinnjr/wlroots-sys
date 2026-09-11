@@ -1130,6 +1130,22 @@ pub trait SeatHandler {
     fn popup_repositioned(&mut self, popup: InputPopupSurfaceId) {
         let _ = popup;
     }
+
+    /// The bound input-method committed. Notification only — the relay to the
+    /// focused text-input has already been forwarded (preedit, commit string,
+    /// delete-surrounding as populated, then done) by the time this runs, so
+    /// there is nothing left here for a handler to *forward*. Read what the
+    /// IME said via
+    /// [`Runtime::committed_ime_state`](crate::Runtime::committed_ime_state).
+    /// Defaulted to a no-op.
+    ///
+    /// Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged (see commit
+    /// `f2cc8a9`, which dropped a would-be `SessionLockHandler` for the same
+    /// reason a new supertrait on [`Handlers`] is not how this ships).
+    fn input_method_committed(&mut self) {}
 }
 
 /// Every handler trait at once.

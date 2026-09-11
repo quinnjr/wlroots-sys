@@ -252,6 +252,16 @@ pub(crate) enum Event {
     /// the handler *which* popup the reposition was for.
     InputMethodPopupRepositioned(InputPopupSurfaceId),
 
+    /// The bound input-method committed. Carries no data — the committed
+    /// generation is owned state (`String`s) that cannot ride in a `Copy`,
+    /// `Eq` enum, so the handler reads it back via
+    /// [`Runtime::committed_ime_state`](crate::Runtime::committed_ime_state)
+    /// instead (the same "carry nothing, resolve at delivery" shape
+    /// `OutputConfigurationApplied` uses). Emitted once per commit, after the
+    /// relay to the focused text-input has settled, so observers see a
+    /// finished forward rather than a half-applied one.
+    InputMethodCommitted,
+
     /// A client's `zwlr_output_manager_v1` configuration was applied. Carries
     /// no data — the owned `Vec<AppliedHead>` payload cannot ride in a `Copy`,
     /// `Eq` enum, so it is staged in

@@ -2771,6 +2771,7 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         Event::InputMethodPopupCreated(popup) => state.new_popup_surface(popup),
         Event::InputMethodPopupDestroyed(popup) => state.popup_surface_destroyed(popup),
         Event::InputMethodPopupRepositioned(popup) => state.popup_repositioned(popup),
+        Event::InputMethodCommitted => state.input_method_committed(),
         Event::OutputConfigurationApplied => {
             // Pop the owned payload staged alongside this marker. FIFO, so the
             // `Vec` popped here is the one `on_output_manager_apply` pushed for
@@ -5442,6 +5443,16 @@ unsafe extern "C" fn on_input_method_commit<S: Handlers>(
         }
         // The serial is minted for a later generation-ordering use; discarded here.
         let _serial = entered.finish();
+        // The relay above has settled: tell the compositor the IME committed,
+        // so it can read the fresh generation via `committed_ime_state()`.
+        // The event carries no payload — owned snapshot strings cannot ride
+        // the `Copy` event — and no borrow is held here (the table borrows
+        // were released with `key` above; the token holds none), so emitting
+        // cannot deadlock a handler that reads the tables back.
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::InputMethodCommitted, deliver);
     }
 }
 
@@ -9069,10 +9080,12 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         // Unreachable: `run` never registers an input-method manager either
         // (`Backend::register_toplevel_and_input` is `run_all`'s hook; `run`
         // uses `no_extra`), so no input-method popup can be announced,
-        // destroyed or repositioned on this path.
+        // destroyed or repositioned — and no IME commit announced — on this
+        // path.
         | Event::InputMethodPopupCreated(..)
         | Event::InputMethodPopupDestroyed(..)
         | Event::InputMethodPopupRepositioned(..)
+        | Event::InputMethodCommitted
         // Unreachable: `run` never registers an output manager either, for the
         // same reason — so no `apply` can fire on this path.
         | Event::OutputConfigurationApplied => {}
