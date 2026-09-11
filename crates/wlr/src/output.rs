@@ -121,6 +121,20 @@ impl<'h> Output<'h> {
         }
     }
 
+    /// The output's description, as reported by the backend (or set via
+    /// [`set_description`](Output::set_description)).
+    pub fn description(&self) -> Option<String> {
+        // SAFETY: the handle's lifetime guarantees the output is live.
+        // wlroots may leave `description` null before it is set.
+        unsafe {
+            let desc = (*self.raw.as_ptr()).description;
+            if desc.is_null() {
+                return None;
+            }
+            Some(CStr::from_ptr(desc).to_string_lossy().into_owned())
+        }
+    }
+
     /// Commit an empty state to the output.
     ///
     /// There is no *pending* state to commit, and that is not an omission here
@@ -467,7 +481,7 @@ impl<'h> Output<'h> {
     /// # Errors
     ///
     /// [`Error::Operation`] if the name contains an interior NUL (it cannot
-    /// cross into C) or wlroots rejected it.
+    /// cross into C). The underlying call reports no failure of its own.
     pub fn set_name(&self, name: &str) -> Result<()> {
         // SAFETY: the handle's lifetime guarantees the output is live.
         let name = CString::new(name).map_err(|_| Error::Operation("wlr_output_set_name"))?;
@@ -481,8 +495,8 @@ impl<'h> Output<'h> {
     ///
     /// # Errors
     ///
-    /// [`Error::Operation`] if the description contains an interior NUL or
-    /// wlroots rejected it.
+    /// [`Error::Operation`] if the description contains an interior NUL.
+    /// The underlying call reports no failure of its own.
     pub fn set_description(&self, desc: &str) -> Result<()> {
         // SAFETY: the handle's lifetime guarantees the output is live.
         let desc =
@@ -543,11 +557,14 @@ impl<'h> Output<'h> {
     }
 
     /// The output's current adaptive-sync status, read from the live object.
-    pub fn adaptive_sync_status(&self) -> AdaptiveSyncStatus {
+    /// `None` for a value this crate does not know: a future wlroots minor
+    /// may add a status, and degrading unknown to `Disabled` would silently
+    /// take the sync-off path for the opposite meaning.
+    pub fn adaptive_sync_status(&self) -> Option<AdaptiveSyncStatus> {
         // SAFETY: the handle's lifetime guarantees the output is live.
         let raw: sys::wlr_output_adaptive_sync_status =
             unsafe { (*self.raw.as_ptr()).adaptive_sync_status };
-        AdaptiveSyncStatus::from_raw(raw.0).unwrap_or(AdaptiveSyncStatus::Disabled)
+        AdaptiveSyncStatus::from_raw(raw.0)
     }
 
     /// Schedule a `done` event (frame callbacks) on this output.
@@ -641,8 +658,12 @@ impl AdaptiveSyncStatus {
 }
 
 /// Present-event flags: how a presented frame reached the screen.
+///
+/// Same bitmask idiom as [`BufferCaps`](crate::render::BufferCaps): private
+/// field with `from_bits`/`bits`/`contains`/`is_empty` and `BitOr`, so
+/// unrelated `u32`s cannot mix into a flag set by accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct PresentFlags(pub u32);
+pub struct PresentFlags(u32);
 
 impl PresentFlags {
     /// Presented on a vertical blank.
@@ -658,9 +679,35 @@ impl PresentFlags {
     pub const ZERO_COPY: PresentFlags =
         PresentFlags(sys::wlr_output_present_flag::WLR_OUTPUT_PRESENT_ZERO_COPY.0);
 
-    /// Combine flags.
-    pub fn union(self, other: PresentFlags) -> PresentFlags {
-        PresentFlags(self.0 | other.0)
+    /// No flags set.
+    pub const NONE: PresentFlags = PresentFlags(0);
+
+    /// Build a set from a raw mask.
+    pub fn from_bits(bits: u32) -> PresentFlags {
+        PresentFlags(bits)
+    }
+
+    /// The raw mask.
+    pub fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Whether every bit of `other` is set here.
+    pub fn contains(self, other: PresentFlags) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether no bit is set.
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::ops::BitOr for PresentFlags {
+    type Output = PresentFlags;
+
+    fn bitor(self, rhs: PresentFlags) -> PresentFlags {
+        PresentFlags(self.0 | rhs.0)
     }
 }
 
@@ -689,7 +736,7 @@ impl PresentEvent {
             output,
             commit_seq: self.commit_seq,
             presented: self.presented,
-            when: libc_timespec(self.when),
+            when: crate::scene::timespec_of(self.when),
             seq: self.seq,
             refresh: self.refresh,
             flags: self.flags.0,
@@ -761,53 +808,42 @@ impl<'a> OutputState<'a> {
         }
     }
 
-    /// Copy another transaction's staged fields into this one.
-    pub fn copy_from(&mut self, src: &OutputState<'_>) {
+    /// Copy another transaction's staged fields into this one. Reports
+    /// whether the copy ran: `false` when either side was already consumed
+    /// (committed), so a silently half-copied state can never pass for a
+    /// complete one.
+    pub fn copy_from(&mut self, src: &OutputState<'_>) -> bool {
         // SAFETY: both states are initialised (constructor invariant;
         // committed states are taken, never re-staged). `wlr_output_state_copy`
         // only reads the source.
         unsafe {
             if let (Some(dst), Some(src)) = (self.state.as_mut(), src.state.as_ref()) {
-                sys::wlr_output_state_copy(dst as *mut _, src as *const _);
+                sys::wlr_output_state_copy(dst as *mut _, src as *const _)
+            } else {
+                false
             }
         }
     }
 
-    /// The fields staged so far, as a bitmask of
-    /// [`Self::FIELD_*`](OutputState::FIELD_ENABLED) flags.
-    pub fn committed_fields(&self) -> u32 {
+    /// The fields staged so far.
+    pub fn committed_fields(&self) -> CommittedFields {
         // No unsafe: the state is owned by this transaction, not borrowed
         // C memory; reading its fields touches nothing wlroots owns.
-        self.state.as_ref().map(|s| s.committed).unwrap_or(0)
+        CommittedFields::from_bits(self.state.as_ref().map(|s| s.committed).unwrap_or(0))
     }
 
-    /// Whether a buffer is staged.
-    pub const FIELD_BUFFER: u32 = sys::wlr_output_state_field::WLR_OUTPUT_STATE_BUFFER.0;
-    /// Whether damage is staged.
-    pub const FIELD_DAMAGE: u32 = sys::wlr_output_state_field::WLR_OUTPUT_STATE_DAMAGE.0;
-    /// Whether a mode is staged.
-    pub const FIELD_MODE: u32 = sys::wlr_output_state_field::WLR_OUTPUT_STATE_MODE.0;
-    /// Whether `FIELD_ENABLED` is staged.
-    pub const FIELD_ENABLED: u32 = sys::wlr_output_state_field::WLR_OUTPUT_STATE_ENABLED.0;
-    /// Whether `FIELD_SCALE` is staged.
-    pub const FIELD_SCALE: u32 = sys::wlr_output_state_field::WLR_OUTPUT_STATE_SCALE.0;
-    /// Whether a transform is staged.
-    pub const FIELD_TRANSFORM: u32 = sys::wlr_output_state_field::WLR_OUTPUT_STATE_TRANSFORM.0;
-    /// Whether adaptive sync is staged.
-    pub const FIELD_ADAPTIVE_SYNC_ENABLED: u32 =
-        sys::wlr_output_state_field::WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED.0;
-    /// Whether a render format is staged.
-    pub const FIELD_RENDER_FORMAT: u32 =
-        sys::wlr_output_state_field::WLR_OUTPUT_STATE_RENDER_FORMAT.0;
-    /// Whether a subpixel geometry is staged.
-    pub const FIELD_SUBPIXEL: u32 = sys::wlr_output_state_field::WLR_OUTPUT_STATE_SUBPIXEL.0;
-
     /// How the staged mode was chosen: a backend mode or a custom size.
+    /// `None` when no mode is staged — the raw field reads `Fixed` on a
+    /// fresh (zeroed) transaction, which would otherwise fabricate an
+    /// answer for "how was the mode chosen" when nothing was.
     pub fn mode_type(&self) -> Option<ModeType> {
         // No unsafe: owned state, read-only scalar field (see
         // `committed_fields`). Names the bindgen newtype so the coverage
         // ledger sees this reader cover `wlr_output_state_mode_type`.
         self.state.as_ref().and_then(|s| {
+            if s.committed & CommittedFields::MODE.0 == 0 {
+                return None;
+            }
             let raw: sys::wlr_output_state_mode_type = s.mode_type;
             ModeType::from_raw(raw.0)
         })
@@ -884,9 +920,14 @@ impl<'a> OutputState<'a> {
     }
 
     /// Stage the buffer to scan out or render from.
-    pub fn set_buffer(&mut self, buffer: &Buffer<'_>) {
-        // SAFETY: as in `set_enabled`. The buffer outlives the transaction
-        // by the borrow; wlroots takes its own reference on commit.
+    ///
+    /// The borrow ties the buffer's lifetime to every later use of this
+    /// transaction, including [`commit`](OutputState::commit): the staged
+    /// pointer is only a borrow, and wlroots takes its own reference no
+    /// earlier than commit, so letting the buffer drop first would stage a
+    /// dangling pointer.
+    pub fn set_buffer<'b>(&'b mut self, buffer: &'b Buffer<'_>) {
+        // SAFETY: as in `set_enabled`, plus the lifetime above.
         unsafe {
             if let Some(state) = self.state.as_mut() {
                 sys::wlr_output_state_set_buffer(state as *mut _, buffer.as_ptr());
@@ -904,6 +945,74 @@ impl<'a> OutputState<'a> {
                 sys::wlr_output_state_set_damage(state as *mut _, region.as_ptr());
             }
         }
+    }
+}
+
+/// Which fields an [`OutputState`] transaction has staged: the
+/// `wlr_output_state_field` bitmask in a typed wrapper, so staged-field
+/// sets cannot mix with unrelated `u32`s (refresh rates, formats, commit
+/// seqs). Same bitmask idiom as [`BufferCaps`](crate::render::BufferCaps).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct CommittedFields(u32);
+
+impl CommittedFields {
+    /// A buffer is staged.
+    pub const BUFFER: CommittedFields =
+        CommittedFields(sys::wlr_output_state_field::WLR_OUTPUT_STATE_BUFFER.0);
+    /// Damage is staged.
+    pub const DAMAGE: CommittedFields =
+        CommittedFields(sys::wlr_output_state_field::WLR_OUTPUT_STATE_DAMAGE.0);
+    /// A mode is staged.
+    pub const MODE: CommittedFields =
+        CommittedFields(sys::wlr_output_state_field::WLR_OUTPUT_STATE_MODE.0);
+    /// The enabled flag is staged.
+    pub const ENABLED: CommittedFields =
+        CommittedFields(sys::wlr_output_state_field::WLR_OUTPUT_STATE_ENABLED.0);
+    /// The output scale is staged.
+    pub const SCALE: CommittedFields =
+        CommittedFields(sys::wlr_output_state_field::WLR_OUTPUT_STATE_SCALE.0);
+    /// A transform is staged.
+    pub const TRANSFORM: CommittedFields =
+        CommittedFields(sys::wlr_output_state_field::WLR_OUTPUT_STATE_TRANSFORM.0);
+    /// Adaptive sync is staged.
+    pub const ADAPTIVE_SYNC_ENABLED: CommittedFields =
+        CommittedFields(sys::wlr_output_state_field::WLR_OUTPUT_STATE_ADAPTIVE_SYNC_ENABLED.0);
+    /// A render format is staged.
+    pub const RENDER_FORMAT: CommittedFields =
+        CommittedFields(sys::wlr_output_state_field::WLR_OUTPUT_STATE_RENDER_FORMAT.0);
+    /// A subpixel geometry is staged.
+    pub const SUBPIXEL: CommittedFields =
+        CommittedFields(sys::wlr_output_state_field::WLR_OUTPUT_STATE_SUBPIXEL.0);
+
+    /// No fields staged.
+    pub const NONE: CommittedFields = CommittedFields(0);
+
+    /// Build a set from a raw mask.
+    pub fn from_bits(bits: u32) -> CommittedFields {
+        CommittedFields(bits)
+    }
+
+    /// The raw mask.
+    pub fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Whether every bit of `other` is set here.
+    pub fn contains(self, other: CommittedFields) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether no bit is set.
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::ops::BitOr for CommittedFields {
+    type Output = CommittedFields;
+
+    fn bitor(self, rhs: CommittedFields) -> CommittedFields {
+        CommittedFields(self.0 | rhs.0)
     }
 }
 
@@ -926,13 +1035,6 @@ impl ModeType {
             1 => ModeType::Custom,
             _ => return None,
         })
-    }
-}
-
-fn libc_timespec(d: std::time::Duration) -> sys::timespec {
-    sys::timespec {
-        tv_sec: d.as_secs() as _,
-        tv_nsec: d.subsec_nanos() as _,
     }
 }
 
@@ -1167,6 +1269,52 @@ mod tests {
             }],
             "modes() must report the one linked wlr_output_mode with its \
              real fields, not an empty or wrong list"
+        );
+    }
+
+    /// Discriminants pinned against the headers, not the comments: a swapped
+    /// constant would read every mode/adaptive decision backwards silently.
+    #[test]
+    fn mode_type_and_adaptive_sync_match_wlroots() {
+        assert_eq!(
+            ModeType::from_raw(sys::wlr_output_state_mode_type::WLR_OUTPUT_STATE_MODE_FIXED.0),
+            Some(ModeType::Fixed)
+        );
+        assert_eq!(
+            ModeType::from_raw(sys::wlr_output_state_mode_type::WLR_OUTPUT_STATE_MODE_CUSTOM.0),
+            Some(ModeType::Custom)
+        );
+        assert_eq!(ModeType::from_raw(2), None);
+        assert_eq!(ModeType::from_raw(u32::MAX), None);
+        assert_eq!(
+            AdaptiveSyncStatus::from_raw(
+                sys::wlr_output_adaptive_sync_status::WLR_OUTPUT_ADAPTIVE_SYNC_DISABLED.0
+            ),
+            Some(AdaptiveSyncStatus::Disabled)
+        );
+        assert_eq!(
+            AdaptiveSyncStatus::from_raw(
+                sys::wlr_output_adaptive_sync_status::WLR_OUTPUT_ADAPTIVE_SYNC_ENABLED.0
+            ),
+            Some(AdaptiveSyncStatus::Enabled)
+        );
+        assert_eq!(AdaptiveSyncStatus::from_raw(99), None);
+    }
+
+    /// Flag combinators behave as a set algebra; unknown bits round-trip
+    /// losslessly for forward compatibility.
+    #[test]
+    fn present_flags_compose_and_query() {
+        let both = PresentFlags::VSYNC | PresentFlags::ZERO_COPY;
+        assert!(both.contains(PresentFlags::VSYNC));
+        assert!(both.contains(PresentFlags::ZERO_COPY));
+        assert!(!both.contains(PresentFlags::HW_CLOCK));
+        assert!(!both.is_empty());
+        assert!(PresentFlags::NONE.is_empty());
+        assert_eq!(
+            PresentFlags::from_bits(0xFFFF).bits(),
+            0xFFFF,
+            "unknown future bits must survive the round trip"
         );
     }
 }

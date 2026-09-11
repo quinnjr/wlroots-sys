@@ -113,7 +113,8 @@ pub use interest::{Interest, Readiness};
 pub use layer::{Anchor, Layer, LayerSurface, LayerSurfaceId};
 pub use log::{LogLevel, init_logging, log_verbosity};
 pub use output::{
-    AdaptiveSyncStatus, Mode, ModeType, Output, OutputState, PresentEvent, PresentFlags,
+    AdaptiveSyncStatus, CommittedFields, Mode, ModeType, Output, OutputState, PresentEvent,
+    PresentFlags,
 };
 pub use popup::{
     ConstraintAdjustment, Popup, PopupId, PopupParent, PositionerAnchor, PositionerGravity,
