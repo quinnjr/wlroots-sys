@@ -2778,6 +2778,7 @@ item   = "SwapchainManager::apply"
 symbol = "wlr_output_swapchain_manager_finish"
 module = "output"
 item   = "SwapchainManager (Drop)"
+
 [[wrapped]]
 symbol = "wlr_output_swapchain_manager"
 module = "output"
