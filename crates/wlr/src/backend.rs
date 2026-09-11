@@ -311,6 +311,17 @@ struct Bound {
     /// an event is about is unrecoverable from the signal and must ride
     /// along. Set at link time by [`Registration::link_tablet_pad`].
     tablet_pad: Option<NonNull<sys::wlr_tablet_pad>>,
+
+    /// The tablet tool this listener belongs to, for the per-tool destroy
+    /// listener `track_tablet_tool` links; `None` for every other listener
+    /// in this file.
+    ///
+    /// A raw object pointer, for the reason `text_input`'s own doc gives:
+    /// the tool's destroy emission carries the tool as `data` by convention,
+    /// not by contract, and FIX-3 recovery must not depend on what a
+    /// destroy signal happens to pass — so the handler reads the tool here
+    /// instead. Set at link time by [`Registration::link_tablet_tool`].
+    tablet_tool: Option<NonNull<sys::wlr_tablet_tool>>,
 }
 
 // `bound_of`'s cast is sound only while `listener` is `Bound`'s first field, at
@@ -383,6 +394,7 @@ impl Registration {
             text_input: None,
             input_method: None,
             tablet_pad: None,
+            tablet_tool: None,
         });
 
         // SAFETY: the caller guarantees `signal` is an initialised `wl_signal`,
@@ -441,6 +453,7 @@ impl Registration {
             text_input: None,
             input_method: None,
             tablet_pad: None,
+            tablet_tool: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -707,6 +720,7 @@ impl Registration {
             text_input: None,
             input_method: None,
             tablet_pad: None,
+            tablet_tool: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -772,6 +786,7 @@ impl Registration {
             text_input: Some(text_input),
             input_method: None,
             tablet_pad: None,
+            tablet_tool: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -829,6 +844,7 @@ impl Registration {
             text_input: None,
             input_method: Some(input_method),
             tablet_pad: None,
+            tablet_tool: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -887,6 +903,69 @@ impl Registration {
             text_input: None,
             input_method: None,
             tablet_pad: Some(tablet_pad),
+            tablet_tool: None,
+        });
+
+        // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per
+        // the caller's contract, and the listener is a freshly boxed one
+        // whose address stays put until this `Registration` drops.
+        unsafe { sys::wl_signal_add(signal, &raw mut bound.listener) };
+
+        Registration { bound }
+    }
+
+    /// Link a per-tablet-tool destroy listener, carrying the raw
+    /// `wlr_tablet_tool` its callback reads back from
+    /// [`Bound::tablet_tool`]. Every other slot is `None`.
+    ///
+    /// A dedicated constructor for the same reason `link_tablet_pad` is,
+    /// and load-bearing for the same reason: per-tool identity must not
+    /// depend on the destroy signal's `data` (see [`Bound::tablet_tool`]).
+    ///
+    /// `alive` is null — the **stronger** claim (see [`Registration::drop`]):
+    /// this is dropped from inside the tool's own destroy emission, from
+    /// `on_input_destroy`'s device sweep while the emission the tools die
+    /// in is still running, or while the run still stands — the same three
+    /// exits `link_input_method` documents, and sound for the same reason:
+    /// wlroots frees a tool only after emitting on it (or on its device),
+    /// so reaching `Drop` at all proves a live owner, exactly as for the
+    /// keyboard/pointer listeners `on_input_destroy` drops in the same
+    /// emission.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`]: `signal` must point at the given
+    /// tool's initialised `events.destroy`, `session` must be a
+    /// `*const Session<S>` for the `S` `notify` casts it back to, valid for
+    /// as long as the registration lives.
+    unsafe fn link_tablet_tool(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        tablet_tool: NonNull<sys::wlr_tablet_tool>,
+    ) -> Self {
+        let mut bound = Box::new(Bound {
+            listener: sys::wl_listener {
+                link: sys::wl_list {
+                    prev: std::ptr::null_mut(),
+                    next: std::ptr::null_mut(),
+                },
+                notify,
+            },
+            session,
+            alive: std::ptr::null(),
+            flag: std::ptr::null(),
+            id: None,
+            toplevel: None,
+            layer: None,
+            node: None,
+            popup: None,
+            #[cfg(wlr_has_xwayland)]
+            xwayland: None,
+            text_input: None,
+            input_method: None,
+            tablet_pad: None,
+            tablet_tool: Some(tablet_tool),
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per
@@ -1063,6 +1142,14 @@ struct Session<'r, S> {
     /// same discipline as `idle_inhibitors` (wlroots emits with surface as
     /// `data`). The active flag is tracked in the runtime map.
     shortcuts_inhibitors: RefCell<HashMap<usize, Registration>>,
+
+    /// This run's destroy listener on every tracked hardware tablet tool,
+    /// keyed by the tool's own address (recovered from the bound slot, not
+    /// from the signal data). Removed, and so unlinked, from
+    /// `on_tablet_tool_destroy` — and swept for a whole tablet by
+    /// `on_input_destroy` — before wlroots frees the tool, mirroring
+    /// `shortcuts_inhibitors` above.
+    tablet_tools: RefCell<HashMap<usize, Registration>>,
 
     /// This run's `new_surface`/`unlock`/`destroy` listeners on every live
     /// `wlr_session_lock_v1`, keyed by the `destroy` listener's own address
@@ -1816,6 +1903,7 @@ impl<'d> Backend<'d> {
             scene_buffers: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
             shortcuts_inhibitors: RefCell::new(HashMap::new()),
+            tablet_tools: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
             pointer_constraints: RefCell::new(HashMap::new()),
@@ -4740,8 +4828,80 @@ unsafe extern "C" fn on_shortcuts_inhibitor_destroy<S: Handlers>(
     }
 }
 
-/// Announce one tablet-tool signal as an id-only `TabletToolUpdate`.
+/// Track a hardware tablet tool for this run: record it in the runtime
+/// table (creating its v2 object when manager and seat exist) and link its
+/// destroy listener, so the tool-signal handlers can name it in a
+/// `TabletToolUpdate` and its own destroy emission evicts it again.
+/// Linking is idempotent — the second call for an already-tracked tool
+/// returns the same id without touching the signal.
 ///
+/// # Safety
+///
+/// `session` must be live for the call; `tool` and `tablet` must be live
+/// hardware objects announced by the tablet `device` whose entry owns the
+/// listeners calling this (or fabricated equivalents in tests that uphold
+/// the same lifetimes).
+unsafe fn track_tablet_tool<S: Handlers>(
+    session: &Session<'_, S>,
+    tool: NonNull<sys::wlr_tablet_tool>,
+    tablet: NonNull<sys::wlr_tablet>,
+) -> crate::TabletToolId {
+    // SAFETY: the caller's guarantees — live session, live tool/tablet —
+    // are what `ensure_tablet_tool`'s scan, the signal link below, and the
+    // table insert all require.
+    unsafe {
+        let id = session.runtime.ensure_tablet_tool(tool, tablet);
+        let key = tool.as_ptr() as usize;
+        if !session.tablet_tools.borrow().contains_key(&key) {
+            // Linked on the hardware tool's own `events.destroy`, with no
+            // `alive` backstop: as for the idle inhibitor this mirrors, the
+            // tool cannot be freed by anything other than the destroy this
+            // very listener watches or the device teardown whose sweep in
+            // `on_input_destroy` drops this registration first — so there is
+            // no "owner died first" case to guard against.
+            let destroy = Registration::link_tablet_tool(
+                &raw mut (*tool.as_ptr()).events.destroy,
+                on_tablet_tool_destroy::<S>,
+                (session as *const Session<'_, S>).cast::<()>(),
+                tool,
+            );
+            session.tablet_tools.borrow_mut().insert(key, destroy);
+        }
+        id
+    }
+}
+
+/// A hardware tablet tool is going away while its device lives on —
+/// upstream drops non-unique tools on proximity-out. Evict exactly this
+/// tool's address so a later tool allocated at the same address is tracked
+/// fresh: a stale entry would make `ensure_tablet_tool` early-return and
+/// skip the new tool's v2 creation.
+unsafe extern "C" fn on_tablet_tool_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `track_tablet_tool` into one hardware tool's
+    // `events.destroy`; the tool is still live for this emission. `data`
+    // is intentionally unread (FIX-3): identity comes from the bound slot.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        let Some(tool) = (*bound).tablet_tool else {
+            return;
+        };
+        let key = tool.as_ptr() as usize;
+        runtime.forget_tablet_tool(tool);
+        // Removed, not merely looked up: dropping the entry unlinks this
+        // very listener — sound because `wl_signal_emit_mutable` has
+        // already advanced its cursor past the firing listener, the same
+        // idiom `on_idle_inhibitor_destroy` relies on.
+        let removed = (*session).tablet_tools.borrow_mut().remove(&key);
+        drop(removed);
+    }
+}
+
+/// Announce one tablet-tool signal as an id-only `TabletToolUpdate`.///
 /// Notification only, deliberately: wlroots forwards nothing itself — a
 /// `wlr_tablet.events.*` emission reaches no client until the compositor
 /// drives the tool's `wlr_tablet_v2_tablet_tool` with the matching
@@ -4759,7 +4919,9 @@ fn emit_tablet_tool_event<S: Handlers>(
     let (Some(tablet), Some(tool)) = (NonNull::new(tablet), NonNull::new(tool)) else {
         return;
     };
-    let id = session.runtime.ensure_tablet_tool(tool, tablet);
+    // SAFETY: `session` is live per the caller's signal emission, and the
+    // tool/tablet are the live objects that emission delivered.
+    let id = unsafe { track_tablet_tool(session, tool, tablet) };
     let deliver = session.deliver;
     // SAFETY: `emit`'s contract — `session` outlives the call and no `&mut S`
     // is live (any reentrant emit defers). The same call every other
@@ -8748,7 +8910,18 @@ unsafe extern "C" fn on_input_destroy<S: Handlers>(
                 runtime.forget_pointer(p);
             }
             if let Some(tab) = entry.tablet {
-                runtime.forget_tablet_tools_for_tablet(tab);
+                // Backstop for tools that never got their own destroy
+                // emission: forget every address this tablet announced and
+                // drop each tool's run-scoped destroy listener now. Sound —
+                // the tools are still live: wlroots frees them only after
+                // this emission returns, the same phase the keyboard/pointer
+                // unlinks in `entry`'s own drop rely on.
+                for tool in runtime.take_tablet_tools_for_tablet(tab) {
+                    (*session)
+                        .tablet_tools
+                        .borrow_mut()
+                        .remove(&(tool.as_ptr() as usize));
+                }
             }
             if let Some(pad) = entry.pad {
                 runtime.forget_tablet_pad(pad);
@@ -10116,6 +10289,7 @@ mod tests {
                 drags: RefCell::new(HashMap::new()),
                 idle_inhibitors: RefCell::new(HashMap::new()),
                 shortcuts_inhibitors: RefCell::new(HashMap::new()),
+                tablet_tools: RefCell::new(HashMap::new()),
                 session_locks: RefCell::new(HashMap::new()),
                 lock_surfaces: RefCell::new(HashMap::new()),
                 scene_buffers: RefCell::new(HashMap::new()),
@@ -10297,6 +10471,7 @@ mod tests {
             inputs: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
             shortcuts_inhibitors: RefCell::new(HashMap::new()),
+            tablet_tools: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
@@ -10364,6 +10539,7 @@ mod tests {
                 drags: RefCell::new(HashMap::new()),
                 idle_inhibitors: RefCell::new(HashMap::new()),
                 shortcuts_inhibitors: RefCell::new(HashMap::new()),
+                tablet_tools: RefCell::new(HashMap::new()),
                 session_locks: RefCell::new(HashMap::new()),
                 lock_surfaces: RefCell::new(HashMap::new()),
                 scene_buffers: RefCell::new(HashMap::new()),
@@ -11123,6 +11299,7 @@ mod axis_delivery_tests {
             drags: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
             shortcuts_inhibitors: RefCell::new(HashMap::new()),
+            tablet_tools: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
             scene_buffers: RefCell::new(HashMap::new()),
@@ -11133,6 +11310,97 @@ mod axis_delivery_tests {
             applied_heads: RefCell::new(VecDeque::new()),
             runtime,
             deliver: deliver_all::<Recorder>,
+        }
+    }
+
+    /// A hardware tool destroyed without its device going away (upstream
+    /// drops non-unique tools on proximity-out) must stop resolving: the
+    /// `events.destroy` emission has to evict exactly that tool's address,
+    /// so a later tool allocated at the same address is tracked fresh
+    /// instead of hitting the stale entry and skipping its v2 creation.
+    #[test]
+    fn emitting_tool_destroy_evicts_that_tool_only() {
+        let runtime = Runtime::new().expect("runtime");
+        let session = empty_session(&runtime);
+
+        // Scratch hardware tools plus the tablet announcing them. Zeroed:
+        // only `events.destroy` is ever touched, and it is initialised
+        // below. Boxed so nothing moves after `wl_signal_init` makes the
+        // head point at itself — the same reason `Harness` is boxed.
+        let mut tool_a: Box<sys::wlr_tablet_tool> = Box::new(unsafe { std::mem::zeroed() });
+        let mut tool_b: Box<sys::wlr_tablet_tool> = Box::new(unsafe { std::mem::zeroed() });
+        let mut tablet: Box<sys::wlr_tablet> = Box::new(unsafe { std::mem::zeroed() });
+        // SAFETY: exclusively-owned fresh boxes; `wl_signal_init` writes
+        // only the list heads it owns; nothing moves afterwards.
+        unsafe {
+            sys::wl_signal_init(&raw mut tool_a.events.destroy);
+            sys::wl_signal_init(&raw mut tool_b.events.destroy);
+        }
+        let (tool_a_nn, tool_b_nn, tablet_nn) = (
+            NonNull::from(tool_a.as_mut()),
+            NonNull::from(tool_b.as_mut()),
+            NonNull::from(tablet.as_mut()),
+        );
+        // Raw pointers for the signal data and the lookups below; the boxes
+        // above keep them alive past the session at the bottom of this test.
+        let (tool_a_ptr, tool_b_ptr) = (tool_a_nn.as_ptr(), tool_b_nn.as_ptr());
+
+        // SAFETY: `session` outlives the calls and the emission; both tools
+        // and the tablet are live boxes that outlive the session's use of
+        // them; no `&mut Recorder` is live (the dispatcher holds null).
+        unsafe {
+            track_tablet_tool(&session, tool_a_nn, tablet_nn);
+            track_tablet_tool(&session, tool_b_nn, tablet_nn);
+        }
+        assert_eq!(runtime.rt_debug_tablet_tool_count(), 2);
+        // SAFETY: fabricated tools are live; addresses compared, never
+        // dereferenced.
+        unsafe {
+            assert!(runtime.try_tablet_tool(tool_a_ptr).is_some());
+            assert!(runtime.try_tablet_tool(tool_b_ptr).is_some());
+        }
+
+        // wlroots emits destroy with the tool as data — mirror it. This is
+        // the emission the fix wires the eviction to.
+        // SAFETY: as above; the linked destroy listener unlinks itself from
+        // this very list, which `wl_signal_emit_mutable` tolerates.
+        unsafe {
+            sys::wl_signal_emit_mutable(&raw mut tool_a.events.destroy, tool_a_ptr.cast());
+        }
+
+        assert_eq!(
+            runtime.rt_debug_tablet_tool_count(),
+            1,
+            "destroy must evict exactly the destroyed tool"
+        );
+        // SAFETY: as above.
+        unsafe {
+            assert!(
+                runtime.try_tablet_tool(tool_a_ptr).is_none(),
+                "the destroyed address must miss"
+            );
+            assert!(
+                runtime.try_tablet_tool(tool_b_ptr).is_some(),
+                "the surviving tool must keep resolving"
+            );
+        }
+        assert_eq!(
+            session.tablet_tools.borrow().len(),
+            1,
+            "the destroyed tool's listener must be unlinked with it"
+        );
+
+        // Address reuse: tracking the same address again must record fresh
+        // rather than early-return on a stale entry (which skipped v2
+        // creation for the new tool).
+        // SAFETY: as above.
+        unsafe {
+            track_tablet_tool(&session, tool_a_nn, tablet_nn);
+        }
+        assert_eq!(runtime.rt_debug_tablet_tool_count(), 2);
+        // SAFETY: as above.
+        unsafe {
+            assert!(runtime.try_tablet_tool(tool_a_ptr).is_some());
         }
     }
 
@@ -11178,7 +11446,6 @@ mod axis_delivery_tests {
              coordinates and with the pixel delta the event encoded"
         );
     }
-
     /// The default is a no-op, not a panic or a swallow of the forward: a
     /// consumer that never mentions `pointer_axis` must still be deliverable
     /// to, which is what makes the method additive.
@@ -11205,6 +11472,7 @@ mod axis_delivery_tests {
             drags: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
             shortcuts_inhibitors: RefCell::new(HashMap::new()),
+            tablet_tools: RefCell::new(HashMap::new()),
             session_locks: RefCell::new(HashMap::new()),
             lock_surfaces: RefCell::new(HashMap::new()),
             scene_buffers: RefCell::new(HashMap::new()),

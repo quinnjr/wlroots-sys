@@ -7578,16 +7578,37 @@ impl Runtime {
             .then_some(TabletToolId(key))
     }
 
-    /// Forget every tool a tablet device announced, called synchronously
-    /// from that device's own destroy handler before wlroots frees anything.
-    /// Hardware tools live and die with their device, so this — not a
-    /// per-tool destroy listener — is what keeps the table from outliving
-    /// its tools.
-    pub(crate) fn forget_tablet_tools_for_tablet(&self, tablet: NonNull<sys::wlr_tablet>) {
+    /// Forget one hardware tool, called synchronously from its own destroy
+    /// emission before wlroots frees it.
+    pub(crate) fn forget_tablet_tool(&self, tool: NonNull<sys::wlr_tablet_tool>) {
         self.inner
             .tablet_tools
             .borrow_mut()
-            .retain(|_, entry| entry.tablet != tablet);
+            .remove(&(tool.as_ptr() as usize));
+    }
+
+    /// Forget every tool a tablet device announced, returning their
+    /// addresses so the caller can drop their run-scoped destroy listeners
+    /// too. Called synchronously from that device's own destroy handler
+    /// before wlroots frees anything — the backstop for tools that never
+    /// got their own destroy emission.
+    pub(crate) fn take_tablet_tools_for_tablet(
+        &self,
+        tablet: NonNull<sys::wlr_tablet>,
+    ) -> Vec<NonNull<sys::wlr_tablet_tool>> {
+        let mut tools = Vec::new();
+        self.inner.tablet_tools.borrow_mut().retain(|key, entry| {
+            if entry.tablet == tablet {
+                // SAFETY: keys are addresses recorded from live `NonNull`s,
+                // compared and re-wrapped here but never dereferenced, and
+                // this `retain` removes the entry in the same breath.
+                tools.push(unsafe { NonNull::new_unchecked(*key as *mut sys::wlr_tablet_tool) });
+                false
+            } else {
+                true
+            }
+        });
+        tools
     }
 
     /// Debug accessor: number of tracked tablet tools.
@@ -7664,6 +7685,12 @@ impl Runtime {
     /// created (no manager, no seat, or wlroots refused): notification must
     /// never depend on the protocol side, and the v2 object is wlroots-owned
     /// (freed with the hardware tool) so nothing here retains it.
+    ///
+    /// A hardware tool shared by two tablets records under the first tablet
+    /// that announced it; the second `ensure` early-returns the same id
+    /// without creating a second v2 object. One object is the correct shape
+    /// — wlroots addresses a v2 tool to one seat — and the duplicate
+    /// announce is still notified through the shared id.
     pub(crate) fn ensure_tablet_tool(
         &self,
         tool: NonNull<sys::wlr_tablet_tool>,
