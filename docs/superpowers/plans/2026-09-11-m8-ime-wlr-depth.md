@@ -135,6 +135,24 @@ Keep tokens `pub(crate)` in this slice: the consumer plan needs only snapshots +
 - [ ] **Step 4: Run** — new compile assertion PASS; full suite green; `input_method_popup` lifecycle test still asserts no synthesis.
 - [ ] **Step 5: Gates + commit** — all six gates; commit `feat(wlr): popup reposition event + size accessor (M8)`.
 
+### Task M8-3b: IME-commit notification event + hook (M8-6 unblocker)
+
+**Files:**
+- Modify: `crates/wlr/src/dispatch.rs` (`Event::InputMethodCommitted` variant + `deliver_all` arm + `run`-path unreachable arm), `crates/wlr/src/handler.rs` (defaulted `fn ime_committed(&mut self)` on `SeatHandler`, f2cc8a9 semver doc), `crates/wlr/src/backend.rs` (emit at the end of `on_input_method_commit`, after relay + `finish()` settle), `crates/wlr/tests/input_method_popup.rs` (compile assertion)
+- Modify: this plan's Task M8-3 cross-refs (none needed — additive)
+
+**Interfaces:**
+- Consumes: tokenized IME-commit path (M8-2); M8-3 precedent (identical wiring shape, id-free payload — the hook takes no arguments; the handler reads `committed_ime_state()`)
+- Produces: `Event::InputMethodCommitted`, `SeatHandler::ime_committed` (consumed by consumer Task M8-6 overlay)
+
+**Why this task exists:** M8-6 implementation proved the IME→app relay is fully crate-internal — `on_input_method_commit` emits no event and calls no hook, so the compositor can read `committed_ime_state()` but is never told when. Preedit show, commit-string hide, and deactivate hide all need this hook. Id-free payload (unlike Repositioned): the snapshot readers already carry the data; the event is purely a timing signal.
+
+- [ ] **Step 1: Failing compile assertion** — override `ime_committed` in `input_method_popup.rs` `PopupHandler`.
+- [ ] **Step 2: Run, watch fail** — undefined method.
+- [ ] **Step 3: Minimal implementation** — variant + arms + defaulted method + emit after `finish()` in `on_input_method_commit` (borrows released before emit; no-op shape identical to Repositioned).
+- [ ] **Step 4: Run** — assertion passes; full `cargo test -p wlr` green.
+- [ ] **Step 5: Gates + commit** — all six gates; commit `feat(wlr): IME-commit notification hook (M8)`.
+
 ### Task M8-4: Release 0.20.32 (freeze; publish is a consent stop)
 
 **Files:**
