@@ -2757,8 +2757,6 @@ symbol = "wlr_output_state_set_layers"
 module = "output"
 item   = "OutputState::set_layers"
 
-
-
 [[wrapped]]
 symbol = "wlr_output_swapchain_manager_init"
 module = "output"
@@ -2783,3 +2781,38 @@ item   = "SwapchainManager (Drop)"
 symbol = "wlr_output_swapchain_manager"
 module = "output"
 item   = "SwapchainManager"
+
+[[wrapped]]
+symbol = "wlr_output_event_commit"
+module = "backend"
+item   = "OutputHandler::output_committed"
+
+[[wrapped]]
+symbol = "wlr_output_event_damage"
+module = "backend"
+item   = "OutputHandler::output_damaged"
+
+[[wrapped]]
+symbol = "wlr_output_event_precommit"
+module = "backend"
+item   = "OutputHandler::output_precommitted"
+
+[[wrapped]]
+symbol = "wlr_output_event_bind"
+module = "backend"
+item   = "OutputHandler::output_bound"
+
+[[wrapped]]
+symbol = "wlr_output_event_request_state"
+module = "backend"
+item   = "OutputHandler::output_state_requested"
+
+[[wrapped]]
+symbol = "wlr_tearing_control_manager_v1"
+module = "runtime"
+item   = "Runtime::create_tearing_control"
+
+[[wrapped]]
+symbol = "wlr_tearing_control_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_tearing_control"

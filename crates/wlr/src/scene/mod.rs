@@ -85,6 +85,16 @@ pub(crate) fn timespec_of(when: std::time::Duration) -> sys::timespec {
     }
 }
 
+/// The reverse: read a `struct timespec` wlroots filled in (output commit and
+/// precommit events carry one) as a `Duration`. Negative inputs cannot come
+/// from a clock; a defensive saturate keeps the unsigned conversion total
+/// rather than panicking in an `extern "C"` frame, where a panic aborts.
+pub(crate) fn duration_of(when: &sys::timespec) -> std::time::Duration {
+    let secs = u64::try_from(when.tv_sec).unwrap_or(0);
+    let nanos = u32::try_from(when.tv_nsec).unwrap_or(0).min(999_999_999);
+    std::time::Duration::new(secs, nanos)
+}
+
 /// Identifies a solid-colour rect in the scene.
 ///
 /// The representation is frozen: this type was published in 0.20.1 and the
@@ -641,6 +651,43 @@ mod tests {
     #[test]
     fn an_unknown_node_tag_is_none_rather_than_a_panic() {
         assert_eq!(NodeKind::from_raw(sys::wlr_scene_node_type(9999)), None);
+    }
+
+    /// The reverse conversion exists for its saturation: every defensive arm
+    /// must be pinned, because the integration test only ever feeds it real
+    /// clocks (which take none of these arms) and this runs in C frames
+    /// where a panic aborts.
+    #[test]
+    fn duration_of_saturates_unrepresentable_inputs() {
+        use std::time::Duration;
+        assert_eq!(
+            duration_of(&sys::timespec {
+                tv_sec: -5,
+                tv_nsec: 0
+            }),
+            Duration::ZERO
+        );
+        assert_eq!(
+            duration_of(&sys::timespec {
+                tv_sec: 3,
+                tv_nsec: -1
+            }),
+            Duration::new(3, 0)
+        );
+        assert_eq!(
+            duration_of(&sys::timespec {
+                tv_sec: 3,
+                tv_nsec: 1_500_000_000,
+            }),
+            Duration::new(3, 999_999_999)
+        );
+        assert_eq!(
+            duration_of(&sys::timespec {
+                tv_sec: 3,
+                tv_nsec: 500
+            }),
+            Duration::new(3, 500)
+        );
     }
 
     /// A timestamp beyond `time_t` saturates instead of wrapping into garbage:

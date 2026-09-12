@@ -40,9 +40,9 @@ use crate::layer::Layer;
 use crate::runtime::{PointerGrab, SceneObserver};
 use crate::seat::{AxisRelativeDirection, AxisSource, KeyEvent, Modifiers, PointerAxis};
 use crate::{
-    AppliedHead, Band, Display, Error, EventLoop, Handlers, LayerSurface, LayerSurfaceId,
-    LoopHandler, NodeId, Output, OutputHandler, OutputId, Popup, PopupId, PopupParent, Result,
-    Runtime, Toplevel, ToplevelId, Transform, sys,
+    AppliedHead, Band, CommittedFields, Display, Error, EventLoop, Handlers, LayerSurface,
+    LayerSurfaceId, LoopHandler, NodeId, Output, OutputHandler, OutputId, Popup, PopupId,
+    PopupParent, Region, Result, Runtime, Toplevel, ToplevelId, Transform, sys,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -1353,6 +1353,64 @@ struct OutputEntry {
     raw: *mut sys::wlr_output,
     _frame: Registration,
     _destroy: Registration,
+    _commit: Registration,
+    _damage: Registration,
+    _precommit: Registration,
+    _bind: Registration,
+    _request_state: Registration,
+    /// Damage snapshots accumulated since the last delivery, unioned on
+    /// every emission so coalesced deliveries still repaint everything.
+    /// Taken (not borrowed) at delivery, because the handler runs arbitrary
+    /// code that can re-enter and emit more damage. Read and written only
+    /// through [`accumulate_damage`] / [`take_pending_damage`] below, which
+    /// own the union-not-replace rule and the skip-on-empty rule.
+    pending_damage: RefCell<Option<Region>>,
+}
+
+/// Union `snapshot` into the slot, replacing nothing: the newest region
+/// joins the accumulated set rather than evicting it. Pure (no registry,
+/// no C frame), so this is the unit under test — [`accumulate_damage`]
+/// adds only the borrow dance around it.
+fn union_into(slot: &mut Option<Region>, snapshot: Region) {
+    *slot = Some(match slot.take() {
+        Some(prev) => prev.union(&snapshot),
+        None => snapshot,
+    });
+}
+
+/// Union `snapshot` into the output's pending damage, for emission sites.
+///
+/// Returns whether the snapshot landed. `false` (contended registry borrow
+/// or unknown id) means the caller must NOT emit: delivery would find an
+/// empty-or-stale slot and skip, silently losing the newest region.
+fn accumulate_damage<S>(session: &Session<'_, S>, id: OutputId, snapshot: Region) -> bool {
+    let Ok(entries) = session.outputs.try_borrow_mut() else {
+        debug_assert!(false, "damage emitted under a registry borrow");
+        return false;
+    };
+    let Some(entry) = entries.get(&id) else {
+        return false;
+    };
+    let Ok(mut slot) = entry.pending_damage.try_borrow_mut() else {
+        debug_assert!(false, "damage emitted while the slot is borrowed");
+        return false;
+    };
+    union_into(&mut slot, snapshot);
+    true
+}
+
+/// Take the output's pending damage for delivery, leaving the slot empty.
+/// `None` means nothing survived to delivery — skip the handler call rather
+/// than inventing damage. Shared by `deliver` and `deliver_all` so the
+/// take-not-borrow rule has one home.
+fn take_pending_damage<S>(session: &Session<'_, S>, id: OutputId) -> Option<Region> {
+    session
+        .outputs
+        .try_borrow()
+        .ok()?
+        .get(&id)?
+        .pending_damage
+        .take()
 }
 
 /// One live toplevel's listeners: the surface's commit/map/unmap, the
@@ -2944,6 +3002,24 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
     match ev {
         Event::NewOutput(id) => with_output(session, id, |output| state.new_output(output)),
         Event::OutputFrame(id) => with_output(session, id, |output| state.frame(output)),
+        Event::OutputCommitted(id, fields, when) => with_output(session, id, |output| {
+            state.output_committed(output, fields, when)
+        }),
+        Event::OutputDamaged(id) => {
+            // Taken at delivery via the shared helper (see its doc for the
+            // take-not-borrow rule); an empty slot skips rather than
+            // inventing damage.
+            if let Some(region) = take_pending_damage(session, id) {
+                with_output(session, id, |output| state.output_damaged(output, region));
+            }
+        }
+        Event::OutputPrecommitted(id, fields, when) => with_output(session, id, |output| {
+            state.output_precommitted(output, fields, when)
+        }),
+        Event::OutputBound(id) => with_output(session, id, |output| state.output_bound(output)),
+        Event::OutputStateRequested(id, fields) => with_output(session, id, |output| {
+            state.output_state_requested(output, fields)
+        }),
         Event::OutputDestroyed(id) => state.destroyed(id),
         // No id to resolve: the run has one renderer, and the handler is
         // handed the runtime so it can tear the graphics stack down without
@@ -4095,6 +4171,9 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let output = data.cast::<sys::wlr_output>();
+        if output.is_null() {
+            return;
+        }
 
         // Give the output an identity before anyone can ask for one.
         let id = OutputId(ensure_id_raw(&raw mut (*output).addons));
@@ -4116,6 +4195,47 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
             std::ptr::null(),
             id,
         );
+        // Commit, damage, precommit, bind, and request-state observations.
+        // Same per-output shape as frame/destroy above: linked before the
+        // handler is told, unlinked by entry removal. Damage snapshots into
+        // the entry slot (see `OutputEntry::pending_damage`); the rest copy
+        // their scalars at emission, because the signal payloads die with
+        // the emission while delivery may run later.
+        let commit = Registration::link_output(
+            &raw mut (*output).events.commit,
+            on_output_commit::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
+        let damage = Registration::link_output(
+            &raw mut (*output).events.damage,
+            on_output_damage::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
+        let precommit = Registration::link_output(
+            &raw mut (*output).events.precommit,
+            on_output_precommit::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
+        let bind = Registration::link_output(
+            &raw mut (*output).events.bind,
+            on_output_bind::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
+        let request_state = Registration::link_output(
+            &raw mut (*output).events.request_state,
+            on_output_request_state::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
 
         // Registered before the handler is told, so that a handler asking about
         // this output — or anything deferred behind it — can resolve the id.
@@ -4133,6 +4253,12 @@ unsafe extern "C" fn on_new_output<S: OutputHandler>(
                 raw: output,
                 _frame: frame,
                 _destroy: destroy,
+                _commit: commit,
+                _damage: damage,
+                _precommit: precommit,
+                _bind: bind,
+                _request_state: request_state,
+                pending_damage: RefCell::new(None),
             },
         );
         drop(displaced);
@@ -4175,6 +4301,185 @@ unsafe extern "C" fn on_frame<S: OutputHandler>(
         (*session)
             .dispatcher
             .emit(&*session, Event::OutputFrame(id), deliver);
+    }
+}
+
+/// Read the committed mask out of a commit-family event state pointer.
+/// Null (never observed, but this runs in an `extern "C"` frame where a
+/// panic aborts) maps to empty rather than a dereference.
+unsafe fn committed_of(state: *const sys::wlr_output_state) -> CommittedFields {
+    if state.is_null() {
+        return CommittedFields::default();
+    }
+    // SAFETY: non-null, and the signal guarantees the state is live for the
+    // emission; only the `committed` mask is read, nothing retained.
+    CommittedFields::from_bits(unsafe { (*state).committed })
+}
+
+/// Resolve an output-signal listener's routing: the session plus the id the
+/// listener was linked with. Every `on_output_*` callback starts here; the
+/// per-signal payload work stays in the callback, so the shared shape (and
+/// the emit discipline) has one home while the wlroots struct reads stay
+/// next to the signal they belong to.
+///
+/// Returns `None` when routing is impossible (listener unlinked mid-flight),
+/// in which case the caller returns without emitting.
+unsafe fn output_event_target<'r, S>(
+    l: *mut sys::wl_listener,
+) -> Option<(*const Session<'r, S>, OutputId)> {
+    // SAFETY: wlroots invokes the callback only for the listener linked into
+    // an output's signal set, which is the `listener` field of a live
+    // `Bound` — live because the registration owning it is removed from the
+    // session's registry, and so unlinked from the signal, before the output
+    // is freed. Same lifetime argument as `on_frame`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        Some((session, (*bound).id?))
+    }
+}
+
+/// An output state committed: snapshot the mask + timestamp, then emit.
+/// The state's pointer dies with the emission while delivery may run later,
+/// so nothing but owned scalars crosses.
+unsafe extern "C" fn on_output_commit<S: OutputHandler>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: `output_event_target` establishes the listener lifetime; the
+    // signal guarantees a live `wlr_output_event_commit` for the emission,
+    // and only its `state` pointer value (re-null-checked in
+    // `committed_of`) and inline `when` are read.
+    unsafe {
+        let Some((session, id)) = output_event_target::<S>(l) else {
+            return;
+        };
+        let event = data.cast::<sys::wlr_output_event_commit>();
+        if event.is_null() || (*event).output.is_null() {
+            return;
+        }
+        let fields = committed_of((*event).state);
+        let when = crate::scene::duration_of(&(*event).when);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::OutputCommitted(id, fields, when), deliver);
+    }
+}
+
+/// An output was damaged: union the region into the entry slot, then emit
+/// only if the snapshot landed. The union (not replace) is load-bearing —
+/// two damages queuing behind a running handler must repaint both.
+unsafe extern "C" fn on_output_damage<S: OutputHandler>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: `output_event_target` establishes the listener lifetime; the
+    // signal guarantees a live `wlr_output_event_damage` for the emission.
+    // The region is copied out synchronously (`to_owned` retains nothing),
+    // and only the owned copy crosses into `accumulate_damage`.
+    unsafe {
+        let Some((session, id)) = output_event_target::<S>(l) else {
+            return;
+        };
+        let event = data.cast::<sys::wlr_output_event_damage>();
+        if event.is_null() || (*event).output.is_null() || (*event).damage.is_null() {
+            return;
+        }
+        // SAFETY: non-null (checked above), and the signal guarantees the
+        // damage region is live for the emission.
+        let snapshot = crate::RegionRef::from_raw((*event).damage.cast_mut()).to_owned();
+        if !accumulate_damage(&*session, id, snapshot) {
+            return;
+        }
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::OutputDamaged(id), deliver);
+    }
+}
+
+/// An output state is about to commit: same snapshot rationale as
+/// [`on_output_commit`](on_output_commit), staged rather than applied.
+unsafe extern "C" fn on_output_precommit<S: OutputHandler>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: `output_event_target` establishes the listener lifetime; the
+    // signal guarantees a live `wlr_output_event_precommit` for the
+    // emission, and only its `state` pointer value and inline `when` are
+    // read.
+    unsafe {
+        let Some((session, id)) = output_event_target::<S>(l) else {
+            return;
+        };
+        let event = data.cast::<sys::wlr_output_event_precommit>();
+        if event.is_null() || (*event).output.is_null() {
+            return;
+        }
+        let fields = committed_of((*event).state);
+        let when = crate::scene::duration_of(&(*event).when);
+
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::OutputPrecommitted(id, fields, when),
+            deliver,
+        );
+    }
+}
+
+/// A client bound the output global: notification only, no payload to
+/// snapshot — the resource has no wrapper and the bind already happened.
+unsafe extern "C" fn on_output_bind<S: OutputHandler>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: `output_event_target` establishes the listener lifetime; the
+    // signal guarantees a live `wlr_output_event_bind` for the emission.
+    // The event's resource pointer is deliberately never read.
+    unsafe {
+        let Some((session, id)) = output_event_target::<S>(l) else {
+            return;
+        };
+        let event = data.cast::<sys::wlr_output_event_bind>();
+        if event.is_null() || (*event).output.is_null() {
+            return;
+        }
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::OutputBound(id), deliver);
+    }
+}
+
+/// A client requested an output state change: snapshot what was asked for.
+/// Applying it stays the compositor's decision, made with its own commit.
+unsafe extern "C" fn on_output_request_state<S: OutputHandler>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: `output_event_target` establishes the listener lifetime; the
+    // signal guarantees a live `wlr_output_event_request_state` for the
+    // emission, and only its `state` pointer value (re-null-checked in
+    // `committed_of`) is read.
+    unsafe {
+        let Some((session, id)) = output_event_target::<S>(l) else {
+            return;
+        };
+        let event = data.cast::<sys::wlr_output_event_request_state>();
+        if event.is_null() || (*event).output.is_null() {
+            return;
+        }
+        let fields = committed_of((*event).state);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::OutputStateRequested(id, fields), deliver);
     }
 }
 
@@ -4712,13 +5017,11 @@ unsafe extern "C" fn on_scene_buffer_frame_done<S: Handlers>(
         };
         // Read here, at emission time, rather than at delivery: a deferred
         // frame-done must report the moment wlroots named, not the moment the
-        // handler happened to run. A negative `tv_sec` is not representable as
-        // a `Duration` and cannot come from a presentation clock; clamping it
-        // to zero is what keeps this conversion total inside a C frame.
-        let when = std::time::Duration::new(
-            u64::try_from((*event).when.tv_sec).unwrap_or(0),
-            u32::try_from((*event).when.tv_nsec).unwrap_or(0),
-        );
+        // handler happened to run. Shared with the output commit-family
+        // events: `duration_of` saturates the unrepresentable inputs (and a
+        // negative `tv_sec` cannot come from a presentation clock), which is
+        // what keeps this conversion total inside a C frame.
+        let when = crate::scene::duration_of(&(*event).when);
         let deliver = (*session).deliver;
         (*session).dispatcher.emit(
             &*session,
@@ -10248,6 +10551,24 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
     match ev {
         Event::NewOutput(id) => with_output(session, id, |output| state.new_output(output)),
         Event::OutputFrame(id) => with_output(session, id, |output| state.frame(output)),
+        Event::OutputCommitted(id, fields, when) => {
+            with_output(session, id, |output| state.output_committed(output, fields, when))
+        }
+        Event::OutputDamaged(id) => {
+            // Taken at delivery via the shared helper (see its doc for the
+            // take-not-borrow rule); an empty slot skips rather than
+            // inventing damage.
+            if let Some(region) = take_pending_damage(session, id) {
+                with_output(session, id, |output| state.output_damaged(output, region));
+            }
+        }
+        Event::OutputPrecommitted(id, fields, when) => {
+            with_output(session, id, |output| state.output_precommitted(output, fields, when))
+        }
+        Event::OutputBound(id) => with_output(session, id, |output| state.output_bound(output)),
+        Event::OutputStateRequested(id, fields) => {
+            with_output(session, id, |output| state.output_state_requested(output, fields))
+        }
         // No resolution to do, and nothing to drop the event for: the id
         // outlives the object on purpose, and the handler is told about the
         // destruction even though nothing is left to hand it.
@@ -10365,6 +10686,24 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
 mod tests {
     use super::*;
     use std::alloc::{Layout, alloc_zeroed, dealloc};
+
+    /// The damage slot unions instead of replacing: two disjoint snapshots
+    /// must both survive, or coalesced deliveries under-repaint. A
+    /// replace-instead-of-union regression spans only the second box and
+    /// fails the (4, 4) half of this assertion.
+    #[test]
+    fn damage_slot_unions_instead_of_replacing() {
+        use crate::Box2D;
+        let mut slot: Option<Region> = None;
+        union_into(&mut slot, Region::from_box(Box2D::new(0, 0, 8, 8)));
+        union_into(&mut slot, Region::from_box(Box2D::new(100, 100, 8, 8)));
+        let region = slot.expect("slot holds both damages");
+        assert!(
+            region.contains_point(4, 4) && region.contains_point(104, 104),
+            "union must span both damages, got {:?}",
+            region.extents()
+        );
+    }
 
     /// A listener that is never emitted to by most of these tests; they
     /// exercise linking and unlinking, not delivery.
@@ -10661,6 +11000,16 @@ mod tests {
                 sys::wlr_addon_set_init(&raw mut (*ptr).addons);
                 sys::wl_signal_init(&raw mut (*ptr).events.frame);
                 sys::wl_signal_init(&raw mut (*ptr).events.destroy);
+                // The output-signal listeners (`commit`, `damage`,
+                // `precommit`, `bind`, `request_state`) link into these on
+                // every announcement, exactly as on a real output — without
+                // initialised heads `wl_signal_add` would corrupt the heap
+                // through the zeroed list pointers.
+                sys::wl_signal_init(&raw mut (*ptr).events.commit);
+                sys::wl_signal_init(&raw mut (*ptr).events.damage);
+                sys::wl_signal_init(&raw mut (*ptr).events.precommit);
+                sys::wl_signal_init(&raw mut (*ptr).events.bind);
+                sys::wl_signal_init(&raw mut (*ptr).events.request_state);
             }
             Self(ptr)
         }
