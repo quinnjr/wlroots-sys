@@ -8,7 +8,7 @@ use crate::{
     ActivationToken, AxisSource, CommittedFields, ConstraintId, CursorShape, CursorShapeDevice,
     DecorationMode, Edges, GestureId, InputPopupSurfaceId, KeyEvent, LayerSurface, LayerSurfaceId,
     NodeId, Output, OutputId, PointerAxis, Popup, PopupId, PowerMode, Region, SceneOutputId,
-    Toplevel, ToplevelId, Transform,
+    SwitchId, Toplevel, ToplevelId, TouchId, Transform,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -1436,6 +1436,71 @@ pub trait SeatHandler {
     /// against any earlier 0.20.x still compiles unchanged (see commit
     /// `f2cc8a9`).
     fn gesture_ended(&mut self, _id: GestureId) {}
+
+    /// A touch point went down — a finger landed. Notification only: the id
+    /// is the wire `touch_id` for the point (stable from this down to its
+    /// up, so a handler can match the pair), and the down forward to the
+    /// touch client has already gone out through the touch token by the
+    /// time this runs, so there is nothing left here for a handler to
+    /// *forward*. A deferred delivery may name a point already up again in
+    /// between; like `popup_surface_destroyed`, the id then only tells the
+    /// handler *which* point the down was for. Write this so an unknown id
+    /// is harmless.
+    ///
+    /// Lives on `SeatHandler` rather than a trait of its own for the reason
+    /// `shortcuts_inhibitor_toggled`'s own doc gives: one more defaulted
+    /// method costs an implementor nothing, whereas a new supertrait on
+    /// [`Handlers`] would be a breaking change to a frozen list (see commit
+    /// `f2cc8a9`). Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged.
+    fn touch_down(&mut self, _id: TouchId) {}
+
+    /// A touch point went up — the finger lifted. Notification only, on the
+    /// same terms as [`touch_down`](SeatHandler::touch_down): the id names
+    /// the point that went up, the up forward (which removes the point) has
+    /// already gone out, and an unknown id must be harmless.
+    ///
+    /// Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged (see commit
+    /// `f2cc8a9`).
+    fn touch_up(&mut self, _id: TouchId) {}
+
+    /// A touch gesture was cancelled wholesale. Notification only: the
+    /// cancel forward to the touch client has already gone out, so there is
+    /// nothing left here for a handler to *forward* — clear whatever
+    /// in-flight touch state the down/up notifications built. Carries no
+    /// id: the cancel names no single point.
+    ///
+    /// Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged (see commit
+    /// `f2cc8a9`).
+    fn touch_cancelled(&mut self) {}
+
+    /// A switch toggled. `on` is the position it toggled to: `true` is on
+    /// (lid closed, tablet mode engaged), `false` is off. Notification
+    /// only: there is no client forward for switches — no protocol carries
+    /// them — so a handler that wants the aggregate reads
+    /// [`Runtime::switch_state`](crate::Runtime::switch_state), and one
+    /// that wants the lid reading reads its `lid_closed`. A deferred
+    /// delivery may name a switch whose device went away in between; like
+    /// `popup_surface_destroyed`, the id then only tells the handler
+    /// *which* switch toggled. Write this so an unknown id is harmless.
+    ///
+    /// Lives on `SeatHandler` rather than a trait of its own for the reason
+    /// `shortcuts_inhibitor_toggled`'s own doc gives (see commit `f2cc8a9`).
+    /// Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged.
+    fn switch_toggled(&mut self, _id: SwitchId, _on: bool) {
+        let _ = (_id, _on);
+    }
 }
 
 /// Every handler trait at once.

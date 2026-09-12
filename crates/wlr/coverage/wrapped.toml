@@ -2959,3 +2959,123 @@ item   = "Output::send_request_state"
 symbol = "wlr_output_get_primary_formats"
 module = "output"
 item   = "Output::primary_formats"
+
+[[wrapped]]
+symbol = "wlr_touch"
+module = "runtime"
+item   = "Runtime::touch_state"
+
+[[wrapped]]
+symbol = "wlr_touch_from_input_device"
+module = "runtime"
+item   = "Runtime::touch_state"
+
+[[wrapped]]
+symbol = "wlr_touch_down_event"
+module = "backend"
+item   = "SeatHandler::touch_down"
+
+[[wrapped]]
+symbol = "wlr_touch_motion_event"
+module = "backend"
+item   = "SeatHandler::touch_down"
+
+[[wrapped]]
+symbol = "wlr_touch_up_event"
+module = "backend"
+item   = "SeatHandler::touch_up"
+
+[[wrapped]]
+symbol = "wlr_touch_cancel_event"
+module = "backend"
+item   = "SeatHandler::touch_cancelled"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_notify_cancel"
+module = "runtime"
+item   = "SeatHandler::touch_cancelled"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_notify_frame"
+module = "runtime"
+item   = "SeatHandler::touch_down"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_get_point"
+module = "runtime"
+item   = "SeatHandler::touch_cancelled"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_has_grab"
+module = "runtime"
+item   = "Runtime::touch_state"
+
+[[wrapped]]
+symbol = "wlr_switch"
+module = "runtime"
+item   = "Runtime::switch_state"
+
+[[wrapped]]
+symbol = "wlr_switch_from_input_device"
+module = "runtime"
+item   = "Runtime::switch_state"
+
+[[wrapped]]
+symbol = "wlr_switch_toggle_event"
+module = "backend"
+item   = "SeatHandler::switch_toggled"
+
+[[wrapped]]
+symbol = "wlr_switch_type"
+module = "backend"
+item   = "SeatHandler::switch_toggled"
+
+[[wrapped]]
+symbol = "wlr_switch_state"
+module = "backend"
+item   = "SeatHandler::switch_toggled"
+
+[[wrapped]]
+symbol = "wlr_pointer_constraints_v1_constraint_for_surface"
+module = "runtime"
+item   = "Runtime::constraint_state_for_surface"
+
+[[wrapped]]
+symbol = "wlr_seat_set_name"
+module = "runtime"
+item   = "Runtime::set_seat_name"
+
+[[wrapped]]
+symbol = "wlr_seat_destroy"
+module = "runtime"
+item   = "Runtime::destroy_seat"
+
+[[wrapped]]
+symbol = "wlr_cursor_destroy"
+module = "runtime"
+item   = "Runtime::destroy_seat"
+
+[[wrapped]]
+symbol = "wlr_seat_client_for_wl_client"
+module = "runtime"
+item   = "Runtime::seat_has_client"
+
+[[wrapped]]
+symbol = "wlr_seat_client_from_pointer_resource"
+module = "runtime"
+item   = "Runtime::seat_has_client_for_pointer_resource"
+
+[[wrapped]]
+symbol = "wlr_seat_client_from_resource"
+module = "runtime"
+item   = "Runtime::seat_client_next_serial"
+
+[[wrapped]]
+symbol = "wlr_seat_client_next_serial"
+module = "runtime"
+item   = "Runtime::seat_client_next_serial"
+
+[[wrapped]]
+symbol = "wlr_seat_client_validate_event_serial"
+module = "runtime"
+item   = "Runtime::seat_client_validate_serial"

@@ -136,11 +136,13 @@ pub use render::{Gles2, Gles2TextureAttribs};
 #[cfg(wlr_has_vulkan_renderer)]
 pub use render::{Vk, VkImageAttribs};
 pub use runtime::{
-    Band, CommittedImeState, CommittedTextInputState, ConstraintId, CursorId, CursorImage,
-    CursorState, GestureId, ImePreedit, InhibitorId, InputPopupSurfaceId, KeyboardGroupId,
-    KeyboardState, PendingImeState, PendingKeyboardState, PendingTextInputState, Runtime,
-    ShortcutsInhibitorId, TabletPadId, TabletToolId, ToolId, TransientSeatAnswer, TransientSeatId,
-    VirtualKeyboardId, VirtualPointerId, XcursorManagerId,
+    Band, CommittedImeState, CommittedTextInputState, ConstraintId, ConstraintLifetime,
+    ConstraintSurface, ConstraintType, CursorId, CursorImage, CursorState, GestureId, ImePreedit,
+    InhibitorId, InputPopupSurfaceId, KeyboardGroupId, KeyboardState, PendingImeState,
+    PendingKeyboardState, PendingTextInputState, PointerConstraintState, Runtime,
+    ShortcutsInhibitorId, SwitchId, SwitchState, TabletPadId, TabletToolId, ToolId, TouchId,
+    TouchPoint, TouchState, TransientSeatAnswer, TransientSeatId, VirtualKeyboardId,
+    VirtualPointerId, XcursorManagerId,
 };
 pub use scene::{
     DamageRing, DamageRingRef, NodeId, NodeKind, RectId, SceneBuffer, SceneBufferOptions,
@@ -149,7 +151,7 @@ pub use scene::{
 };
 pub use seat::{
     ActivationToken, AxisRelativeDirection, AxisSource, CursorShape, CursorShapeDevice, KeyEvent,
-    Modifiers, PointerAxis,
+    Modifiers, PointerAxis, SwitchType,
 };
 pub use toplevel::{Edges, Toplevel, ToplevelId};
 #[cfg(wlr_has_xwayland)]

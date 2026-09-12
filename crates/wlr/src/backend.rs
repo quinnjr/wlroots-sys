@@ -37,13 +37,15 @@ use std::rc::Rc;
 use crate::dispatch::{Dispatcher, DisplayPinGuard, Event};
 use crate::id::{SourceId, attach_id, find_id};
 use crate::layer::Layer;
-use crate::runtime::{GesturePhase, PointerFrame, PointerGrab, SceneObserver};
-use crate::seat::{AxisRelativeDirection, AxisSource, KeyEvent, Modifiers, PointerAxis};
+use crate::runtime::{GesturePhase, PointerFrame, PointerGrab, SceneObserver, TouchFrame};
+use crate::seat::{
+    AxisRelativeDirection, AxisSource, KeyEvent, Modifiers, PointerAxis, SwitchType,
+};
 use crate::{
     AppliedHead, Band, CommittedFields, ConstraintId, Display, Error, EventLoop, GestureId,
     Handlers, LayerSurface, LayerSurfaceId, LoopHandler, NodeId, Output, OutputHandler, OutputId,
-    Popup, PopupId, PopupParent, PowerMode, Region, Result, Runtime, Toplevel, ToplevelId,
-    Transform, sys,
+    Popup, PopupId, PopupParent, PowerMode, Region, Result, Runtime, SwitchId, Toplevel,
+    ToplevelId, TouchId, Transform, sys,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -334,6 +336,17 @@ struct Bound {
     /// signal happens to pass — so the handler reads the request here
     /// instead. Set at link time by [`Registration::link_transient_seat`].
     transient_seat: Option<NonNull<sys::wlr_transient_seat_v1>>,
+
+    /// The switch device this listener belongs to, for the per-switch
+    /// `toggle` listener `on_new_input` links; `None` for every other
+    /// listener in this file.
+    ///
+    /// A raw object pointer, for the reason `tablet_pad`'s own doc gives: a
+    /// `wlr_switch_toggle_event` carries no device pointer at all — only
+    /// time, type and state — so the switch an event is about is
+    /// unrecoverable from the signal and must ride along. Set at link time
+    /// by [`Registration::link_switch`].
+    switch: Option<NonNull<sys::wlr_switch>>,
 }
 
 // `bound_of`'s cast is sound only while `listener` is `Bound`'s first field, at
@@ -408,6 +421,7 @@ impl Registration {
             tablet_pad: None,
             tablet_tool: None,
             transient_seat: None,
+            switch: None,
         });
 
         // SAFETY: the caller guarantees `signal` is an initialised `wl_signal`,
@@ -468,6 +482,7 @@ impl Registration {
             tablet_pad: None,
             tablet_tool: None,
             transient_seat: None,
+            switch: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -736,6 +751,7 @@ impl Registration {
             tablet_pad: None,
             tablet_tool: None,
             transient_seat: None,
+            switch: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -803,6 +819,7 @@ impl Registration {
             tablet_pad: None,
             tablet_tool: None,
             transient_seat: None,
+            switch: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -862,6 +879,7 @@ impl Registration {
             tablet_pad: None,
             tablet_tool: None,
             transient_seat: None,
+            switch: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
@@ -922,6 +940,7 @@ impl Registration {
             tablet_pad: Some(tablet_pad),
             tablet_tool: None,
             transient_seat: None,
+            switch: None,
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per
@@ -985,6 +1004,64 @@ impl Registration {
             tablet_pad: None,
             tablet_tool: Some(tablet_tool),
             transient_seat: None,
+            switch: None,
+        });
+
+        // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per
+        // the caller's contract, and the listener is a freshly boxed one
+        // whose address stays put until this `Registration` drops.
+        unsafe { sys::wl_signal_add(signal, &raw mut bound.listener) };
+
+        Registration { bound }
+    }
+
+    /// Link a per-switch `toggle` listener, carrying the raw `wlr_switch`
+    /// its callback reads back from [`Bound::switch`]. Every other slot is
+    /// `None`.
+    ///
+    /// A dedicated constructor for the same reason `link_tablet_pad` is,
+    /// and load-bearing for the same reason: per-switch identity must not
+    /// depend on the toggle signal's `data` — which is the toggle event,
+    /// naming no device at all — so the handler reads the switch here
+    /// instead (see [`Bound::switch`]).
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`]: `signal` must point at the given
+    /// switch's initialised `events.toggle`, `session` must be a
+    /// `*const Session<S>` for the `S` `notify` casts it back to, valid for
+    /// as long as the registration lives.
+    unsafe fn link_switch(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        alive: *const Cell<bool>,
+        switch: NonNull<sys::wlr_switch>,
+    ) -> Self {
+        let mut bound = Box::new(Bound {
+            listener: sys::wl_listener {
+                link: sys::wl_list {
+                    prev: std::ptr::null_mut(),
+                    next: std::ptr::null_mut(),
+                },
+                notify,
+            },
+            session,
+            alive,
+            flag: std::ptr::null(),
+            id: None,
+            toplevel: None,
+            layer: None,
+            node: None,
+            popup: None,
+            #[cfg(wlr_has_xwayland)]
+            xwayland: None,
+            text_input: None,
+            input_method: None,
+            tablet_pad: None,
+            tablet_tool: None,
+            transient_seat: None,
+            switch: Some(switch),
         });
 
         // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per
@@ -1056,6 +1133,7 @@ impl Registration {
             tablet_pad: None,
             tablet_tool: None,
             transient_seat: Some(transient_seat),
+            switch: None,
         });
 
         // SAFETY: `resource` is live per the caller's contract, and the
@@ -3277,6 +3355,10 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         Event::PointerConstraintCommitted(id) => state.pointer_constraint_committed(id),
         Event::GestureBegan(id) => state.gesture_began(id),
         Event::GestureEnded(id) => state.gesture_ended(id),
+        Event::TouchDown(id) => state.touch_down(id),
+        Event::TouchUp(id) => state.touch_up(id),
+        Event::TouchCancelled => state.touch_cancelled(),
+        Event::SwitchToggled(id, on) => state.switch_toggled(id, on),
         Event::SessionLockChanged(locked) => state.session_lock_changed(locked),
         Event::RequestSetShape(device, serial, shape) => {
             state.request_set_shape(device, serial, shape)
@@ -9000,6 +9082,14 @@ struct InputDevice {
     /// `on_input_destroy` can sweep the tools it announced out of the
     /// runtime's tablet table before wlroots frees the device.
     tablet: Option<NonNull<sys::wlr_tablet>>,
+    /// This device's touch identity, if it is one — recorded so
+    /// `on_input_destroy` can call [`Runtime::forget_touch`] and keep
+    /// [`Runtime::has_touch`] truthful once this device is gone.
+    touch: Option<NonNull<sys::wlr_touch>>,
+    /// This device's switch identity, if it is one — recorded so
+    /// `on_input_destroy` can call [`Runtime::forget_switch`] and keep
+    /// [`Runtime::has_switch`] truthful once this device is gone.
+    switch: Option<NonNull<sys::wlr_switch>>,
     /// This device's pad identity, if it is one — recorded so
     /// `on_input_destroy` can evict it from the runtime's pad set.
     pad: Option<NonNull<sys::wlr_tablet_pad>>,
@@ -9008,9 +9098,11 @@ struct InputDevice {
     /// twelve for a pointer (`motion`, `motion_absolute`, `button`, `axis`,
     /// and the eight swipe/pinch/hold phase signals), four for a tablet
     /// (`axis`, `proximity`, `tip`, `button`), three for a pad (`button`,
-    /// `ring`, `strip`), zero for a device type this crate does not yet wire
-    /// up (the destroy watch above is still linked, so this entry is still
-    /// found and removed on destroy even for an ignored device type).
+    /// `ring`, `strip`), five for a touch (`down`, `up`, `motion`, `cancel`,
+    /// `frame`), one for a switch (`toggle`), zero for a device type this
+    /// crate does not yet wire up (the destroy watch above is still linked,
+    /// so this entry is still found and removed on destroy even for an
+    /// ignored device type).
     _listeners: Vec<Registration>,
     /// See this struct's own doc for why this is a backstop, not the
     /// primary mechanism.
@@ -9058,7 +9150,10 @@ pub(crate) fn update_seat_capabilities(runtime: &Runtime) {
     if runtime.has_keyboard() {
         caps |= WL_SEAT_CAPABILITY_KEYBOARD;
     }
-    if runtime.test_touch_enabled() {
+    // Either a tracked touch device or the test-harness stand-in: both mean
+    // the seat can do touch (see `Runtime::enable_test_touch` for why the
+    // flag is not subsumed by the device count).
+    if runtime.has_touch() || runtime.test_touch_enabled() {
         caps |= WL_SEAT_CAPABILITY_TOUCH;
     }
     // SAFETY: the seat is this runtime's own (created by `create_seat`) and
@@ -9198,6 +9293,8 @@ unsafe extern "C" fn on_new_virtual_keyboard<S: Handlers>(
                 pointer: None,
                 tablet: None,
                 pad: None,
+                touch: None,
+                switch: None,
                 _destroy: destroy,
                 _listeners: listeners,
             },
@@ -9324,6 +9421,8 @@ unsafe extern "C" fn on_new_virtual_pointer<S: Handlers>(
                 pointer: Some(p_nn),
                 tablet: None,
                 pad: None,
+                touch: None,
+                switch: None,
                 _destroy: destroy,
                 _listeners: listeners,
                 alive,
@@ -9621,6 +9720,8 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
         let mut pointer = None;
         let mut tablet = None;
         let mut pad = None;
+        let mut touch = None;
+        let mut switch = None;
 
         match (*device).type_ {
             sys::wlr_input_device_type::WLR_INPUT_DEVICE_KEYBOARD => {
@@ -9839,6 +9940,82 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                     ));
                 }
             }
+            sys::wlr_input_device_type::WLR_INPUT_DEVICE_TOUCH => {
+                // A touch moves the cursor exactly like a pointer — attach
+                // it so the cursor follows the finger without the
+                // compositor repeating the pointer arm's call.
+                if let Some(cursor) = runtime.cursor_ptr() {
+                    // SAFETY: `device` is the live input device just
+                    // announced, and `cursor` is this runtime's own live
+                    // cursor; attaching only records the device, which
+                    // `on_input_destroy` detaches by dropping this entry.
+                    sys::wlr_cursor_attach_input_device(cursor.as_ptr(), device);
+                }
+                let raw_touch = sys::wlr_touch_from_input_device(device);
+                if !raw_touch.is_null() {
+                    // SAFETY: `raw_touch` is non-null per the check above
+                    // and live for as long as `device` is — the same
+                    // lifetime the keyboard/pointer arms rely on for their
+                    // own listeners.
+                    let touch_nn = NonNull::new_unchecked(raw_touch);
+                    runtime.record_touch(touch_nn);
+                    touch = Some(touch_nn);
+
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*raw_touch).events.down,
+                        on_touch_down::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*raw_touch).events.up,
+                        on_touch_up::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*raw_touch).events.motion,
+                        on_touch_motion::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*raw_touch).events.cancel,
+                        on_touch_cancel::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*raw_touch).events.frame,
+                        on_touch_frame::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                }
+            }
+            sys::wlr_input_device_type::WLR_INPUT_DEVICE_SWITCH => {
+                let raw_switch = sys::wlr_switch_from_input_device(device);
+                if !raw_switch.is_null() {
+                    // SAFETY: `raw_switch` is non-null per the check above
+                    // and live for as long as `device` is — the same
+                    // lifetime the keyboard/pointer arms rely on.
+                    let switch_nn = NonNull::new_unchecked(raw_switch);
+                    runtime.record_switch(switch_nn);
+                    switch = Some(switch_nn);
+
+                    // The toggle event names no device (only time, type and
+                    // state), so identity rides the listener slot
+                    // (`link_switch`), on the same FIX-3 terms as the pad
+                    // listeners above.
+                    listeners.push(Registration::link_switch(
+                        &raw mut (*raw_switch).events.toggle,
+                        on_switch_toggle::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                        switch_nn,
+                    ));
+                }
+            }
             _ => {}
         }
 
@@ -9855,6 +10032,8 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                 pointer,
                 tablet,
                 pad,
+                touch,
+                switch,
                 _destroy: destroy,
                 _listeners: listeners,
             },
@@ -9931,6 +10110,12 @@ unsafe extern "C" fn on_input_destroy<S: Handlers>(
             }
             if let Some(pad) = entry.pad {
                 runtime.forget_tablet_pad(pad);
+            }
+            if let Some(touch) = entry.touch {
+                runtime.forget_touch(touch);
+            }
+            if let Some(switch) = entry.switch {
+                runtime.forget_switch(switch);
             }
             drop(entry);
         }
@@ -11017,6 +11202,263 @@ unsafe extern "C" fn on_pointer_hold_end<S: Handlers>(
     }
 }
 
+/// A touch point went down — a finger landed. Forwards the down through
+/// the [`TouchFrame`] token, then announces it (`Event::TouchDown`).
+///
+/// The device event carries normalised 0..1 coordinates, so they are mapped
+/// to layout exactly as `on_pointer_motion_absolute` maps absolute pointer
+/// events — the touch device was attached to the cursor at announce, so the
+/// cursor owns the mapping — and hit-tested to the surface-local pair the
+/// seat notify wants. A touch over no surface creates no point (the notify
+/// requires a surface), so neither the forward nor the event happens there.
+unsafe extern "C" fn on_touch_down<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live touch device's
+    // `events.down`, whose data is a `wlr_touch_down_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_touch_down_event>();
+        let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
+        let Some(cursor) = runtime.cursor_ptr() else {
+            return;
+        };
+        let Some(touch) = NonNull::new((*ev).touch) else {
+            return;
+        };
+        let time_msec = (*ev).time_msec;
+        let touch_id = (*ev).touch_id;
+
+        // Normalised 0..1 to layout, on the same terms as
+        // `on_pointer_motion_absolute`: without a per-device output mapping
+        // (still waived) this falls back to the layout-wide mapping, which
+        // is what the cursor does for unmapped absolute devices too.
+        let device = &raw mut (*touch.as_ptr()).base;
+        let (mut lx, mut ly) = (0.0, 0.0);
+        sys::wlr_cursor_absolute_to_layout_coords(
+            cursor.as_ptr(),
+            device,
+            (*ev).x,
+            (*ev).y,
+            &mut lx,
+            &mut ly,
+        );
+        let Some((surface, sx, sy)) = runtime.leaf_surface_at(lx, ly) else {
+            return;
+        };
+
+        // The frame every seat forward below goes through — the relay
+        // handlers never touch the raw notifies.
+        let frame = TouchFrame::of(runtime);
+        // SAFETY: `surface` was just hit-tested against this runtime's own
+        // live scene, which is what `send_down` requires. The down serial
+        // cites nothing in this crate (the drag path cites down serials
+        // from its own test helper, not from here), so it is discarded —
+        // the same reason `PointerFrame::send_button` discards its own.
+        frame.send_down(surface, time_msec, touch_id, sx, sy);
+
+        runtime.ensure_cursor_image();
+
+        // The forward settled; announce the finished down, not a
+        // half-applied one.
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::TouchDown(TouchId(touch_id)), deliver);
+    }
+}
+
+/// A touch point moved. Forwards the motion through the [`TouchFrame`]
+/// token; no handler event — a touch's middle is client traffic, and the
+/// compositor already learned of the point from its down.
+///
+/// The point's focus is re-resolved every motion, on the same terms as
+/// `Runtime::inject_touch_motion` (whose own doc gives the drag rationale):
+/// wlroots' own refocus is a no-op when the surface already matches, so
+/// this keeps `focus_surface` in sync unconditionally rather than tracking
+/// "did it change" here.
+unsafe extern "C" fn on_touch_motion<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live touch device's
+    // `events.motion`, whose data is a `wlr_touch_motion_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_touch_motion_event>();
+        let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
+        let Some(cursor) = runtime.cursor_ptr() else {
+            return;
+        };
+        let Some(touch) = NonNull::new((*ev).touch) else {
+            return;
+        };
+        let time_msec = (*ev).time_msec;
+        let touch_id = (*ev).touch_id;
+
+        // Normalised 0..1 to layout, as for `on_touch_down`.
+        let device = &raw mut (*touch.as_ptr()).base;
+        let (mut lx, mut ly) = (0.0, 0.0);
+        sys::wlr_cursor_absolute_to_layout_coords(
+            cursor.as_ptr(),
+            device,
+            (*ev).x,
+            (*ev).y,
+            &mut lx,
+            &mut ly,
+        );
+        // Off every surface there is nothing to resolve coordinates
+        // against, so this is a deliberate no-op rather than notifying with
+        // stale coordinates — the same terms as `inject_touch_motion`.
+        let Some((surface, sx, sy)) = runtime.leaf_surface_at(lx, ly) else {
+            return;
+        };
+
+        let frame = TouchFrame::of(runtime);
+        // Focus bookkeeping, not a client forward: the motion itself goes
+        // through the frame below.
+        if let Some(seat) = runtime.seat_ptr() {
+            // SAFETY: `seat` is this runtime's own live seat; `surface` was
+            // just hit-tested live. The table borrow ended inside
+            // `seat_ptr`, so no borrow crosses this call.
+            sys::wlr_seat_touch_point_focus(seat.as_ptr(), surface, time_msec, touch_id, sx, sy);
+        }
+        frame.send_motion(time_msec, touch_id, sx, sy);
+    }
+}
+
+/// A touch point went up — the finger lifted. Forwards the up (consuming
+/// nothing — the point is gone but the wire frame for it is a separate
+/// device signal), then announces it (`Event::TouchUp`).
+unsafe extern "C" fn on_touch_up<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live touch device's
+    // `events.up`, whose data is a `wlr_touch_up_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_touch_up_event>();
+        let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
+        if (*ev).touch.is_null() {
+            return;
+        }
+        let time_msec = (*ev).time_msec;
+        let touch_id = (*ev).touch_id;
+
+        // The forward settles first; the event after it names the finished
+        // up. The up serial cites nothing here and is discarded, as for
+        // `on_touch_down`.
+        let frame = TouchFrame::of(runtime);
+        frame.send_up(time_msec, touch_id);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::TouchUp(TouchId(touch_id)), deliver);
+    }
+}
+
+/// A touch gesture was cancelled wholesale. Forwards the cancel (consuming
+/// the [`TouchFrame`] session, exactly like a frame consumes one), then
+/// announces it (`Event::TouchCancelled`).
+unsafe extern "C" fn on_touch_cancel<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live touch device's
+    // `events.cancel`, whose data is a `wlr_touch_cancel_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_touch_cancel_event>();
+        let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
+        if (*ev).touch.is_null() {
+            return;
+        }
+        let touch_id = (*ev).touch_id;
+
+        // The cancel forward (consuming the session) settles first; the
+        // event after it names the finished clear. A stale id resolves to
+        // nothing and the forward no-ops inside `send_cancel`, while the
+        // event still tells the compositor to clear.
+        let frame = TouchFrame::of(runtime);
+        frame.send_cancel(touch_id);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::TouchCancelled, deliver);
+    }
+}
+
+/// A touch frame boundary: close the wire frame the downs/motions/ups since
+/// the last one belong to. No handler event — a frame is grouping, not
+/// notification, on the same terms as the pointer frame `PointerFrame`
+/// closes without announcing.
+unsafe extern "C" fn on_touch_frame<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live touch device's
+    // `events.frame`, which carries no event struct (`data` is unread).
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        TouchFrame::of(runtime).send_frame();
+    }
+}
+
+/// A switch toggled. Records the position for [`Runtime::switch_state`],
+/// then announces it (`Event::SwitchToggled`). There is no client forward
+/// for switches — no protocol carries them — so the record and the event
+/// are the whole of a toggle's observable effect.
+unsafe extern "C" fn on_switch_toggle<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` via `link_switch` into one switch
+    // device's `events.toggle`, whose data is a
+    // `wlr_switch_toggle_event`. `data` names no device, so identity comes
+    // from the bound slot (see [`Bound::switch`]).
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_switch_toggle_event>();
+        let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
+        debug_assert!(
+            (*bound).switch.is_some(),
+            "switch toggle fired without a bound switch"
+        );
+        let Some(switch) = (*bound).switch else {
+            return;
+        };
+        let switch_type = SwitchType::from_raw((*ev).switch_type);
+        let on = (*ev).switch_state == sys::wlr_switch_state::WLR_SWITCH_STATE_ON;
+
+        // The record settles first; the event after it names the finished
+        // transition, not a half-applied one.
+        runtime.note_switch_toggle(switch_type, on);
+
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::SwitchToggled(SwitchId(switch.as_ptr() as usize), on),
+            deliver,
+        );
+    }
+}
+
 /// Borrow the output `id` names, if this session still knows of one.
 ///
 /// The registry borrow is released before `f` runs: a handler can re-enter
@@ -11194,11 +11636,17 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         // Unreachable: `run` never registers a pointer-constraints,
         // relative-pointer or pointer-gestures manager either, for the same
         // reason — so no constraint commit, relative motion or gesture
-        // begin/end can fire on this path.
+        // begin/end can fire on this path. Touch and switch devices arrive
+        // through `on_new_input`, which `run` never registers either, so
+        // their events cannot fire here on the same grounds.
         | Event::RelativeMotion { .. }
         | Event::PointerConstraintCommitted(..)
         | Event::GestureBegan(..)
         | Event::GestureEnded(..)
+        | Event::TouchDown(..)
+        | Event::TouchUp(..)
+        | Event::TouchCancelled
+        | Event::SwitchToggled(..)
         // Unreachable: `run` never registers a session-lock manager either
         // (`Backend::register_toplevel_and_input` is `run_all`'s hook; `run`
         // uses `no_extra`), so this cannot be produced on this path.
@@ -13486,5 +13934,181 @@ mod pointer_protocol_delivery_tests {
     fn gesture_phase_misses_without_manager_or_seat() {
         let runtime = Runtime::new().expect("runtime");
         assert!(GesturePhase::of(&runtime).is_none());
+    }
+}
+
+#[cfg(test)]
+mod touch_switch_delivery_tests {
+    use super::*;
+
+    /// Records what the four touch/switch hooks were called with. Every
+    /// other handler method is defaulted, so the empty impls below are the
+    /// whole `Handlers` bound `deliver_all` needs.
+    #[derive(Default)]
+    struct Recorder {
+        downs: Vec<TouchId>,
+        ups: Vec<TouchId>,
+        cancelled: u32,
+        toggles: Vec<(SwitchId, bool)>,
+    }
+
+    impl OutputHandler for Recorder {}
+    impl crate::ToplevelHandler for Recorder {}
+    impl crate::FdHandler for Recorder {}
+    impl LoopHandler for Recorder {}
+
+    impl crate::SeatHandler for Recorder {
+        fn touch_down(&mut self, id: TouchId) {
+            self.downs.push(id);
+        }
+
+        fn touch_up(&mut self, id: TouchId) {
+            self.ups.push(id);
+        }
+
+        fn touch_cancelled(&mut self) {
+            self.cancelled += 1;
+        }
+
+        fn switch_toggled(&mut self, id: SwitchId, on: bool) {
+            self.toggles.push((id, on));
+        }
+    }
+
+    /// A session with nothing in it. `deliver_all`'s touch/switch arms
+    /// resolve nothing — the events carry everything — so this is the whole
+    /// context the routing needs, on the same terms as
+    /// `pointer_protocol_delivery_tests`' own `empty_session`.
+    fn empty_session(runtime: &Runtime) -> Session<'_, Recorder> {
+        Session {
+            dispatcher: Dispatcher::new(std::ptr::null_mut()),
+            outputs: RefCell::new(HashMap::new()),
+            toplevels: RefCell::new(HashMap::new()),
+            decorations: RefCell::new(HashMap::new()),
+            layers: RefCell::new(HashMap::new()),
+            popups: RefCell::new(HashMap::new()),
+            inputs: RefCell::new(HashMap::new()),
+            drags: RefCell::new(HashMap::new()),
+            idle_inhibitors: RefCell::new(HashMap::new()),
+            shortcuts_inhibitors: RefCell::new(HashMap::new()),
+            tablet_tools: RefCell::new(HashMap::new()),
+            transient_seats: RefCell::new(HashMap::new()),
+            session_locks: RefCell::new(HashMap::new()),
+            lock_surfaces: RefCell::new(HashMap::new()),
+            scene_buffers: RefCell::new(HashMap::new()),
+            pointer_constraints: RefCell::new(HashMap::new()),
+            #[cfg(wlr_has_xwayland)]
+            xwayland_surfaces: RefCell::new(HashMap::new()),
+            last_key_consumed: Cell::new(false),
+            applied_heads: RefCell::new(VecDeque::new()),
+            runtime,
+            deliver: deliver_all::<Recorder>,
+        }
+    }
+
+    #[test]
+    fn touch_and_switch_events_route_their_payloads() {
+        let runtime = Runtime::new().expect("runtime");
+        let session = empty_session(&runtime);
+        let mut state = Recorder::default();
+
+        let down = TouchId::dangling_nth_for_test(1);
+        let up = TouchId::dangling_nth_for_test(2);
+        let switch = SwitchId::dangling_nth_for_test(3);
+        deliver_all(&session, &mut state, Event::TouchDown(down));
+        deliver_all(&session, &mut state, Event::TouchUp(up));
+        deliver_all(&session, &mut state, Event::TouchCancelled);
+        deliver_all(&session, &mut state, Event::SwitchToggled(switch, true));
+        deliver_all(&session, &mut state, Event::SwitchToggled(switch, false));
+
+        assert_eq!(state.downs, vec![down]);
+        assert_eq!(state.ups, vec![up]);
+        assert_eq!(state.cancelled, 1);
+        assert_eq!(state.toggles, vec![(switch, true), (switch, false)]);
+    }
+
+    /// The defaults are no-ops, not panics: a consumer that never mentions
+    /// the touch/switch hooks must still be deliverable to, which is what
+    /// makes each method additive.
+    #[test]
+    fn a_handler_that_overrides_nothing_still_takes_delivery() {
+        struct Legacy;
+        impl OutputHandler for Legacy {}
+        impl crate::ToplevelHandler for Legacy {}
+        impl crate::SeatHandler for Legacy {}
+        impl crate::FdHandler for Legacy {}
+        impl LoopHandler for Legacy {}
+
+        let runtime = Runtime::new().expect("runtime");
+        // Same shape as `empty_session`, for the one other state type this
+        // module has; not worth a generic helper for a single extra use.
+        let session = Session::<'_, Legacy> {
+            dispatcher: Dispatcher::new(std::ptr::null_mut()),
+            outputs: RefCell::new(HashMap::new()),
+            toplevels: RefCell::new(HashMap::new()),
+            decorations: RefCell::new(HashMap::new()),
+            layers: RefCell::new(HashMap::new()),
+            popups: RefCell::new(HashMap::new()),
+            inputs: RefCell::new(HashMap::new()),
+            drags: RefCell::new(HashMap::new()),
+            idle_inhibitors: RefCell::new(HashMap::new()),
+            shortcuts_inhibitors: RefCell::new(HashMap::new()),
+            tablet_tools: RefCell::new(HashMap::new()),
+            transient_seats: RefCell::new(HashMap::new()),
+            session_locks: RefCell::new(HashMap::new()),
+            lock_surfaces: RefCell::new(HashMap::new()),
+            scene_buffers: RefCell::new(HashMap::new()),
+            pointer_constraints: RefCell::new(HashMap::new()),
+            #[cfg(wlr_has_xwayland)]
+            xwayland_surfaces: RefCell::new(HashMap::new()),
+            last_key_consumed: Cell::new(false),
+            applied_heads: RefCell::new(VecDeque::new()),
+            runtime: &runtime,
+            deliver: deliver_all::<Legacy>,
+        };
+
+        deliver_all(
+            &session,
+            &mut Legacy,
+            Event::TouchDown(TouchId::dangling_nth_for_test(1)),
+        );
+        deliver_all(
+            &session,
+            &mut Legacy,
+            Event::TouchUp(TouchId::dangling_nth_for_test(1)),
+        );
+        deliver_all(&session, &mut Legacy, Event::TouchCancelled);
+        deliver_all(
+            &session,
+            &mut Legacy,
+            Event::SwitchToggled(SwitchId::dangling_nth_for_test(2), true),
+        );
+    }
+
+    /// A frame with no seat sends nothing and closes nothing: the token
+    /// methods resolve the seat per send and no-op on a miss, so building a
+    /// frame against a seatless runtime must not fault. The down/up serials
+    /// read `0` for the same reason `EnteredTextInput::finish` hands back
+    /// `CommitSerial(0)` when stale: nothing went out, so there is no
+    /// serial for it.
+    #[test]
+    fn a_seatless_touch_frame_is_a_quiet_no_op() {
+        let runtime = Runtime::new().expect("runtime");
+        assert!(
+            runtime.seat_ptr().is_none(),
+            "no seat was ever created on this runtime"
+        );
+        let frame = TouchFrame::of(&runtime);
+        // SAFETY: null is the documented miss case for a live-or-null
+        // surface contract — and the seat is gone, so the surface is never
+        // even reached.
+        assert_eq!(
+            unsafe { frame.send_down(std::ptr::null_mut(), 1, 7, 2.0, 3.0) },
+            0
+        );
+        frame.send_motion(1, 7, 2.0, 3.0);
+        assert_eq!(frame.send_up(1, 7), 0);
+        frame.send_cancel(7);
+        TouchFrame::of(&runtime).send_frame();
     }
 }

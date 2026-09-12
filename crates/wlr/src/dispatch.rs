@@ -48,8 +48,8 @@ use crate::{
     ActivationToken, AxisRelativeDirection, AxisSource, CommittedFields, ConstraintId, CursorShape,
     CursorShapeDevice, DecorationMode, Edges, GestureId, InputPopupSurfaceId, LayerSurfaceId,
     NodeId, OutputId, PointerAxis, PopupId, PowerMode, SceneOutputId, ShortcutsInhibitorId,
-    TabletPadId,
-    TabletToolId, ToplevelId, TransientSeatId, VirtualKeyboardId, VirtualPointerId,
+    SwitchId, TabletPadId, TabletToolId, ToplevelId, TouchId, TransientSeatId, VirtualKeyboardId,
+    VirtualPointerId,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -249,6 +249,40 @@ pub(crate) enum Event {
     /// `GestureBegan`: the end forward has already gone out, and a deferred
     /// delivery may name a pointer whose device went away in between.
     GestureEnded(GestureId),
+
+    /// A touch point went down — a finger landed. Carries the crate's own
+    /// [`TouchId`] handle for it — the wire `touch_id`, so it rides the
+    /// `Copy`/`Eq` `Event` like every other id, and so a handler can match
+    /// this down to its later up. The down forward to the touch client has
+    /// already gone out by the time this is emitted. Emitted only when the
+    /// down found a surface to land on; a touch over no surface creates no
+    /// point and announces nothing.
+    TouchDown(TouchId),
+
+    /// A touch point went up — the finger lifted. Same shape as `TouchDown`:
+    /// the up forward has already gone out (removing the point), and the id
+    /// names the point that went up. A deferred delivery may name a point
+    /// already gone; like `InputMethodPopupDestroyed`, the id then only
+    /// tells the handler *which* point the up was for. Write this so an
+    /// unknown id is harmless.
+    TouchUp(TouchId),
+
+    /// A touch gesture was cancelled wholesale — the compositor's cue to
+    /// clear any in-flight touch state. Carries nothing: the cancel names no
+    /// single point (the hardware event's `touch_id` drove the client
+    /// forward, which has already gone out), on the same "carry nothing"
+    /// terms as `InputMethodCommitted`.
+    TouchCancelled,
+
+    /// A switch toggled — a lid closed or opened, tablet mode engaged or
+    /// left. Carries the crate's own [`SwitchId`] handle for the device and
+    /// the position it toggled to (`true` is on), both read at emission
+    /// time, so a deferred delivery still reports the transition that
+    /// actually happened. There is no client forward for switches — no
+    /// protocol carries them — so this and the recorded
+    /// [`SwitchState`](crate::SwitchState) are the whole of a toggle's
+    /// observable effect.
+    SwitchToggled(SwitchId, bool),
 
     /// The session's lock state changed. Carries the new state — `true` when a
     /// locker takes a lock, `false` only on a genuine unlock. Never emitted
