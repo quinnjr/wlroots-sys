@@ -116,11 +116,38 @@ fn power_manager_global_constructs_once() {
         ),
         "second power manager create must refuse as a double-create"
     );
+
+    // Running with the manager created executes the `set_mode` wiring block
+    // (`if let Some(manager)` in run setup): a broken registration would
+    // trap here, and an announced output proves the run still delivers.
+    struct Announced {
+        outputs: u32,
+    }
+    impl wlr::OutputHandler for Announced {
+        fn new_output(&mut self, _output: &Output<'_>) {
+            self.outputs += 1;
+        }
+    }
+    impl wlr::ToplevelHandler for Announced {}
+    impl wlr::SeatHandler for Announced {}
+    impl wlr::FdHandler for Announced {}
+    impl wlr::LoopHandler for Announced {}
+
+    let mut app = Announced { outputs: 0 };
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Turns(4))
+        .expect("run_all");
+    assert_eq!(
+        app.outputs, 1,
+        "run with power manager must announce the output"
+    );
 }
 
 /// `primary_formats` is smoke-only: headless may constrain formats or not,
 /// and either answer is backend truth, not something to pin. What this
-/// proves is the call itself — no trap through C on a live output.
+/// proves is the call contract: no trap through C, a stable answer across
+/// calls, and `None` (unconstrained) distinguished from `Some` — never an
+/// error in disguise.
 #[test]
 fn primary_formats_call_is_sound() {
     headless_env();
@@ -130,7 +157,7 @@ fn primary_formats_call_is_sound() {
     runtime.init_graphics(&display, &backend).expect("graphics");
 
     struct Probe {
-        called: bool,
+        stable: Option<bool>,
     }
     impl wlr::OutputHandler for Probe {
         fn new_output(&mut self, output: &Output<'_>) {
@@ -138,10 +165,16 @@ fn primary_formats_call_is_sound() {
             st.set_enabled(true);
             st.set_custom_mode(800, 600, 60_000);
             if st.commit().is_ok() {
-                // `None` means unconstrained (every format supported), not
-                // an error — either way the call must simply return.
-                let _ = output.primary_formats(BufferCaps::DMABUF);
-                self.called = true;
+                let first = output.primary_formats(BufferCaps::DMABUF);
+                let second = output.primary_formats(BufferCaps::DMABUF);
+                // Both calls must agree: the constraint is backend state,
+                // not per-call allocation luck. `is_ok` on both pins the
+                // copy-out too — an allocation failure would surface here.
+                self.stable = Some(
+                    first.is_ok()
+                        && second.is_ok()
+                        && first.unwrap().is_none() == second.unwrap().is_none(),
+                );
             }
         }
     }
@@ -150,9 +183,13 @@ fn primary_formats_call_is_sound() {
     impl wlr::FdHandler for Probe {}
     impl wlr::LoopHandler for Probe {}
 
-    let mut app = Probe { called: false };
+    let mut app = Probe { stable: None };
     backend
         .run_all(&display, &mut app, &runtime, Until::Turns(4))
         .expect("run_all");
-    assert!(app.called, "primary_formats must run on a live output");
+    assert_eq!(
+        app.stable,
+        Some(true),
+        "primary_formats must agree with itself across calls"
+    );
 }

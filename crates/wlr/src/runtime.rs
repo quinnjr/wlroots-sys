@@ -7182,6 +7182,10 @@ impl Runtime {
 
     /// Create the `zwlr_output_power_manager_v1` global, letting clients
     /// request an output power mode. Errors if called twice.
+    ///
+    /// Create before [`Backend::run_all`](crate::Backend::run_all): the
+    /// `set_mode` listener is linked during run setup, so a manager created
+    /// mid-run takes effect on the next run.
     pub fn create_power_manager(&self, display: &Display) -> Result<()> {
         if self.inner.power_manager.borrow().is_some() {
             return Err(Error::Operation(

@@ -377,14 +377,16 @@ pub trait OutputHandler {
     /// for, not what was applied: acting on it — disabling the output for
     /// [`PowerMode::Off`](crate::PowerMode::Off), re-enabling for
     /// [`PowerMode::On`](crate::PowerMode::On) — is the compositor's call,
-    /// made by committing its own state for this output.
+    /// made by committing its own state for the output it tracks under this
+    /// id.
     ///
     /// Added additively: it is defaulted, so an `impl OutputHandler`
     /// written against any earlier 0.20.x still compiles unchanged.
     ///
-    /// Fires only with a client speaking output-power-management; e2e-only
-    /// (icedtea harness — no wlr milestone, the gap is environmental).
-    fn output_power_mode_set(&mut self, output: &Output<'_>, mode: PowerMode) {
+    /// Fires only when a client bound to `zwlr_output_power_manager_v1`
+    /// requests a mode; requires
+    /// [`Runtime::create_power_manager`](crate::Runtime::create_power_manager).
+    fn output_power_mode_requested(&mut self, output: OutputId, mode: PowerMode) {
         let _ = (output, mode);
     }
 }

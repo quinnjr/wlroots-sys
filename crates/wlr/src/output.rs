@@ -17,7 +17,7 @@ use crate::buffer::Buffer;
 use crate::geom::{Box2D, FBox, Subpixel, Transform};
 use crate::id::{OutputId, find_id};
 use crate::region::Region;
-use crate::render::{BufferCaps, DrmFormatSetRef};
+use crate::render::{BufferCaps, DrmFormatSet, DrmFormatSetRef};
 use crate::{Error, Result, sys};
 
 /// A wlroots output, borrowed for the duration of a handler call.
@@ -305,19 +305,18 @@ impl<'h> Output<'h> {
         unsafe { sys::wlr_output_schedule_frame(self.raw.as_ptr()) };
     }
 
-    /// Ask the compositor to apply new state, emitting the output's
-    /// `request_state` signal with the staged transaction.
+    /// Emit the output's `request_state` signal with the staged transaction.
     ///
-    /// This is the emit side of
-    /// [`OutputHandler::output_state_requested`](crate::OutputHandler::output_state_requested):
+    /// This is the emit side of `OutputHandler::output_state_requested`
+    /// (which lands with the feedback branch's request_state listener):
     /// backends call it when forwarding a client request, and tests call it
-    /// to exercise that path without a protocol client. `state` must stage
-    /// for this output and hold something staged.
+    /// to exercise that path without a protocol client.
     ///
     /// # Errors
     ///
     /// [`Error::Mismatch`] if the transaction stages another output.
-    /// [`Error::Operation`] if it stages nothing.
+    /// [`Error::Operation`] if it stages nothing — including a transaction
+    /// that was already consumed, whose state is gone.
     pub fn send_request_state(&self, state: &OutputState<'_, '_>) -> Result<()> {
         if state.output.as_ptr() != self.as_ptr() {
             return Err(Error::Mismatch("Output::send_request_state"));
@@ -327,10 +326,18 @@ impl<'h> Output<'h> {
                 "Output::send_request_state with nothing staged",
             ));
         };
-        // SAFETY: the transaction stages this output (checked above) and is
-        // borrowed for the call; the signal delivers synchronously to this
-        // crate's own listener, which snapshots owned scalars before
-        // returning.
+        if sys_state.committed == 0 {
+            return Err(Error::Operation(
+                "Output::send_request_state with an empty transaction",
+            ));
+        }
+        // SAFETY: the transaction stages this output (checked above),
+        // holds staged fields (checked above), and is borrowed for the
+        // call. Delivery is synchronous — no pointer escapes the emission —
+        // and currently no listener is registered in this tree at all, so
+        // the emission is a no-op. Any listener added later must snapshot
+        // owned scalars during the call and retain nothing: the state and
+        // its staged interiors die with this borrow.
         unsafe {
             sys::wlr_output_send_request_state(
                 self.raw.as_ptr(),
@@ -341,22 +348,28 @@ impl<'h> Output<'h> {
     }
 
     /// The DRM formats suitable for this output's primary buffer, assuming
-    /// buffers with `caps` capabilities.
+    /// buffers with `caps` capabilities — copied out, so the result stays
+    /// valid regardless of what the backend does afterwards. (Borrowing the
+    /// backend-owned set would trust no commit ever rebuilds it; copying
+    /// follows [`Output::modes`](Output::modes)' own discipline.)
     ///
-    /// `None` is not an error: wlroots returns null when the backend has no
-    /// format constraint, meaning every format is supported. An empty set
-    /// means the backend supports no format. The set is borrowed from the
-    /// output and must not outlive this borrow.
-    pub fn primary_formats(&self, caps: BufferCaps) -> Option<DrmFormatSetRef<'_>> {
-        // SAFETY: the handle's lifetime guarantees the output is live; the
-        // returned set (when non-null) is owned by the output, which this
-        // borrow outlives.
+    /// `Ok(None)` is not an error: wlroots returns null when the backend has
+    /// no format constraint, meaning every format is supported. An empty set
+    /// means the backend supports no format.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Create`] if the copy itself failed to allocate.
+    pub fn primary_formats(&self, caps: BufferCaps) -> Result<Option<DrmFormatSet>> {
+        // SAFETY: the handle's lifetime guarantees the output is live, so
+        // the hook runs against live backend state; the set is copied out
+        // synchronously, retaining nothing.
         unsafe {
             let set = sys::wlr_output_get_primary_formats(self.raw.as_ptr(), caps.bits());
             if set.is_null() {
-                None
+                Ok(None)
             } else {
-                Some(DrmFormatSetRef::from_raw(set))
+                Ok(Some(DrmFormatSetRef::from_raw(set).to_owned()?))
             }
         }
     }
@@ -980,8 +993,13 @@ impl AdaptiveSyncStatus {
 }
 
 /// Power mode a client requested for an output: off (power saving) or on.
-/// Delivered by [`OutputHandler::output_power_mode_set`](crate::OutputHandler::output_power_mode_set);
+/// Delivered by [`OutputHandler::output_power_mode_requested`](crate::OutputHandler::output_power_mode_requested);
 /// acting on it (disabling the output, say) is the compositor's call.
+///
+/// No `Default`: a mode names a client request with no safe implicit value.
+/// Deliberately parallel to [`AdaptiveSyncStatus::from_raw`](AdaptiveSyncStatus::from_raw),
+/// not shared with it: unknown statuses degrade, unknown requests are
+/// ignored — different miss policies for different domains.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -1538,6 +1556,11 @@ mod tests {
             // that either).
             unsafe { (*ptr).name = c"SCRATCH-1".as_ptr().cast_mut() };
             unsafe { sys::wlr_addon_set_init(&raw mut (*ptr).addons) };
+            // `send_request_state` emits into this list; without an
+            // initialised head the emission corrupts the heap (same lesson
+            // as `backend.rs`'s ScratchOutput, which inits the five signals
+            // its listeners link into).
+            unsafe { sys::wl_signal_init(&raw mut (*ptr).events.request_state) };
             Self(ptr)
         }
     }
@@ -1590,6 +1613,44 @@ mod tests {
         // SAFETY: as in the test above.
         let handle = unsafe { Output::from_raw(output.0) };
         assert_eq!(handle.name(), None);
+    }
+
+    /// `PowerMode` decodes 0/1 and misses everything else: the miss branch
+    /// is the fail-closed contract `on_output_power_set_mode` relies on to
+    /// skip unknown modes rather than abort, so it gets pinned directly —
+    /// no protocol client is needed to prove a pure function.
+    #[test]
+    fn power_mode_from_raw_round_trips_and_misses() {
+        assert_eq!(PowerMode::from_raw(0), Some(PowerMode::Off));
+        assert_eq!(PowerMode::from_raw(1), Some(PowerMode::On));
+        assert_eq!(PowerMode::from_raw(2), None);
+        assert_eq!(PowerMode::from_raw(u32::MAX), None);
+    }
+
+    /// `send_request_state` refuses a foreign transaction and an empty one.
+    /// Both guards are pure handle/state checks (no backend), so they are
+    /// pinned here against scratch outputs rather than in the harness: the
+    /// emission itself still needs a live backend and is covered there.
+    #[test]
+    fn send_request_state_rejects_foreign_and_empty_transactions() {
+        let a = ScratchOutput::new();
+        let b = ScratchOutput::new();
+        // SAFETY: as in `from_raw_wraps_the_output_it_was_given`.
+        let ha = unsafe { Output::from_raw(a.0) };
+        let hb = unsafe { Output::from_raw(b.0) };
+
+        let mut staged = ha.state();
+        staged.set_scale(2.0);
+        assert!(
+            matches!(hb.send_request_state(&staged), Err(Error::Mismatch(_))),
+            "another output's transaction must refuse as a mismatch"
+        );
+
+        let empty = ha.state();
+        assert!(
+            matches!(ha.send_request_state(&empty), Err(Error::Operation(_))),
+            "a transaction staging nothing must refuse as unusable"
+        );
     }
 
     /// Pins the panic *message*, not just that `id()` panics: whoever wires

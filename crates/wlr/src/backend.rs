@@ -2772,10 +2772,13 @@ impl<'d> Backend<'d> {
         }
 
         if let Some(manager) = runtime.power_manager_ptr() {
-            // SAFETY: `create_power_manager` returned a non-null manager owned
-            // by the display, which this call requires to outlive it, exactly
-            // as for the managers above — null liveness is correct. This is
-            // the `set_mode` signal wlroots raises when a client requests a
+            // SAFETY: `create_power_manager` returned a non-null manager that
+            // the display owns and destroys with itself, and this call
+            // requires the display to outlive the returned `Registration`s —
+            // the same display-ownership rule every manager block above
+            // states. The session pointer pairs this instantiation's `S`,
+            // and null liveness is correct for the same reason. This is the
+            // `set_mode` signal wlroots raises when a client requests a
             // power mode; the handler snapshots the output id plus the mode
             // (both owned scalars) and emits, so nothing borrowed crosses
             // into deferred delivery.
@@ -3230,9 +3233,7 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         }
         Event::RequestActivate(target, token) => state.request_activate(target, token),
         Event::GammaControlChanged(id) => state.gamma_control_changed(id),
-        Event::OutputPowerModeSet(id, mode) => with_output(session, id, |output| {
-            state.output_power_mode_set(output, mode)
-        }),
+        Event::OutputPowerModeSet(id, mode) => state.output_power_mode_requested(id, mode),
         Event::InputMethodPopupCreated(popup) => state.new_popup_surface(popup),
         Event::InputMethodPopupDestroyed(popup) => state.popup_surface_destroyed(popup),
         Event::InputMethodPopupRepositioned(popup) => state.popup_repositioned(popup),

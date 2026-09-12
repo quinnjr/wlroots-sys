@@ -525,7 +525,7 @@ milestone = "M13"
 [[waived]]
 symbol    = "wlr_direction"
 reason    = "internal"
-note      = "Layout-adjacency bitflags companion to the deliberately unwrapped layout helpers (M5 audit)."
+note      = "Bitflags for wlr_output_layout_adjacent_output, itself internal (M5 audit: the crate maintains its own layout, exposing only output_layout_box); no other consumer."
 
 [[waived]]
 symbol    = "wlr_dmabuf_v1_buffer"
@@ -1243,7 +1243,7 @@ note      = "Manual non-scene gamma driving; the scene integration applies ramps
 [[waived]]
 symbol    = "wlr_gamma_control_v1_get_color_transform"
 reason    = "internal"
-note      = "Manual non-scene gamma driving; also needs the color-transform type (M12)."
+note      = "Manual non-scene gamma driving; the color-transform type (M12) does not change this, the crate never drives gamma manually."
 
 [[waived]]
 symbol    = "wlr_gamma_control_v1_send_failed_and_destroy"
@@ -1604,14 +1604,14 @@ milestone = "M13"
 [[waived]]
 symbol    = "wlr_output_add_software_cursors_to_render_pass"
 reason    = "not-yet"
-note      = "Custom frame-loop path; sound wrapping needs the reentrancy guard keyed to the output runtime-owned renderer (Runtime keeps only the raw pointer, no owning Renderer handle exists) plus a borrow model for the output-internal buffer. Revisit with a renderer-handle ownership design."
-milestone = "M6"
+note      = "Custom frame-loop path; sound wrapping needs the reentrancy guard keyed to the output runtime-owned renderer (Runtime keeps only the raw pointer, no owning Renderer handle exists) plus a borrow model for the output-internal buffer. Revisit with a renderer-handle ownership design. (Blocked on renderer-handle ownership design, M13 scope.)"
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_output_begin_render_pass"
 reason    = "not-yet"
-note      = "Custom frame-loop path; sound wrapping needs the reentrancy guard keyed to the output runtime-owned renderer (Runtime keeps only the raw pointer, no owning Renderer handle exists) plus a borrow model for the output-internal buffer. Revisit with a renderer-handle ownership design."
-milestone = "M6"
+note      = "Custom frame-loop path; sound wrapping needs the reentrancy guard keyed to the output runtime-owned renderer (Runtime keeps only the raw pointer, no owning Renderer handle exists) plus a borrow model for the output-internal buffer. Revisit with a renderer-handle ownership design. (Blocked on renderer-handle ownership design, M13 scope.)"
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_output_configuration_v1_build_state"
