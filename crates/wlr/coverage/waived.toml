@@ -1628,8 +1628,8 @@ milestone = "M6"
 [[waived]]
 symbol    = "wlr_output_configure_primary_swapchain"
 reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+note      = "Backend-internal primary-buffer plumbing; out-param swapchain allocator ownership needs the allocator-lifetime model from M13 backends work."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_output_create_global"
@@ -1871,47 +1871,22 @@ reason    = "not-yet"
 note      = "with M10 (needs the drm-syncobj timeline type)."
 milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_swapchain_manager"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_swapchain_manager_apply"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_swapchain_manager_finish"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_swapchain_manager_get_swapchain"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_swapchain_manager_init"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_swapchain_manager_prepare"
 reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+note      = "Backend-commit flow: takes wlr_backend_output_state array plus wlr_backend_commit; wrap as one unit in M13."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_output_try_from_ext_image_capture_source_v1"
 reason    = "not-yet"
 note      = "with M10 (image-capture sources)."
-milestone = "M6"
+milestone = "M10"
 
 
 [[waived]]

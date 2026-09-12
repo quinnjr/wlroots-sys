@@ -12,6 +12,7 @@ use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
+use crate::backend::Backend;
 use crate::buffer::Buffer;
 use crate::geom::{Box2D, FBox, Subpixel, Transform};
 use crate::id::{OutputId, find_id};
@@ -773,6 +774,126 @@ pub struct LayerState<'l, 'o> {
     pub damage: &'l Region,
     /// Whether the compositor accepts this layer.
     pub accepted: bool,
+}
+
+/// Mode-setting swapchain management for a backend: one manager per
+/// compositor, borrowing the backend it allocates from.
+///
+/// The wlroots flow is prepare → repaint from an acquired buffer →
+/// `wlr_backend_commit` → [`apply`](SwapchainManager::apply). Of that flow
+/// this type owns creation, the pending [`SwapchainRef`](crate::SwapchainRef)
+/// lookup, and apply. `prepare` (`wlr_output_swapchain_manager_prepare`) is
+/// not wrapped yet — blocked on M13, which owns the backend-commit states it
+/// takes — so the full repaint loop is e2e-only until then.
+///
+/// No [`Debug`](std::fmt::Debug) by decision, not omission: there is nothing
+/// printable beyond the backend pointer this borrows.
+pub struct SwapchainManager<'b> {
+    raw: Box<sys::wlr_output_swapchain_manager>,
+    _backend: PhantomData<&'b ()>,
+}
+
+impl<'b> SwapchainManager<'b> {
+    /// Create a manager on `backend`, initialising it.
+    ///
+    /// The borrow is the contract: the manager stores the backend pointer
+    /// and hands out swapchains allocated from the backend's allocator, so
+    /// the backend must outlive the manager.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Destroyed`] if the backend is already dead — a borrow is
+    /// not liveness (an unplugged backend is freed mid-dispatch with Rust
+    /// borrows still live), so this is checked, not assumed, like every
+    /// other constructor that takes a [`Backend`].
+    pub fn new(backend: &'b Backend<'_>) -> Result<SwapchainManager<'b>> {
+        backend.alive_or_err()?;
+        // SAFETY: `init` writes every field (`backend` plus the outputs
+        // array), so assuming initialisation afterwards is sound; the
+        // backend was just checked live, and the borrow guarantees the
+        // stored pointer stays live for `'b`.
+        let mut raw = Box::<sys::wlr_output_swapchain_manager>::new_uninit();
+        unsafe {
+            sys::wlr_output_swapchain_manager_init(raw.as_mut_ptr(), backend.as_ptr());
+            Ok(SwapchainManager {
+                raw: raw.assume_init(),
+                _backend: PhantomData,
+            })
+        }
+    }
+
+    /// The pending swapchain for `output`, if a prepared manager has one.
+    ///
+    /// Null — a disabled output, or one the last prepare did not cover —
+    /// reports as `None` rather than a null handle. A `None` for an
+    /// *enabled* output means the caller is at fault (no successful prepare
+    /// covering it, or a prepare error was ignored), not that there is
+    /// nothing to paint; likewise an output from a different backend misses
+    /// the lookup and reads as `None`, which is a caller bug, not
+    /// "disabled".
+    ///
+    /// # Safety
+    ///
+    /// Must only be called after a successful prepare covering `output`.
+    /// wlroots documents prepare-then-get as the call order and backs it
+    /// with an assertion plus an unconditional dereference — calling
+    /// beforehand aborts (assert builds) or dereferences null (release
+    /// builds), so the order is a safety precondition, not prose. `output`
+    /// must be live for the call, which its borrow guarantees. The returned
+    /// ref borrows the manager, not the output: wlroots retains no output
+    /// pointer, and the ref cannot outlive the manager that owns the
+    /// swapchain.
+    ///
+    /// When M13 wraps `prepare`, it must take `&mut self` (or otherwise
+    /// invalidate live refs): prepare is the one call that can reap and
+    /// replace manager-owned swapchains behind an outstanding
+    /// [`SwapchainRef`](crate::SwapchainRef).
+    pub unsafe fn get_swapchain(&self, output: &Output<'_>) -> Option<crate::SwapchainRef<'_>> {
+        // SAFETY: both handles are live borrows, and the caller guarantees a
+        // covering prepare ran; the non-null return is then a manager-owned
+        // swapchain, tied to the manager borrow.
+        unsafe {
+            let raw =
+                sys::wlr_output_swapchain_manager_get_swapchain(self.as_ptr(), output.as_ptr());
+            NonNull::new(raw).map(|raw| crate::SwapchainRef::from_raw(raw))
+        }
+    }
+
+    /// Swap in the swapchains the last successful prepare allocated.
+    ///
+    /// Called after a successful backend commit; with nothing pending it is a
+    /// no-op. Takes `&self` rather than `&mut self`, matching the crate's
+    /// mutating-output calls ([`Output::commit`](Output::commit) commits
+    /// state through `&self` the same way): wlroots takes a bare pointer and
+    /// interior-mutates through it, and the documented call order (prepare,
+    /// commit, apply) is what serialises it, not exclusivity here. The type
+    /// is thread-bound (see the `!Send`/`!Sync` asserts), so no second
+    /// thread can interleave through the same borrow.
+    pub fn apply(&self) {
+        // SAFETY: this value owns a live, initialised manager.
+        unsafe { sys::wlr_output_swapchain_manager_apply(self.as_ptr()) };
+    }
+
+    fn as_ptr(&self) -> *mut sys::wlr_output_swapchain_manager {
+        // SAFETY: `Box` owns the allocation for the manager's whole life, so
+        // the pointer is valid. The `*const`-to-`*mut` conversion loans C a
+        // mutation right Rust cannot see: sound here because the manager is
+        // logically single-owner (no `&mut` field borrows escape across a
+        // call), every mutating entry point documents its position in the
+        // prepare → commit → apply order that serialises it, and the type is
+        // `!Sync`, so no thread can hold a conflicting borrow. A future
+        // `prepare` wrapper must preserve all three properties.
+        (&*self.raw) as *const sys::wlr_output_swapchain_manager
+            as *mut sys::wlr_output_swapchain_manager
+    }
+}
+
+impl Drop for SwapchainManager<'_> {
+    fn drop(&mut self) {
+        // SAFETY: this value owns the initialised manager; `finish` undoes
+        // exactly what `init` did, and runs before the backend borrow ends.
+        unsafe { sys::wlr_output_swapchain_manager_finish(self.as_ptr()) };
+    }
 }
 
 /// Adaptive-sync status of an output: whether variable refresh is active.

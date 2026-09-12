@@ -114,7 +114,7 @@ pub use layer::{Anchor, Layer, LayerSurface, LayerSurfaceId};
 pub use log::{LogLevel, init_logging, log_verbosity};
 pub use output::{
     AdaptiveSyncStatus, CommittedFields, LayerState, Mode, ModeType, Output, OutputCursor,
-    OutputLayer, OutputState, PresentEvent, PresentFlags,
+    OutputLayer, OutputState, PresentEvent, PresentFlags, SwapchainManager,
 };
 pub use popup::{
     ConstraintAdjustment, Popup, PopupId, PopupParent, PositionerAnchor, PositionerGravity,
@@ -128,8 +128,8 @@ pub use render::{
     DrmFormat, DrmFormatRef, DrmFormatSet, DrmFormatSetRef, Egl, FilterMode, FourCc, LockedBuffer,
     Modifier, NamedPrimaries, OwnedBuffer, Pixman, ReadPixels, RectOptions, RenderColor,
     RenderPass, RenderTimer, Renderer, RendererFeatures, RendererRef, SWAPCHAIN_CAP,
-    ShmAttributesRef, Swapchain, SyncFlags, SyncTimeline, SyncWaiter, Texture, TextureOptions,
-    TransferFunction, TransferFunctions,
+    ShmAttributesRef, Swapchain, SwapchainRef, SyncFlags, SyncTimeline, SyncWaiter, Texture,
+    TextureOptions, TransferFunction, TransferFunctions,
 };
 #[cfg(wlr_has_gles2_renderer)]
 pub use render::{Gles2, Gles2TextureAttribs};

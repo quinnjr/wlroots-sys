@@ -155,7 +155,7 @@ pub use pass::{
 };
 pub use pixman::Pixman;
 pub use shm::ShmAttributesRef;
-pub use swapchain::{LockedBuffer, SWAPCHAIN_CAP, Swapchain};
+pub use swapchain::{LockedBuffer, SWAPCHAIN_CAP, Swapchain, SwapchainRef};
 pub use sync::{SyncFlags, SyncTimeline, SyncWaiter};
 pub use texture::{ReadPixels, Texture};
 #[cfg(wlr_has_vulkan_renderer)]
@@ -989,6 +989,7 @@ mod tests {
         assert_not_impl_any!(Allocator<'static>: Send, Sync);
         assert_not_impl_any!(AllocatorRef<'static>: Send, Sync);
         assert_not_impl_any!(Swapchain<'static>: Send, Sync);
+        assert_not_impl_any!(SwapchainRef<'static>: Send, Sync);
         assert_not_impl_any!(OwnedBuffer<'static>: Send, Sync);
         assert_not_impl_any!(LockedBuffer<'static>: Send, Sync);
         assert_not_impl_any!(crate::Buffer<'static>: Send, Sync);

@@ -2759,3 +2759,27 @@ item   = "OutputState::set_layers"
 
 
 
+[[wrapped]]
+symbol = "wlr_output_swapchain_manager_init"
+module = "output"
+item   = "SwapchainManager::new"
+
+[[wrapped]]
+symbol = "wlr_output_swapchain_manager_get_swapchain"
+module = "output"
+item   = "SwapchainManager::get_swapchain"
+
+[[wrapped]]
+symbol = "wlr_output_swapchain_manager_apply"
+module = "output"
+item   = "SwapchainManager::apply"
+
+[[wrapped]]
+symbol = "wlr_output_swapchain_manager_finish"
+module = "output"
+item   = "SwapchainManager (Drop)"
+
+[[wrapped]]
+symbol = "wlr_output_swapchain_manager"
+module = "output"
+item   = "SwapchainManager"

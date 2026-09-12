@@ -774,6 +774,10 @@ mod tests {
         // changes.
         assert_not_impl_any!(crate::Region: Send, Sync);
         assert_not_impl_any!(crate::RegionRef<'static>: Send, Sync);
+        // The swapchain manager interior-mutates through `&self` (see
+        // `SwapchainManager::apply`), so `Sync` in particular must never
+        // arrive silently via a representation change.
+        assert_not_impl_any!(crate::SwapchainManager<'static>: Send, Sync);
     }
 
     /// The other half of the same argument: the plain value types carry no
