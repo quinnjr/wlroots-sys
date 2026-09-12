@@ -307,8 +307,8 @@ impl<'h> Output<'h> {
 
     /// Emit the output's `request_state` signal with the staged transaction.
     ///
-    /// This is the emit side of `OutputHandler::output_state_requested`
-    /// (which lands with the feedback branch's request_state listener):
+    /// This is the emit side of
+    /// [`OutputHandler::output_state_requested`](crate::OutputHandler::output_state_requested):
     /// backends call it when forwarding a client request, and tests call it
     /// to exercise that path without a protocol client.
     ///
