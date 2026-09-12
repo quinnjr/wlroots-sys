@@ -474,6 +474,37 @@ pre-map commit listener that calls the new
 `Runtime::schedule_frame_all(&self) -> usize` so XWayland's handshake frame
 callback is answered. Bounded to the handshake commits; never busy-loops.
 
+## 0.20.34 — M6 output rest: swapchain, feedback, protocols
+
+The rest of the output stack: a compositor can manage mode-setting
+swapchains, observe output signals, and serve power/tearing clients —
+and keeps paying nothing for any of it. The wire behavior is
+byte-identical to 0.20.33.
+
+### What you get
+
+- **Swapchain management.** `SwapchainManager` owns the mode-setting
+  helper (`new`/`apply`/`Drop` with a backend-liveness flag, so a dead
+  backend refuses instead of faulting), and `SwapchainRef` is the
+  manager-owned counterpart to `Swapchain` with the same `LockedBuffer`
+  acquire. The full repaint loop waits on `prepare` (M13 backend-commit).
+- **Output signal delivery.** `commit`, `damage`, `precommit`, `bind`,
+  and `request_state` arrive as five `OutputHandler` methods with owned
+  payloads snapshotted at emission; damage coalesces by union in a
+  registry slot and empty snapshots never wake the compositor.
+- **Power + tearing globals.** `create_power_manager` with
+  `output_power_mode_requested` delivery (`PowerMode::Off`/`On`,
+  unknown modes ignored, not acted on), and
+  `create_tearing_control_manager`. Surface-bound feedback
+  (`sampled`/`send_presented`/hints) waits on the surface model (M9).
+- **Request emit + primary formats.** `Output::send_request_state`
+  (the emit side of `output_state_requested`, with mismatch/empty
+  guards) and `Output::primary_formats` (copied out — `None` means
+  unconstrained, not an error).
+- **One soundness fix.** `OutputState::copy_from` reinstalls the
+  layers clone into the destination; previously the destination kept
+  pointing at the source's array (use-after-free on src-drop-first).
+
 ## 0.20.33 — M8 remainder: keyboard, inhibit, tablet, virtual, transient
 
 The last of the M8 waived symbols: a compositor can now **read** its
