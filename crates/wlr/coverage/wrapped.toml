@@ -2757,9 +2757,6 @@ symbol = "wlr_output_state_set_layers"
 module = "output"
 item   = "OutputState::set_layers"
 
-
-
-<<<<<<< HEAD
 [[wrapped]]
 symbol = "wlr_output_swapchain_manager_init"
 module = "output"
