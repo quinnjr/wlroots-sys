@@ -2809,3 +2809,13 @@ item   = "OutputHandler::output_bound"
 symbol = "wlr_output_event_request_state"
 module = "backend"
 item   = "OutputHandler::output_state_requested"
+
+[[wrapped]]
+symbol = "wlr_tearing_control_manager_v1"
+module = "runtime"
+item   = "Runtime::create_tearing_control"
+
+[[wrapped]]
+symbol = "wlr_tearing_control_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_tearing_control"

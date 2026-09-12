@@ -172,3 +172,30 @@ fn output_signal_events_fire_with_staged_payloads() {
         "delivered damage must be non-empty, got {extents:?}"
     );
 }
+
+/// Presentation and tearing globals construct once and refuse twice. The
+/// double-create refusal is the assertion with teeth: remove the guard and
+/// this fails, while a second wlroots global would silently double-bind.
+#[test]
+fn feedback_protocol_globals_construct_once() {
+    headless_env();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+
+    runtime
+        .create_presentation(&display, &backend)
+        .expect("presentation creates on a live backend");
+    assert!(
+        runtime.create_presentation(&display, &backend).is_err(),
+        "second presentation create must refuse"
+    );
+    runtime
+        .create_tearing_control(&display, 1)
+        .expect("tearing control creates");
+    assert!(
+        runtime.create_tearing_control(&display, 1).is_err(),
+        "second tearing control create must refuse"
+    );
+}

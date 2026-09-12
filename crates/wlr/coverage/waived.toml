@@ -2023,50 +2023,50 @@ milestone = "M7"
 [[waived]]
 symbol    = "wlr_presentation_event"
 reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
+milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_presentation_event_from_output"
 reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
+milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_presentation_feedback"
 reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
+milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_presentation_feedback_destroy"
 reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
+milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_presentation_feedback_send_presented"
 reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
+milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_presentation_surface_sampled"
 reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
+milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_presentation_surface_scanned_out_on_output"
 reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
+milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_presentation_surface_textured_on_output"
 reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
+milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_primary_selection_source"
@@ -3390,29 +3390,19 @@ reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
 
-[[waived]]
-symbol    = "wlr_tearing_control_manager_v1"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_tearing_control_manager_v1_create"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_tearing_control_manager_v1_surface_hint_from_surface"
 reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
+milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_tearing_control_v1"
 reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+note      = "Per-surface control object with set_hint signal; readable only via a surface handle (M9)."
+milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_texture_impl"
@@ -4327,6 +4317,6 @@ milestone = "M6"
 [[waived]]
 symbol    = "wlr_output_layer_feedback_event"
 reason    = "not-yet"
-note      = "consumed by M10 dmabuf-feedback init options; needs frame-event listener infrastructure, with the M6-feedback slice."
+note      = "Delivered on wlr_output_layer.events.feedback; needs per-layer listener registration in Output::create_layer with session plumbing, after protocols."
 milestone = "M6"
 

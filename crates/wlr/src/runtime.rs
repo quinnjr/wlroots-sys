@@ -1449,6 +1449,13 @@ pub(crate) struct RuntimeInner {
     /// input-method. `Option`, same rationale as the other manager globals.
     pub(crate) text_input_manager: RefCell<Option<NonNull<sys::wlr_text_input_manager_v3>>>,
 
+    /// The `wp_tearing_control_manager_v1` global, once created — lets
+    /// clients hint at tearing presentation per surface. `Option`, same
+    /// rationale as the other manager globals. Reading a surface's hint
+    /// needs the surface handle model (M9).
+    pub(crate) tearing_control_manager:
+        RefCell<Option<NonNull<sys::wlr_tearing_control_manager_v1>>>,
+
     /// The `zwp_input_method_manager_v2` global, once created — lets an
     /// input-method client (an IME) offer composed text back to focused
     /// fields. `Option`, same rationale as the other manager globals.
@@ -2397,6 +2404,7 @@ impl Runtime {
                 xdg_activation_manager: RefCell::new(None),
                 gamma_control_manager: RefCell::new(None),
                 text_input_manager: RefCell::new(None),
+                tearing_control_manager: RefCell::new(None),
                 input_method_manager: RefCell::new(None),
                 text_inputs: RefCell::new(HashMap::new()),
                 input_method: RefCell::new(None),
@@ -6434,6 +6442,27 @@ impl Runtime {
         let raw = unsafe { sys::wlr_input_method_manager_v2_create(display.as_ptr()) };
         let raw = NonNull::new(raw).ok_or(Error::Create("wlr_input_method_manager_v2_create"))?;
         *self.inner.input_method_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// Create the `wp_tearing_control_manager_v1` global, so clients can
+    /// hint at tearing presentation. `version` is the protocol version to
+    /// advertise (1 is current). Errors if called twice.
+    ///
+    /// Reading a surface's hint needs the surface handle model (M9).
+    pub fn create_tearing_control(&self, display: &Display, version: u32) -> Result<()> {
+        if self.inner.tearing_control_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_tearing_control called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is
+        // owned by the display and destroyed with it, so this crate never
+        // frees it.
+        let raw = unsafe { sys::wlr_tearing_control_manager_v1_create(display.as_ptr(), version) };
+        let raw =
+            NonNull::new(raw).ok_or(Error::Create("wlr_tearing_control_manager_v1_create"))?;
+        *self.inner.tearing_control_manager.borrow_mut() = Some(raw);
         Ok(())
     }
 
