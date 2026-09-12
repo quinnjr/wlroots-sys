@@ -4317,6 +4317,6 @@ milestone = "M6"
 [[waived]]
 symbol    = "wlr_output_layer_feedback_event"
 reason    = "not-yet"
-note      = "Delivered on wlr_output_layer.events.feedback; needs per-layer listener registration in Output::create_layer with session plumbing, after protocols."
+note      = "Delivered on wlr_output_layer.events.feedback; needs per-layer listener registration in Output::create_layer with session plumbing, after M6-protocols lands (same M6 milestone, later slice)."
 milestone = "M6"
 

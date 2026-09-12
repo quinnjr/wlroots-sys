@@ -2798,7 +2798,7 @@ item   = "OutputHandler::output_damaged"
 [[wrapped]]
 symbol = "wlr_output_event_precommit"
 module = "backend"
-item   = "OutputHandler::output_precommit"
+item   = "OutputHandler::output_precommitted"
 
 [[wrapped]]
 symbol = "wlr_output_event_bind"

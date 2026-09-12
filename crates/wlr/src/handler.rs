@@ -305,6 +305,9 @@ pub trait OutputHandler {
     /// This fires for every commit — including ones this compositor did not
     /// make (backend-driven mode repair, for instance). It is observation,
     /// not a veto point: the state is already applied.
+    ///
+    /// Added additively: it is defaulted, so an `impl OutputHandler`
+    /// written against any earlier 0.20.x still compiles unchanged.
     fn output_committed(
         &mut self,
         output: &Output<'_>,
@@ -314,10 +317,15 @@ pub trait OutputHandler {
         let _ = (output, fields, when);
     }
 
-    /// An output was damaged. `damage` is the buffer-local region, copied at
-    /// emission: owning it is what lets this event queue behind a running
-    /// handler like every other event, rather than borrowing wlroots memory
-    /// that would be gone by delivery.
+    /// An output was damaged. `damage` is the buffer-local region to repaint.
+    ///
+    /// Damages that queue behind a running handler are unioned and delivered
+    /// once carrying the accumulated set — not once per emission — and if no
+    /// snapshot survived to delivery this is not called at all. There is no
+    /// empty-damage call and no per-emission 1:1 delivery to rely on.
+    ///
+    /// Added additively: it is defaulted, so an `impl OutputHandler`
+    /// written against any earlier 0.20.x still compiles unchanged.
     fn output_damaged(&mut self, output: &Output<'_>, damage: Region) {
         let _ = (output, damage);
     }
@@ -325,7 +333,10 @@ pub trait OutputHandler {
     /// An output state is about to commit, before backends have validated it.
     /// Same payload as [`output_committed`](OutputHandler::output_committed);
     /// the state is staged, not yet applied.
-    fn output_precommit(
+    ///
+    /// Added additively: it is defaulted, so an `impl OutputHandler`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn output_precommitted(
         &mut self,
         output: &Output<'_>,
         fields: CommittedFields,
@@ -337,6 +348,13 @@ pub trait OutputHandler {
     /// A client bound the output global. Rarely actionable — recorded so a
     /// compositor can notice unexpected clients, not so it can refuse them
     /// (the bind already happened).
+    ///
+    /// Added additively: it is defaulted, so an `impl OutputHandler`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    ///
+    /// Fires only with a Wayland client in the loop; the in-tree harness
+    /// has none, so this is e2e-only (icedtea harness — no wlr milestone,
+    /// the gap is environmental, not API).
     fn output_bound(&mut self, output: &Output<'_>) {
         let _ = output;
     }
@@ -345,6 +363,12 @@ pub trait OutputHandler {
     /// protocol). `fields` names what was asked for, not what was applied:
     /// applying it is the compositor's decision, made by committing its own
     /// state for this output.
+    ///
+    /// Added additively: it is defaulted, so an `impl OutputHandler`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    ///
+    /// Fires only with a client speaking output-management; e2e-only
+    /// (icedtea harness — no wlr milestone, the gap is environmental).
     fn output_state_requested(&mut self, output: &Output<'_>, fields: CommittedFields) {
         let _ = (output, fields);
     }

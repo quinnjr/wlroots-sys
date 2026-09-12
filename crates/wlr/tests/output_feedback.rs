@@ -12,7 +12,11 @@
 //! or backend-specific logic"). Bind and request-state need a Wayland
 //! client (binding the output global, speaking output-management), which
 //! no harness binary has — they are wired and ledger-claimed, but e2e-only
-//! (icedtea harness).
+//! (icedtea harness — no wlr milestone, the gap is environmental, not API).
+//!
+//! Keep `headless_env` and `argb` in sync with `tests/output.rs`: each
+//! integration binary owns its environment, so these are intentional
+//! copies, and a skew between them presents as backend flakiness.
 
 use std::sync::Once;
 use wlr::{
@@ -45,14 +49,24 @@ fn argb() -> wlr::DrmFormat {
     wlr::DrmFormat::new(wlr::FourCc::ARGB8888, [wlr::Modifier::LINEAR])
 }
 
+/// One commit-family delivery, in arrival order. Recording the sequence
+/// (not just the last of each kind) is what makes a swapped
+/// commit/precommit wiring fail: transposed callbacks still produce equal
+/// masks, but never in this order with both timestamps set.
+#[derive(Debug)]
+enum CommitEv {
+    Pre(CommittedFields, std::time::Duration),
+    Commit(CommittedFields, std::time::Duration),
+}
+
 #[derive(Default)]
 struct Observed {
     setup_commit_ok: Option<bool>,
     cursor_moved: Option<bool>,
-    precommit_fields: Option<CommittedFields>,
-    committed_fields: Option<CommittedFields>,
-    committed_when: Option<std::time::Duration>,
-    damaged_extents: Option<Box2D>,
+    /// Every commit-family event, in delivery order.
+    commit_log: Vec<CommitEv>,
+    /// Every damage delivery's extents, in delivery order.
+    damaged: Vec<Box2D>,
 }
 
 struct App<'a> {
@@ -84,13 +98,13 @@ impl wlr::OutputHandler for App<'_> {
         }
     }
 
-    fn output_precommit(
+    fn output_precommitted(
         &mut self,
         _output: &Output<'_>,
         fields: CommittedFields,
-        _when: std::time::Duration,
+        when: std::time::Duration,
     ) {
-        self.seen.precommit_fields = Some(fields);
+        self.seen.commit_log.push(CommitEv::Pre(fields, when));
     }
 
     fn output_committed(
@@ -99,12 +113,11 @@ impl wlr::OutputHandler for App<'_> {
         fields: CommittedFields,
         when: std::time::Duration,
     ) {
-        self.seen.committed_fields = Some(fields);
-        self.seen.committed_when = Some(when);
+        self.seen.commit_log.push(CommitEv::Commit(fields, when));
     }
 
     fn output_damaged(&mut self, _output: &Output<'_>, damage: Region) {
-        self.seen.damaged_extents = Some(damage.extents());
+        self.seen.damaged.push(damage.extents());
     }
 }
 
@@ -113,9 +126,11 @@ impl wlr::SeatHandler for App<'_> {}
 impl wlr::FdHandler for App<'_> {}
 impl wlr::LoopHandler for App<'_> {}
 
-/// Committing fires precommit then commit with the staged mask, and moving
-/// the software cursor delivers non-empty damage. The default `LoopHandler`
-/// never stops early, so `Until::Turns` bounds the run.
+/// Committing fires precommit then commit with the staged mask and live
+/// timestamps, and moving the software cursor delivers damage covering the
+/// cursor. Histories (not last-write slots) so extra backend commits on a
+/// future wlroots cannot flake this: the staged transaction must appear in
+/// order, whatever else fires around it.
 #[test]
 fn output_signal_events_fire_with_staged_payloads() {
     headless_env();
@@ -147,37 +162,47 @@ fn output_signal_events_fire_with_staged_payloads() {
         "setup commit must succeed on headless"
     );
     let staged = CommittedFields::ENABLED | CommittedFields::MODE;
-    assert_eq!(
-        seen.precommit_fields,
-        Some(staged),
-        "precommit must carry the staged mask before the commit applies"
-    );
-    assert_eq!(
-        seen.committed_fields,
-        Some(staged),
-        "commit must carry the same staged mask after applying"
-    );
+    // Precommit-with-staged must precede commit-with-staged: swapped
+    // callbacks produce the same two masks in the wrong order and fail here.
+    let pre_idx = seen
+        .commit_log
+        .iter()
+        .position(|ev| matches!(ev, CommitEv::Pre(f, w) if *f == staged && !w.is_zero()));
+    let commit_idx = seen
+        .commit_log
+        .iter()
+        .position(|ev| matches!(ev, CommitEv::Commit(f, w) if *f == staged && !w.is_zero()));
     assert!(
-        seen.committed_when.is_some_and(|w| !w.is_zero()),
-        "commit carries wlroots' timestamp, which a clock produced and so is non-zero"
+        matches!((pre_idx, commit_idx), (Some(p), Some(c)) if p < c),
+        "precommit-with-staged must precede commit-with-staged, both timestamped; got {:?}",
+        seen.commit_log
     );
     assert_eq!(
         seen.cursor_moved,
         Some(true),
         "cursor move must succeed for damage to mean anything"
     );
-    let extents = seen.damaged_extents.expect("damage must be delivered");
     assert!(
-        extents.width > 0 && extents.height > 0,
-        "delivered damage must be non-empty, got {extents:?}"
+        !seen.damaged.is_empty(),
+        "damage must be delivered at least once"
+    );
+    assert!(
+        seen.damaged.iter().any(|b| b.width >= 8
+            && b.height >= 8
+            && b.x <= 10
+            && b.y <= 20
+            && b.x + b.width >= 10
+            && b.y + b.height >= 20),
+        "a delivery must cover the cursor hotspot (10, 20) with at least the 8x8 image, got {:?}",
+        seen.damaged
     );
 }
 
-/// Presentation and tearing globals construct once and refuse twice. The
-/// double-create refusal is the assertion with teeth: remove the guard and
-/// this fails, while a second wlroots global would silently double-bind.
+/// The presentation global constructs once and refuses twice. Matching on
+/// the error (not just `is_err`) is what pins the guard rather than a
+/// canned refusal: remove the double-create check and this fails.
 #[test]
-fn feedback_protocol_globals_construct_once() {
+fn presentation_global_constructs_once() {
     headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
@@ -188,14 +213,32 @@ fn feedback_protocol_globals_construct_once() {
         .create_presentation(&display, &backend)
         .expect("presentation creates on a live backend");
     assert!(
-        runtime.create_presentation(&display, &backend).is_err(),
-        "second presentation create must refuse"
+        matches!(
+            runtime.create_presentation(&display, &backend),
+            Err(wlr::Error::Operation(_))
+        ),
+        "second presentation create must refuse as a double-create"
     );
+}
+
+/// The tearing-control global constructs once and refuses twice, same terms
+/// as presentation above.
+#[test]
+fn tearing_control_global_constructs_once() {
+    headless_env();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+
     runtime
         .create_tearing_control(&display, 1)
         .expect("tearing control creates");
     assert!(
-        runtime.create_tearing_control(&display, 1).is_err(),
-        "second tearing control create must refuse"
+        matches!(
+            runtime.create_tearing_control(&display, 1),
+            Err(wlr::Error::Operation(_))
+        ),
+        "second tearing control create must refuse as a double-create"
     );
 }
