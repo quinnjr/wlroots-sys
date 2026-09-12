@@ -299,6 +299,16 @@ module = "runtime"
 item   = "Runtime::create_seat"
 
 [[wrapped]]
+symbol = "wlr_cursor_map_to_output"
+module = "runtime"
+item   = "Runtime::cursor_state"
+
+[[wrapped]]
+symbol = "wlr_cursor_map_to_region"
+module = "runtime"
+item   = "Runtime::cursor_state"
+
+[[wrapped]]
 symbol = "wlr_cursor_move"
 module = "backend"
 item   = "SeatHandler::pointer_motion"
@@ -847,6 +857,96 @@ item   = "SeatHandler::pointer_button"
 symbol = "wlr_pointer_from_input_device"
 module = "backend"
 item   = "SeatHandler::pointer_motion"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1"
+module = "runtime"
+item   = "Runtime::create_pointer_gestures_manager"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_create"
+module = "runtime"
+item   = "Runtime::create_pointer_gestures_manager"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_hold_begin"
+module = "runtime"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_hold_end"
+module = "runtime"
+item   = "SeatHandler::gesture_ended"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_pinch_begin"
+module = "runtime"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_pinch_end"
+module = "runtime"
+item   = "SeatHandler::gesture_ended"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_pinch_update"
+module = "runtime"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_swipe_begin"
+module = "runtime"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_swipe_end"
+module = "runtime"
+item   = "SeatHandler::gesture_ended"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_swipe_update"
+module = "runtime"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_hold_begin_event"
+module = "backend"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_hold_end_event"
+module = "backend"
+item   = "SeatHandler::gesture_ended"
+
+[[wrapped]]
+symbol = "wlr_pointer_pinch_begin_event"
+module = "backend"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_pinch_end_event"
+module = "backend"
+item   = "SeatHandler::gesture_ended"
+
+[[wrapped]]
+symbol = "wlr_pointer_pinch_update_event"
+module = "backend"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_swipe_begin_event"
+module = "backend"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_swipe_end_event"
+module = "backend"
+item   = "SeatHandler::gesture_ended"
+
+[[wrapped]]
+symbol = "wlr_pointer_swipe_update_event"
+module = "backend"
+item   = "SeatHandler::gesture_began"
 
 [[wrapped]]
 symbol = "wlr_pointer_motion_absolute_event"
@@ -1837,6 +1937,21 @@ item   = "Runtime::create_seat"
 symbol = "wlr_xcursor_manager_load"
 module = "runtime"
 item   = "Runtime::pointer_position"
+
+[[wrapped]]
+symbol = "wlr_xcursor_theme"
+module = "runtime"
+item   = "Runtime::load_xcursor_theme"
+
+[[wrapped]]
+symbol = "wlr_xcursor_theme_destroy"
+module = "runtime"
+item   = "Runtime::destroy_xcursor_theme"
+
+[[wrapped]]
+symbol = "wlr_xcursor_theme_load"
+module = "runtime"
+item   = "Runtime::load_xcursor_theme"
 
 [[wrapped]]
 symbol = "wlr_xdg_decoration_manager_v1"
@@ -2844,3 +2959,123 @@ item   = "Output::send_request_state"
 symbol = "wlr_output_get_primary_formats"
 module = "output"
 item   = "Output::primary_formats"
+
+[[wrapped]]
+symbol = "wlr_touch"
+module = "runtime"
+item   = "Runtime::touch_state"
+
+[[wrapped]]
+symbol = "wlr_touch_from_input_device"
+module = "runtime"
+item   = "Runtime::touch_state"
+
+[[wrapped]]
+symbol = "wlr_touch_down_event"
+module = "backend"
+item   = "SeatHandler::touch_down"
+
+[[wrapped]]
+symbol = "wlr_touch_motion_event"
+module = "backend"
+item   = "SeatHandler::touch_down"
+
+[[wrapped]]
+symbol = "wlr_touch_up_event"
+module = "backend"
+item   = "SeatHandler::touch_up"
+
+[[wrapped]]
+symbol = "wlr_touch_cancel_event"
+module = "backend"
+item   = "SeatHandler::touch_cancelled"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_notify_cancel"
+module = "runtime"
+item   = "SeatHandler::touch_cancelled"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_notify_frame"
+module = "runtime"
+item   = "TouchFrame::send_frame"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_get_point"
+module = "runtime"
+item   = "TouchFrame::send_cancel"
+
+[[wrapped]]
+symbol = "wlr_seat_touch_has_grab"
+module = "runtime"
+item   = "Runtime::touch_state"
+
+[[wrapped]]
+symbol = "wlr_switch"
+module = "runtime"
+item   = "Runtime::switch_state"
+
+[[wrapped]]
+symbol = "wlr_switch_from_input_device"
+module = "runtime"
+item   = "Runtime::switch_state"
+
+[[wrapped]]
+symbol = "wlr_switch_toggle_event"
+module = "backend"
+item   = "SeatHandler::switch_toggled"
+
+[[wrapped]]
+symbol = "wlr_switch_type"
+module = "backend"
+item   = "SeatHandler::switch_toggled"
+
+[[wrapped]]
+symbol = "wlr_switch_state"
+module = "backend"
+item   = "SeatHandler::switch_toggled"
+
+[[wrapped]]
+symbol = "wlr_pointer_constraints_v1_constraint_for_surface"
+module = "runtime"
+item   = "Runtime::constraint_state_for_surface"
+
+[[wrapped]]
+symbol = "wlr_seat_set_name"
+module = "runtime"
+item   = "Runtime::set_seat_name"
+
+[[wrapped]]
+symbol = "wlr_seat_destroy"
+module = "runtime"
+item   = "Runtime::destroy_seat"
+
+[[wrapped]]
+symbol = "wlr_cursor_destroy"
+module = "runtime"
+item   = "Runtime::destroy_seat"
+
+[[wrapped]]
+symbol = "wlr_seat_client_for_wl_client"
+module = "runtime"
+item   = "Runtime::seat_has_client"
+
+[[wrapped]]
+symbol = "wlr_seat_client_from_pointer_resource"
+module = "runtime"
+item   = "Runtime::seat_has_client_for_pointer_resource"
+
+[[wrapped]]
+symbol = "wlr_seat_client_from_resource"
+module = "runtime"
+item   = "Runtime::seat_client_next_serial"
+
+[[wrapped]]
+symbol = "wlr_seat_client_next_serial"
+module = "runtime"
+item   = "Runtime::seat_client_next_serial"
+
+[[wrapped]]
+symbol = "wlr_seat_client_validate_event_serial"
+module = "runtime"
+item   = "Runtime::seat_client_validate_serial"

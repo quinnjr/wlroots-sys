@@ -545,6 +545,44 @@ impl AxisRelativeDirection {
     }
 }
 
+/// What kind of switch toggled.
+///
+/// Mirrors `wlr_switch_type`: a laptop lid, a tablet-mode hinge sensor, or a
+/// keypad slide. A switch carries no other identity — unlike a key it has no
+/// code, and unlike a touch point it has no slot — so the toggle event's
+/// `(type, on)` pair, recorded by the runtime, is the whole of a switch's
+/// observable state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SwitchType {
+    /// A laptop lid: `on` means closed.
+    Lid,
+    /// A tablet-mode hinge sensor: `on` means tablet mode.
+    TabletMode,
+    /// A keypad slide.
+    KeypadSlide,
+}
+
+impl SwitchType {
+    /// Decode a `wlr_switch_type` wire value. Total for the same reason as
+    /// [`PointerAxis::from_raw`]; an unknown value — which no wlroots 0.20
+    /// build can produce, the enum having exactly three values — falls back
+    /// to [`SwitchType::Lid`], the overwhelmingly common switch, so a future
+    /// header addition degrades to a mislabelled toggle rather than a dead
+    /// process.
+    ///
+    /// There is no `to_raw`: switches only ever report inward (device to
+    /// compositor), so nothing in this crate encodes one back out.
+    pub(crate) fn from_raw(raw: sys::wlr_switch_type) -> SwitchType {
+        use sys::wlr_switch_type as W;
+        match raw {
+            W::WLR_SWITCH_TYPE_TABLET_MODE => SwitchType::TabletMode,
+            W::WLR_SWITCH_TYPE_KEYPAD_SLIDE => SwitchType::KeypadSlide,
+            // Includes `WLR_SWITCH_TYPE_LID` itself.
+            _ => SwitchType::Lid,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,6 +665,10 @@ mod tests {
             AxisRelativeDirection::from_raw(sys::wl_pointer_axis_relative_direction(99)),
             AxisRelativeDirection::Identical
         );
+        assert_eq!(
+            SwitchType::from_raw(sys::wlr_switch_type(99)),
+            SwitchType::Lid
+        );
     }
 
     /// The bit values the fallbacks above assume: `0` is the variant each
@@ -645,6 +687,29 @@ mod tests {
             sys::wl_pointer_axis_relative_direction::WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL.0,
             0
         );
+    }
+
+    /// Every switch wire value this build's headers define decodes to the
+    /// safe enum's matching variant, and the fallback arm degrades to the
+    /// value wlroots numbers `0`.
+    #[test]
+    fn the_switch_type_decodes_every_known_wire_value() {
+        for (raw, safe) in [
+            (sys::wlr_switch_type::WLR_SWITCH_TYPE_LID, SwitchType::Lid),
+            (
+                sys::wlr_switch_type::WLR_SWITCH_TYPE_TABLET_MODE,
+                SwitchType::TabletMode,
+            ),
+            (
+                sys::wlr_switch_type::WLR_SWITCH_TYPE_KEYPAD_SLIDE,
+                SwitchType::KeypadSlide,
+            ),
+        ] {
+            assert_eq!(SwitchType::from_raw(raw), safe);
+        }
+        assert_eq!(sys::wlr_switch_type::WLR_SWITCH_TYPE_LID.0, 0);
+        assert_eq!(sys::wlr_switch_state::WLR_SWITCH_STATE_OFF.0, 0);
+        assert_eq!(sys::wlr_switch_state::WLR_SWITCH_STATE_ON.0, 1);
     }
 
     #[test]

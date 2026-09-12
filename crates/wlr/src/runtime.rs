@@ -856,6 +856,265 @@ pub(crate) struct TransientSeatEntry {
     pub(crate) raw: NonNull<sys::wlr_transient_seat_v1>,
 }
 
+/// A stable handle for this runtime's `wlr_cursor`.
+///
+/// Opaque to consumers, like [`KeyboardGroupId`]: the wrapped value is the
+/// cursor's own address — the identity [`Runtime::create_seat`] minted it
+/// under, so creation names the object directly and lookup is a membership
+/// check, not a search. There is exactly one cursor per runtime (created
+/// alongside the seat), so the id is how a compositor names *that* cursor to
+/// [`Runtime::try_cursor`]; [`Runtime::cursor_state`] answers the same
+/// snapshot without one.
+///
+/// Evicted by `backend.rs`'s `on_seat_destroy` — the cursor is created with
+/// the seat and dies with it, and a `wlr_cursor` exposes no public
+/// per-object destroy signal of its own to listen on.
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`KeyboardGroupId`]: an
+/// opaque id's ordering would promise creation-order semantics nobody asked
+/// for.
+///
+/// `Debug` is redacted: the wrapped value is a heap address and every other
+/// id is a counter that leaks nothing — printing this would hand out an
+/// ASLR oracle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CursorId(pub(crate) usize);
+
+impl std::fmt::Debug for CursorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CursorId(..)")
+    }
+}
+
+impl CursorId {
+    /// An id that names no cursor, for negative tests: `usize::MAX` can
+    /// never be a cursor address handed out here (heap addresses never sit
+    /// at the top of the address space). Mirrors
+    /// `InputPopupSurfaceId::dangling_nth_for_test`.
+    #[doc(hidden)]
+    pub fn dangling() -> Self {
+        Self(usize::MAX)
+    }
+}
+
+/// This runtime's tracked `wlr_cursor`: a borrowed wlroots pointer, never
+/// owned — created by [`Runtime::create_seat`], freed with the display, with
+/// `backend.rs`'s `on_seat_destroy` evicting this entry first.
+///
+/// Keyed in the map by the cursor's own address (which [`CursorId`] wraps
+/// directly), the same creation-names-the-object discipline
+/// [`KeyboardGroupEntry`] follows.
+#[derive(Clone, Copy)]
+pub(crate) struct CursorEntry {
+    pub(crate) raw: NonNull<sys::wlr_cursor>,
+}
+
+/// What image the cursor is showing.
+///
+/// The buffer/surface variants arrive with the consumer wiring that sets
+/// them (a follow-up task); until then only `Hidden` and `Xcursor` are
+/// produced — `Hidden` before [`Runtime::create_seat`] and before the first
+/// image is applied, `Xcursor` once `ensure_cursor_image` has applied the
+/// theme image. The variants exist now so the snapshot's data model already
+/// covers the whole attachment surface the spec names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorImage {
+    /// No image: the cursor is hidden.
+    Hidden,
+    /// An xcursor theme image (the default `left_ptr` or a shape named
+    /// through [`Runtime::set_cursor_shape`]).
+    Xcursor,
+    /// A buffer set through `wlr_cursor_set_buffer`.
+    Buffer,
+    /// A client surface set through `wlr_cursor_set_surface`.
+    Surface,
+}
+
+/// The cursor's aggregate state: mapping, attachment and position, copied
+/// out of the live cursor and this crate's own tracking.
+///
+/// `wlr_cursor_state` itself is opaque in wlroots 0.20 (a forward-declared
+/// struct whose fields are `WLR_PRIVATE`), so this reads the cursor's public
+/// fields (`x`, `y`) plus what this crate's own map/image wrappers recorded
+/// — the same owned-fields, null-guarded snapshot discipline
+/// [`KeyboardState`] follows. Constructed only by the crate from a live
+/// cursor (`pub(crate)` constructor, called by [`Runtime::cursor_state`] and
+/// [`Runtime::try_cursor`]); fields `pub` for read, all owned/`Copy` so no
+/// raw pointer escapes.
+///
+/// `mapped_output` is the id named at map time; like every id here it may
+/// not resolve after the run that mapped it ended (the output table is
+/// per-run, while the mapping itself persists in wlroots). It is cleared
+/// when the mapped output is destroyed, so it never names a dead output.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CursorState {
+    /// The cursor's position in layout coordinates, live-read from the
+    /// cursor (`x`, `y`) — the same value [`Runtime::pointer_position`]
+    /// reports.
+    pub position: (f64, f64),
+    /// The output the cursor is mapped to, or `None` for the whole layout.
+    pub mapped_output: Option<OutputId>,
+    /// The layout region the cursor is mapped to, or `None` for
+    /// unconstrained.
+    pub mapped_region: Option<Box2D>,
+    /// What image the cursor is showing; see [`CursorImage`].
+    pub image: CursorImage,
+    /// The attachment hotspot in logical pixels: meaningful for the
+    /// buffer/surface attachments, `(0, 0)` for `Hidden`/`Xcursor` (whose
+    /// hotspot lives inside the theme image).
+    pub hotspot: (i32, i32),
+}
+
+impl CursorState {
+    /// Copy the live cursor out. `cursor` must point at a live `wlr_cursor`
+    /// for the read — the callers ([`Runtime::cursor_state`],
+    /// [`Runtime::try_cursor`]) resolve it from the tracked table, whose
+    /// entry is evicted before wlroots frees the cursor. The mapping and
+    /// image are this crate's own recorded tracking, passed in by the
+    /// caller; the position is the only field read through the pointer.
+    pub(crate) fn from_raw(
+        cursor: &sys::wlr_cursor,
+        mapped_output: Option<OutputId>,
+        mapped_region: Option<Box2D>,
+        image: CursorImage,
+        hotspot: (i32, i32),
+    ) -> Self {
+        Self {
+            position: (cursor.x, cursor.y),
+            mapped_output,
+            mapped_region,
+            image,
+            hotspot,
+        }
+    }
+}
+
+/// A stable handle for an xcursor theme this runtime loaded.
+///
+/// Opaque to consumers, like [`CursorId`]: the wrapped value is the theme's
+/// own address — the identity `wlr_xcursor_theme_load` returned, so creation
+/// names the object directly (the [`VirtualKeyboardId`] discipline) and
+/// lookup is a membership check. It names a theme held in this runtime's
+/// xcursor management (loaded by [`Runtime::load_xcursor_theme`], released
+/// by [`Runtime::destroy_xcursor_theme`]) — not the `wlr_xcursor_manager`
+/// [`Runtime::create_seat`] owns, which is singleton state and needs no id.
+///
+/// Eviction is explicit-destroy-only: a `wlr_xcursor_theme` exposes no
+/// public per-object destroy signal to listen on, so unlike the
+/// listener-keyed tables there is no destroy listener that could evict it —
+/// and a stale id misses cleanly for exactly that reason (the same shape as
+/// [`KeyboardGroupId`]).
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`CursorId`]: an opaque id's
+/// ordering would promise creation-order semantics nobody asked for.
+///
+/// `Debug` is redacted: the wrapped value is a heap address — printing it
+/// would hand out an ASLR oracle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct XcursorManagerId(pub(crate) usize);
+
+impl std::fmt::Debug for XcursorManagerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("XcursorManagerId(..)")
+    }
+}
+
+impl XcursorManagerId {
+    /// An id that names no theme, for negative tests: `usize::MAX` can
+    /// never be a theme address handed out here. Mirrors
+    /// [`CursorId::dangling`].
+    #[doc(hidden)]
+    pub fn dangling() -> Self {
+        Self(usize::MAX)
+    }
+}
+
+/// One theme loaded through [`Runtime::load_xcursor_theme`].
+///
+/// `raw` is owned by this runtime — `wlr_xcursor_theme_load` allocates, and
+/// [`Runtime::destroy_xcursor_theme`] frees with `wlr_xcursor_theme_destroy`
+/// — which is the opposite of every other entry in this file (borrowed
+/// wlroots pointers evicted by destroy listeners). Owned because no signal
+/// announces a theme's death: nothing else could release it.
+pub(crate) struct XcursorThemeEntry {
+    pub(crate) raw: NonNull<sys::wlr_xcursor_theme>,
+}
+
+/// A stable handle for one tracked `wlr_pointer_constraint_v1`.
+///
+/// Opaque to consumers, like [`CursorId`]: the wrapped value is the
+/// constraint's own address — the identity `backend.rs`'s
+/// `on_new_pointer_constraint` recovers from the firing listener's matched
+/// entry (FIX-3), so creation names the object and no signal `data` is
+/// trusted. Notification-only: the handler learns *which* constraint
+/// committed through
+/// [`SeatHandler::pointer_constraint_committed`](crate::SeatHandler::pointer_constraint_committed),
+/// and a deferred delivery may name a constraint destroyed in between — the
+/// id then only tells the handler which one it was, exactly as
+/// [`InputPopupSurfaceId`] behaves after its entry is evicted. There is no
+/// resolver: the constraint table lives on the per-run `Session`, not on
+/// this runtime, so nothing outlives the run to resolve against.
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`CursorId`]: an opaque id's
+/// ordering would promise creation-order semantics nobody asked for.
+///
+/// `Debug` is redacted: the wrapped value is a heap address — printing it
+/// would hand out an ASLR oracle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConstraintId(pub(crate) usize);
+
+impl std::fmt::Debug for ConstraintId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ConstraintId(..)")
+    }
+}
+
+impl ConstraintId {
+    /// An id that names no constraint, for negative tests: `usize::MAX - n`
+    /// can never be a constraint address handed out here (heap addresses
+    /// never sit at the top of the address space). Mirrors
+    /// [`CursorId::dangling`].
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
+/// A stable handle for a pointer gesture in flight — a swipe, pinch or hold
+/// a hardware pointer announced.
+///
+/// Opaque to consumers, like [`ConstraintId`]: the wrapped value is the
+/// announcing `wlr_pointer`'s own address — the identity every pointer-gesture
+/// signal (`swipe_begin`, `pinch_update`, `hold_end`, …) carries in its event,
+/// so a handler recovers the id from the event itself rather than from a
+/// signal `data` that may be NULL (FIX-3, the same discipline the tablet-tool
+/// ids follow). Notification-only: the handler learns that a gesture began or
+/// ended through [`SeatHandler::gesture_began`](crate::SeatHandler::gesture_began) /
+/// [`SeatHandler::gesture_ended`](crate::SeatHandler::gesture_ended), while the
+/// full-fidelity forward to gesture clients (kind, deltas, scale, rotation)
+/// goes through the `GesturePhase` token's `send_*`, driven separately.
+///
+/// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
+/// reasons [`ConstraintId`]'s doc gives.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GestureId(pub(crate) usize);
+
+impl std::fmt::Debug for GestureId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GestureId(..)")
+    }
+}
+
+impl GestureId {
+    /// An id that names no gesture, for negative tests: `usize::MAX - n` can
+    /// never be a pointer address handed out here. Mirrors
+    /// [`ConstraintId::dangling_nth_for_test`].
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
 /// One tracked hardware tablet tool: the tablet device that announced it,
 /// and whether its client-facing `wlr_tablet_v2_tablet_tool` was created.
 ///
@@ -1203,6 +1462,831 @@ impl EnteredTextInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CommitSerial(pub u32);
 
+/// One pointer input event's outgoing seat sends: every
+/// `wlr_seat_pointer_notify_*` for a single motion, button or axis event,
+/// closed by the `notify_frame` that groups them on the wire.
+///
+/// `PointerFrame` is the session-typed proof that the seat is still live:
+/// every send resolves this runtime's seat slot and no-ops when it is gone
+/// (stale — the seat was destroyed), preserving each call site's guard. It
+/// carries no borrow: each method copies the seat pointer out, drops the
+/// borrow, then emits — the same discipline [`ImeActivation`] follows — so
+/// resolving per send (rather than once at [`of`](PointerFrame::of)) stays
+/// sound even across the handler delivery between capture and use.
+///
+/// Produced only by the motion/button/axis paths (`backend.rs`'s
+/// `on_pointer_motion`, `on_pointer_motion_absolute`, `on_pointer_button`,
+/// `on_pointer_axis`); only its methods emit `send_motion`/`send_button`
+/// (and the enter/axis notifies that share the frame), and
+/// [`finish`](PointerFrame::finish) is the only path to `send_frame` — the
+/// relay handlers never touch the raw notifies. Dropping a frame without
+/// finishing sends nothing and still compiles (the locked-pointer path does
+/// exactly that: relative motion went out, absolute motion is frozen, so
+/// there is no frame to close) — the type guides, it does not enforce.
+///
+/// `Clone`, not `Copy`: the handle holds a `Runtime` (an `Rc`), which cannot
+/// be `Copy`, and a clone is the same cheap handle.
+#[derive(Clone)]
+pub(crate) struct PointerFrame {
+    runtime: Runtime,
+}
+
+impl std::fmt::Debug for PointerFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redacted like `ImeActivation`: the runtime holds heap addresses.
+        f.write_str("PointerFrame(..)")
+    }
+}
+
+impl PointerFrame {
+    /// The live frame for one input event. Infallible — a missing seat is
+    /// not an error here but a per-send no-op below, so callers keep their
+    /// shape (the handler event is still delivered; only the client forward
+    /// is skipped).
+    #[must_use]
+    pub(crate) fn of(runtime: &Runtime) -> Self {
+        Self {
+            runtime: runtime.clone(),
+        }
+    }
+
+    /// The seat this frame targets, for the helpers that need more than a
+    /// notify (grab bookkeeping reads the seat's `pointer_state`; constraint
+    /// activation compares against it). Resolved live per call, like every
+    /// send below; `None` means "no seat": those helpers return early,
+    /// exactly as their `if let Some(seat)` callers did before the token
+    /// existed.
+    pub(crate) fn seat(&self) -> Option<NonNull<sys::wlr_seat>> {
+        self.runtime.seat_ptr()
+    }
+
+    /// Forward a motion to the focused client.
+    pub(crate) fn send_motion(&self, time_msec: u32, sx: f64, sy: f64) {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return;
+        };
+        // SAFETY: `seat` is this runtime's own live seat (evicted by the
+        // seat-destroy handler before wlroots frees it); the table borrow
+        // ended inside `seat_ptr`, so no borrow crosses this emit.
+        unsafe { sys::wlr_seat_pointer_notify_motion(seat.as_ptr(), time_msec, sx, sy) };
+    }
+
+    /// Forward a button press or release to the focused client. The serial
+    /// the notify returns is of no use here: nothing in this crate cites it,
+    /// and a client that needs it reads it off its own `wl_pointer.button`.
+    pub(crate) fn send_button(
+        &self,
+        time_msec: u32,
+        button: u32,
+        state: sys::wl_pointer_button_state,
+    ) {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return;
+        };
+        // SAFETY: as for `send_motion`.
+        unsafe {
+            let _ = sys::wlr_seat_pointer_notify_button(seat.as_ptr(), time_msec, button, state);
+        }
+    }
+
+    /// Forward a scroll to the focused client.
+    ///
+    /// Seven parameters counting `&self`, one for each field a `wl_pointer`
+    /// scroll carries — the same shape `SeatHandler::pointer_axis` documents,
+    /// and for the same reason: no subset groups meaningfully.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_axis(
+        &self,
+        time_msec: u32,
+        axis: crate::seat::PointerAxis,
+        delta: f64,
+        delta_discrete: i32,
+        source: crate::seat::AxisSource,
+        relative_direction: crate::seat::AxisRelativeDirection,
+    ) {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return;
+        };
+        // SAFETY: as for `send_motion`; the scalars are plain values.
+        unsafe {
+            sys::wlr_seat_pointer_notify_axis(
+                seat.as_ptr(),
+                time_msec,
+                axis.to_raw(),
+                delta,
+                delta_discrete,
+                source.to_raw(),
+                relative_direction.to_raw(),
+            )
+        };
+    }
+
+    /// Move pointer focus to `surface` at surface-local `(sx, sy)`.
+    ///
+    /// # Safety
+    ///
+    /// `surface` must be a live, non-null `wlr_surface` from this runtime's
+    /// scene — the hit test's contract, which the callers uphold.
+    pub(crate) unsafe fn send_enter(&self, surface: *mut sys::wlr_surface, sx: f64, sy: f64) {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return;
+        };
+        // SAFETY: `seat` as for `send_motion`; `surface` is live per the
+        // caller's contract.
+        unsafe { sys::wlr_seat_pointer_notify_enter(seat.as_ptr(), surface, sx, sy) };
+    }
+
+    /// Clear pointer focus: the cursor is over nothing.
+    pub(crate) fn clear_focus(&self) {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return;
+        };
+        // SAFETY: as for `send_motion`.
+        unsafe { sys::wlr_seat_pointer_notify_clear_focus(seat.as_ptr()) };
+    }
+
+    /// Close the frame (`notify_frame`) and consume it: the conventional path
+    /// to `send_frame` — every motion/button/axis path's frame flows through
+    /// here, and nowhere else sends one.
+    pub(crate) fn finish(self) {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return;
+        };
+        // SAFETY: as for `send_motion`.
+        unsafe { sys::wlr_seat_pointer_notify_frame(seat.as_ptr()) };
+    }
+}
+
+/// A live gesture-forwarding session toward the bound gesture clients.
+///
+/// `GesturePhase` is the session-typed proof that the pointer-gestures
+/// manager *and* the seat it forwards on are both still live: every send
+/// resolves both and no-ops when either is gone (stale — the manager was
+/// never created, or the seat was destroyed), preserving each call site's
+/// guard. Same no-borrow-across-FFI discipline as [`PointerFrame`]: each
+/// method copies both pointers out, drops the borrows, then emits.
+///
+/// Produced on swipe/pinch/hold `begin` ([`of`](GesturePhase::of) plus a
+/// `send_*_begin`); only its methods emit the `update` sends; consumed on
+/// `end` — `send_*_end(self, …, cancelled)` takes the session, so a cancelled
+/// gesture consumes exactly like a completed one. Pairing is by convention at
+/// the call sites (`backend.rs`'s gesture handlers): dropping a session
+/// without ending sends nothing and still compiles — the type guides, it
+/// does not enforce. The relay handlers never touch the raw gesture sends.
+///
+/// `Clone`, not `Copy`: the handle holds a `Runtime` (an `Rc`), which cannot
+/// be `Copy`, and a clone is the same cheap handle.
+#[derive(Clone)]
+pub(crate) struct GesturePhase {
+    runtime: Runtime,
+}
+
+impl std::fmt::Debug for GesturePhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redacted like `ImeActivation`: the runtime holds heap addresses.
+        f.write_str("GesturePhase(..)")
+    }
+}
+
+impl GesturePhase {
+    /// The live forwarding session, or `None` when there is no gestures
+    /// manager or no seat to forward on (stale — every caller no-ops, while
+    /// the handler event is still delivered so shell-side gesture mapping
+    /// works without gesture clients).
+    #[must_use]
+    pub(crate) fn of(runtime: &Runtime) -> Option<Self> {
+        if runtime.pointer_gestures_manager_ptr().is_none() || runtime.seat_ptr().is_none() {
+            return None;
+        }
+        Some(Self {
+            runtime: runtime.clone(),
+        })
+    }
+
+    /// Both ends of the forward, copied out with no borrow held: the gestures
+    /// manager (display-owned, live as long as this runtime) and this
+    /// runtime's seat. `None` when either went away since `of` (stale — the
+    /// send no-ops).
+    fn ends(
+        &self,
+    ) -> Option<(
+        NonNull<sys::wlr_pointer_gestures_v1>,
+        NonNull<sys::wlr_seat>,
+    )> {
+        Some((
+            self.runtime.pointer_gestures_manager_ptr()?,
+            self.runtime.seat_ptr()?,
+        ))
+    }
+
+    /// Forward a swipe begin for `fingers` fingers.
+    pub(crate) fn send_swipe_begin(&self, time_msec: u32, fingers: u32) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: both ends are live per `ends()`; the table borrows ended
+        // inside that call, so no borrow crosses this emit.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_swipe_begin(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                fingers,
+            )
+        };
+    }
+
+    /// Forward a swipe update: the gesture centre's displacement since the
+    /// previous update.
+    pub(crate) fn send_swipe_update(&self, time_msec: u32, dx: f64, dy: f64) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: as for `send_swipe_begin`.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_swipe_update(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                dx,
+                dy,
+            )
+        };
+    }
+
+    /// Forward a swipe end and consume the session. `cancelled` is whether
+    /// the hardware cancelled the gesture rather than completing it — a
+    /// cancel consumes exactly like a completion.
+    pub(crate) fn send_swipe_end(self, time_msec: u32, cancelled: bool) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: as for `send_swipe_begin`.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_swipe_end(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                cancelled,
+            )
+        };
+    }
+
+    /// Forward a pinch begin for `fingers` fingers.
+    pub(crate) fn send_pinch_begin(&self, time_msec: u32, fingers: u32) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: as for `send_swipe_begin`.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_pinch_begin(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                fingers,
+            )
+        };
+    }
+
+    /// Forward a pinch update: the gesture centre's displacement since the
+    /// previous update, the absolute scale since begin, and the relative
+    /// rotation in degrees clockwise since the previous update.
+    ///
+    /// Six parameters counting `&self`, one for each field the wire update
+    /// carries — the same shape `PointerFrame::send_axis` documents, and for
+    /// the same reason: no subset groups meaningfully.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_pinch_update(
+        &self,
+        time_msec: u32,
+        dx: f64,
+        dy: f64,
+        scale: f64,
+        rotation: f64,
+    ) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: as for `send_swipe_begin`.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_pinch_update(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                dx,
+                dy,
+                scale,
+                rotation,
+            )
+        };
+    }
+
+    /// Forward a pinch end and consume the session, on the same
+    /// complete-or-cancel terms as
+    /// [`send_swipe_end`](GesturePhase::send_swipe_end).
+    pub(crate) fn send_pinch_end(self, time_msec: u32, cancelled: bool) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: as for `send_swipe_begin`.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_pinch_end(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                cancelled,
+            )
+        };
+    }
+
+    /// Forward a hold begin for `fingers` fingers (a hold has no update: the
+    /// fingers went down and have not moved).
+    pub(crate) fn send_hold_begin(&self, time_msec: u32, fingers: u32) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: as for `send_swipe_begin`.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_hold_begin(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                fingers,
+            )
+        };
+    }
+
+    /// Forward a hold end and consume the session, on the same
+    /// complete-or-cancel terms as
+    /// [`send_swipe_end`](GesturePhase::send_swipe_end).
+    pub(crate) fn send_hold_end(self, time_msec: u32, cancelled: bool) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: as for `send_swipe_begin`.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_hold_end(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                cancelled,
+            )
+        };
+    }
+}
+
+/// A stable handle for one touch point in flight — a finger down on a touch
+/// device.
+///
+/// Unlike every other id in this file this wraps the wire identity, not an
+/// object address: a `wlr_touch_point` is allocated by wlroots per down and
+/// freed per up, so its address aliases across sequential touches, while the
+/// `touch_id` the down/motion/up events carry is the protocol's own slot
+/// identity — the same value a client uses to match a down to its up. The
+/// handler learns *which* point moved through
+/// [`SeatHandler::touch_down`](crate::SeatHandler::touch_down) /
+/// [`SeatHandler::touch_up`](crate::SeatHandler::touch_up); there is no
+/// resolver, on the same notification-only terms as [`GestureId`].
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`ConstraintId`]: an opaque
+/// id's ordering would promise a creation-order semantics nobody asked for.
+///
+/// `Debug` is *not* redacted, unlike every address-keyed id: the wrapped
+/// value is a small wire integer, not a heap address, so printing it leaks
+/// no layout.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct TouchId(pub(crate) i32);
+
+impl TouchId {
+    /// An id that names no live point, for negative tests: `i32::MAX - n`
+    /// can never be a driver-issued touch id handed out here (drivers number
+    /// slots from zero). Mirrors
+    /// [`ConstraintId::dangling_nth_for_test`].
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(i32::MAX - n as i32)
+    }
+}
+
+/// A stable handle for one tracked switch device — a laptop lid, a
+/// tablet-mode hinge sensor, a keypad slide.
+///
+/// Opaque to consumers, like [`ConstraintId`]: the wrapped value is the
+/// `wlr_switch`'s own address — the identity `backend.rs`'s switch-toggle
+/// listener slot carries (FIX-3: a `wlr_switch_toggle_event` names no
+/// device at all, only time, type and state, so identity rides the listener
+/// set at link time, the same discipline the tablet-pad listeners keep).
+/// Notification-only: the handler learns the new position through
+/// [`SeatHandler::switch_toggled`](crate::SeatHandler::switch_toggled), and
+/// the aggregate through [`Runtime::switch_state`].
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`ConstraintId`]: an opaque
+/// id's ordering would promise creation-order semantics nobody asked for.
+///
+/// `Debug` is redacted: the wrapped value is a heap address — printing it
+/// would hand out an ASLR oracle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SwitchId(pub(crate) usize);
+
+impl std::fmt::Debug for SwitchId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SwitchId(..)")
+    }
+}
+
+impl SwitchId {
+    /// An id that names no switch, for negative tests: `usize::MAX - n` can
+    /// never be a switch address handed out here (heap addresses never sit
+    /// at the top of the address space). Mirrors
+    /// [`ConstraintId::dangling_nth_for_test`].
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
+/// One touch point down on the seat: the wire slot and the last position
+/// wlroots reported for it.
+///
+/// Constructed only by the crate from the live seat (`pub(crate)`
+/// constructor, called by [`Runtime::touch_state`]); fields `pub` for read,
+/// all owned/`Copy` so no raw pointer escapes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TouchPoint {
+    /// The wire touch id: stable for this point from its down to its up,
+    /// and what [`TouchId`] wraps in the down/up events for it — the value
+    /// a compositor matches pairs on.
+    pub id: i32,
+    /// The last-notified position, surface-local to the point's focus
+    /// surface — the `(sx, sy)` the matching down or motion carried, copied
+    /// out of the live point. The focus surface itself is deliberately not
+    /// named (no raw pointers escape), so without the compositor's own
+    /// focus model this is a delta source, not a layout position.
+    pub position: (f64, f64),
+}
+
+/// The seat's aggregate touch state: which points are down and whether a
+/// grab owns them.
+///
+/// Mirrors the seat's `touch_state` as read at snapshot time (the same
+/// owned-fields, null-guarded snapshot discipline [`KeyboardState`]
+/// follows). Constructed only by the crate from the live seat (`pub(crate)`
+/// constructor, called by [`Runtime::touch_state`]); fields `pub` for read.
+/// Empty `points` with `has_grab == false` is the resting state — fingers
+/// up, no drag in flight — which is what makes the consumer's
+/// `touch_active` a one-line emptiness check.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TouchState {
+    /// Every touch point currently down on the seat, in wlroots' own list
+    /// order.
+    pub points: Vec<TouchPoint>,
+    /// Whether the seat holds a touch grab other than the default one
+    /// (`wlr_seat_touch_has_grab`): a drag, a popup grab, an IME grab.
+    pub has_grab: bool,
+}
+
+impl TouchState {
+    /// Copy the live seat's touch state out. `seat` must be this runtime's
+    /// own live seat — the caller ([`Runtime::touch_state`]) resolves it
+    /// from the seat slot, which is cleared before wlroots frees the seat.
+    pub(crate) fn from_seat(seat: NonNull<sys::wlr_seat>) -> Self {
+        // SAFETY: `seat` is this runtime's own live seat per the caller; the
+        // table borrow ended inside `seat_ptr`, so no borrow crosses this
+        // emit-free read.
+        let has_grab = unsafe { sys::wlr_seat_touch_has_grab(seat.as_ptr()) };
+        let mut points = Vec::new();
+        // SAFETY: `seat` as above. `touch_points` is the seat's own
+        // initialised list head, and every node is a live `wlr_touch_point`:
+        // wlroots unlinks a point from this list before freeing it (on up,
+        // on surface destroy, on client disconnect), and nothing emits — and
+        // so nothing mutates the list — while this synchronous read runs.
+        // Only inline scalars and the list links are read; the point's
+        // surface and client pointers are never dereferenced.
+        unsafe {
+            let head = &raw const (*seat.as_ptr()).touch_state.touch_points;
+            let mut link = (*head).next;
+            while link != head.cast_mut() {
+                let point = (link as *const u8)
+                    .sub(std::mem::offset_of!(sys::wlr_touch_point, link))
+                    as *const sys::wlr_touch_point;
+                points.push(TouchPoint {
+                    id: (*point).touch_id,
+                    position: ((*point).sx, (*point).sy),
+                });
+                link = (*link).next;
+            }
+        }
+        Self { points, has_grab }
+    }
+}
+
+/// The last switch position the runtime observed: which switch toggled, to
+/// what, and the lid-close reading derived from the pair.
+///
+/// A `wlr_switch` retains no state — the toggle event carries it — so the
+/// runtime records each toggle and this reports the latest one (the same
+/// "crate's own tracking plus live reads" shape [`CursorState`] keeps for
+/// its mapping). Constructed only by the crate (`pub(crate)` constructor);
+/// fields `pub` for read, all `Copy` so no raw pointer escapes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SwitchState {
+    /// Which kind of switch last toggled.
+    pub switch_type: crate::seat::SwitchType,
+    /// The position it toggled to: `true` is on (lid closed, tablet mode
+    /// engaged), `false` is off.
+    pub on: bool,
+    /// Whether the lid is closed: `switch_type == Lid && on`. The
+    /// compositor's session/lock signal reads this, not the raw pair.
+    pub lid_closed: bool,
+}
+
+impl SwitchState {
+    /// Record a toggle. `on` is whether the wire state is
+    /// `WLR_SWITCH_STATE_ON` — the caller
+    /// (`backend.rs`'s switch-toggle handler) decodes that comparison at
+    /// emission time, so a deferred delivery still reports the transition
+    /// that actually happened.
+    pub(crate) fn from_toggle(switch_type: crate::seat::SwitchType, on: bool) -> Self {
+        Self {
+            switch_type,
+            on,
+            lid_closed: matches!(switch_type, crate::seat::SwitchType::Lid) && on,
+        }
+    }
+}
+
+/// How long a pointer constraint lives.
+///
+/// Mirrors `zwp_pointer_constraints_v1_lifetime`: a oneshot constraint dies
+/// with the gesture that requested it, a persistent one stands until the
+/// client destroys it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConstraintLifetime {
+    /// The constraint stands until destroyed.
+    Persistent,
+    /// The constraint dies with its gesture.
+    Oneshot,
+}
+
+impl ConstraintLifetime {
+    /// Decode the wire lifetime. Total for the same reason as
+    /// [`crate::seat::PointerAxis::from_raw`]; an unknown value — which no
+    /// wlroots 0.20 build can produce — falls back to
+    /// [`ConstraintLifetime::Persistent`], the fail-closed choice: a
+    /// constraint that stands is re-checked, one that silently lapses is
+    /// not.
+    pub(crate) fn from_raw(raw: sys::zwp_pointer_constraints_v1_lifetime) -> Self {
+        use sys::zwp_pointer_constraints_v1_lifetime as W;
+        match raw {
+            W::ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT => ConstraintLifetime::Oneshot,
+            // Includes `ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT` itself.
+            _ => ConstraintLifetime::Persistent,
+        }
+    }
+}
+
+/// What a pointer constraint does to the pointer.
+///
+/// Mirrors `wlr_pointer_constraint_v1_type`: a locked pointer is frozen
+/// (relative motion still flows — the FPS case), a confined one is clamped
+/// into its region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConstraintType {
+    /// The cursor is frozen; only relative motion flows.
+    Locked,
+    /// The cursor is clamped into [`PointerConstraintState::region`].
+    Confined,
+}
+
+impl ConstraintType {
+    /// Decode the wire type. Total for the same reason as
+    /// [`ConstraintLifetime::from_raw`]; an unknown value — which no
+    /// wlroots 0.20 build can produce — falls back to
+    /// [`ConstraintType::Locked`], the fail-closed choice, matching the
+    /// enforcement in `backend.rs`'s motion paths (which freeze on
+    /// `LOCKED` and clamp on anything else).
+    pub(crate) fn from_raw(raw: sys::wlr_pointer_constraint_v1_type) -> Self {
+        use sys::wlr_pointer_constraint_v1_type as W;
+        match raw {
+            W::WLR_POINTER_CONSTRAINT_V1_CONFINED => ConstraintType::Confined,
+            // Includes `WLR_POINTER_CONSTRAINT_V1_LOCKED` itself.
+            _ => ConstraintType::Locked,
+        }
+    }
+}
+
+/// A pointer constraint's settled state: what it does, how long it lives,
+/// and where it holds the pointer.
+///
+/// Mirrors the constraint's `current` generation — the settled state, on the
+/// same committed/current terms as [`CommittedImeState`] (the region commit
+/// lands in `pending`; it becomes this on the surface commit). Constructed
+/// only by the crate from a live constraint (`pub(crate)` constructor,
+/// called by [`Runtime::constraint_state_for_surface`]); fields `pub` for
+/// read, all owned/`Copy` so no raw pointer escapes.
+///
+/// The surface itself is not carried: the reader names it
+/// ([`ConstraintSurface`]), so carrying it back would be redundant — the
+/// same "key names it, snapshot carries the rest" split every by-id
+/// accessor in this crate keeps.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointerConstraintState {
+    /// How long the constraint lives.
+    pub lifetime: ConstraintLifetime,
+    /// What the constraint does to the pointer.
+    pub constraint_type: ConstraintType,
+    /// The committed region's extents, in layout coordinates. Empty when no
+    /// region was set — a locked constraint needs none.
+    pub region: Box2D,
+    /// The committed cursor hint: where the client suggests warping on
+    /// (de)activation. `None` when the client offered none.
+    pub cursor_hint: Option<(f64, f64)>,
+}
+
+impl PointerConstraintState {
+    /// Copy the live constraint out. `constraint` must point at a live
+    /// `wlr_pointer_constraint_v1` for the read — the caller
+    /// ([`Runtime::constraint_state_for_surface`]) resolves it through
+    /// wlroots' own surface lookup, which answers null for a destroyed
+    /// constraint, and the per-run table's destroy handler evicts entries
+    /// before wlroots frees them.
+    pub(crate) fn from_constraint(constraint: NonNull<sys::wlr_pointer_constraint_v1>) -> Self {
+        // SAFETY: `constraint` is live per the caller; only inline fields
+        // are read (`type_`, `lifetime`, the committed region's extents box
+        // and the committed cursor hint), and everything is copied out —
+        // the region itself is never retained.
+        let raw = unsafe { &*constraint.as_ptr() };
+        let extents = raw.current.region.extents;
+        let hint = raw.current.cursor_hint;
+        Self {
+            lifetime: ConstraintLifetime::from_raw(raw.lifetime),
+            constraint_type: ConstraintType::from_raw(raw.type_),
+            region: Box2D::new(
+                extents.x1,
+                extents.y1,
+                extents.x2 - extents.x1,
+                extents.y2 - extents.y1,
+            ),
+            cursor_hint: hint.enabled.then_some((hint.x, hint.y)),
+        }
+    }
+}
+
+/// Which surface a pointer-constraint lookup names.
+///
+/// A constraint binds exactly one surface, and surfaces of every role can
+/// carry one — a game confining to its toplevel, a panel locking to its
+/// layer surface, a menu to its popup — so the lookup takes the role id the
+/// compositor already holds. The same "which surface" question
+/// [`PopupParent`](crate::PopupParent) answers for popups, asked here for
+/// constraints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConstraintSurface {
+    /// An `xdg_toplevel`.
+    Toplevel(ToplevelId),
+    /// A `zwlr_layer_surface_v1`.
+    Layer(LayerSurfaceId),
+    /// An `xdg_popup`.
+    Popup(PopupId),
+}
+
+/// One touch input event's outgoing seat sends: every
+/// `wlr_seat_touch_notify_*` for a single down, motion or up event, closed
+/// by the `notify_frame` that groups them on the wire.
+///
+/// `TouchFrame` is the session-typed proof that the seat is still live, on
+/// the same terms as [`PointerFrame`]: every send resolves this runtime's
+/// seat slot and no-ops when it is gone (stale — the seat was destroyed),
+/// preserving each call site's guard. It carries no borrow: each method
+/// copies the seat pointer out, drops the borrow, then emits. Produced by
+/// the touch handlers (`backend.rs`'s `on_touch_down`, `on_touch_motion`,
+/// `on_touch_up`, `on_touch_cancel`, `on_touch_frame`) and by the
+/// `inject_touch_*` test helpers; only its methods emit the touch notifies
+/// — the relay handlers never touch the raw notifies. Dropping a frame
+/// without finishing sends nothing and still compiles — the type guides, it
+/// does not enforce.
+///
+/// The down/up notifies hand back the serial wlroots minted (a valid touch
+/// grab serial — the drag path cites it), which is why these return `u32`
+/// where [`PointerFrame::send_button`] discards its own: nothing in this
+/// crate cites a pointer-button serial, and a client that needs it reads it
+/// off its own wire events.
+///
+/// `Clone`, not `Copy`: the handle holds a `Runtime` (an `Rc`), which cannot
+/// be `Copy`, and a clone is the same cheap handle.
+#[derive(Clone)]
+pub(crate) struct TouchFrame {
+    runtime: Runtime,
+}
+
+impl std::fmt::Debug for TouchFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redacted like `PointerFrame`: the runtime holds heap addresses.
+        f.write_str("TouchFrame(..)")
+    }
+}
+
+impl TouchFrame {
+    /// The live frame for one input event. Infallible — a missing seat is
+    /// not an error here but a per-send no-op below, so callers keep their
+    /// shape (the handler event is still delivered; only the client forward
+    /// is skipped).
+    #[must_use]
+    pub(crate) fn of(runtime: &Runtime) -> Self {
+        Self {
+            runtime: runtime.clone(),
+        }
+    }
+
+    /// Forward a touch-down to the client owning `surface`, registering the
+    /// point `touch_id` at surface-local `(sx, sy)`. Hands back the down
+    /// serial, or `0` when stale (no seat — nothing went out, so there is no
+    /// serial for it).
+    ///
+    /// # Safety
+    ///
+    /// `surface` must be a live, non-null `wlr_surface` from this runtime's
+    /// scene — the hit test's contract, which the callers uphold.
+    pub(crate) unsafe fn send_down(
+        &self,
+        surface: *mut sys::wlr_surface,
+        time_msec: u32,
+        touch_id: i32,
+        sx: f64,
+        sy: f64,
+    ) -> u32 {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return 0;
+        };
+        // SAFETY: `seat` is this runtime's own live seat (evicted by the
+        // seat-destroy handler before wlroots frees it); `surface` is live
+        // per the caller's contract. The table borrow ended inside
+        // `seat_ptr`, so no borrow crosses this emit.
+        unsafe {
+            sys::wlr_seat_touch_notify_down(seat.as_ptr(), surface, time_msec, touch_id, sx, sy)
+        }
+    }
+
+    /// Forward a touch-motion for the point `touch_id` at surface-local
+    /// `(sx, sy)`.
+    pub(crate) fn send_motion(&self, time_msec: u32, touch_id: i32, sx: f64, sy: f64) {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return;
+        };
+        // SAFETY: `seat` as for `send_down`; the scalars are plain values.
+        unsafe { sys::wlr_seat_touch_notify_motion(seat.as_ptr(), time_msec, touch_id, sx, sy) };
+    }
+
+    /// Forward a touch-up for the point `touch_id`, removing it. Hands back
+    /// the up serial, or `0` when stale — on the same terms as
+    /// [`send_down`](TouchFrame::send_down).
+    pub(crate) fn send_up(&self, time_msec: u32, touch_id: i32) -> u32 {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return 0;
+        };
+        // SAFETY: as for `send_motion`.
+        unsafe { sys::wlr_seat_touch_notify_up(seat.as_ptr(), time_msec, touch_id) }
+    }
+
+    /// Close the frame (`notify_frame`) and consume it: the conventional path
+    /// to `send_frame` — the touch-frame handler's frame flows through here,
+    /// and nowhere else sends one.
+    pub(crate) fn send_frame(self) {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return;
+        };
+        // SAFETY: as for `send_motion`.
+        unsafe { sys::wlr_seat_touch_notify_frame(seat.as_ptr()) };
+    }
+
+    /// Cancel the point `touch_id`'s gesture and consume the frame: the
+    /// conventional path to `send_cancel`. The cancel notify addresses the
+    /// point's *client*, so the point is resolved first — a stale id (the
+    /// point already up, or never down) resolves to nothing and this no-ops,
+    /// while the `TouchCancelled` event is still delivered.
+    pub(crate) fn send_cancel(self, touch_id: i32) {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return;
+        };
+        // SAFETY: `seat` as for `send_down`. The lookup only reads the seat;
+        // a null answer (unknown point) misses below. The table borrow ended
+        // inside `seat_ptr`, so no borrow crosses either call.
+        let point = unsafe { sys::wlr_seat_touch_get_point(seat.as_ptr(), touch_id) };
+        if point.is_null() {
+            return;
+        }
+        // SAFETY: `point` names a live touch point per the lookup's own
+        // contract (null was checked); `client` is only handed to the cancel
+        // below, never dereferenced here.
+        let client = unsafe { (*point).client };
+        if client.is_null() {
+            return;
+        }
+        // SAFETY: `seat` as above; `client` is the point's live client.
+        unsafe { sys::wlr_seat_touch_notify_cancel(seat.as_ptr(), client) };
+    }
+}
+
 pub(crate) struct RuntimeInner {
     pub(crate) sources: RefCell<Vec<FdSource>>,
 
@@ -1425,6 +2509,12 @@ pub(crate) struct RuntimeInner {
     /// rationale as the other manager globals.
     pub(crate) relative_pointer_manager:
         RefCell<Option<NonNull<sys::wlr_relative_pointer_manager_v1>>>,
+
+    /// The pointer-gestures (`zwp_pointer_gestures_v1`) manager, once created —
+    /// lets a client receive swipe/pinch/hold gesture events, which this crate
+    /// forwards from the hardware pointers through the [`GesturePhase`] token.
+    /// `Option`, same rationale as the other manager globals.
+    pub(crate) pointer_gestures_manager: RefCell<Option<NonNull<sys::wlr_pointer_gestures_v1>>>,
 
     /// The cursor-shape (`wp_cursor_shape_manager_v1`) manager, once created —
     /// lets a client name the cursor image it wants instead of drawing its
@@ -1741,6 +2831,46 @@ pub(crate) struct RuntimeInner {
     /// this crate's own tests.
     pub(crate) applied_cursor: std::cell::Cell<Option<Option<CursorShape>>>,
 
+    /// This runtime's `wlr_cursor`, recorded by [`Runtime::create_seat`]
+    /// keyed by the cursor's own address (which [`CursorId`] wraps
+    /// directly) and evicted by `backend.rs`'s `on_seat_destroy`. At most
+    /// one entry: exactly one cursor exists per runtime. Empty before the
+    /// seat exists, which is what makes [`Runtime::cursor_state`] and
+    /// [`Runtime::try_cursor`] miss with `None` there.
+    pub(crate) cursors: RefCell<HashMap<usize, CursorEntry>>,
+
+    /// The output [`Runtime::map_cursor_to_output`] last mapped the cursor
+    /// to, or `None` for the whole layout (the initial state, and what a
+    /// region map leaves alone — output and region mappings are recorded
+    /// independently, as wlroots keeps them). Cleared when the mapped
+    /// output is destroyed and with the cursor itself, so
+    /// [`CursorState::mapped_output`] never names a dead output.
+    pub(crate) cursor_mapped_output: RefCell<Option<OutputId>>,
+
+    /// The layout region [`Runtime::map_cursor_to_region`] last mapped the
+    /// cursor to, or `None` for unconstrained (the initial state).
+    pub(crate) cursor_mapped_region: RefCell<Option<Box2D>>,
+
+    /// What image the cursor is showing; see [`CursorImage`]. `Hidden`
+    /// until [`Runtime::ensure_cursor_image`] applies the theme image
+    /// through `apply_cursor` — the single funnel that also records here,
+    /// so the snapshot cannot drift from what was last handed to wlroots.
+    pub(crate) cursor_image: std::cell::Cell<CursorImage>,
+
+    /// The hotspot of the current buffer/surface attachment in logical
+    /// pixels; `(0, 0)` for `Hidden`/`Xcursor`. Recorded alongside
+    /// [`cursor_image`](RuntimeInner::cursor_image) when an attachment
+    /// carrying a hotspot is applied (the buffer/surface setters land with
+    /// the consumer wiring).
+    pub(crate) cursor_hotspot: std::cell::Cell<(i32, i32)>,
+
+    /// Every theme [`Runtime::load_xcursor_theme`] loaded, keyed by the
+    /// theme's own address (which [`XcursorManagerId`] wraps directly).
+    /// Owned by this runtime and released only by
+    /// [`Runtime::destroy_xcursor_theme`] — a theme exposes no destroy
+    /// signal, so this table has no listener; see [`XcursorThemeEntry`].
+    pub(crate) xcursor_themes: RefCell<HashMap<usize, XcursorThemeEntry>>,
+
     /// Every live keyboard the backend has announced, so capabilities can be
     /// recomputed as devices arrive and leave.
     ///
@@ -1756,6 +2886,26 @@ pub(crate) struct RuntimeInner {
     /// Every live pointer the backend has announced. Same shape and same
     /// pruning as `keyboards`, for [`Runtime::has_pointer`].
     pub(crate) pointers: RefCell<Vec<NonNull<sys::wlr_pointer>>>,
+
+    /// Every live touch device the backend has announced. Same shape and
+    /// same pruning as `pointers`, for [`Runtime::has_touch`] — which feeds
+    /// both the seat-capability recompute (`backend.rs`'s
+    /// `update_seat_capabilities`) and [`Runtime::touch_state`]'s gate.
+    pub(crate) touches: RefCell<Vec<NonNull<sys::wlr_touch>>>,
+
+    /// Every live switch device the backend has announced. Same shape and
+    /// same pruning as `touches`, for [`Runtime::has_switch`] — which gates
+    /// [`Runtime::switch_state`]. Switches carry no seat capability, so
+    /// unlike `touches` this feeds no capability recompute.
+    pub(crate) switches: RefCell<Vec<NonNull<sys::wlr_switch>>>,
+
+    /// The last switch toggle the backend observed, as `(type, on)`. A
+    /// `wlr_switch` retains no state — the toggle event carries it — so the
+    /// backend records each toggle here for [`Runtime::switch_state`] to
+    /// report. `None` until the first toggle; never cleared (a destroyed
+    /// switch drops the whole snapshot through [`Runtime::has_switch`],
+    /// not by clearing this).
+    pub(crate) last_switch: std::cell::Cell<Option<(crate::seat::SwitchType, bool)>>,
 
     /// Every live `wlr_keyboard_group` this runtime tracks, keyed by the
     /// group's own address — the identity `create_keyboard_group` minted it
@@ -2407,6 +3557,7 @@ impl Runtime {
                 screencopy_manager: RefCell::new(None),
                 pointer_constraints_manager: RefCell::new(None),
                 relative_pointer_manager: RefCell::new(None),
+                pointer_gestures_manager: RefCell::new(None),
                 cursor_shape_manager: RefCell::new(None),
                 xdg_activation_manager: RefCell::new(None),
                 gamma_control_manager: RefCell::new(None),
@@ -2454,8 +3605,17 @@ impl Runtime {
                 cursor_image_loaded: std::cell::Cell::new(false),
                 named_cursor: std::cell::Cell::new(None),
                 applied_cursor: std::cell::Cell::new(None),
+                cursors: RefCell::new(HashMap::new()),
+                cursor_mapped_output: RefCell::new(None),
+                cursor_mapped_region: RefCell::new(None),
+                cursor_image: std::cell::Cell::new(CursorImage::Hidden),
+                cursor_hotspot: std::cell::Cell::new((0, 0)),
+                xcursor_themes: RefCell::new(HashMap::new()),
                 keyboards: RefCell::new(Vec::new()),
                 pointers: RefCell::new(Vec::new()),
+                touches: RefCell::new(Vec::new()),
+                switches: RefCell::new(Vec::new()),
+                last_switch: std::cell::Cell::new(None),
                 keyboard_groups: RefCell::new(HashMap::new()),
                 shortcuts_inhibit_manager: RefCell::new(None),
                 shortcuts_inhibitors: RefCell::new(HashMap::new()),
@@ -7709,6 +8869,36 @@ impl Runtime {
         *self.inner.relative_pointer_manager.borrow()
     }
 
+    /// Create the `zwp_pointer_gestures_v1` global, letting clients receive
+    /// swipe/pinch/hold gesture events. This crate forwards the hardware
+    /// pointers' gesture signals to it through the `GesturePhase` token;
+    /// without this call that forward no-ops while the handler events
+    /// (`SeatHandler::gesture_began/ended`) still fire. Errors if called
+    /// twice.
+    pub fn create_pointer_gestures_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.pointer_gestures_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_pointer_gestures_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_pointer_gestures_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_pointer_gestures_v1_create"))?;
+        *self.inner.pointer_gestures_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// The `zwp_pointer_gestures_v1` manager, once created via
+    /// [`Runtime::create_pointer_gestures_manager`] — used internally by the
+    /// [`GesturePhase`] token to forward hardware gestures to gesture
+    /// clients.
+    pub(crate) fn pointer_gestures_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_pointer_gestures_v1>> {
+        *self.inner.pointer_gestures_manager.borrow()
+    }
+
     /// Create the `ext_idle_notifier_v1` global. Clients (e.g. swayidle) bind
     /// `ext_idle_notification_v1` to be told when the seat has been idle for a
     /// timeout; this crate feeds it input activity from the seat handlers, and
@@ -10797,6 +11987,14 @@ impl Runtime {
             *self.inner.seat.borrow_mut() = Some(seat);
             *self.inner.cursor.borrow_mut() = Some(cursor);
             *self.inner.xcursor.borrow_mut() = Some(xcursor);
+            // Keyed by the cursor's own address: creation names the object
+            // directly (the `KeyboardGroupId` discipline), and `on_seat_destroy`
+            // evicts it — the cursor dies with the seat and exposes no destroy
+            // signal of its own.
+            self.inner
+                .cursors
+                .borrow_mut()
+                .insert(cursor.as_ptr() as usize, CursorEntry { raw: cursor });
         }
         Ok(())
     }
@@ -11335,15 +12533,13 @@ impl Runtime {
     #[doc(hidden)]
     pub fn inject_touch_down(&self, x: f64, y: f64, id: i32, time_msec: u32) -> Option<u32> {
         self.notify_seat_activity();
-        let seat = self.seat_ptr()?;
+        self.seat_ptr()?;
         let (surface, sx, sy) = self.leaf_surface_at(x, y)?;
-        // SAFETY: `seat` is this runtime's own live seat (from
-        // `seat_ptr`); `surface` was just resolved from a hit test against
-        // this runtime's own live scene and is therefore live too.
-        // wlroots reads `sx`/`sy` by value and does not retain them.
-        Some(unsafe {
-            sys::wlr_seat_touch_notify_down(seat.as_ptr(), surface, time_msec, id, sx, sy)
-        })
+        // SAFETY: `surface` was just resolved from a hit test against this
+        // runtime's own live scene and is therefore live and non-null —
+        // `leaf_surface_at` answers `None` for a miss — which is what
+        // `TouchFrame::send_down` requires.
+        Some(unsafe { TouchFrame::of(self).send_down(surface, time_msec, id, sx, sy) })
     }
 
     /// Test-only: synthesize a touch-motion to `(x, y)` for the touch point
@@ -11393,10 +12589,14 @@ impl Runtime {
         // unconditionally rather than this crate tracking "did it change"
         // itself and risking drift from wlroots' own idea of the same
         // question.
+        //
+        // Focus bookkeeping, not a client forward, so it stays a direct
+        // call: the motion itself goes through the frame below, keeping the
+        // "only path to `send_motion`" claim true.
         unsafe {
             sys::wlr_seat_touch_point_focus(seat.as_ptr(), surface, time_msec, id, sx, sy);
-            sys::wlr_seat_touch_notify_motion(seat.as_ptr(), time_msec, id, sx, sy);
         }
+        TouchFrame::of(self).send_motion(time_msec, id, sx, sy);
 
         // `(x, y)` are already layout coordinates — this method's own doc
         // says so — so no conversion is needed before handing them to
@@ -11419,11 +12619,13 @@ impl Runtime {
     #[doc(hidden)]
     pub fn inject_touch_up(&self, id: i32, time_msec: u32) {
         self.notify_seat_activity();
-        let Some(seat) = self.seat_ptr() else {
+        if self.seat_ptr().is_none() {
             return;
-        };
-        // SAFETY: `seat` is this runtime's own live seat.
-        unsafe { sys::wlr_seat_touch_notify_up(seat.as_ptr(), time_msec, id) };
+        }
+        // The up serial cites nothing in this crate (the drag path cites
+        // down serials, not up ones), so it is discarded here — the same
+        // reason `PointerFrame::send_button` discards its own.
+        TouchFrame::of(self).send_up(time_msec, id);
     }
 
     /// Where the cursor is, in scene coordinates. `(0.0, 0.0)` with no seat.
@@ -11505,6 +12707,9 @@ impl Runtime {
             sys::wlr_cursor_set_xcursor(cursor.as_ptr(), xcursor.as_ptr(), name);
         }
         self.inner.applied_cursor.set(Some(shape));
+        // The single funnel for theme-image sets, so the snapshot records
+        // here: `CursorState.image` cannot drift from what wlroots shows.
+        self.inner.cursor_image.set(CursorImage::Xcursor);
     }
 
     /// Make sure the cursor has an image, loading the default xcursor theme
@@ -11627,6 +12832,159 @@ impl Runtime {
         self.inner.applied_cursor.get()
     }
 
+    /// The id of this runtime's cursor, or `None` before
+    /// [`create_seat`](Runtime::create_seat) has run (and after the seat —
+    /// and with it the cursor — is destroyed). The handle
+    /// [`try_cursor`](Runtime::try_cursor) resolves; a consumer that only
+    /// wants the aggregate state calls [`cursor_state`](Runtime::cursor_state)
+    /// instead and never needs this.
+    pub fn cursor_id(&self) -> Option<CursorId> {
+        let (&key, _) = self.inner.cursors.borrow().iter().next()?;
+        Some(CursorId(key))
+    }
+
+    /// The cursor's aggregate state, or `None` when no cursor is tracked
+    /// (no seat yet, or the seat destroyed). `None` mirrors the IME and
+    /// keyboard readers' miss shape.
+    pub fn cursor_state(&self) -> Option<CursorState> {
+        let id = self.cursor_id()?;
+        self.try_cursor(id)
+    }
+
+    /// The cursor's aggregate state behind `id`, or `None` for an unknown
+    /// id. Miss `None` matches every other by-id accessor in this crate
+    /// (FIX-3): a deferred delivery naming a destroyed cursor resolves to
+    /// nothing rather than to a reused object.
+    pub fn try_cursor(&self, id: CursorId) -> Option<CursorState> {
+        // Copy out, drop the borrow, then read: no table borrow is held
+        // across the snapshot below (which takes none, but the discipline
+        // is unconditional in this file).
+        let entry = *self.inner.cursors.borrow().get(&id.0)?;
+        Some(self.snapshot_cursor(entry.raw))
+    }
+
+    /// Copy the live cursor out into a [`CursorState`]. `cursor` must name
+    /// the tracked cursor — callers resolve it from the table, whose entry
+    /// is evicted before wlroots frees the cursor.
+    fn snapshot_cursor(&self, cursor: NonNull<sys::wlr_cursor>) -> CursorState {
+        // SAFETY: `cursor` names the live tracked cursor per the caller; the
+        // position read borrows wlroots-owned memory without freeing it, and
+        // the mapping/image tracking is copied out of this crate's own cells
+        // (each borrow ended) before constructing the snapshot.
+        let cursor_ref = unsafe { &*cursor.as_ptr() };
+        CursorState::from_raw(
+            cursor_ref,
+            *self.inner.cursor_mapped_output.borrow(),
+            *self.inner.cursor_mapped_region.borrow(),
+            self.inner.cursor_image.get(),
+            self.inner.cursor_hotspot.get(),
+        )
+    }
+
+    /// Load the named xcursor theme at `size` pixels for direct cursor-image
+    /// use (e.g. a grab cursor while moving a window — the
+    /// `wlr_xcursor_theme_load` doc's own example), returning the handle
+    /// [`destroy_xcursor_theme`](Runtime::destroy_xcursor_theme) releases.
+    /// `None` when the name contains a NUL or wlroots loads nothing (no
+    /// theme installed, not even a fallback).
+    ///
+    /// The theme is owned by this runtime, independent of the seat and of
+    /// any run: loading needs no seat, and the entry stands until
+    /// explicitly destroyed.
+    pub fn load_xcursor_theme(&self, name: &str, size: i32) -> Option<XcursorManagerId> {
+        let c_name = std::ffi::CString::new(name).ok()?;
+        // SAFETY: `c_name` is a live NUL-terminated string for the call;
+        // `wlr_xcursor_theme_load` copies what it needs and returns an owned
+        // theme or null on failure — null is the documented "no theme"
+        // outcome, not a fault.
+        let theme = unsafe { sys::wlr_xcursor_theme_load(c_name.as_ptr(), size) };
+        let theme = NonNull::new(theme)?;
+        let id = XcursorManagerId(theme.as_ptr() as usize);
+        self.inner
+            .xcursor_themes
+            .borrow_mut()
+            .insert(id.0, XcursorThemeEntry { raw: theme });
+        Some(id)
+    }
+
+    /// Release a theme [`load_xcursor_theme`](Runtime::load_xcursor_theme)
+    /// loaded. Returns `false` — and releases nothing — for an unknown id,
+    /// so double-destroy and dangling ids are harmless no-ops rather than
+    /// double-frees.
+    pub fn destroy_xcursor_theme(&self, id: XcursorManagerId) -> bool {
+        // Removed, not merely looked up: the entry owns the theme, and
+        // dropping the entry after the destroy keeps ownership single.
+        // The borrow ends with this statement, before the FFI call below.
+        let removed = self.inner.xcursor_themes.borrow_mut().remove(&id.0);
+        let Some(entry) = removed else {
+            return false;
+        };
+        // SAFETY: `entry` was removed from the only table holding it, so
+        // this is the single destroy of a live theme; no borrow is held.
+        unsafe { sys::wlr_xcursor_theme_destroy(entry.raw.as_ptr()) };
+        true
+    }
+
+    /// Map the cursor to `output`, constraining all its motion to that
+    /// output (which must belong to the cursor's output layout). Records the
+    /// mapping for [`CursorState::mapped_output`].
+    ///
+    /// `None` when there is no seat cursor, or `output` names no live
+    /// output of the current run — the same miss shape as the other by-id
+    /// mutators. A compositor calls this with an output announced by the
+    /// current run (e.g. from an output handler), where the output table is
+    /// populated.
+    pub fn map_cursor_to_output(&self, output: OutputId) -> Option<()> {
+        let cursor = self.cursor_ptr()?;
+        // Copy out, drop the borrow, then emit: no table borrow crosses FFI.
+        let target = *self.inner.outputs.borrow().get(&output)?;
+        // SAFETY: `cursor` is this runtime's own live cursor from
+        // `create_seat`; `target` is live — its entry stands, and
+        // `on_output_destroy` evicts entries before wlroots frees them.
+        unsafe { sys::wlr_cursor_map_to_output(cursor.as_ptr(), target.as_ptr()) };
+        *self.inner.cursor_mapped_output.borrow_mut() = Some(output);
+        Some(())
+    }
+
+    /// Map the cursor to an arbitrary layout `region`. Records the region
+    /// for [`CursorState::mapped_region`].
+    ///
+    /// `None` when there is no seat cursor; otherwise always applies (a
+    /// region needs no table resolution).
+    pub fn map_cursor_to_region(&self, region: Box2D) -> Option<()> {
+        let cursor = self.cursor_ptr()?;
+        // SAFETY: `cursor` is this runtime's own live cursor; `region.as_c`
+        // is a layout-identical view of `region`, live for the call.
+        unsafe { sys::wlr_cursor_map_to_region(cursor.as_ptr(), region.as_c()) };
+        *self.inner.cursor_mapped_region.borrow_mut() = Some(region);
+        Some(())
+    }
+
+    /// Drop the recorded output mapping when it names `output`, called from
+    /// `backend.rs`'s `on_output_destroy` before the output is freed, so
+    /// [`CursorState::mapped_output`] never names a dead output. Takes the
+    /// id rather than the pointer: the output is dying, and only the id is
+    /// needed to compare.
+    pub(crate) fn clear_cursor_mapping_for_output(&self, output: OutputId) {
+        if *self.inner.cursor_mapped_output.borrow() == Some(output) {
+            *self.inner.cursor_mapped_output.borrow_mut() = None;
+        }
+    }
+
+    /// Evict the tracked cursor and reset its mapping/image tracking,
+    /// called from `backend.rs`'s `on_seat_destroy`: the cursor dies with
+    /// the seat, so from here on [`cursor_id`](Runtime::cursor_id),
+    /// [`cursor_state`](Runtime::cursor_state) and
+    /// [`try_cursor`](Runtime::try_cursor) miss again. Clearing only drops
+    /// borrowed pointers, never dereferences them.
+    pub(crate) fn forget_cursor(&self) {
+        self.inner.cursors.borrow_mut().clear();
+        *self.inner.cursor_mapped_output.borrow_mut() = None;
+        *self.inner.cursor_mapped_region.borrow_mut() = None;
+        self.inner.cursor_image.set(CursorImage::Hidden);
+        self.inner.cursor_hotspot.set((0, 0));
+    }
+
     /// Record a keyboard the backend announced, for
     /// [`has_keyboard`](Runtime::has_keyboard) to count.
     pub(crate) fn record_keyboard(&self, kb: NonNull<sys::wlr_keyboard>) {
@@ -11674,6 +13032,57 @@ impl Runtime {
         !self.inner.pointers.borrow().is_empty()
     }
 
+    /// Record a touch device the backend announced, for
+    /// [`has_touch`](Runtime::has_touch) to count.
+    pub(crate) fn record_touch(&self, touch: NonNull<sys::wlr_touch>) {
+        self.inner.touches.borrow_mut().push(touch);
+    }
+
+    /// Forget a touch device; see [`forget_keyboard`](Runtime::forget_keyboard).
+    pub(crate) fn forget_touch(&self, touch: NonNull<sys::wlr_touch>) {
+        self.inner
+            .touches
+            .borrow_mut()
+            .retain(|&recorded| recorded != touch);
+    }
+
+    /// Whether this runtime currently has a live touch device. Used to decide
+    /// whether the seat should advertise the touch capability — mirroring
+    /// [`has_pointer`](Runtime::has_pointer) — and to gate
+    /// [`touch_state`](Runtime::touch_state).
+    pub(crate) fn has_touch(&self) -> bool {
+        !self.inner.touches.borrow().is_empty()
+    }
+
+    /// Record a switch device the backend announced, for
+    /// [`has_switch`](Runtime::has_switch) to count.
+    pub(crate) fn record_switch(&self, switch: NonNull<sys::wlr_switch>) {
+        self.inner.switches.borrow_mut().push(switch);
+    }
+
+    /// Forget a switch device; see [`forget_keyboard`](Runtime::forget_keyboard).
+    pub(crate) fn forget_switch(&self, switch: NonNull<sys::wlr_switch>) {
+        self.inner
+            .switches
+            .borrow_mut()
+            .retain(|&recorded| recorded != switch);
+    }
+
+    /// Whether this runtime currently has a live switch device. Gates
+    /// [`switch_state`](Runtime::switch_state): with no switch there is no
+    /// position to report.
+    pub(crate) fn has_switch(&self) -> bool {
+        !self.inner.switches.borrow().is_empty()
+    }
+
+    /// Record a switch toggle for [`switch_state`](Runtime::switch_state) to
+    /// report. Called from `backend.rs`'s switch-toggle handler at emission
+    /// time, so a deferred delivery still reports the transition that
+    /// actually happened.
+    pub(crate) fn note_switch_toggle(&self, switch_type: crate::seat::SwitchType, on: bool) {
+        self.inner.last_switch.set(Some((switch_type, on)));
+    }
+
     /// Whether [`enable_test_touch`](Runtime::enable_test_touch) has been
     /// called. Read by `backend.rs`'s `update_seat_capabilities` on every
     /// recompute, exactly as `has_keyboard`/`has_pointer` are.
@@ -11709,6 +13118,300 @@ impl Runtime {
     pub fn enable_test_touch(&self) {
         self.inner.test_touch_enabled.set(true);
         crate::backend::update_seat_capabilities(self);
+    }
+
+    /// The seat's aggregate touch state, or `None` when there is none to
+    /// report: no seat yet (or the seat destroyed), or a seat with no touch
+    /// capability — neither a tracked touch device nor the
+    /// [`enable_test_touch`](Runtime::enable_test_touch) stand-in. `None`
+    /// mirrors the IME and keyboard readers' miss shape.
+    ///
+    /// The capability gate is load-bearing, not incidental: without touch
+    /// capability wlroots refuses to create touch points at all (see
+    /// [`enable_test_touch`](Runtime::enable_test_touch)), so a touchless
+    /// seat has no touch state to snapshot — reporting `Some` with empty
+    /// points would promise a touch surface that does not exist.
+    pub fn touch_state(&self) -> Option<TouchState> {
+        let seat = self.seat_ptr()?;
+        if !self.has_touch() && !self.test_touch_enabled() {
+            return None;
+        }
+        Some(TouchState::from_seat(seat))
+    }
+
+    /// The last switch position observed, or `None` when there is none to
+    /// report: no seat yet (or the seat destroyed), no switch device
+    /// tracked, or no toggle observed since the switch arrived. `None`
+    /// mirrors [`touch_state`](Runtime::touch_state)'s miss shape.
+    pub fn switch_state(&self) -> Option<SwitchState> {
+        self.seat_ptr()?;
+        if !self.has_switch() {
+            return None;
+        }
+        let (switch_type, on) = self.inner.last_switch.get()?;
+        Some(SwitchState::from_toggle(switch_type, on))
+    }
+
+    /// The settled constraint state on `surface`, or `None` when there is
+    /// none: no seat, no pointer-constraints manager, an unknown surface id,
+    /// or no live constraint on that surface. `None` mirrors
+    /// [`touch_state`](Runtime::touch_state)'s miss shape.
+    ///
+    /// Resolved through wlroots' own
+    /// `wlr_pointer_constraints_v1_constraint_for_surface` at call time, so
+    /// this always reports the live constraint — a surface whose constraint
+    /// was destroyed since the last commit reads `None` rather than a
+    /// reused object (FIX-3).
+    pub fn constraint_state_for_surface(
+        &self,
+        surface: ConstraintSurface,
+    ) -> Option<PointerConstraintState> {
+        let seat = self.seat_ptr()?;
+        let manager = self.pointer_constraints_manager_ptr()?;
+        let raw_surface = self.constraint_surface_ptr(surface)?;
+        // SAFETY: `manager` is this runtime's own display-owned manager and
+        // `seat` its own live seat; `raw_surface` was just resolved from a
+        // live entry (whose destroy handler evicts it before wlroots frees
+        // the surface). A null answer — no live constraint on that surface —
+        // misses below. The table borrows ended inside the resolvers, so no
+        // borrow crosses this call.
+        let constraint = unsafe {
+            sys::wlr_pointer_constraints_v1_constraint_for_surface(
+                manager.as_ptr(),
+                raw_surface,
+                seat.as_ptr(),
+            )
+        };
+        let constraint = NonNull::new(constraint)?;
+        Some(PointerConstraintState::from_constraint(constraint))
+    }
+
+    /// The live `wlr_surface` behind a [`ConstraintSurface`], or `None` for
+    /// an unknown id. The entry stands exactly while its surface lives —
+    /// each role's destroy path evicts before wlroots frees — so a resolved
+    /// pointer is live for this synchronous read.
+    pub(crate) fn constraint_surface_ptr(
+        &self,
+        surface: ConstraintSurface,
+    ) -> Option<*mut sys::wlr_surface> {
+        match surface {
+            ConstraintSurface::Toplevel(id) => {
+                let entry = self.toplevel_entry(id)?;
+                // SAFETY: a present entry names a live toplevel (its destroy
+                // callback removes the entry before wlroots frees it) — the
+                // same reach-through `focus_toplevel_keyboard` uses.
+                unsafe {
+                    let base = (*entry.raw.as_ptr()).base;
+                    if base.is_null() {
+                        return None;
+                    }
+                    NonNull::new((*base).surface).map(|surface| surface.as_ptr())
+                }
+            }
+            ConstraintSurface::Layer(id) => {
+                // Copy out, drop the borrow, then read: no table borrow is
+                // held across the surface read below.
+                let raw = self.inner.layer_surfaces.borrow().get(&id).map(|e| e.raw)?;
+                // SAFETY: as for the toplevel arm — a present layer entry
+                // names a live layer surface, evicted before it is freed.
+                unsafe { NonNull::new((*raw.as_ptr()).surface).map(|s| s.as_ptr()) }
+            }
+            ConstraintSurface::Popup(id) => {
+                // Copy out, drop the borrow, then read, as for the layer arm.
+                let raw = self.inner.popups.borrow().get(&id).map(|e| e.raw)?;
+                // SAFETY: as for the toplevel arm — a present popup entry
+                // names a live popup, evicted before it is freed.
+                unsafe {
+                    let base = (*raw.as_ptr()).base;
+                    if base.is_null() {
+                        return None;
+                    }
+                    NonNull::new((*base).surface).map(|s| s.as_ptr())
+                }
+            }
+        }
+    }
+
+    /// Rename this runtime's seat, broadcasting the new name to all clients
+    /// (`wlr_seat_set_name` sends it).
+    ///
+    /// Returns `false` — renaming nothing — when there is no seat yet, or
+    /// the name contains a NUL (which no Wayland string can carry).
+    pub fn set_seat_name(&self, name: &str) -> bool {
+        let Some(seat) = self.seat_ptr() else {
+            return false;
+        };
+        let Ok(c_name) = std::ffi::CString::new(name) else {
+            return false;
+        };
+        // SAFETY: `seat` is this runtime's own live seat; `c_name` is a live
+        // NUL-terminated string for the call, which wlroots copies before
+        // broadcasting. The table borrow ended inside `seat_ptr`, so no
+        // borrow crosses this call.
+        unsafe { sys::wlr_seat_set_name(seat.as_ptr(), c_name.as_ptr()) };
+        true
+    }
+
+    /// Destroy this runtime's seat and its cursor, clearing every tracking
+    /// entry that named them, so [`cursor_state`](Runtime::cursor_state),
+    /// [`touch_state`](Runtime::touch_state) and
+    /// [`switch_state`](Runtime::switch_state) miss again from here on.
+    ///
+    /// Returns `false` — destroying nothing — when there is no seat, or
+    /// when called from inside a handler. The handler refusal is the
+    /// soundness gate, not an inconvenience: a run holds seat listeners
+    /// with null liveness flags (the display-outlives-the-run reasoning in
+    /// `backend.rs`'s registration hook), so destroying mid-run would leave
+    /// the run's teardown unlinking listeners out of freed seat memory. Runs
+    /// are synchronous, so on this thread "a run is active" and "a handler
+    /// is on the stack" coincide — and `Runtime` is `!Send`, so no other
+    /// thread can hold a run concurrently.
+    ///
+    /// The cursor goes with the seat — it was created with it, and the
+    /// cursor id's own doc promises it dies with it — while attached input
+    /// devices live on (they are backend-owned): wlroots detaches them as
+    /// part of the cursor destroy, and this crate's device vectors keep
+    /// counting them, so a seat recreated afterwards re-resolves its
+    /// capabilities on the next device change. The xcursor manager object is
+    /// inert data with no listeners and is freed with the display; it is
+    /// left standing.
+    pub fn destroy_seat(&self) -> bool {
+        let Some(seat) = self.seat_ptr() else {
+            return false;
+        };
+        if crate::dispatch::in_handler() {
+            return false;
+        }
+        let cursor = self.cursor_ptr();
+        // SAFETY: no run is on this thread's stack (checked above), so no
+        // run holds listeners into either object — every registration a run
+        // ever linked was unlinked again by that run's teardown — and both
+        // objects are this runtime's own, display-owned and live here. The
+        // seat-destroy emission fires no handler of ours (none is linked
+        // outside a run), so the bookkeeping below runs exactly once, here.
+        unsafe { sys::wlr_seat_destroy(seat.as_ptr()) };
+        if let Some(cursor) = cursor {
+            // SAFETY: as for the seat — this runtime's own live cursor, with
+            // no run holding listeners into it.
+            unsafe { sys::wlr_cursor_destroy(cursor.as_ptr()) };
+        }
+        *self.inner.seat.borrow_mut() = None;
+        *self.inner.cursor.borrow_mut() = None;
+        self.forget_cursor();
+        true
+    }
+
+    /// Whether `client` has a client object on this runtime's seat — the
+    /// thin check behind "is this client speaking to my seat".
+    ///
+    /// `false` for null, for a foreign client, and when there is no seat.
+    ///
+    /// # Safety
+    ///
+    /// `client` must be null or point at a live `wl_client`. A live client
+    /// is only ever *read* by the lookup wlroots performs; the answer is
+    /// compared, never dereferenced.
+    pub unsafe fn seat_has_client(&self, client: *mut sys::wl_client) -> bool {
+        let Some(seat) = self.seat_ptr() else {
+            return false;
+        };
+        let Some(client) = NonNull::new(client) else {
+            return false;
+        };
+        // SAFETY: `client` is live per the caller's contract and `seat` is
+        // this runtime's own live seat; the lookup only reads both, and a
+        // null answer (foreign client) misses below. No borrow is held
+        // across the call: the table is only touched before it.
+        unsafe { !sys::wlr_seat_client_for_wl_client(seat.as_ptr(), client.as_ptr()).is_null() }
+    }
+
+    /// Whether the seat client behind a pointer `resource` exists — the
+    /// pointer-resource twin of
+    /// [`seat_has_client`](Runtime::seat_has_client), for callers holding a
+    /// `wl_pointer` resource rather than a `wl_client`.
+    ///
+    /// `false` for null, for a foreign or inert resource, and when there is
+    /// no seat.
+    ///
+    /// # Safety
+    ///
+    /// `resource` must be null or point at a live `wl_resource`, on the same
+    /// read-only terms as [`seat_has_client`](Runtime::seat_has_client).
+    pub unsafe fn seat_has_client_for_pointer_resource(
+        &self,
+        resource: *mut sys::wl_resource,
+    ) -> bool {
+        if self.seat_ptr().is_none() {
+            return false;
+        }
+        let Some(resource) = NonNull::new(resource) else {
+            return false;
+        };
+        // SAFETY: `resource` is live per the caller's contract; the lookup
+        // only reads it, and a null answer (foreign or inert resource)
+        // misses below.
+        unsafe { !sys::wlr_seat_client_from_pointer_resource(resource.as_ptr()).is_null() }
+    }
+
+    /// Mint a fresh serial for the seat client behind `resource`, recording
+    /// it as valid for that client — what every programmatic input event
+    /// must carry so
+    /// [`seat_client_validate_serial`](Runtime::seat_client_validate_serial)
+    /// accepts the request serials built on it.
+    ///
+    /// `None` for null, for a foreign resource, and when there is no seat.
+    /// The lookup is resource-keyed, so the serial is minted on whichever
+    /// seat owns the resource's client.
+    ///
+    /// # Safety
+    ///
+    /// `resource` must be null or point at a live `wl_resource`, on the same
+    /// read-only terms as [`seat_has_client`](Runtime::seat_has_client).
+    pub unsafe fn seat_client_next_serial(&self, resource: *mut sys::wl_resource) -> Option<u32> {
+        self.seat_ptr()?;
+        let resource = NonNull::new(resource)?;
+        // SAFETY: `resource` is live per the caller's contract; both lookups
+        // only read, and a null answer at either hop (foreign resource)
+        // misses below.
+        let client = unsafe { sys::wlr_seat_client_from_resource(resource.as_ptr()) };
+        let client = NonNull::new(client)?;
+        // SAFETY: `client` is live per wlroots' own lookup contract; minting
+        // only advances its serial ring.
+        Some(unsafe { sys::wlr_seat_client_next_serial(client.as_ptr()) })
+    }
+
+    /// Whether `serial` could have been minted by
+    /// [`seat_client_next_serial`](Runtime::seat_client_next_serial) for the
+    /// seat client behind `resource` and is still live — the serial gate a
+    /// compositor applies before honouring a client's grab or selection
+    /// request.
+    ///
+    /// `false` for null, for a foreign resource, and when there is no seat.
+    ///
+    /// # Safety
+    ///
+    /// `resource` must be null or point at a live `wl_resource`, on the same
+    /// read-only terms as [`seat_has_client`](Runtime::seat_has_client).
+    pub unsafe fn seat_client_validate_serial(
+        &self,
+        resource: *mut sys::wl_resource,
+        serial: u32,
+    ) -> bool {
+        if self.seat_ptr().is_none() {
+            return false;
+        }
+        let Some(resource) = NonNull::new(resource) else {
+            return false;
+        };
+        // SAFETY: as for
+        // [`seat_client_next_serial`](Runtime::seat_client_next_serial).
+        let client = unsafe { sys::wlr_seat_client_from_resource(resource.as_ptr()) };
+        let Some(client) = NonNull::new(client) else {
+            return false;
+        };
+        // SAFETY: `client` is live per wlroots' own lookup contract; the
+        // check only reads its serial ring.
+        unsafe { sys::wlr_seat_client_validate_event_serial(client.as_ptr(), serial) }
     }
 }
 
@@ -11761,6 +13464,68 @@ mod tests {
     // `RefCell` give this incidentally today; a future `Arc` field, or a
     // well-meant `unsafe impl Send`, would void the guard in silence.
     assert_not_impl_any!(Runtime: Send, Sync);
+
+    /// The lid-close derivation the session/lock signal reads: only a lid
+    /// in the on position counts. A tablet-mode switch fully on is not a
+    /// closed lid, and neither is a lid toggled back off.
+    #[test]
+    fn switch_state_derives_lid_closed_from_type_and_position() {
+        use crate::seat::SwitchType;
+        let closed = SwitchState::from_toggle(SwitchType::Lid, true);
+        assert!(closed.on);
+        assert!(closed.lid_closed);
+
+        let open = SwitchState::from_toggle(SwitchType::Lid, false);
+        assert!(!open.on);
+        assert!(!open.lid_closed);
+
+        let tablet = SwitchState::from_toggle(SwitchType::TabletMode, true);
+        assert!(tablet.on);
+        assert!(
+            !tablet.lid_closed,
+            "tablet mode engaged must not read as a closed lid"
+        );
+    }
+
+    /// The constraint wire enums decode totally: every known value maps to
+    /// its variant, and anything else fails closed rather than panicking
+    /// out of an `extern "C"` frame.
+    #[test]
+    fn constraint_wire_enums_decode_and_fail_closed() {
+        assert_eq!(
+            ConstraintLifetime::from_raw(
+                sys::zwp_pointer_constraints_v1_lifetime::ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_ONESHOT
+            ),
+            ConstraintLifetime::Oneshot
+        );
+        assert_eq!(
+            ConstraintLifetime::from_raw(
+                sys::zwp_pointer_constraints_v1_lifetime::ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT
+            ),
+            ConstraintLifetime::Persistent
+        );
+        assert_eq!(
+            ConstraintLifetime::from_raw(sys::zwp_pointer_constraints_v1_lifetime(99)),
+            ConstraintLifetime::Persistent
+        );
+
+        assert_eq!(
+            ConstraintType::from_raw(
+                sys::wlr_pointer_constraint_v1_type::WLR_POINTER_CONSTRAINT_V1_LOCKED
+            ),
+            ConstraintType::Locked
+        );
+        assert_eq!(
+            ConstraintType::from_raw(
+                sys::wlr_pointer_constraint_v1_type::WLR_POINTER_CONSTRAINT_V1_CONFINED
+            ),
+            ConstraintType::Confined
+        );
+        assert_eq!(
+            ConstraintType::from_raw(sys::wlr_pointer_constraint_v1_type(99)),
+            ConstraintType::Locked
+        );
+    }
 
     fn pipe_read_end() -> OwnedFd {
         let (read, _write) = rustix::pipe::pipe().expect("pipe");

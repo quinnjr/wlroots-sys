@@ -190,9 +190,8 @@ milestone = "M10"
 
 [[waived]]
 symbol    = "wlr_button_state"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Button state is read as wl_pointer_button_state off wlr_pointer_button_event; the wlr_button_state enum is never named."
 
 [[waived]]
 symbol    = "wlr_client_buffer"
@@ -343,71 +342,46 @@ reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
 milestone = "M9"
 
-[[waived]]
-symbol    = "wlr_cursor_destroy"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_cursor_detach_input_device"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Devices stay attached for their whole life; removal is destroy-driven (on_input_destroy forgets, never detaches)."
 
 [[waived]]
 symbol    = "wlr_cursor_map_input_to_output"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Every device attaches to the whole layout at create_seat (T4: per-output mapping would strand multi-output cursors); mapping fns are never issued."
 
 [[waived]]
 symbol    = "wlr_cursor_map_input_to_region"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_cursor_map_to_output"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_cursor_map_to_region"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Every device attaches to the whole layout at create_seat; region mapping is never issued."
 
 [[waived]]
 symbol    = "wlr_cursor_set_buffer"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "The single image path is wlr_cursor_set_xcursor (Runtime::set_cursor_shape); per-buffer sets are never issued."
 
 [[waived]]
 symbol    = "wlr_cursor_set_surface"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "The single image path is wlr_cursor_set_xcursor (Runtime::set_cursor_shape); per-surface sets are never issued."
 
 [[waived]]
 symbol    = "wlr_cursor_state"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Opaque to the crate: x/y are own-tracked (CursorState.mapped_output plus the warp path, T1 ruling); the struct type itself is never named."
 
 [[waived]]
 symbol    = "wlr_cursor_unset_image"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "Images change by setting another xcursor, never by unsetting (Runtime::set_cursor_shape persists until focus moves)."
 
 [[waived]]
 symbol    = "wlr_cursor_warp"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "Runtime::warp_cursor uses wlr_cursor_warp_closest, which moves unconditionally; warp no-ops out-of-bounds by design."
 
 [[waived]]
 symbol    = "wlr_damage_ring_buffer"
@@ -1270,27 +1244,23 @@ milestone = "M12"
 
 [[waived]]
 symbol    = "wlr_input_device_get_virtual_keyboard"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "on_new_input dispatches on the wlr_input_device type field directly; virtual keyboards resolve through their own creation signal, never by probing a device."
 
 [[waived]]
 symbol    = "wlr_input_device_is_libinput"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "on_new_input dispatches on the wlr_input_device type field directly; the predicate helpers are never named."
 
 [[waived]]
 symbol    = "wlr_input_device_is_wl"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "on_new_input dispatches on the wlr_input_device type field directly; the predicate helpers are never named."
 
 [[waived]]
 symbol    = "wlr_input_device_is_x11"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "on_new_input dispatches on the wlr_input_device type field directly; the predicate helpers are never named."
 
 [[waived]]
 symbol    = "wlr_keyboard_finish"
@@ -1822,21 +1792,14 @@ milestone = "M10"
 
 [[waived]]
 symbol    = "wlr_pointer_constraint_v1_state"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Read field-wise as constraint.current through Runtime::constraint_state_for_surface; the struct type itself is never named."
 
 [[waived]]
 symbol    = "wlr_pointer_constraint_v1_state_field"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Read field-wise as constraint.current fields through Runtime::constraint_state_for_surface; the struct type itself is never named."
 
-[[waived]]
-symbol    = "wlr_pointer_constraints_v1_constraint_for_surface"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_pointer_finish"
@@ -1845,82 +1808,10 @@ note      = "Reachable only by implementing a wlroots vtable from Rust; see M13.
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_pointer_gestures_v1"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_create"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_hold_begin"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_hold_end"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_pinch_begin"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_pinch_end"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_pinch_update"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_swipe_begin"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_swipe_end"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_swipe_update"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
 symbol    = "wlr_pointer_grab_interface"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_hold_begin_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_hold_end_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_pointer_impl"
@@ -1936,45 +1827,8 @@ milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_pointer_notify_button"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_pinch_begin_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_pinch_end_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_pinch_update_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_swipe_begin_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_swipe_end_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_swipe_update_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Hardware-side event synthesis; real devices emit themselves and test paths inject at seat level, so device notifies are never issued."
 
 [[waived]]
 symbol    = "wlr_presentation_event"
@@ -2073,15 +1927,13 @@ milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_relative_pointer_v1"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Motion goes out as a manager broadcast (wlr_relative_pointer_manager_v1_send_relative_motion); per-client objects are never resolved."
 
 [[waived]]
 symbol    = "wlr_relative_pointer_v1_from_resource"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Motion goes out as a manager broadcast (wlr_relative_pointer_manager_v1_send_relative_motion); per-client objects are never resolved from resources."
 
 [[waived]]
 symbol    = "wlr_render_pass_impl"
@@ -2186,41 +2038,11 @@ reason    = "not-yet"
 note      = "Buffer-sharing, screen capture and DRM lease protocols."
 milestone = "M10"
 
-[[waived]]
-symbol    = "wlr_seat_client_for_wl_client"
-reason    = "not-yet"
-note      = "Seat core, alongside the pointer work."
-milestone = "M7"
 
-[[waived]]
-symbol    = "wlr_seat_client_from_pointer_resource"
-reason    = "not-yet"
-note      = "Seat core, alongside the pointer work."
-milestone = "M7"
 
-[[waived]]
-symbol    = "wlr_seat_client_from_resource"
-reason    = "not-yet"
-note      = "Seat core, alongside the pointer work."
-milestone = "M7"
 
-[[waived]]
-symbol    = "wlr_seat_client_next_serial"
-reason    = "not-yet"
-note      = "Seat core, alongside the pointer work."
-milestone = "M7"
 
-[[waived]]
-symbol    = "wlr_seat_client_validate_event_serial"
-reason    = "not-yet"
-note      = "Seat core, alongside the pointer work."
-milestone = "M7"
 
-[[waived]]
-symbol    = "wlr_seat_destroy"
-reason    = "not-yet"
-note      = "Seat core, alongside the pointer work."
-milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_seat_keyboard_clear_focus"
@@ -2278,39 +2100,34 @@ milestone = "M8"
 
 [[waived]]
 symbol    = "wlr_seat_pointer_button"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Per-button press counts are never read; the implicit press-grab is modeled crate-side (PointerGrab records the press origin for drag continuation)."
 
 [[waived]]
 symbol    = "wlr_seat_pointer_clear_focus"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "Grab-bypassing direct clear; focus clears through wlr_seat_pointer_notify_clear_focus (PointerFrame::clear_focus)."
 
 [[waived]]
 symbol    = "wlr_seat_pointer_end_grab"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "interface-impl-only"
+note      = "Only a grab owner calls these; nothing in wlr takes a wlroots seat grab (the implicit press-grab is automatic, modeled crate-side as PointerGrab)."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_seat_pointer_enter"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "Grab-bypassing direct enter; focus moves through wlr_seat_pointer_notify_enter (PointerFrame::send_enter)."
 
 [[waived]]
 symbol    = "wlr_seat_pointer_grab"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "The crate never takes a wlroots seat grab (implicit press-grab is wlroots-automatic; xdg grabs stay wlroots-internal); grab state structs are never named."
 
 [[waived]]
 symbol    = "wlr_seat_pointer_request_set_cursor_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "Legacy seat cursor-request signal; images arrive via wp_cursor_shape_device_v1 (SeatHandler::request_set_shape), which the crate gates on seat focus itself."
 
 [[waived]]
 symbol    = "wlr_seat_pointer_send_axis"
@@ -2319,39 +2136,34 @@ note      = "`wlr_seat_pointer_notify_axis` (wrapped) is the grab-aware form and
 
 [[waived]]
 symbol    = "wlr_seat_pointer_send_button"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "Grab-bypassing direct send; forwards go through wlr_seat_pointer_notify_button (PointerFrame::send_button), which defers to grabs."
 
 [[waived]]
 symbol    = "wlr_seat_pointer_send_frame"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "Grab-bypassing direct send; frames close through wlr_seat_pointer_notify_frame (PointerFrame::finish)."
 
 [[waived]]
 symbol    = "wlr_seat_pointer_send_motion"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "Grab-bypassing direct send; forwards go through wlr_seat_pointer_notify_motion (PointerFrame::send_motion), which defers to grabs."
 
 [[waived]]
 symbol    = "wlr_seat_pointer_start_grab"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "interface-impl-only"
+note      = "Only a grab owner calls these; nothing in wlr takes a wlroots seat grab (the implicit press-grab is automatic, modeled crate-side as PointerGrab)."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_seat_pointer_surface_has_focus"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Focus is tracked through the crate's own motion and hit-test path; the query helper is never called."
 
 [[waived]]
 symbol    = "wlr_seat_pointer_warp"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Seat warps are never issued; position lives in the cursor (Runtime::warp_cursor via wlr_cursor_warp_closest)."
 
 [[waived]]
 symbol    = "wlr_seat_request_set_primary_selection"
@@ -2371,11 +2183,6 @@ reason    = "not-yet"
 note      = "Selection and drag entry points on the seat."
 milestone = "M11"
 
-[[waived]]
-symbol    = "wlr_seat_set_name"
-reason    = "not-yet"
-note      = "Seat core, alongside the pointer work."
-milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_seat_start_drag"
@@ -2385,99 +2192,69 @@ milestone = "M11"
 
 [[waived]]
 symbol    = "wlr_seat_touch_end_grab"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "interface-impl-only"
+note      = "Only a grab owner calls these; nothing in wlr takes a wlroots seat grab (touch forwards defer to whatever grab wlroots holds)."
+milestone = "M13"
 
-[[waived]]
-symbol    = "wlr_seat_touch_get_point"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_seat_touch_grab"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "The crate never takes a wlroots seat grab; touch grab state structs are never named."
 
-[[waived]]
-symbol    = "wlr_seat_touch_has_grab"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
-[[waived]]
-symbol    = "wlr_seat_touch_notify_cancel"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_seat_touch_notify_clear_focus"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Touch focus clears only via up and cancel forwards; explicit clear-focus is never issued."
 
-[[waived]]
-symbol    = "wlr_seat_touch_notify_frame"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_seat_touch_num_points"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "TouchState walks the seat's live touch_points list itself; the count helper is never named."
 
 [[waived]]
 symbol    = "wlr_seat_touch_point_clear_focus"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Touch focus clears only via up and cancel forwards; explicit per-point clear-focus is never issued."
 
 [[waived]]
 symbol    = "wlr_seat_touch_send_cancel"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "Grab-bypassing direct send; cancels go through wlr_seat_touch_notify_cancel (TouchFrame::send_cancel)."
 
 [[waived]]
 symbol    = "wlr_seat_touch_send_down"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "Grab-bypassing direct send; forwards go through wlr_seat_touch_notify_down (TouchFrame::send_down), which defers to grabs."
 
 [[waived]]
 symbol    = "wlr_seat_touch_send_frame"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "Grab-bypassing direct send; frames close through wlr_seat_touch_notify_frame (TouchFrame::send_frame)."
 
 [[waived]]
 symbol    = "wlr_seat_touch_send_motion"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "Grab-bypassing direct send; forwards go through wlr_seat_touch_notify_motion (TouchFrame::send_motion)."
 
 [[waived]]
 symbol    = "wlr_seat_touch_send_up"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "superseded-by"
+note      = "Grab-bypassing direct send; forwards go through wlr_seat_touch_notify_up (TouchFrame::send_up)."
 
 [[waived]]
 symbol    = "wlr_seat_touch_start_grab"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "interface-impl-only"
+note      = "Only a grab owner calls these; nothing in wlr takes a wlroots seat grab (touch forwards defer to whatever grab wlroots holds)."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_seat_touch_state"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Read field-wise (touch_points walk plus has_grab) through Runtime::touch_state; the struct type itself is never named."
 
 [[waived]]
 symbol    = "wlr_security_context_manager_v1"
@@ -2981,11 +2758,6 @@ reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
 milestone = "M9"
 
-[[waived]]
-symbol    = "wlr_switch"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_switch_finish"
@@ -2993,11 +2765,6 @@ reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
 milestone = "M13"
 
-[[waived]]
-symbol    = "wlr_switch_from_input_device"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_switch_impl"
@@ -3011,23 +2778,8 @@ reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
 milestone = "M13"
 
-[[waived]]
-symbol    = "wlr_switch_state"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
-[[waived]]
-symbol    = "wlr_switch_toggle_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
-[[waived]]
-symbol    = "wlr_switch_type"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
 
 [[waived]]
@@ -3384,23 +3136,8 @@ reason    = "interface-impl-only"
 note      = "Accessor a renderer implementation calls on options wlroots hands it."
 milestone = "M13"
 
-[[waived]]
-symbol    = "wlr_touch"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
-[[waived]]
-symbol    = "wlr_touch_cancel_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
-[[waived]]
-symbol    = "wlr_touch_down_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_touch_finish"
@@ -3408,17 +3145,12 @@ reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
 milestone = "M13"
 
-[[waived]]
-symbol    = "wlr_touch_from_input_device"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_touch_grab_interface"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "interface-impl-only"
+note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_touch_impl"
@@ -3432,17 +3164,7 @@ reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
 milestone = "M13"
 
-[[waived]]
-symbol    = "wlr_touch_motion_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
-[[waived]]
-symbol    = "wlr_touch_up_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
 
 [[waived]]
 symbol    = "wlr_version_get_major"
@@ -3524,75 +3246,48 @@ milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_xcursor"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Theme and image structs stay inside wlr_cursor_set_xcursor; the crate passes names, never resolves images itself."
 
 [[waived]]
 symbol    = "wlr_xcursor_frame"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Cursor animation stepping happens inside wlr_cursor_set_xcursor; frame indexes are never computed crate-side."
 
 [[waived]]
 symbol    = "wlr_xcursor_get_resize_name"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Shapes are named via wlr_cursor_shape_v1_name (CursorShape::to_raw); the edges-to-name lookup is never used."
 
 [[waived]]
 symbol    = "wlr_xcursor_image"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Theme and image structs stay inside wlr_cursor_set_xcursor; the crate passes names, never resolves images itself."
 
 [[waived]]
 symbol    = "wlr_xcursor_image_get_buffer"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Theme-image buffers are never extracted; images reach the cursor only through wlr_cursor_set_xcursor."
 
 [[waived]]
 symbol    = "wlr_xcursor_manager_destroy"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "One boot-owned manager per runtime (T4 REUSE verdict); destruction is display teardown, never a call."
 
 [[waived]]
 symbol    = "wlr_xcursor_manager_get_xcursor"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Theme-to-image resolution happens inside wlr_cursor_set_xcursor; the crate never looks an image up itself."
 
 [[waived]]
 symbol    = "wlr_xcursor_manager_theme"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_xcursor_theme"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_xcursor_theme_destroy"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Manager-internals list node (scale, theme, link); never named - the manager is used, never inspected."
 
 [[waived]]
 symbol    = "wlr_xcursor_theme_get_cursor"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_xcursor_theme_load"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
+reason    = "internal"
+note      = "Theme-to-image resolution happens inside wlr_cursor_set_xcursor; the crate never looks a cursor up itself."
 
 [[waived]]
 symbol    = "wlr_xdg_activation_token_v1"
