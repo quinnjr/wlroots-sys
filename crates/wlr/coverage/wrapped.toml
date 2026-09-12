@@ -2833,3 +2833,14 @@ item   = "Runtime::create_power_manager"
 symbol = "wlr_output_power_v1_set_mode_event"
 module = "backend"
 item   = "OutputHandler::output_power_mode_set"
+
+
+[[wrapped]]
+symbol = "wlr_output_send_request_state"
+module = "output"
+item   = "Output::send_request_state"
+
+[[wrapped]]
+symbol = "wlr_output_get_primary_formats"
+module = "output"
+item   = "Output::primary_formats"

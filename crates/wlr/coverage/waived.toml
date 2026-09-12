@@ -524,9 +524,8 @@ milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_direction"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "Layout-adjacency bitflags companion to the deliberately unwrapped layout helpers (M5 audit)."
 
 [[waived]]
 symbol    = "wlr_dmabuf_v1_buffer"
@@ -1228,33 +1227,28 @@ milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_gamma_control_manager_v1_get_control"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "Manual non-scene gamma driving; the scene integration applies ramps automatically, so the crate never names a control object."
 
 [[waived]]
 symbol    = "wlr_gamma_control_v1"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "Manual non-scene gamma driving; the scene integration applies ramps automatically, so the crate never names a control object."
 
 [[waived]]
 symbol    = "wlr_gamma_control_v1_apply"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "Manual non-scene gamma driving; the scene integration applies ramps automatically."
 
 [[waived]]
 symbol    = "wlr_gamma_control_v1_get_color_transform"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "Manual non-scene gamma driving; also needs the color-transform type (M12)."
 
 [[waived]]
 symbol    = "wlr_gamma_control_v1_send_failed_and_destroy"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "Manual non-scene gamma driving; the scene integration signals failed itself."
 
 [[waived]]
 symbol    = "wlr_headless_add_output"
@@ -1610,20 +1604,20 @@ milestone = "M13"
 [[waived]]
 symbol    = "wlr_output_add_software_cursors_to_render_pass"
 reason    = "not-yet"
-note      = "with the render-pass follow-up (needs renderer + pass plumbing)."
+note      = "Custom frame-loop path; sound wrapping needs the reentrancy guard keyed to the output runtime-owned renderer (Runtime keeps only the raw pointer, no owning Renderer handle exists) plus a borrow model for the output-internal buffer. Revisit with a renderer-handle ownership design."
 milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_begin_render_pass"
 reason    = "not-yet"
-note      = "with the render-pass follow-up (needs renderer + pass plumbing)."
+note      = "Custom frame-loop path; sound wrapping needs the reentrancy guard keyed to the output runtime-owned renderer (Runtime keeps only the raw pointer, no owning Renderer handle exists) plus a borrow model for the output-internal buffer. Revisit with a renderer-handle ownership design."
 milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_configuration_v1_build_state"
 reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+note      = "Returns backend-commit states for wlr_backend_test/commit; wrap as one unit in M13."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_output_configure_primary_swapchain"
@@ -1633,9 +1627,8 @@ milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_output_create_global"
-reason    = "not-yet"
-note      = "with the M6-protocols slice (output-management)."
-milestone = "M6"
+reason    = "internal"
+note      = "Backend-internal advertising; backends self-manage output globals on output creation."
 
 
 
@@ -1651,9 +1644,8 @@ milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_output_destroy_global"
-reason    = "not-yet"
-note      = "with the M6-protocols slice (output-management)."
-milestone = "M6"
+reason    = "internal"
+note      = "Backend-internal advertising; backends self-manage output globals."
 
 
 
@@ -1669,18 +1661,13 @@ note      = "Reachable only by implementing a wlroots vtable from Rust; see M13.
 milestone = "M13"
 
 
-[[waived]]
-symbol    = "wlr_output_get_primary_formats"
-reason    = "not-yet"
-note      = "with M10 (drm format sets feed dmabuf feedback)."
-milestone = "M6"
 
 
 [[waived]]
 symbol    = "wlr_output_image_description"
 reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+note      = "Colorimetry image description type (M12), with set_image_description."
+milestone = "M12"
 
 [[waived]]
 symbol    = "wlr_output_impl"
@@ -1768,9 +1755,8 @@ note      = "outputs leave the layout via display teardown only; per-output remo
 
 [[waived]]
 symbol    = "wlr_output_mode_aspect_ratio"
-reason    = "not-yet"
-note      = "needs a live mode object; owned Mode copies carry no pointer."
-milestone = "M6"
+reason    = "internal"
+note      = "Descriptive field of wlr_output_mode with no consumer: Mode copies its fields without retaining aspect, and adding a field would break the published struct."
 
 
 
@@ -1780,11 +1766,6 @@ milestone = "M6"
 
 
 
-[[waived]]
-symbol    = "wlr_output_send_request_state"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 
 
@@ -1796,30 +1777,30 @@ milestone = "M6"
 [[waived]]
 symbol    = "wlr_output_state_set_color_transform"
 reason    = "not-yet"
-note      = "with M12 (needs the color-transform type)."
-milestone = "M6"
+note      = "Needs the color-transform type (M12)."
+milestone = "M12"
 
 
 [[waived]]
 symbol    = "wlr_output_state_set_image_description"
 reason    = "not-yet"
-note      = "with M12 (needs the color image-description type)."
-milestone = "M6"
+note      = "Needs the image-description type (M12)."
+milestone = "M12"
 
 
 
 [[waived]]
 symbol    = "wlr_output_state_set_signal_timeline"
 reason    = "not-yet"
-note      = "with M10 (needs the drm-syncobj timeline type)."
-milestone = "M6"
+note      = "Needs the drm-syncobj timeline type (M10)."
+milestone = "M10"
 
 
 [[waived]]
 symbol    = "wlr_output_state_set_wait_timeline"
 reason    = "not-yet"
-note      = "with M10 (needs the drm-syncobj timeline type)."
-milestone = "M6"
+note      = "Needs the drm-syncobj timeline type (M10)."
+milestone = "M10"
 
 
 
@@ -3765,9 +3746,8 @@ milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_xdg_output_v1"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
+reason    = "internal"
+note      = "wlroots-managed per-output object; compositors address xdg-output through the manager global, never this object."
 
 [[waived]]
 symbol    = "wlr_xdg_popup_from_resource"
@@ -4287,7 +4267,7 @@ milestone = "M8"
 symbol    = "wlr_output_cursor_size"
 reason    = "not-yet"
 note      = "size-list element for renderer get_cursor_sizes vtable (M13); cursor extents are read off the live object instead."
-milestone = "M6"
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_output_layer_feedback_event"

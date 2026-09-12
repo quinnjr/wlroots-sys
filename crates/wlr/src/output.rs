@@ -17,6 +17,7 @@ use crate::buffer::Buffer;
 use crate::geom::{Box2D, FBox, Subpixel, Transform};
 use crate::id::{OutputId, find_id};
 use crate::region::Region;
+use crate::render::{BufferCaps, DrmFormatSetRef};
 use crate::{Error, Result, sys};
 
 /// A wlroots output, borrowed for the duration of a handler call.
@@ -302,6 +303,62 @@ impl<'h> Output<'h> {
     pub fn schedule_frame(&self) {
         // SAFETY: the handle's lifetime guarantees the output is live.
         unsafe { sys::wlr_output_schedule_frame(self.raw.as_ptr()) };
+    }
+
+    /// Ask the compositor to apply new state, emitting the output's
+    /// `request_state` signal with the staged transaction.
+    ///
+    /// This is the emit side of
+    /// [`OutputHandler::output_state_requested`](crate::OutputHandler::output_state_requested):
+    /// backends call it when forwarding a client request, and tests call it
+    /// to exercise that path without a protocol client. `state` must stage
+    /// for this output and hold something staged.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Mismatch`] if the transaction stages another output.
+    /// [`Error::Operation`] if it stages nothing.
+    pub fn send_request_state(&self, state: &OutputState<'_, '_>) -> Result<()> {
+        if state.output.as_ptr() != self.as_ptr() {
+            return Err(Error::Mismatch("Output::send_request_state"));
+        }
+        let Some(sys_state) = state.state.as_ref() else {
+            return Err(Error::Operation(
+                "Output::send_request_state with nothing staged",
+            ));
+        };
+        // SAFETY: the transaction stages this output (checked above) and is
+        // borrowed for the call; the signal delivers synchronously to this
+        // crate's own listener, which snapshots owned scalars before
+        // returning.
+        unsafe {
+            sys::wlr_output_send_request_state(
+                self.raw.as_ptr(),
+                sys_state as *const sys::wlr_output_state,
+            )
+        };
+        Ok(())
+    }
+
+    /// The DRM formats suitable for this output's primary buffer, assuming
+    /// buffers with `caps` capabilities.
+    ///
+    /// `None` is not an error: wlroots returns null when the backend has no
+    /// format constraint, meaning every format is supported. An empty set
+    /// means the backend supports no format. The set is borrowed from the
+    /// output and must not outlive this borrow.
+    pub fn primary_formats(&self, caps: BufferCaps) -> Option<DrmFormatSetRef<'_>> {
+        // SAFETY: the handle's lifetime guarantees the output is live; the
+        // returned set (when non-null) is owned by the output, which this
+        // borrow outlives.
+        unsafe {
+            let set = sys::wlr_output_get_primary_formats(self.raw.as_ptr(), caps.bits());
+            if set.is_null() {
+                None
+            } else {
+                Some(DrmFormatSetRef::from_raw(set))
+            }
+        }
     }
 
     /// The raw output, for the in-crate callers that pass it to wlroots.
