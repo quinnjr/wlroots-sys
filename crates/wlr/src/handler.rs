@@ -7,7 +7,7 @@
 use crate::{
     ActivationToken, AxisSource, CommittedFields, CursorShape, CursorShapeDevice, DecorationMode,
     Edges, InputPopupSurfaceId, KeyEvent, LayerSurface, LayerSurfaceId, NodeId, Output, OutputId,
-    PointerAxis, Popup, PopupId, Region, SceneOutputId, Toplevel, ToplevelId, Transform,
+    PointerAxis, Popup, PopupId, PowerMode, Region, SceneOutputId, Toplevel, ToplevelId, Transform,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -371,6 +371,21 @@ pub trait OutputHandler {
     /// (icedtea harness — no wlr milestone, the gap is environmental).
     fn output_state_requested(&mut self, output: &Output<'_>, fields: CommittedFields) {
         let _ = (output, fields);
+    }
+
+    /// A client requested an output power mode. `mode` names what was asked
+    /// for, not what was applied: acting on it — disabling the output for
+    /// [`PowerMode::Off`](crate::PowerMode::Off), re-enabling for
+    /// [`PowerMode::On`](crate::PowerMode::On) — is the compositor's call,
+    /// made by committing its own state for this output.
+    ///
+    /// Added additively: it is defaulted, so an `impl OutputHandler`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    ///
+    /// Fires only with a client speaking output-power-management; e2e-only
+    /// (icedtea harness — no wlr milestone, the gap is environmental).
+    fn output_power_mode_set(&mut self, output: &Output<'_>, mode: PowerMode) {
+        let _ = (output, mode);
     }
 }
 

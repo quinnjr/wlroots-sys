@@ -1675,11 +1675,6 @@ reason    = "not-yet"
 note      = "with M10 (drm format sets feed dmabuf feedback)."
 milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_head_v1_state"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 [[waived]]
 symbol    = "wlr_output_image_description"
@@ -1777,29 +1772,9 @@ reason    = "not-yet"
 note      = "needs a live mode object; owned Mode copies carry no pointer."
 milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_power_manager_v1"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_power_manager_v1_create"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_power_v1"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
-[[waived]]
-symbol    = "wlr_output_power_v1_set_mode_event"
-reason    = "not-yet"
-note      = "Output stack completion."
-milestone = "M6"
 
 
 
@@ -4320,3 +4295,13 @@ reason    = "not-yet"
 note      = "Delivered on wlr_output_layer.events.feedback; needs per-layer listener registration in Output::create_layer with session plumbing, after M6-protocols lands (same M6 milestone, later slice)."
 milestone = "M6"
 
+
+[[waived]]
+symbol    = "wlr_output_power_v1"
+reason    = "internal"
+note      = "wlroots-owned per-output object lived in the manager list; observed through set_mode delivery (OutputHandler::output_power_mode_set), never named by the crate."
+
+[[waived]]
+symbol    = "wlr_output_head_v1_state"
+reason    = "internal"
+note      = "consumed by reference through wlr_output_head_v1_state_apply inside run_head_state; the type itself is never named."

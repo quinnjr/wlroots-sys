@@ -1519,6 +1519,13 @@ pub(crate) struct RuntimeInner {
     /// advertises the global, and a second call would advertise a second one.
     pub(crate) output_manager: RefCell<Option<NonNull<sys::wlr_output_manager_v1>>>,
 
+    /// The `zwlr_output_power_manager_v1` global, once created — lets a
+    /// client (e.g. a screen locker or power daemon) request an output power
+    /// mode. `Option`, same rationale as the other manager globals. Mode
+    /// requests arrive on [`crate::OutputHandler::output_power_mode_set`];
+    /// acting on them is the compositor's call.
+    pub(crate) power_manager: RefCell<Option<NonNull<sys::wlr_output_power_manager_v1>>>,
+
     /// The `wp_viewporter` global, once created — lets a client crop/scale
     /// its buffer via a viewport, applied by the scene at render time.
     /// `Option`, same rationale as the other manager globals.
@@ -2416,6 +2423,7 @@ impl Runtime {
                 idle_inhibitors: std::cell::Cell::new(0),
                 session_lock_manager: RefCell::new(None),
                 output_manager: RefCell::new(None),
+                power_manager: RefCell::new(None),
                 viewporter: RefCell::new(None),
                 single_pixel_buffer_manager: RefCell::new(None),
                 content_type_manager: RefCell::new(None),
@@ -7170,6 +7178,29 @@ impl Runtime {
     /// [`update_output_manager_state`](Runtime::update_output_manager_state).
     pub(crate) fn output_manager_ptr(&self) -> Option<NonNull<sys::wlr_output_manager_v1>> {
         *self.inner.output_manager.borrow()
+    }
+
+    /// Create the `zwlr_output_power_manager_v1` global, letting clients
+    /// request an output power mode. Errors if called twice.
+    pub fn create_power_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.power_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_power_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_output_power_manager_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_output_power_manager_v1_create"))?;
+        *self.inner.power_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// The `zwlr_output_power_manager_v1` manager, once created via
+    /// [`Runtime::create_power_manager`] — read by `backend.rs`'s
+    /// manager-setup block to link the `set_mode` listener.
+    pub(crate) fn power_manager_ptr(&self) -> Option<NonNull<sys::wlr_output_power_manager_v1>> {
+        *self.inner.power_manager.borrow()
     }
 
     /// Broadcast the compositor's current output layout to

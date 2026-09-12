@@ -922,6 +922,32 @@ impl AdaptiveSyncStatus {
     }
 }
 
+/// Power mode a client requested for an output: off (power saving) or on.
+/// Delivered by [`OutputHandler::output_power_mode_set`](crate::OutputHandler::output_power_mode_set);
+/// acting on it (disabling the output, say) is the compositor's call.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum PowerMode {
+    /// Output is turned off: power saving.
+    Off = 0,
+    /// Output is turned on: no power saving.
+    On = 1,
+}
+
+impl PowerMode {
+    /// Decode a raw protocol value. Unknown values (a future protocol
+    /// version adding a state) miss rather than panic: the mode names a
+    /// client request, and an unrecognised request is ignored, not acted on.
+    pub fn from_raw(value: u32) -> Option<PowerMode> {
+        Some(match value {
+            0 => PowerMode::Off,
+            1 => PowerMode::On,
+            _ => return None,
+        })
+    }
+}
+
 /// Present-event flags: how a presented frame reached the screen.
 ///
 /// Same bitmask idiom as [`BufferCaps`](crate::render::BufferCaps): private

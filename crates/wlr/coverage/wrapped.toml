@@ -2783,6 +2783,7 @@ module = "output"
 item   = "SwapchainManager"
 
 [[wrapped]]
+[[wrapped]]
 symbol = "wlr_output_event_commit"
 module = "backend"
 item   = "OutputHandler::output_committed"
@@ -2816,3 +2817,19 @@ item   = "Runtime::create_tearing_control"
 symbol = "wlr_tearing_control_manager_v1_create"
 module = "runtime"
 item   = "Runtime::create_tearing_control"
+
+[[wrapped]]
+symbol = "wlr_output_power_manager_v1"
+module = "runtime"
+item   = "Runtime::create_power_manager"
+
+[[wrapped]]
+symbol = "wlr_output_power_manager_v1_create"
+module = "runtime"
+item   = "Runtime::create_power_manager"
+
+
+[[wrapped]]
+symbol = "wlr_output_power_v1_set_mode_event"
+module = "backend"
+item   = "OutputHandler::output_power_mode_set"
