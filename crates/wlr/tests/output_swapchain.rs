@@ -1,9 +1,9 @@
 //! Output swapchain manager lifecycle, against a real headless backend.
 //!
-//! Same shape as the other per-binary `headless_env` helpers: this
-//! integration binary owns its environment (`Display::new` +
+//! This integration binary owns its environment (`Display::new` +
 //! `Backend::autocreate` + `Runtime::new` + `init_graphics`, keeping
-//! `display` a live local).
+//! `display` a live local); the setup itself is `common::headless_env`,
+//! shared with the other output test binaries.
 //!
 //! Only the lifecycle is covered here — construction, apply-with-nothing-
 //! pending, and drop. The repaint loop the manager exists for (prepare →
@@ -17,26 +17,10 @@
 //! state coverage: with nothing ever prepared there is no pending state
 //! to read back.
 
-use std::sync::Once;
-use wlr::{Backend, Display, Runtime, SwapchainManager};
+mod common;
 
-/// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
-/// any test in this binary calls `Backend::autocreate`. See `output.rs`'s
-/// identical copy for the full argument — this is a separate integration-test
-/// binary with its own environment.
-fn headless_env() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: `Once::call_once` runs this closure at most once and blocks
-        // every other caller on this `Once` until it returns, so no concurrent
-        // `getenv` can observe a torn write.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-            std::env::set_var("WLR_RENDERER", "pixman");
-        }
-    });
-}
+use common::headless_env;
+use wlr::{Backend, Display, Runtime, SwapchainManager};
 
 /// Applying with nothing pending is a no-op and dropping finishes: the
 /// lifecycle half of the manager contract. Deliberately one behaviour per
@@ -56,7 +40,7 @@ fn manager_apply_with_nothing_pending_is_noop() {
     let manager = SwapchainManager::new(&backend).expect("manager on a live backend");
     // Fresh manager, no prepare since construction: nothing pending, so apply
     // must be a no-op rather than a use of uninitialised state.
-    manager.apply();
+    manager.apply().expect("apply on a live backend");
     // Drop runs `wlr_output_swapchain_manager_finish`. Under plain `cargo
     // test` this proves no trap on the empty-list path; reaping real pending
     // swapchains needs a prepare and is M13-blocked (see the module docs).

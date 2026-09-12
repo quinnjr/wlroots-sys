@@ -1,32 +1,16 @@
 //! Output protocol helpers, against a real headless backend.
 //!
-//! Same shape as the other per-binary `headless_env` helpers: this
-//! integration binary owns its environment (`Display::new` +
+//! This integration binary owns its environment (`Display::new` +
 //! `Backend::autocreate` + `Runtime::new` + `init_graphics`, keeping
-//! `display` a live local). Handler observations are recorded on `App`
-//! and asserted after the run — never inside a handler, where a panic
-//! would abort through C.
+//! `display` a live local); the setup itself is `common::headless_env`,
+//! shared with the other output test binaries. Handler observations are
+//! recorded on `App` and asserted after the run — never inside a handler,
+//! where a panic would abort through C.
 
-use std::sync::Once;
+mod common;
+
+use common::headless_env;
 use wlr::{Backend, BufferCaps, CommittedFields, Display, Output, Runtime, Transform, Until};
-
-/// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
-/// any test in this binary calls `Backend::autocreate`. See `output.rs`'s
-/// identical copy for the full argument — this is a separate integration-test
-/// binary with its own environment.
-fn headless_env() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: `Once::call_once` runs this closure at most once and blocks
-        // every other caller on this `Once` until it returns, so no concurrent
-        // `getenv` can observe a torn write.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-            std::env::set_var("WLR_RENDERER", "pixman");
-        }
-    });
-}
 
 #[derive(Default)]
 struct Observed {
@@ -181,13 +165,22 @@ fn primary_formats_call_is_sound() {
                 let first = output.primary_formats(BufferCaps::DMABUF);
                 let second = output.primary_formats(BufferCaps::DMABUF);
                 // Both calls must agree: the constraint is backend state,
-                // not per-call allocation luck. `is_ok` on both pins the
-                // copy-out too — an allocation failure would surface here.
-                self.stable = Some(
-                    first.is_ok()
-                        && second.is_ok()
-                        && first.unwrap().is_none() == second.unwrap().is_none(),
-                );
+                // not per-call allocation luck. `None` agrees with `None`;
+                // two `Some` sets agree when their owned contents match —
+                // each entry copied out via `to_owned` (`DrmFormat` is
+                // `PartialEq`; `DrmFormatSet` itself is not). This pins
+                // determinism; the copy-out is pinned by the owned
+                // `Result<Option<DrmFormatSet>>` signature — a borrow would
+                // not survive past the call.
+                self.stable = Some(match (first, second) {
+                    (Ok(None), Ok(None)) => true,
+                    (Ok(Some(a)), Ok(Some(b))) => {
+                        let a: Vec<wlr::DrmFormat> = a.iter().map(|f| f.to_owned()).collect();
+                        let b: Vec<wlr::DrmFormat> = b.iter().map(|f| f.to_owned()).collect();
+                        a == b
+                    }
+                    _ => false,
+                });
             }
         }
     }

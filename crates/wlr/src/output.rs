@@ -8,9 +8,11 @@
 //! Anything a consumer needs to remember goes in their own state, keyed by
 //! [`OutputId`].
 
+use std::cell::Cell;
 use std::ffi::{CStr, CString};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
+use std::rc::Rc;
 
 use crate::backend::Backend;
 use crate::buffer::Buffer;
@@ -333,11 +335,13 @@ impl<'h> Output<'h> {
         }
         // SAFETY: the transaction stages this output (checked above),
         // holds staged fields (checked above), and is borrowed for the
-        // call. Delivery is synchronous — no pointer escapes the emission —
-        // and currently no listener is registered in this tree at all, so
-        // the emission is a no-op. Any listener added later must snapshot
-        // owned scalars during the call and retain nothing: the state and
-        // its staged interiors die with this borrow.
+        // call. Delivery is synchronous — no pointer escapes the emission.
+        // The per-output `request_state` listener (`on_output_request_state`
+        // in backend.rs) snapshots only the `committed` mask synchronously
+        // during emission; the deferred event carries owned `(OutputId,
+        // CommittedFields)` scalars. Any future listener must
+        // snapshot-and-retain-nothing: the state and its staged interiors
+        // die with this borrow.
         unsafe {
             sys::wlr_output_send_request_state(
                 self.raw.as_ptr(),
@@ -860,6 +864,10 @@ pub struct LayerState<'l, 'o> {
 /// printable beyond the backend pointer this borrows.
 pub struct SwapchainManager<'b> {
     raw: Box<sys::wlr_output_swapchain_manager>,
+    /// The backend's liveness flag, cloned at construction. A borrow is not
+    /// liveness (an unplugged backend is freed mid-dispatch with Rust
+    /// borrows still live), so every use re-checks instead of trusting `'b`.
+    alive: Rc<Cell<bool>>,
     _backend: PhantomData<&'b ()>,
 }
 
@@ -878,29 +886,51 @@ impl<'b> SwapchainManager<'b> {
     /// other constructor that takes a [`Backend`].
     pub fn new(backend: &'b Backend<'_>) -> Result<SwapchainManager<'b>> {
         backend.alive_or_err()?;
+        Ok(Self::new_inner(backend.as_ptr(), backend.alive_flag()))
+    }
+
+    /// Build a manager from a raw backend pointer plus its liveness flag.
+    ///
+    /// `new` is the checked entry point; this split exists so tests can
+    /// inject the flag (including a dead one) without a backend. Takes the
+    /// flag rather than reading liveness off anything else, so a manager
+    /// built here observes later backend death exactly like one from `new`.
+    fn new_inner(
+        backend_ptr: *mut sys::wlr_backend,
+        alive: Rc<Cell<bool>>,
+    ) -> SwapchainManager<'b> {
         // SAFETY: `init` writes every field (`backend` plus the outputs
-        // array), so assuming initialisation afterwards is sound; the
-        // backend was just checked live, and the borrow guarantees the
-        // stored pointer stays live for `'b`.
+        // array), so assuming initialisation afterwards is sound. The caller
+        // guarantees the stored pointer stays live for `'b` — `new` via the
+        // borrow plus a just-passed liveness check, tests via never touching
+        // the backend while the flag denies liveness (every use re-checks
+        // the flag before reaching the backend).
         let mut raw = Box::<sys::wlr_output_swapchain_manager>::new_uninit();
         unsafe {
-            sys::wlr_output_swapchain_manager_init(raw.as_mut_ptr(), backend.as_ptr());
-            Ok(SwapchainManager {
+            sys::wlr_output_swapchain_manager_init(raw.as_mut_ptr(), backend_ptr);
+            SwapchainManager {
                 raw: raw.assume_init(),
+                alive,
                 _backend: PhantomData,
-            })
+            }
         }
     }
 
     /// The pending swapchain for `output`, if a prepared manager has one.
     ///
-    /// Null — a disabled output, or one the last prepare did not cover —
-    /// reports as `None` rather than a null handle. A `None` for an
-    /// *enabled* output means the caller is at fault (no successful prepare
-    /// covering it, or a prepare error was ignored), not that there is
-    /// nothing to paint; likewise an output from a different backend misses
-    /// the lookup and reads as `None`, which is a caller bug, not
-    /// "disabled".
+    /// Null reports as `None` rather than a null handle, for one of four
+    /// reasons: the output is disabled; no prepare covered it; a prepare
+    /// error was ignored; or the output belongs to a foreign backend (a
+    /// caller bug, not "disabled"). A `None` for an *enabled* output of a
+    /// live backend means the caller is at fault, not that there is nothing
+    /// to paint. A dead backend is not a fifth `None` reason — it reports
+    /// as [`Error::Destroyed`], so a dead backend can never pass for "an
+    /// output with nothing pending".
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Destroyed`] if the backend died after construction — checked
+    /// on every call, because the borrow alone cannot prove liveness.
     ///
     /// # Safety
     ///
@@ -912,36 +942,61 @@ impl<'b> SwapchainManager<'b> {
     /// must be live for the call, which its borrow guarantees. The returned
     /// ref borrows the manager, not the output: wlroots retains no output
     /// pointer, and the ref cannot outlive the manager that owns the
-    /// swapchain.
+    /// swapchain. A dead backend is not a safety concern here — the
+    /// liveness check runs before any FFI, so it reports as an error
+    /// rather than reaching wlroots at all.
     ///
     /// When M13 wraps `prepare`, it must take `&mut self` (or otherwise
-    /// invalidate live refs): prepare is the one call that can reap and
-    /// replace manager-owned swapchains behind an outstanding
-    /// [`SwapchainRef`](crate::SwapchainRef).
-    pub unsafe fn get_swapchain(&self, output: &Output<'_>) -> Option<crate::SwapchainRef<'_>> {
-        // SAFETY: both handles are live borrows, and the caller guarantees a
-        // covering prepare ran; the non-null return is then a manager-owned
-        // swapchain, tied to the manager borrow.
+    /// invalidate live refs): prepare and `apply` can both reap
+    /// manager-owned swapchains behind an outstanding
+    /// [`SwapchainRef`](crate::SwapchainRef) (apply destroys replaced
+    /// swapchains), so a live ref must exclude `apply` too — `apply` will
+    /// need `&mut self` (or ref invalidation) no later than M13.
+    pub unsafe fn get_swapchain(
+        &self,
+        output: &Output<'_>,
+    ) -> Result<Option<crate::SwapchainRef<'_>>> {
+        if !self.alive.get() {
+            return Err(Error::Destroyed("wlr_backend"));
+        }
+        // SAFETY: both handles are live borrows (the backend was just
+        // checked live above), and the caller guarantees a covering prepare
+        // ran; the non-null return is then a manager-owned swapchain, tied
+        // to the manager borrow.
         unsafe {
             let raw =
                 sys::wlr_output_swapchain_manager_get_swapchain(self.as_ptr(), output.as_ptr());
-            NonNull::new(raw).map(|raw| crate::SwapchainRef::from_raw(raw))
+            Ok(NonNull::new(raw).map(|raw| crate::SwapchainRef::from_raw(raw)))
         }
     }
 
     /// Swap in the swapchains the last successful prepare allocated.
     ///
     /// Called after a successful backend commit; with nothing pending it is a
-    /// no-op. Takes `&self` rather than `&mut self`, matching the crate's
-    /// mutating-output calls ([`Output::commit`](Output::commit) commits
-    /// state through `&self` the same way): wlroots takes a bare pointer and
-    /// interior-mutates through it, and the documented call order (prepare,
-    /// commit, apply) is what serialises it, not exclusivity here. The type
-    /// is thread-bound (see the `!Send`/`!Sync` asserts), so no second
-    /// thread can interleave through the same borrow.
-    pub fn apply(&self) {
-        // SAFETY: this value owns a live, initialised manager.
+    /// no-op. Like prepare, apply can reap manager-owned swapchains behind
+    /// a live [`SwapchainRef`](crate::SwapchainRef) (it destroys replaced
+    /// swapchains), so `apply` will need `&mut self` (or ref invalidation)
+    /// no later than M13. Takes `&self` rather than `&mut self` for now,
+    /// matching the crate's mutating-output calls
+    /// ([`Output::commit`](Output::commit) commits state through `&self` the
+    /// same way): wlroots takes a bare pointer and interior-mutates through
+    /// it, and the documented call order (prepare, commit, apply) is what
+    /// serialises it, not exclusivity here. The type is thread-bound (see
+    /// the `!Send`/`!Sync` asserts), so no second thread can interleave
+    /// through the same borrow.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Destroyed`] if the backend died after construction — checked
+    /// on every call, because the borrow alone cannot prove liveness.
+    pub fn apply(&self) -> Result<()> {
+        if !self.alive.get() {
+            return Err(Error::Destroyed("wlr_backend"));
+        }
+        // SAFETY: this value owns a live, initialised manager whose backend
+        // was just checked live on this thread.
         unsafe { sys::wlr_output_swapchain_manager_apply(self.as_ptr()) };
+        Ok(())
     }
 
     fn as_ptr(&self) -> *mut sys::wlr_output_swapchain_manager {
@@ -960,8 +1015,15 @@ impl<'b> SwapchainManager<'b> {
 
 impl Drop for SwapchainManager<'_> {
     fn drop(&mut self) {
-        // SAFETY: this value owns the initialised manager; `finish` undoes
-        // exactly what `init` did, and runs before the backend borrow ends.
+        if !self.alive.get() {
+            // The backend died first: walking its outputs to destroy
+            // swapchains would be use-after-free. Skipping `finish` leaks
+            // the manager's own empty bookkeeping, which dies with the
+            // backend anyway — the safe direction.
+            return;
+        }
+        // SAFETY: this value owns the initialised manager whose backend is
+        // live (checked above); `finish` undoes exactly what `init` did.
         unsafe { sys::wlr_output_swapchain_manager_finish(self.as_ptr()) };
     }
 }
@@ -997,9 +1059,9 @@ impl AdaptiveSyncStatus {
 /// acting on it (disabling the output, say) is the compositor's call.
 ///
 /// No `Default`: a mode names a client request with no safe implicit value.
-/// Deliberately parallel to [`AdaptiveSyncStatus::from_raw`](AdaptiveSyncStatus::from_raw),
-/// not shared with it: unknown statuses degrade, unknown requests are
-/// ignored — different miss policies for different domains.
+/// Like [`AdaptiveSyncStatus::from_raw`](AdaptiveSyncStatus::from_raw),
+/// unknown values miss (`None`); unlike that status type, there is no
+/// degraded value to default to, so none is offered.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -1211,6 +1273,19 @@ impl<'a, 'b> OutputState<'a, 'b> {
                         array: guard.array.clone(),
                         _entries: guard._entries.clone(),
                     });
+                    // Reinstall the clone: the copy above is shallow and
+                    // leaves `dst` pointing at SRC's array, which dangles
+                    // the moment src drops first. (When src staged no
+                    // layers the copy already nulled the pointer, so only
+                    // the `Some` case needs reinstalling — and calling
+                    // `set_layers` there would spuriously stage LAYERS.)
+                    if let Some(new_guard) = self.staged_layers.as_mut() {
+                        sys::wlr_output_state_set_layers(
+                            dst as *mut _,
+                            new_guard.array.as_mut_ptr(),
+                            new_guard.array.len(),
+                        );
+                    }
                 }
                 ok
             } else {
@@ -1653,6 +1728,74 @@ mod tests {
         );
     }
 
+    /// `copy_from` must repoint the destination at its own layers clone.
+    /// `wlr_output_state_copy` is shallow: without reinstalling, `dst`
+    /// keeps pointing at SRC's array, which dangles the moment src drops
+    /// first and poisons any later commit of dst.
+    #[test]
+    fn copy_from_repoints_layers_at_the_clone() {
+        let a_out = ScratchOutput::new();
+        let b_out = ScratchOutput::new();
+        // SAFETY: as in `from_raw_wraps_the_output_it_was_given`.
+        let ha = unsafe { Output::from_raw(a_out.0) };
+        let hb = unsafe { Output::from_raw(b_out.0) };
+        let region = Region::new();
+        // `create_layer` links into the output's `layers` list, which is
+        // zeroed — not initialised — on a scratch output; make it a valid
+        // empty head first (`wl_list` is `{prev, next}` self-pointers).
+        unsafe {
+            (*a_out.0).layers.prev = &raw mut (*a_out.0).layers;
+            (*a_out.0).layers.next = &raw mut (*a_out.0).layers;
+        }
+        let layer = ha.create_layer().expect("scratch layer stages");
+        let entry = LayerState {
+            layer: &layer,
+            buffer: None,
+            src: FBox::new(0.0, 0.0, 8.0, 8.0),
+            dst: Box2D::new(0, 0, 8, 8),
+            damage: &region,
+            accepted: true,
+        };
+        let mut a = ha.state();
+        a.set_layers(std::slice::from_ref(&entry));
+        let a_array = a
+            .staged_layers
+            .as_ref()
+            .expect("layers staged")
+            .array
+            .as_ptr();
+
+        let mut b = hb.state();
+        assert!(b.copy_from(&a), "copy of a staged transaction must run");
+        let b_backing = b
+            .staged_layers
+            .as_ref()
+            .expect("copy carries layers")
+            .array
+            .as_ptr();
+        let b_state_ptr = b.state.as_ref().expect("dst live").layers as *const _;
+        // The destination's C state must name its OWN guard's array —
+        // pre-fix it still named src's (assert would read freed heap).
+        assert_eq!(
+            b_state_ptr, b_backing,
+            "dst state must point at its own clone, not src's array"
+        );
+        assert_ne!(
+            b_state_ptr, a_array,
+            "dst state must not alias src's array allocation"
+        );
+
+        // Dropping src first must leave dst fully backed by its live guard.
+        drop(a);
+        let b_state_ptr = b.state.as_ref().expect("dst live").layers as *const _;
+        assert_eq!(
+            b_state_ptr, b_backing,
+            "dst state must survive src's drop via its own guard"
+        );
+        drop(b);
+        layer.destroy();
+    }
+
     /// Pins the panic *message*, not just that `id()` panics: whoever wires
     /// up the real dispatch-time constructor will read this message the
     /// moment they forget to attach an id addon first, so it must name what
@@ -1906,5 +2049,66 @@ mod tests {
             0xFFFF,
             "unknown future bits must survive the round trip"
         );
+    }
+
+    /// The three dead-backend guards fail safe without a backend: `apply`
+    /// refuses, `get_swapchain` refuses (rather than conflating death with
+    /// "nothing pending"), and drop skips `finish` instead of walking a
+    /// dead backend's outputs.
+    ///
+    /// Built via `new_inner` with a null backend pointer plus a dead flag —
+    /// sound here only because every guarded path checks the flag before
+    /// touching the backend, so the null is stored by `init` and never
+    /// dereferenced. If `init`-with-null ever traps, this test (not the
+    /// guards) is what must go, in favour of a real-backend teardown
+    /// harness.
+    #[test]
+    fn dead_backend_manager_refuses_and_drops_quietly() {
+        // SAFETY: `init` only stores the pointer plus initialises the
+        // outputs array (no dereference — see the disassembly review noted
+        // in `new_inner`'s callers), and the dead flag keeps every later
+        // use from reaching the backend.
+        let manager = SwapchainManager::new_inner(std::ptr::null_mut(), Rc::new(Cell::new(false)));
+        assert!(
+            matches!(manager.apply(), Err(Error::Destroyed(_))),
+            "apply on a dead backend must refuse as destroyed"
+        );
+
+        let output = ScratchOutput::new();
+        // SAFETY: `output.0` is live with an initialised addon set, and the
+        // handle does not outlive this function. The manager side never
+        // reaches FFI: the dead flag returns first.
+        let handle = unsafe { Output::from_raw(output.0) };
+        assert!(
+            matches!(
+                // SAFETY: as above; the dead-backend early return runs
+                // before the prepare-order precondition could matter.
+                unsafe { manager.get_swapchain(&handle) },
+                Err(Error::Destroyed(_))
+            ),
+            "get_swapchain on a dead backend must refuse as destroyed, \
+             not report None for nothing pending"
+        );
+        // Drop runs here: a dead flag must skip `finish` (walking the
+        // backend's outputs would be use-after-free). Reaching this line
+        // without a trap is the assertion.
+        drop(manager);
+    }
+
+    /// The live-flag mirror: with nothing ever prepared, apply on an empty
+    /// manager is a no-op `Ok` and drop finishes — the same lifecycle the
+    /// `output_swapchain` integration smoke proves against a real backend,
+    /// pinned here without one.
+    #[test]
+    fn live_flag_manager_apply_with_nothing_pending_is_noop() {
+        // SAFETY: as in the dead-backend test — `init` stores the null
+        // pointer without dereferencing it, and an empty manager's apply
+        // and finish walk only the (empty) outputs list, never the backend.
+        let manager = SwapchainManager::new_inner(std::ptr::null_mut(), Rc::new(Cell::new(true)));
+        assert!(
+            manager.apply().is_ok(),
+            "apply with nothing pending on a live flag must be a no-op Ok"
+        );
+        drop(manager);
     }
 }

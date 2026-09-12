@@ -1,53 +1,35 @@
 //! Output signal events, against a real headless backend.
 //!
-//! Same shape as the other per-binary `headless_env` helpers: this
+//! The setup itself is `common::headless_env`, shared with the other output
+//! test binaries: this
 //! integration binary owns its environment (`Display::new` +
 //! `Backend::autocreate` + `Runtime::new` + `init_graphics`, keeping
 //! `display` a live local). Handler observations are recorded on `App`
 //! and asserted after the run — never inside a handler, where a panic
 //! would abort through C.
 //!
-//! Commit and precommit fire from an in-harness commit; damage fires from
+//! Commit and precommit fire from in-harness commits; damage fires from
 //! moving a software cursor (per the signal's own doc: "software cursors
-//! or backend-specific logic"). Bind and request-state need a Wayland
-//! client (binding the output global, speaking output-management), which
-//! no harness binary has — they are wired and ledger-claimed, but e2e-only
-//! (icedtea harness — no wlr milestone, the gap is environmental, not API).
-//!
-//! Keep `headless_env` and `argb` in sync with `tests/output.rs`: each
-//! integration binary owns its environment, so these are intentional
-//! copies, and a skew between them presents as backend flakiness.
+//! or backend-specific logic" — staged commit damage does NOT emit it).
+//! Cursor damage flushes the cursor's current position rather than one
+//! event per move, so moves are not independent stimuli: the union rule
+//! for coalesced emissions is pinned by the `union_into` unit test in
+//! `backend.rs`, and this binary proves delivery carries the live damage.
+//! Bind and request-state need a Wayland client (binding the output
+//! global, speaking output-management), which no harness binary has —
+//! they are wired and ledger-claimed, but e2e-only (icedtea harness — no
+//! wlr milestone, the gap is environmental, not API).
 
-use std::sync::Once;
 use wlr::{
     Allocator, Backend, Box2D, CommittedFields, Display, Output, OwnedBuffer, Region, Renderer,
     Runtime, Until,
 };
 
-/// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
-/// any test in this binary calls `Backend::autocreate`. See `output.rs`'s
-/// identical copy for the full argument — this is a separate integration-test
-/// binary with its own environment.
-fn headless_env() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: `Once::call_once` runs this closure at most once and blocks
-        // every other caller on this `Once` until it returns, so no concurrent
-        // `getenv` can observe a torn write.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-            std::env::set_var("WLR_RENDERER", "pixman");
-        }
-    });
-}
-
-/// The linear ARGB8888 format cursor buffers are allocated in — the same
-/// choice as `tests/output.rs`'s `argb()`, so the pixman allocator hands out
-/// mappable buffers a cursor can take.
-fn argb() -> wlr::DrmFormat {
-    wlr::DrmFormat::new(wlr::FourCc::ARGB8888, [wlr::Modifier::LINEAR])
-}
+mod common;
+#[path = "common/format.rs"]
+mod format;
+use common::headless_env;
+use format::argb;
 
 /// One commit-family delivery, in arrival order. Recording the sequence
 /// (not just the last of each kind) is what makes a swapped
@@ -72,7 +54,20 @@ struct Observed {
 struct App<'a> {
     cursor_buf: OwnedBuffer<'a>,
     runtime: Runtime,
+    /// When still, no cursor is shown: no `output_damaged` may fire.
+    /// Commits still emit (wlroots signals empty regions), which the
+    /// dispatch filters before delivery.
+    cursor: Cursor,
     seen: Observed,
+}
+
+/// Whether the harness moves the software cursor. A plain `bool` at the
+/// `run_app` boundary reads as blindness at both call sites (`true`/`false`
+/// with no meaning), so the two cases are named.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cursor {
+    Moved,
+    Still,
 }
 
 impl wlr::OutputHandler for App<'_> {
@@ -85,10 +80,9 @@ impl wlr::OutputHandler for App<'_> {
         st.set_custom_mode(800, 600, 60_000);
         self.seen.setup_commit_ok = Some(st.commit().is_ok());
 
-        // Moving a software cursor damages the output, which delivers
-        // `output_damaged` below. Needs render init first, as the cursor
-        // test in `output.rs` documents.
-        if self.runtime.init_output(output).is_ok() {
+        // A single cursor move to a known hotspot. Needs render init
+        // first, as the cursor test in `output.rs` documents.
+        if self.cursor == Cursor::Moved && self.runtime.init_output(output).is_ok() {
             let buf: &wlr::Buffer = &self.cursor_buf;
             if let Some(mut cursor) = output.create_cursor() {
                 cursor.set_buffer(buf, 1, 1);
@@ -126,13 +120,20 @@ impl wlr::SeatHandler for App<'_> {}
 impl wlr::FdHandler for App<'_> {}
 impl wlr::LoopHandler for App<'_> {}
 
-/// Committing fires precommit then commit with the staged mask and live
-/// timestamps, and moving the software cursor delivers damage covering the
-/// cursor. Histories (not last-write slots) so extra backend commits on a
-/// future wlroots cannot flake this: the staged transaction must appear in
-/// order, whatever else fires around it.
-#[test]
-fn output_signal_events_fire_with_staged_payloads() {
+/// Whether any damage delivery covers `(x, y)` with at least the 8x8 cursor
+/// image: the box must contain the point and be at least 8x8.
+fn covers_hotspot(delivered: &[Box2D], x: i32, y: i32) -> bool {
+    delivered.iter().any(|b| {
+        b.width >= 8
+            && b.height >= 8
+            && b.x <= x
+            && b.y <= y
+            && b.x + b.width >= x
+            && b.y + b.height >= y
+    })
+}
+
+fn run_app(cursor: Cursor) -> Observed {
     headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
@@ -149,13 +150,23 @@ fn output_signal_events_fire_with_staged_payloads() {
     let mut app = App {
         cursor_buf,
         runtime: runtime.clone(),
+        cursor,
         seen: Observed::default(),
     };
     backend
         .run_all(&display, &mut app, &runtime, Until::Turns(4))
         .expect("run_all");
+    app.seen
+}
 
-    let seen = app.seen;
+/// Committing fires precommit then commit with the staged mask and live
+/// timestamps, and the cursor move delivers damage covering its hotspot.
+/// Histories (not last-write slots) so extra backend commits on a future
+/// wlroots cannot flake this: the staged transaction must appear in order,
+/// whatever else fires around it.
+#[test]
+fn output_signal_events_fire_with_staged_payloads() {
+    let seen = run_app(Cursor::Moved);
     assert_eq!(
         seen.setup_commit_ok,
         Some(true),
@@ -183,17 +194,26 @@ fn output_signal_events_fire_with_staged_payloads() {
         "cursor move must succeed for damage to mean anything"
     );
     assert!(
-        !seen.damaged.is_empty(),
-        "damage must be delivered at least once"
+        covers_hotspot(&seen.damaged, 10, 20),
+        "a delivery must cover the cursor hotspot (10, 20) with at least the 8x8 image, got {:?}",
+        seen.damaged
+    );
+}
+
+/// No cursor movement means no damage delivery: the setup commit's empty
+/// damage emission is filtered before delivery rather than waking the
+/// compositor for an empty region.
+#[test]
+fn output_damage_stays_quiet_without_cursor_movement() {
+    let seen = run_app(Cursor::Still);
+    assert_eq!(
+        seen.setup_commit_ok,
+        Some(true),
+        "setup commit must succeed on headless"
     );
     assert!(
-        seen.damaged.iter().any(|b| b.width >= 8
-            && b.height >= 8
-            && b.x <= 10
-            && b.y <= 20
-            && b.x + b.width >= 10
-            && b.y + b.height >= 20),
-        "a delivery must cover the cursor hotspot (10, 20) with at least the 8x8 image, got {:?}",
+        seen.damaged.is_empty(),
+        "no cursor movement must mean no damage delivered, got {:?}",
         seen.damaged
     );
 }
@@ -232,11 +252,11 @@ fn tearing_control_global_constructs_once() {
     runtime.init_graphics(&display, &backend).expect("graphics");
 
     runtime
-        .create_tearing_control(&display, 1)
+        .create_tearing_control_manager(&display, 1)
         .expect("tearing control creates");
     assert!(
         matches!(
-            runtime.create_tearing_control(&display, 1),
+            runtime.create_tearing_control_manager(&display, 1),
             Err(wlr::Error::Operation(_))
         ),
         "second tearing control create must refuse as a double-create"

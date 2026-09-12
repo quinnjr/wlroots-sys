@@ -1604,13 +1604,13 @@ milestone = "M13"
 [[waived]]
 symbol    = "wlr_output_add_software_cursors_to_render_pass"
 reason    = "not-yet"
-note      = "Custom frame-loop path; sound wrapping needs the reentrancy guard keyed to the output runtime-owned renderer (Runtime keeps only the raw pointer, no owning Renderer handle exists) plus a borrow model for the output-internal buffer. Revisit with a renderer-handle ownership design. (Blocked on renderer-handle ownership design, M13 scope.)"
+note      = "Custom frame-loop path; sound wrapping needs the reentrancy guard keyed to the output runtime-owned renderer (Runtime keeps only the raw pointer, no owning Renderer handle exists) plus a borrow model for the output-internal buffer. Revisit with a renderer-handle ownership design (M13)."
 milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_output_begin_render_pass"
 reason    = "not-yet"
-note      = "Custom frame-loop path; sound wrapping needs the reentrancy guard keyed to the output runtime-owned renderer (Runtime keeps only the raw pointer, no owning Renderer handle exists) plus a borrow model for the output-internal buffer. Revisit with a renderer-handle ownership design. (Blocked on renderer-handle ownership design, M13 scope.)"
+note      = "Custom frame-loop path; sound wrapping needs the reentrancy guard keyed to the output runtime-owned renderer (Runtime keeps only the raw pointer, no owning Renderer handle exists) plus a borrow model for the output-internal buffer. Revisit with a renderer-handle ownership design (M13)."
 milestone = "M13"
 
 [[waived]]
@@ -1810,7 +1810,7 @@ milestone = "M10"
 [[waived]]
 symbol    = "wlr_output_swapchain_manager_prepare"
 reason    = "not-yet"
-note      = "Backend-commit flow: takes wlr_backend_output_state array plus wlr_backend_commit; wrap as one unit in M13."
+note      = "Backend-commit flow: takes wlr_backend_output_state array plus wlr_backend_commit; wrap as one unit in M13 (see SwapchainManager docs for the &mut self requirement)."
 milestone = "M13"
 
 [[waived]]
@@ -4272,14 +4272,14 @@ milestone = "M13"
 [[waived]]
 symbol    = "wlr_output_layer_feedback_event"
 reason    = "not-yet"
-note      = "Delivered on wlr_output_layer.events.feedback; needs per-layer listener registration in Output::create_layer with session plumbing, after M6-protocols lands (same M6 milestone, later slice)."
-milestone = "M6"
+note      = "Delivered on wlr_output_layer.events.feedback; M6-protocols landed; still needs per-layer listener registration in Output::create_layer with session plumbing — (M13 interfaces scope)."
+milestone = "M13"
 
 
 [[waived]]
 symbol    = "wlr_output_power_v1"
 reason    = "internal"
-note      = "wlroots-owned per-output object lived in the manager list; observed through set_mode delivery (OutputHandler::output_power_mode_set), never named by the crate."
+note      = "wlroots-owned per-output object lived in the manager list; observed through set_mode delivery (OutputHandler::output_power_mode_requested), never named by the crate."
 
 [[waived]]
 symbol    = "wlr_output_head_v1_state"

@@ -2762,6 +2762,7 @@ symbol = "wlr_output_swapchain_manager_init"
 module = "output"
 item   = "SwapchainManager::new"
 
+# e2e-only until M13 (prepare): reaching this needs the M13 prepare wrapper, so no harness run acquires yet.
 [[wrapped]]
 symbol = "wlr_output_swapchain_manager_get_swapchain"
 module = "output"
@@ -2810,12 +2811,12 @@ item   = "OutputHandler::output_state_requested"
 [[wrapped]]
 symbol = "wlr_tearing_control_manager_v1"
 module = "runtime"
-item   = "Runtime::create_tearing_control"
+item   = "Runtime::create_tearing_control_manager"
 
 [[wrapped]]
 symbol = "wlr_tearing_control_manager_v1_create"
 module = "runtime"
-item   = "Runtime::create_tearing_control"
+item   = "Runtime::create_tearing_control_manager"
 
 [[wrapped]]
 symbol = "wlr_output_power_manager_v1"

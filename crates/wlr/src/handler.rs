@@ -378,7 +378,9 @@ pub trait OutputHandler {
     /// [`PowerMode::Off`](crate::PowerMode::Off), re-enabling for
     /// [`PowerMode::On`](crate::PowerMode::On) — is the compositor's call,
     /// made by committing its own state for the output it tracks under this
-    /// id.
+    /// id. It takes an [`OutputId`] rather than an `&Output` by convention:
+    /// manager-scoped signals (power, gamma) pass ids while output-scoped
+    /// signals pass handles.
     ///
     /// Added additively: it is defaulted, so an `impl OutputHandler`
     /// written against any earlier 0.20.x still compiles unchanged.
