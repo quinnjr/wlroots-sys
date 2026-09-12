@@ -2516,9 +2516,13 @@ impl<'d> Backend<'d> {
             // cursor and resets its mapping/image tracking, so no entry
             // names an object the dying seat takes with it — the cursor was
             // created with the seat and dies with it, and a `wlr_cursor`
-            // exposes no per-object destroy signal of its own. Same
-            // ownership and liveness reasoning as the seat signals above.
+            // exposes no per-object destroy signal of its own.
             regs.push(unsafe {
+                // SAFETY: `create_seat` returned a non-null `wlr_seat` owned
+                // by the display, which this call requires to outlive it —
+                // same ownership and liveness reasoning as the seat signals
+                // above, so a null liveness flag is correct. `session` is
+                // paired with `on_seat_destroy` at the same `S`, as above.
                 Registration::link_bare(
                     &raw mut (*seat.as_ptr()).events.destroy,
                     on_seat_destroy::<S>,
