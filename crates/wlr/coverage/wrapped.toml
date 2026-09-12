@@ -2998,12 +2998,12 @@ item   = "SeatHandler::touch_cancelled"
 [[wrapped]]
 symbol = "wlr_seat_touch_notify_frame"
 module = "runtime"
-item   = "SeatHandler::touch_down"
+item   = "TouchFrame::send_frame"
 
 [[wrapped]]
 symbol = "wlr_seat_touch_get_point"
 module = "runtime"
-item   = "SeatHandler::touch_cancelled"
+item   = "TouchFrame::send_cancel"
 
 [[wrapped]]
 symbol = "wlr_seat_touch_has_grab"

@@ -474,6 +474,87 @@ pre-map commit listener that calls the new
 `Runtime::schedule_frame_all(&self) -> usize` so XWayland's handshake frame
 callback is answered. Bounded to the handshake commits; never busy-loops.
 
+## 0.20.35 — M7 pointer/cursor/touch batch
+
+The last of the input stack: a compositor can read its cursor, touch and
+switch state as owned snapshots, order its pointer/touch/gesture sends
+through session-typed tokens, and hear constraint, gesture, touch and
+switch events as id-only handler methods — and keeps paying nothing for
+any of it. The wire behavior is byte-identical to 0.20.34. The icedtea
+compositor consumes the whole batch (cursor attach/map/image, constraint
+gate, touch/gesture/switch plumbing) with both-sides e2e proving the API
+before this publish.
+
+### What you get
+
+- **Cursor depth.** `CursorState` (mapped output/region, image/buffer/
+  surface attachment, hotspot, warp position — owned fields, null-guarded)
+  through `Runtime::{cursor_state, try_cursor}`, `CursorId`/`XcursorManagerId`
+  handles, and `load_xcursor_theme`. Images go through the one funnel —
+  `wlr_cursor_set_xcursor` via `set_cursor_shape`/`ensure_cursor_image` —
+  so the snapshot cannot drift from what wlroots shows. Every device
+  attaches to the whole layout at `create_seat`; per-output mapping is
+  deliberately not exposed (it would strand multi-output cursors).
+- **Pointer protocols.** `PointerFrame` is the only path to
+  `send_motion`/`send_button`, consumed by `finish` (the only path to
+  `send_frame`); `GesturePhase` carries begin→update→end. Constraints
+  settle through `Runtime::constraint_state_for_surface` (reads the
+  constraint's settled `current` generation) with
+  `pointer_constraint_committed` / `gesture_began` / `gesture_ended` /
+  `relative_motion` arriving as id-only events on defaulted handler
+  methods. Relative motion broadcasts through the gestures manager, so
+  per-client relative-pointer objects are never resolved.
+- **Touch + switch + seat core.** `TouchState` (live point list plus grab
+  flag — a table was rejected because points die on paths no listener
+  sees) and `SwitchState` (type, state, lid-close derived) through
+  `Runtime::{touch_state, switch_state}`; `TouchFrame` is the only path to
+  `send_down`/`send_motion`/`send_up`, consumed by `send_frame`/
+  `send_cancel` (which resolves the point's client, stale-safe).
+  `TouchDown`/`TouchUp`/`TouchCancelled`/`SwitchToggled` arrive id-only.
+  The seat-core remainder ships as thin wrappers: `set_seat_name`,
+  `destroy_seat` (seat *and* cursor, per the crate's own lifecycle), and
+  the client/serial queries.
+- **No grab vtables, no direct sends.** The crate never takes a wlroots
+  seat grab — the implicit press-grab is wlroots-automatic (modeled
+  crate-side as `PointerGrab` for drag continuation) — and never issues
+  the grab-bypassing `send_*` seats calls: every forward goes through the
+  grab-respecting `notify_*` variants behind the tokens above.
+
+### Additive
+
+No trait was added and no supertrait changed. The new hooks live on the
+existing `SeatHandler` (and gesture/constraint-adjacent traits) as
+defaulted no-ops, so an empty `SeatHandler` impl written against 0.20.34
+still compiles and still satisfies `Handlers`. The new `Event` variants
+ride the `pub(crate)` enum — internal dispatch, not public surface — and
+`PointerFrame`/`TouchFrame`/`GesturePhase` are `pub(crate)` tokens, not
+public types. An integration test asserts the additivity as a
+compile-time claim.
+
+### Coverage
+
+Forty-seven symbols moved waived → wrapped: the cursor pair
+(`wlr_cursor_map_to_output`, `wlr_cursor_map_to_region`), the
+pointer-gestures manager set (`wlr_pointer_gestures_v1` + `_create`,
+`_send_hold/pinch/swipe_begin/update/end`), the gesture event types, the
+xcursor theme trio, the touch set (`wlr_touch`,
+`wlr_touch_from_input_device`, the down/motion/up/cancel events, the
+touch notify trio plus `get_point` and `has_grab`), the switch set, the
+constraint lookup, and the seat-core seven. The remaining fifty-three M7
+rows did not move to wrapped — none of them appears in a `sys::` use, and
+the gate forbids a wrapped row without one — they were re-pointed from
+the M7 blanket note to terminal reasons instead: the grab-bypassing
+`send_*` calls and legacy cursor-request signal are `superseded-by` the
+`notify_*` / cursor-shape paths this crate wraps; the grab interfaces and
+grab start/end calls are `interface-impl-only` (M13 vtable territory);
+everything else is `internal` (whole-layout attach, manager-broadcast
+relative motion, boot-owned xcursor manager, field-wise struct reads the
+audit cannot see). Two wrapped items were renamed to the token that owns
+them (`wlr_seat_touch_notify_frame` →
+`TouchFrame::send_frame`, `wlr_seat_touch_get_point` →
+`TouchFrame::send_cancel`). No dead FFI was added to reach zero-not-yet
+on paper.
+
 ## 0.20.34 — M6 output rest: swapchain, feedback, protocols
 
 The rest of the output stack: a compositor can manage mode-setting
