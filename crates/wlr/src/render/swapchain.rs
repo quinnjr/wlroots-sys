@@ -170,11 +170,8 @@ impl<'a> Swapchain<'a> {
     /// Computed from the slots rather than remembered, so a buffer released by
     /// something else — wlroots' own output code, say — is reflected.
     pub fn in_flight(&self) -> usize {
-        // SAFETY: this value owns a live swapchain; `slots` is a fixed-size
-        // array of `WLR_SWAPCHAIN_CAP` entries, which `SWAPCHAIN_CAP` is read
-        // from.
-        let slots = unsafe { &(*self.raw.as_ptr()).slots };
-        slots.iter().filter(|slot| slot.acquired).count()
+        // SAFETY: this value owns a live swapchain.
+        unsafe { slots_in_flight_of(self.raw.as_ptr()) }
     }
 }
 
@@ -278,6 +275,18 @@ unsafe fn allocator_alive_of(raw: *mut sys::wlr_swapchain) -> bool {
     !unsafe { (*raw).allocator }.is_null()
 }
 
+/// # Safety
+///
+/// raw must point at a live wlr_swapchain for the call; reads slots/SWAPCHAIN_CAP only.
+unsafe fn slots_in_flight_of(raw: *mut sys::wlr_swapchain) -> usize {
+    // SAFETY: forwarded from the caller; `slots` is a fixed-size array of
+    // `WLR_SWAPCHAIN_CAP` entries, which `SWAPCHAIN_CAP` is read from.
+    unsafe { &(*raw).slots }
+        .iter()
+        .filter(|slot| slot.acquired)
+        .count()
+}
+
 /// Acquire a buffer from a swapchain the caller does not own.
 ///
 /// The manager-owned swapchains [`SwapchainRef`] hands out acquire exactly
@@ -291,7 +300,9 @@ unsafe fn allocator_alive_of(raw: *mut sys::wlr_swapchain) -> bool {
 /// `raw` must point at a live `wlr_swapchain` whose allocator is live, and
 /// stay so for the call. Both callers establish this the same way: an
 /// [`allocator_alive_of`] read on the same thread with no wlroots call in
-/// between.
+/// between. `'x` must not outlive the caller's borrow of the swapchain —
+/// both [`Swapchain::acquire`] and [`SwapchainRef::acquire`] instantiate it
+/// at `&self`, so the lock cannot outlive the value it was acquired from.
 unsafe fn acquire_raw<'x>(raw: *mut sys::wlr_swapchain) -> Result<LockedBuffer<'x>> {
     // SAFETY: forwarded from the caller.
     let raw = unsafe { sys::wlr_swapchain_acquire(raw) };
@@ -309,9 +320,10 @@ unsafe fn acquire_raw<'x>(raw: *mut sys::wlr_swapchain) -> Result<LockedBuffer<'
 /// the swapchain and reaps it when the manager is finished. What it shares
 /// with the owned kind is acquiring: [`acquire`](SwapchainRef::acquire) hands
 /// out the same [`LockedBuffer`] consumer reference, released the same way.
-/// Only `width`, `height`, and `acquire` are mirrored here — the manager flow
-/// acquires buffers to repaint into, so the owned kind's `format`,
-/// `has_buffer`, and `in_flight` have no caller on this path.
+/// Only `width`, `height`, `allocator_alive`, `in_flight`, and `acquire`
+/// are mirrored here — the manager flow acquires buffers to repaint into,
+/// so the owned kind's `format` and `has_buffer` have no caller on this
+/// path.
 pub struct SwapchainRef<'m> {
     raw: NonNull<sys::wlr_swapchain>,
     _manager: PhantomData<&'m ()>,
@@ -353,7 +365,7 @@ impl<'m> SwapchainRef<'m> {
     /// own listener on the allocator's destroy signal. The manager's
     /// allocator is the backend's, which normally outlives the manager —
     /// normally is not always, so this is checked, not assumed.
-    fn allocator_alive(&self) -> bool {
+    pub fn allocator_alive(&self) -> bool {
         // SAFETY: the manager owns a live swapchain for as long as this
         // borrow exists.
         unsafe { allocator_alive_of(self.raw.as_ptr()) }
@@ -364,12 +376,10 @@ impl<'m> SwapchainRef<'m> {
     /// Computed from the slots, mirroring
     /// [`Swapchain::in_flight`](Swapchain::in_flight) — kept for the
     /// [`Debug`] impl below, so the two kinds print the same shape.
-    fn in_flight(&self) -> usize {
+    pub fn in_flight(&self) -> usize {
         // SAFETY: the manager owns a live swapchain for as long as this
-        // borrow exists; `slots` is a fixed-size array of
-        // `WLR_SWAPCHAIN_CAP` entries, which `SWAPCHAIN_CAP` is read from.
-        let slots = unsafe { &(*self.raw.as_ptr()).slots };
-        slots.iter().filter(|slot| slot.acquired).count()
+        // borrow exists.
+        unsafe { slots_in_flight_of(self.raw.as_ptr()) }
     }
 
     /// Take the next free buffer, allocating one if the slot is empty.
@@ -382,8 +392,8 @@ impl<'m> SwapchainRef<'m> {
     ///
     /// [`Error::Destroyed`] if the allocator is gone; [`Error::Operation`]
     /// if all [`SWAPCHAIN_CAP`] slots are still in flight or the allocation
-    /// failed. Unlike the owned kind this never reports anything else —
-    /// there is no other failure mode in the shared tail.
+    /// failed — the same contract as the owned kind, reported through the
+    /// shared tail.
     pub fn acquire(&self) -> Result<LockedBuffer<'_>> {
         if !self.allocator_alive() {
             return Err(Error::Destroyed("wlr_allocator"));

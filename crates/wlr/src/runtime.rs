@@ -1522,7 +1522,7 @@ pub(crate) struct RuntimeInner {
     /// The `zwlr_output_power_manager_v1` global, once created — lets a
     /// client (e.g. a screen locker or power daemon) request an output power
     /// mode. `Option`, same rationale as the other manager globals. Mode
-    /// requests arrive on [`crate::OutputHandler::output_power_mode_set`];
+    /// requests arrive on [`crate::OutputHandler::output_power_mode_requested`];
     /// acting on them is the compositor's call.
     pub(crate) power_manager: RefCell<Option<NonNull<sys::wlr_output_power_manager_v1>>>,
 
@@ -6458,10 +6458,10 @@ impl Runtime {
     /// advertise (1 is current). Errors if called twice.
     ///
     /// Reading a surface's hint needs the surface handle model (M9).
-    pub fn create_tearing_control(&self, display: &Display, version: u32) -> Result<()> {
+    pub fn create_tearing_control_manager(&self, display: &Display, version: u32) -> Result<()> {
         if self.inner.tearing_control_manager.borrow().is_some() {
             return Err(Error::Operation(
-                "Runtime::create_tearing_control called twice",
+                "Runtime::create_tearing_control_manager called twice",
             ));
         }
         // SAFETY: `display` is live for the call; the returned manager is

@@ -1,42 +1,22 @@
 //! Output atomic state and accessors, against a real headless backend.
 //!
-//! Same shape as the other per-binary `headless_env` helpers: this
-//! integration binary owns its environment (`Display::new` +
+//! This integration binary owns its environment (`Display::new` +
 //! `Backend::autocreate` + `Runtime::new` + `init_graphics`, keeping
-//! `display` a live local). Handler observations are recorded on `App`
-//! and asserted after the run — never inside a handler, where a panic
-//! would abort through C.
+//! `display` a live local); the setup itself is `common::headless_env`,
+//! shared with the other output test binaries. Handler observations are
+//! recorded on `App` and asserted after the run — never inside a handler,
+//! where a panic would abort through C.
 
-use std::sync::Once;
+mod common;
+#[path = "common/format.rs"]
+mod format;
+
+use common::headless_env;
+use format::argb;
 use wlr::{
-    Allocator, Backend, Box2D, CommittedFields, Display, DrmFormat, FBox, FourCc, ModeType,
-    Modifier, OwnedBuffer, Region, Renderer, Runtime, Transform, Until,
+    Allocator, Backend, Box2D, CommittedFields, Display, FBox, ModeType, OwnedBuffer, Region,
+    Renderer, Runtime, Transform, Until,
 };
-
-/// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
-/// any test in this binary calls `Backend::autocreate`. See `axis.rs`'s
-/// identical copy for the full argument — this is a separate integration-test
-/// binary with its own environment.
-fn headless_env() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: `Once::call_once` runs this closure at most once and blocks
-        // every other caller on this `Once` until it returns, so no concurrent
-        // `getenv` can observe a torn write.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-            std::env::set_var("WLR_RENDERER", "pixman");
-        }
-    });
-}
-
-/// The linear ARGB8888 format cursor buffers are allocated in — the same
-/// choice as `tests/render.rs`'s `argb()`, so the pixman allocator hands out
-/// mappable buffers a cursor can take.
-fn argb() -> DrmFormat {
-    DrmFormat::new(FourCc::ARGB8888, [Modifier::LINEAR])
-}
 
 #[derive(Default)]
 struct App {

@@ -250,7 +250,7 @@ pub(crate) enum Event {
     /// not what was applied: acting on it (disabling the output, say) is
     /// the compositor's call, made with its own commit. Both fields are
     /// owned scalars copied at emission.
-    OutputPowerModeSet(OutputId, PowerMode),
+    OutputPowerModeRequested(OutputId, PowerMode),
 
     /// An input-method created a `zwp_input_method_v2` candidate popup surface.
     /// Carries the crate's own [`InputPopupSurfaceId`] handle for it — an

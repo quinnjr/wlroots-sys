@@ -1380,15 +1380,31 @@ fn union_into(slot: &mut Option<Region>, snapshot: Region) {
 
 /// Union `snapshot` into the output's pending damage, for emission sites.
 ///
-/// Returns whether the snapshot landed. `false` (contended registry borrow
-/// or unknown id) means the caller must NOT emit: delivery would find an
-/// empty-or-stale slot and skip, silently losing the newest region.
+/// Returns whether the snapshot landed. The two `false` meanings are
+/// deliberately distinguishable below: an empty snapshot is expected (silent
+/// by design — wlroots emits damage on every commit even when nothing is
+/// staged), while contention or an unknown id is unexpected (a `debug_assert`
+/// fires, and the caller still drops the emit since delivery would find an
+/// empty-or-stale slot and silently lose the newest region).
 fn accumulate_damage<S>(session: &Session<'_, S>, id: OutputId, snapshot: Region) -> bool {
+    if snapshot.is_empty() {
+        // Nothing to repaint: wlroots emits the damage signal on every
+        // commit even when the staged damage is empty, and delivering those
+        // would wake the compositor for no-op regions. Expected, so silent by
+        // design — unlike the contention and unknown-id arms below, which
+        // should never fire.
+        return false;
+    }
     let Ok(entries) = session.outputs.try_borrow_mut() else {
         debug_assert!(false, "damage emitted under a registry borrow");
         return false;
     };
     let Some(entry) = entries.get(&id) else {
+        // The id came from a live listener's `Bound`, whose entry is removed
+        // only in the output's own destroy emission — after which the
+        // listener is unlinked and no damage can fire. Unexpected, so
+        // asserted like the contention arms; still dropped, never trapped.
+        debug_assert!(false, "damage for an output the registry has forgotten");
         return false;
     };
     let Ok(mut slot) = entry.pending_damage.try_borrow_mut() else {
@@ -1778,6 +1794,13 @@ impl<'d> Backend<'d> {
     /// the backend.
     pub(crate) fn alive_or_err(&self) -> Result<()> {
         alive_or_err(&self.alive)
+    }
+
+    /// Clone the liveness flag for owners that outlive any single call.
+    /// `SwapchainManager` keeps one so `apply` and `Drop` can refuse a dead
+    /// backend instead of walking its freed outputs.
+    pub(crate) fn alive_flag(&self) -> Rc<Cell<bool>> {
+        self.alive.clone()
     }
 
     /// Start the backend, at most once.
@@ -3020,27 +3043,21 @@ fn no_extra<S>(
 /// Delivery for `run_all`: every event kind, including the ones `deliver`
 /// (which is bound only by `OutputHandler`) cannot route.
 fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) {
+    // Shared output events; anything else falls through to the match below —
+    // see the helper's doc for which five and why.
+    if deliver_shared_output_event(session, state, &ev) {
+        return;
+    }
     match ev {
         Event::NewOutput(id) => with_output(session, id, |output| state.new_output(output)),
         Event::OutputFrame(id) => with_output(session, id, |output| state.frame(output)),
-        Event::OutputCommitted(id, fields, when) => with_output(session, id, |output| {
-            state.output_committed(output, fields, when)
-        }),
-        Event::OutputDamaged(id) => {
-            // Taken at delivery via the shared helper (see its doc for the
-            // take-not-borrow rule); an empty slot skips rather than
-            // inventing damage.
-            if let Some(region) = take_pending_damage(session, id) {
-                with_output(session, id, |output| state.output_damaged(output, region));
-            }
-        }
-        Event::OutputPrecommitted(id, fields, when) => with_output(session, id, |output| {
-            state.output_precommitted(output, fields, when)
-        }),
-        Event::OutputBound(id) => with_output(session, id, |output| state.output_bound(output)),
-        Event::OutputStateRequested(id, fields) => with_output(session, id, |output| {
-            state.output_state_requested(output, fields)
-        }),
+        // Handled by the helper above; listed so the match stays exhaustive
+        // without a wildcard swallowing future variants.
+        Event::OutputCommitted(..)
+        | Event::OutputDamaged(..)
+        | Event::OutputPrecommitted(..)
+        | Event::OutputBound(..)
+        | Event::OutputStateRequested(..) => {}
         Event::OutputDestroyed(id) => state.destroyed(id),
         // No id to resolve: the run has one renderer, and the handler is
         // handed the runtime so it can tear the graphics stack down without
@@ -3233,7 +3250,7 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         }
         Event::RequestActivate(target, token) => state.request_activate(target, token),
         Event::GammaControlChanged(id) => state.gamma_control_changed(id),
-        Event::OutputPowerModeSet(id, mode) => state.output_power_mode_requested(id, mode),
+        Event::OutputPowerModeRequested(id, mode) => state.output_power_mode_requested(id, mode),
         Event::InputMethodPopupCreated(popup) => state.new_popup_surface(popup),
         Event::InputMethodPopupDestroyed(popup) => state.popup_surface_destroyed(popup),
         Event::InputMethodPopupRepositioned(popup) => state.popup_repositioned(popup),
@@ -4328,14 +4345,19 @@ unsafe extern "C" fn on_frame<S: OutputHandler>(
 
 /// Read the committed mask out of a commit-family event state pointer.
 /// Null (never observed, but this runs in an `extern "C"` frame where a
-/// panic aborts) maps to empty rather than a dereference.
-unsafe fn committed_of(state: *const sys::wlr_output_state) -> CommittedFields {
+/// panic aborts) maps to "no event" — the caller skips the emit, consistent
+/// with the damage path's skip-on-empty rule — rather than a dereference.
+unsafe fn committed_of(state: *const sys::wlr_output_state) -> Option<CommittedFields> {
     if state.is_null() {
-        return CommittedFields::default();
+        // Never observed, and the caller drops the event either way — release
+        // builds stay silent here rather than panicking out of an `extern "C"`
+        // frame, where a panic aborts the process.
+        debug_assert!(false, "commit-family event with null state");
+        return None;
     }
     // SAFETY: non-null, and the signal guarantees the state is live for the
     // emission; only the `committed` mask is read, nothing retained.
-    CommittedFields::from_bits(unsafe { (*state).committed })
+    Some(CommittedFields::from_bits(unsafe { (*state).committed }))
 }
 
 /// Resolve an output-signal listener's routing: the session plus the id the
@@ -4355,6 +4377,12 @@ unsafe fn output_event_target<'r, S>(
     // session's registry, and so unlinked from the signal, before the output
     // is freed. Same lifetime argument as `on_frame`.
     unsafe {
+        // wlroots always passes a valid listener; this is hardening so a
+        // spurious null degrades to a dropped event instead of an abort in
+        // an extern C frame.
+        if l.is_null() {
+            return None;
+        }
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         Some((session, (*bound).id?))
@@ -4380,7 +4408,9 @@ unsafe extern "C" fn on_output_commit<S: OutputHandler>(
         if event.is_null() || (*event).output.is_null() {
             return;
         }
-        let fields = committed_of((*event).state);
+        let Some(fields) = committed_of((*event).state) else {
+            return;
+        };
         let when = crate::scene::duration_of(&(*event).when);
 
         let deliver = (*session).deliver;
@@ -4441,7 +4471,9 @@ unsafe extern "C" fn on_output_precommit<S: OutputHandler>(
         if event.is_null() || (*event).output.is_null() {
             return;
         }
-        let fields = committed_of((*event).state);
+        let Some(fields) = committed_of((*event).state) else {
+            return;
+        };
         let when = crate::scene::duration_of(&(*event).when);
 
         let deliver = (*session).deliver;
@@ -4496,7 +4528,9 @@ unsafe extern "C" fn on_output_request_state<S: OutputHandler>(
         if event.is_null() || (*event).output.is_null() {
             return;
         }
-        let fields = committed_of((*event).state);
+        let Some(fields) = committed_of((*event).state) else {
+            return;
+        };
 
         let deliver = (*session).deliver;
         (*session)
@@ -6824,6 +6858,12 @@ unsafe extern "C" fn on_output_power_set_mode<S: Handlers>(
     // initialised addon set (every output this crate's `on_new_output`
     // announces gets one attached immediately).
     unsafe {
+        // wlroots always passes a valid listener; this is hardening so a
+        // spurious null degrades to a dropped event instead of an abort in
+        // an extern C frame.
+        if l.is_null() {
+            return;
+        }
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let event = data.cast::<sys::wlr_output_power_v1_set_mode_event>();
@@ -6835,9 +6875,11 @@ unsafe extern "C" fn on_output_power_set_mode<S: Handlers>(
 
         let deliver = (*session).deliver;
         if let Some(mode) = mode {
-            (*session)
-                .dispatcher
-                .emit(&*session, Event::OutputPowerModeSet(id, mode), deliver);
+            (*session).dispatcher.emit(
+                &*session,
+                Event::OutputPowerModeRequested(id, mode),
+                deliver,
+            );
         }
     }
 }
@@ -10598,33 +10640,85 @@ fn with_output<S>(session: &Session<'_, S>, id: OutputId, f: impl FnOnce(&Output
     f(&output);
 }
 
+/// Route the five output events `deliver` and `deliver_all` handle identically —
+/// `OutputCommitted`, `OutputDamaged`, `OutputPrecommitted`, `OutputBound` and
+/// `OutputStateRequested` — returning whether `ev` was one of them.
+///
+/// One home rather than two copies so the take-at-delivery damage rule (see
+/// [`take_pending_damage`]) cannot drift between the `run` and `run_all`
+/// paths: `OutputDamaged` takes the pending slot here, and an empty slot
+/// skips rather than inventing damage.
+///
+/// `NewOutput`/`Frame` stay in the callers deliberately, even though both
+/// paths route them the same way today: each caller's match lists every
+/// `Event` variant explicitly, so a future variant fails to compile until
+/// both paths place it — folding the two most common arms into a shared
+/// `bool` helper would hide them from that exhaustiveness pin. The events
+/// the two paths route *differently* (`OutputPowerModeRequested`, delivered
+/// by `deliver_all` and dropped by `deliver`) never enter here for the same
+/// reason: the difference stays visible at the call sites.
+fn deliver_shared_output_event<S: OutputHandler>(
+    session: &Session<'_, S>,
+    state: &mut S,
+    ev: &Event,
+) -> bool {
+    match ev {
+        Event::OutputCommitted(id, fields, when) => {
+            with_output(session, *id, |output| {
+                state.output_committed(output, *fields, *when)
+            });
+            true
+        }
+        Event::OutputDamaged(id) => {
+            // Taken at delivery via the shared helper (see its doc for the
+            // take-not-borrow rule); an empty slot skips rather than
+            // inventing damage.
+            if let Some(region) = take_pending_damage(session, *id) {
+                with_output(session, *id, |output| state.output_damaged(output, region));
+            }
+            true
+        }
+        Event::OutputPrecommitted(id, fields, when) => {
+            with_output(session, *id, |output| {
+                state.output_precommitted(output, *fields, *when)
+            });
+            true
+        }
+        Event::OutputBound(id) => {
+            with_output(session, *id, |output| state.output_bound(output));
+            true
+        }
+        Event::OutputStateRequested(id, fields) => {
+            with_output(session, *id, |output| {
+                state.output_state_requested(output, *fields)
+            });
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Route an event to the matching handler method.
 ///
 /// Ids are resolved here rather than carried as handles, which is what makes
 /// deferral sound: an output destroyed between queueing and delivery is simply
 /// absent from the registry and the event is dropped.
 fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event) {
+    // Shared output events; anything else falls through to the match below —
+    // see the helper's doc for which five and why.
+    if deliver_shared_output_event(session, state, &ev) {
+        return;
+    }
     match ev {
         Event::NewOutput(id) => with_output(session, id, |output| state.new_output(output)),
         Event::OutputFrame(id) => with_output(session, id, |output| state.frame(output)),
-        Event::OutputCommitted(id, fields, when) => {
-            with_output(session, id, |output| state.output_committed(output, fields, when))
-        }
-        Event::OutputDamaged(id) => {
-            // Taken at delivery via the shared helper (see its doc for the
-            // take-not-borrow rule); an empty slot skips rather than
-            // inventing damage.
-            if let Some(region) = take_pending_damage(session, id) {
-                with_output(session, id, |output| state.output_damaged(output, region));
-            }
-        }
-        Event::OutputPrecommitted(id, fields, when) => {
-            with_output(session, id, |output| state.output_precommitted(output, fields, when))
-        }
-        Event::OutputBound(id) => with_output(session, id, |output| state.output_bound(output)),
-        Event::OutputStateRequested(id, fields) => {
-            with_output(session, id, |output| state.output_state_requested(output, fields))
-        }
+        // Handled by the helper above; listed so the match stays exhaustive
+        // without a wildcard swallowing future variants.
+        Event::OutputCommitted(..)
+        | Event::OutputDamaged(..)
+        | Event::OutputPrecommitted(..)
+        | Event::OutputBound(..)
+        | Event::OutputStateRequested(..) => {}
         // No resolution to do, and nothing to drop the event for: the id
         // outlives the object on purpose, and the handler is told about the
         // destruction even though nothing is left to hand it.
@@ -10690,7 +10784,7 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::RequestSetShape(..)
         | Event::RequestActivate(..)
         | Event::GammaControlChanged(..)
-        | Event::OutputPowerModeSet(..)
+        | Event::OutputPowerModeRequested(..)
         // Unreachable: `run` never registers an input-method manager either
         // (`Backend::register_toplevel_and_input` is `run_all`'s hook; `run`
         // uses `no_extra`), so no input-method popup can be announced,
@@ -10760,6 +10854,55 @@ mod tests {
             "union must span both damages, got {:?}",
             region.extents()
         );
+    }
+
+    /// Damage accumulates across emissions and survives to delivery as a
+    /// union, through the session slot rather than around it: an empty
+    /// snapshot lands nothing, two disjoint snapshots both land, and the take
+    /// returns one region spanning both. A replace-instead-of-union regression
+    /// in [`accumulate_damage`] (as opposed to [`union_into`], pinned above)
+    /// spans only the second box and fails the (4, 4) half of the take
+    /// assertion. The null-listener check pins the [`output_event_target`]
+    /// hardening next to the dispatch path it guards.
+    #[test]
+    fn damage_accumulates_through_the_session_slot_to_delivery() {
+        use crate::Box2D;
+        let _serialised = crate::id::id_test_lock();
+
+        let out = ScratchOutput::new();
+        let mut state = Recorder::default();
+        let p = &raw mut state;
+
+        // SAFETY: `p` and `out.0` are live for the whole call and `state` is
+        // reached only through `p` from here on.
+        unsafe {
+            announce(p, out.0, |session, id| {
+                assert!(
+                    !accumulate_damage(session, id, Region::new()),
+                    "an empty snapshot lands nothing, so there is nothing to emit"
+                );
+                assert!(
+                    accumulate_damage(session, id, Region::from_box(Box2D::new(0, 0, 8, 8))),
+                    "the first damage must land"
+                );
+                assert!(
+                    accumulate_damage(session, id, Region::from_box(Box2D::new(100, 100, 8, 8))),
+                    "the second damage must union in rather than evict the first"
+                );
+                let region = take_pending_damage(session, id)
+                    .expect("both damages must survive to delivery");
+                assert!(
+                    region.contains_point(4, 4) && region.contains_point(104, 104),
+                    "delivery must repaint both damages, got {:?}",
+                    region.extents()
+                );
+
+                assert!(
+                    output_event_target::<Recorder>(std::ptr::null_mut()).is_none(),
+                    "a null listener degrades to a dropped event, never a trap"
+                );
+            });
+        }
     }
 
     /// A listener that is never emitted to by most of these tests; they
@@ -11104,6 +11247,7 @@ mod tests {
         names: Vec<Option<String>>,
         frames: Vec<OutputId>,
         destroyed: Vec<OutputId>,
+        power_modes: Vec<(OutputId, PowerMode)>,
 
         /// If set, `new_output` emits this output's `destroy` signal — standing
         /// in for wlroots destroying an output from underneath a handler, which
@@ -11140,6 +11284,10 @@ mod tests {
 
         fn destroyed(&mut self, id: OutputId) {
             self.destroyed.push(id);
+        }
+
+        fn output_power_mode_requested(&mut self, output: OutputId, mode: PowerMode) {
+            self.power_modes.push((output, mode));
         }
     }
 
@@ -11396,6 +11544,73 @@ mod tests {
             vec![ghost],
             "destruction is the one event that needs no object, so it is \
              delivered even though the lookup would miss"
+        );
+    }
+
+    /// The power-mode request path at the dispatch level: `deliver_all`
+    /// hands the id plus the mode straight to the handler — no registry
+    /// entry needed, since this event resolves nothing — while `deliver`
+    /// (the `run` path) keeps dropping it, because `run` never registers a
+    /// power manager and the event is unreachable there.
+    ///
+    /// Driving the real `wlr_output_power_v1_set_mode_event` C signal stays
+    /// e2e-only (icedtea harness — no wlr milestone, the gap is environmental,
+    /// not API): it needs a live power manager plus a client, which no
+    /// in-crate harness provides.
+    #[test]
+    fn output_power_mode_requested_reaches_the_handler_through_deliver_all() {
+        let mut state = Recorder::default();
+        let id = OutputId(42);
+        let runtime = Runtime::new().expect("runtime");
+        let session: Session<'_, Recorder> = Session {
+            // Never dereferenced: these tests call `deliver`/`deliver_all`
+            // directly and pass the state alongside, rather than going
+            // through `emit`.
+            dispatcher: Dispatcher::new(std::ptr::null_mut()),
+            outputs: RefCell::new(HashMap::new()),
+            toplevels: RefCell::new(HashMap::new()),
+            decorations: RefCell::new(HashMap::new()),
+            layers: RefCell::new(HashMap::new()),
+            popups: RefCell::new(HashMap::new()),
+            inputs: RefCell::new(HashMap::new()),
+            idle_inhibitors: RefCell::new(HashMap::new()),
+            shortcuts_inhibitors: RefCell::new(HashMap::new()),
+            tablet_tools: RefCell::new(HashMap::new()),
+            transient_seats: RefCell::new(HashMap::new()),
+            session_locks: RefCell::new(HashMap::new()),
+            lock_surfaces: RefCell::new(HashMap::new()),
+            drags: RefCell::new(HashMap::new()),
+            scene_buffers: RefCell::new(HashMap::new()),
+            pointer_constraints: RefCell::new(HashMap::new()),
+            #[cfg(wlr_has_xwayland)]
+            xwayland_surfaces: RefCell::new(HashMap::new()),
+            last_key_consumed: Cell::new(false),
+            applied_heads: RefCell::new(VecDeque::new()),
+            runtime: &runtime,
+            deliver: deliver::<Recorder>,
+        };
+
+        deliver_all(
+            &session,
+            &mut state,
+            Event::OutputPowerModeRequested(id, PowerMode::On),
+        );
+        assert_eq!(
+            state.power_modes,
+            vec![(id, PowerMode::On)],
+            "deliver_all must hand the requested id and mode to the handler"
+        );
+
+        deliver(
+            &session,
+            &mut state,
+            Event::OutputPowerModeRequested(id, PowerMode::Off),
+        );
+        assert_eq!(
+            state.power_modes,
+            vec![(id, PowerMode::On)],
+            "deliver must keep dropping the event: the run path never \
+             registers a power manager, so it is unreachable there"
         );
     }
 
