@@ -2759,6 +2759,7 @@ item   = "OutputState::set_layers"
 
 
 
+<<<<<<< HEAD
 [[wrapped]]
 symbol = "wlr_output_swapchain_manager_init"
 module = "output"
@@ -2783,3 +2784,28 @@ item   = "SwapchainManager (Drop)"
 symbol = "wlr_output_swapchain_manager"
 module = "output"
 item   = "SwapchainManager"
+
+[[wrapped]]
+symbol = "wlr_output_event_commit"
+module = "backend"
+item   = "OutputHandler::output_committed"
+
+[[wrapped]]
+symbol = "wlr_output_event_damage"
+module = "backend"
+item   = "OutputHandler::output_damaged"
+
+[[wrapped]]
+symbol = "wlr_output_event_precommit"
+module = "backend"
+item   = "OutputHandler::output_precommit"
+
+[[wrapped]]
+symbol = "wlr_output_event_bind"
+module = "backend"
+item   = "OutputHandler::output_bound"
+
+[[wrapped]]
+symbol = "wlr_output_event_request_state"
+module = "backend"
+item   = "OutputHandler::output_state_requested"

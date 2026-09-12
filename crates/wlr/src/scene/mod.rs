@@ -85,6 +85,16 @@ pub(crate) fn timespec_of(when: std::time::Duration) -> sys::timespec {
     }
 }
 
+/// The reverse: read a `struct timespec` wlroots filled in (output commit and
+/// precommit events carry one) as a `Duration`. Negative inputs cannot come
+/// from a clock; a defensive saturate keeps the unsigned conversion total
+/// rather than panicking in an `extern "C"` frame, where a panic aborts.
+pub(crate) fn duration_of(when: &sys::timespec) -> std::time::Duration {
+    let secs = u64::try_from(when.tv_sec).unwrap_or(0);
+    let nanos = u32::try_from(when.tv_nsec).unwrap_or(0).min(999_999_999);
+    std::time::Duration::new(secs, nanos)
+}
+
 /// Identifies a solid-colour rect in the scene.
 ///
 /// The representation is frozen: this type was published in 0.20.1 and the

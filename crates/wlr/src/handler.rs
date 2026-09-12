@@ -5,9 +5,9 @@
 //! implements only what they use.
 
 use crate::{
-    ActivationToken, AxisSource, CursorShape, CursorShapeDevice, DecorationMode, Edges,
-    InputPopupSurfaceId, KeyEvent, LayerSurface, LayerSurfaceId, NodeId, Output, OutputId,
-    PointerAxis, Popup, PopupId, SceneOutputId, Toplevel, ToplevelId, Transform,
+    ActivationToken, AxisSource, CommittedFields, CursorShape, CursorShapeDevice, DecorationMode,
+    Edges, InputPopupSurfaceId, KeyEvent, LayerSurface, LayerSurfaceId, NodeId, Output, OutputId,
+    PointerAxis, Popup, PopupId, Region, SceneOutputId, Toplevel, ToplevelId, Transform,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -297,6 +297,56 @@ pub trait OutputHandler {
     /// step.
     fn gamma_control_changed(&mut self, output: OutputId) {
         let _ = output;
+    }
+
+    /// An output state was committed. `fields` names what changed, `when` is
+    /// the commit timestamp wlroots recorded.
+    ///
+    /// This fires for every commit — including ones this compositor did not
+    /// make (backend-driven mode repair, for instance). It is observation,
+    /// not a veto point: the state is already applied.
+    fn output_committed(
+        &mut self,
+        output: &Output<'_>,
+        fields: CommittedFields,
+        when: std::time::Duration,
+    ) {
+        let _ = (output, fields, when);
+    }
+
+    /// An output was damaged. `damage` is the buffer-local region, copied at
+    /// emission: owning it is what lets this event queue behind a running
+    /// handler like every other event, rather than borrowing wlroots memory
+    /// that would be gone by delivery.
+    fn output_damaged(&mut self, output: &Output<'_>, damage: Region) {
+        let _ = (output, damage);
+    }
+
+    /// An output state is about to commit, before backends have validated it.
+    /// Same payload as [`output_committed`](OutputHandler::output_committed);
+    /// the state is staged, not yet applied.
+    fn output_precommit(
+        &mut self,
+        output: &Output<'_>,
+        fields: CommittedFields,
+        when: std::time::Duration,
+    ) {
+        let _ = (output, fields, when);
+    }
+
+    /// A client bound the output global. Rarely actionable — recorded so a
+    /// compositor can notice unexpected clients, not so it can refuse them
+    /// (the bind already happened).
+    fn output_bound(&mut self, output: &Output<'_>) {
+        let _ = output;
+    }
+
+    /// A client requested an output state change (output-management
+    /// protocol). `fields` names what was asked for, not what was applied:
+    /// applying it is the compositor's decision, made by committing its own
+    /// state for this output.
+    fn output_state_requested(&mut self, output: &Output<'_>, fields: CommittedFields) {
+        let _ = (output, fields);
     }
 }
 

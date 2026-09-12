@@ -45,10 +45,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
 use crate::{
-    ActivationToken, AxisRelativeDirection, AxisSource, CursorShape, CursorShapeDevice,
-    DecorationMode, Edges, InputPopupSurfaceId, LayerSurfaceId, NodeId, OutputId, PointerAxis,
-    PopupId, SceneOutputId, ShortcutsInhibitorId, TabletPadId, TabletToolId, ToplevelId,
-    TransientSeatId, VirtualKeyboardId, VirtualPointerId,
+    ActivationToken, AxisRelativeDirection, AxisSource, CommittedFields, CursorShape,
+    CursorShapeDevice, DecorationMode, Edges, InputPopupSurfaceId, LayerSurfaceId, NodeId,
+    OutputId, PointerAxis, PopupId, SceneOutputId, ShortcutsInhibitorId, TabletPadId, TabletToolId,
+    ToplevelId, TransientSeatId, VirtualKeyboardId, VirtualPointerId,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -62,6 +62,24 @@ pub(crate) enum Event {
     NewOutput(OutputId),
     OutputFrame(OutputId),
     OutputDestroyed(OutputId),
+
+    /// An output state committed. Carries what changed plus wlroots'
+    /// timestamp, both copied at emission: the signal's state pointer is
+    /// valid only for the emission, while this event may deliver later.
+    OutputCommitted(OutputId, CommittedFields, std::time::Duration),
+    /// An output was damaged. Carries no region — the damage accumulates in
+    /// the output's registry slot (unioned, so coalesced deliveries repaint
+    /// everything) and is taken at delivery, because an owned `Region` is
+    /// not `Copy` and cannot ride this enum.
+    OutputDamaged(OutputId),
+    /// An output state is about to commit. Same snapshot rationale as
+    /// [`Event::OutputCommitted`]; the state is staged, not yet applied.
+    OutputPrecommitted(OutputId, CommittedFields, std::time::Duration),
+    /// A client bound the output global. Notification only.
+    OutputBound(OutputId),
+    /// A client requested an output state change. Carries what was asked
+    /// for, not what was applied — applying it is the compositor's call.
+    OutputStateRequested(OutputId, CommittedFields),
 
     /// The runtime's renderer emitted `events.lost`: the GPU was reset and
     /// everything derived from that renderer is invalid.

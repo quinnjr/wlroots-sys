@@ -1656,36 +1656,11 @@ note      = "with the M6-protocols slice (output-management)."
 milestone = "M6"
 
 
-[[waived]]
-symbol    = "wlr_output_event_bind"
-reason    = "not-yet"
-note      = "with the M6-feedback slice (frame-event listener infrastructure)."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_event_commit"
-reason    = "not-yet"
-note      = "with the M6-feedback slice (frame-event listener infrastructure)."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_event_damage"
-reason    = "not-yet"
-note      = "with the M6-feedback slice (frame-event listener infrastructure)."
-milestone = "M6"
-
-[[waived]]
-symbol    = "wlr_output_event_precommit"
-reason    = "not-yet"
-note      = "with the M6-feedback slice (frame-event listener infrastructure)."
-milestone = "M6"
 
 
-[[waived]]
-symbol    = "wlr_output_event_request_state"
-reason    = "not-yet"
-note      = "with the M6-feedback slice (frame-event listener infrastructure)."
-milestone = "M6"
+
+
+
 
 [[waived]]
 symbol    = "wlr_output_finish"
