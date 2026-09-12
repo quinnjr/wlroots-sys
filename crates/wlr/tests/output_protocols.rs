@@ -8,7 +8,7 @@
 //! would abort through C.
 
 use std::sync::Once;
-use wlr::{Backend, BufferCaps, Display, Output, Runtime, Transform, Until};
+use wlr::{Backend, BufferCaps, CommittedFields, Display, Output, Runtime, Transform, Until};
 
 /// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
 /// any test in this binary calls `Backend::autocreate`. See `output.rs`'s
@@ -32,6 +32,7 @@ fn headless_env() {
 struct Observed {
     setup_commit_ok: Option<bool>,
     send_request_ok: Option<bool>,
+    requested_all: Vec<CommittedFields>,
 }
 
 struct App {
@@ -51,11 +52,12 @@ impl wlr::OutputHandler for App {
 
         let mut req = output.state();
         req.set_scale(2.0);
-        req.set_transform(Transform::Normal);
+        req.set_transform(Transform::Flipped180);
         self.seen.send_request_ok = Some(output.send_request_state(&req).is_ok());
-        // Delivery (`output_state_requested`) lands with the feedback
-        // branch's request_state listener (PR #20): this tree emits into an
-        // empty signal list, so the round trip asserts there, on rebase.
+    }
+
+    fn output_state_requested(&mut self, _output: &Output<'_>, fields: CommittedFields) {
+        self.seen.requested_all.push(fields);
     }
 }
 
@@ -65,11 +67,10 @@ impl wlr::FdHandler for App {}
 impl wlr::LoopHandler for App {}
 
 /// `send_request_state` accepts a staged transaction for its own output
-/// and emits without trapping. The delivery half (`output_state_requested`
-/// firing with the staged mask) asserts on rebase onto the feedback
-/// branch, whose request_state listener receives the emission.
+/// and delivers the staged mask through `output_state_requested` — the
+/// full emit-to-delivery round trip, with no protocol client in the loop.
 #[test]
-fn send_request_state_call_is_sound() {
+fn send_request_state_delivers_the_staged_mask() {
     headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
@@ -93,6 +94,18 @@ fn send_request_state_call_is_sound() {
         seen.send_request_ok,
         Some(true),
         "sending a staged request must succeed"
+    );
+    // History, not last-write: the staged request must arrive intact among
+    // whatever the backend emits around it.
+    let staged = CommittedFields::SCALE | CommittedFields::TRANSFORM;
+    assert!(
+        !seen.requested_all.is_empty(),
+        "at least one request must deliver"
+    );
+    assert!(
+        seen.requested_all.contains(&staged),
+        "the staged request must arrive intact; got {:?}",
+        seen.requested_all
     );
 }
 

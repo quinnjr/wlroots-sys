@@ -2783,7 +2783,6 @@ module = "output"
 item   = "SwapchainManager"
 
 [[wrapped]]
-[[wrapped]]
 symbol = "wlr_output_event_commit"
 module = "backend"
 item   = "OutputHandler::output_committed"
