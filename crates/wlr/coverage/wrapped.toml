@@ -299,6 +299,16 @@ module = "runtime"
 item   = "Runtime::create_seat"
 
 [[wrapped]]
+symbol = "wlr_cursor_map_to_output"
+module = "runtime"
+item   = "Runtime::cursor_state"
+
+[[wrapped]]
+symbol = "wlr_cursor_map_to_region"
+module = "runtime"
+item   = "Runtime::cursor_state"
+
+[[wrapped]]
 symbol = "wlr_cursor_move"
 module = "backend"
 item   = "SeatHandler::pointer_motion"
@@ -1837,6 +1847,21 @@ item   = "Runtime::create_seat"
 symbol = "wlr_xcursor_manager_load"
 module = "runtime"
 item   = "Runtime::pointer_position"
+
+[[wrapped]]
+symbol = "wlr_xcursor_theme"
+module = "runtime"
+item   = "Runtime::load_xcursor_theme"
+
+[[wrapped]]
+symbol = "wlr_xcursor_theme_destroy"
+module = "runtime"
+item   = "Runtime::destroy_xcursor_theme"
+
+[[wrapped]]
+symbol = "wlr_xcursor_theme_load"
+module = "runtime"
+item   = "Runtime::load_xcursor_theme"
 
 [[wrapped]]
 symbol = "wlr_xdg_decoration_manager_v1"

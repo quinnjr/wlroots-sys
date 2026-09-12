@@ -368,18 +368,6 @@ note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
 
 [[waived]]
-symbol    = "wlr_cursor_map_to_output"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_cursor_map_to_region"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
 symbol    = "wlr_cursor_set_buffer"
 reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
@@ -3571,25 +3559,7 @@ note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
 
 [[waived]]
-symbol    = "wlr_xcursor_theme"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_xcursor_theme_destroy"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
 symbol    = "wlr_xcursor_theme_get_cursor"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_xcursor_theme_load"
 reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"

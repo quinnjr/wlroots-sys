@@ -2512,6 +2512,20 @@ impl<'d> Backend<'d> {
                     std::ptr::null(),
                 )
             });
+            // The seat's own `destroy`: `on_seat_destroy` evicts the tracked
+            // cursor and resets its mapping/image tracking, so no entry
+            // names an object the dying seat takes with it — the cursor was
+            // created with the seat and dies with it, and a `wlr_cursor`
+            // exposes no per-object destroy signal of its own. Same
+            // ownership and liveness reasoning as the seat signals above.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*seat.as_ptr()).events.destroy,
+                    on_seat_destroy::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
         }
 
         if let Some(manager) = runtime.virtual_keyboard_manager_ptr() {
@@ -4572,6 +4586,9 @@ unsafe extern "C" fn on_output_destroy<S: OutputHandler>(
         // Mirrors the removal above, in `Runtime`'s own table — see
         // `record_output`'s call site for why both exist.
         (*session).runtime.forget_output(id);
+        // The cursor may have been mapped to this output: drop the recorded
+        // mapping so `CursorState.mapped_output` never names a dead output.
+        (*session).runtime.clear_cursor_mapping_for_output(id);
 
         let deliver = (*session).deliver;
         (*session)
@@ -9506,6 +9523,30 @@ unsafe extern "C" fn on_shortcuts_inhibit_manager_destroy<S: Handlers>(
         let session = (*bound).session.cast::<Session<'_, S>>();
         let runtime = (*session).runtime;
         runtime.inner.shortcuts_inhibitors.borrow_mut().clear();
+    }
+}
+
+/// The seat is going away. Evict the tracked cursor and reset its
+/// mapping/image tracking, for the reason
+/// [`on_virtual_keyboard_manager_destroy`] gives: the cursor was created
+/// with the seat and dies with it, and a `wlr_cursor` exposes no public
+/// per-object destroy signal of its own. No event is announced.
+///
+/// After this [`Runtime::cursor_id`], [`Runtime::cursor_state`] and
+/// [`Runtime::try_cursor`] miss again, exactly as before the seat existed.
+unsafe extern "C" fn on_seat_destroy<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `register_toplevel_and_input` into the seat's own
+    // `events.destroy`; the seat is still live memory for this emission.
+    // Nothing is read through it — `forget_cursor` only drops borrowed
+    // pointers and resets tracking cells, never dereferences them.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let runtime = (*session).runtime;
+        runtime.forget_cursor();
     }
 }
 

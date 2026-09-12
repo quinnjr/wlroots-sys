@@ -856,6 +856,190 @@ pub(crate) struct TransientSeatEntry {
     pub(crate) raw: NonNull<sys::wlr_transient_seat_v1>,
 }
 
+/// A stable handle for this runtime's `wlr_cursor`.
+///
+/// Opaque to consumers, like [`KeyboardGroupId`]: the wrapped value is the
+/// cursor's own address — the identity [`Runtime::create_seat`] minted it
+/// under, so creation names the object directly and lookup is a membership
+/// check, not a search. There is exactly one cursor per runtime (created
+/// alongside the seat), so the id is how a compositor names *that* cursor to
+/// [`Runtime::try_cursor`]; [`Runtime::cursor_state`] answers the same
+/// snapshot without one.
+///
+/// Evicted by `backend.rs`'s `on_seat_destroy` — the cursor is created with
+/// the seat and dies with it, and a `wlr_cursor` exposes no public
+/// per-object destroy signal of its own to listen on.
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`KeyboardGroupId`]: an
+/// opaque id's ordering would promise creation-order semantics nobody asked
+/// for.
+///
+/// `Debug` is redacted: the wrapped value is a heap address and every other
+/// id is a counter that leaks nothing — printing this would hand out an
+/// ASLR oracle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CursorId(pub(crate) usize);
+
+impl std::fmt::Debug for CursorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CursorId(..)")
+    }
+}
+
+impl CursorId {
+    /// An id that names no cursor, for negative tests: `usize::MAX` can
+    /// never be a cursor address handed out here (heap addresses never sit
+    /// at the top of the address space). Mirrors
+    /// `InputPopupSurfaceId::dangling_nth_for_test`.
+    #[doc(hidden)]
+    pub fn dangling() -> Self {
+        Self(usize::MAX)
+    }
+}
+
+/// This runtime's tracked `wlr_cursor`: a borrowed wlroots pointer, never
+/// owned — created by [`Runtime::create_seat`], freed with the display, with
+/// `backend.rs`'s `on_seat_destroy` evicting this entry first.
+///
+/// Keyed in the map by the cursor's own address (which [`CursorId`] wraps
+/// directly), the same creation-names-the-object discipline
+/// [`KeyboardGroupEntry`] follows.
+#[derive(Clone, Copy)]
+pub(crate) struct CursorEntry {
+    pub(crate) raw: NonNull<sys::wlr_cursor>,
+}
+
+/// What image the cursor is showing.
+///
+/// The buffer/surface variants arrive with the consumer wiring that sets
+/// them (a follow-up task); until then only `Hidden` and `Xcursor` are
+/// produced — `Hidden` before [`Runtime::create_seat`] and before the first
+/// image is applied, `Xcursor` once `ensure_cursor_image` has applied the
+/// theme image. The variants exist now so the snapshot's data model already
+/// covers the whole attachment surface the spec names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorImage {
+    /// No image: the cursor is hidden.
+    Hidden,
+    /// An xcursor theme image (the default `left_ptr` or a shape named
+    /// through [`Runtime::set_cursor_shape`]).
+    Xcursor,
+    /// A buffer set through `wlr_cursor_set_buffer`.
+    Buffer,
+    /// A client surface set through `wlr_cursor_set_surface`.
+    Surface,
+}
+
+/// The cursor's aggregate state: mapping, attachment and position, copied
+/// out of the live cursor and this crate's own tracking.
+///
+/// `wlr_cursor_state` itself is opaque in wlroots 0.20 (a forward-declared
+/// struct whose fields are `WLR_PRIVATE`), so this reads the cursor's public
+/// fields (`x`, `y`) plus what this crate's own map/image wrappers recorded
+/// — the same owned-fields, null-guarded snapshot discipline
+/// [`KeyboardState`] follows. Constructed only by the crate from a live
+/// cursor (`pub(crate)` constructor, called by [`Runtime::cursor_state`] and
+/// [`Runtime::try_cursor`]); fields `pub` for read, all owned/`Copy` so no
+/// raw pointer escapes.
+///
+/// `mapped_output` is the id named at map time; like every id here it may
+/// not resolve after the run that mapped it ended (the output table is
+/// per-run, while the mapping itself persists in wlroots). It is cleared
+/// when the mapped output is destroyed, so it never names a dead output.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CursorState {
+    /// The cursor's position in layout coordinates, live-read from the
+    /// cursor (`x`, `y`) — the same value [`Runtime::pointer_position`]
+    /// reports.
+    pub position: (f64, f64),
+    /// The output the cursor is mapped to, or `None` for the whole layout.
+    pub mapped_output: Option<OutputId>,
+    /// The layout region the cursor is mapped to, or `None` for
+    /// unconstrained.
+    pub mapped_region: Option<Box2D>,
+    /// What image the cursor is showing; see [`CursorImage`].
+    pub image: CursorImage,
+    /// The attachment hotspot in logical pixels: meaningful for the
+    /// buffer/surface attachments, `(0, 0)` for `Hidden`/`Xcursor` (whose
+    /// hotspot lives inside the theme image).
+    pub hotspot: (i32, i32),
+}
+
+impl CursorState {
+    /// Copy the live cursor out. `cursor` must point at a live `wlr_cursor`
+    /// for the read — the callers ([`Runtime::cursor_state`],
+    /// [`Runtime::try_cursor`]) resolve it from the tracked table, whose
+    /// entry is evicted before wlroots frees the cursor. The mapping and
+    /// image are this crate's own recorded tracking, passed in by the
+    /// caller; the position is the only field read through the pointer.
+    pub(crate) fn from_raw(
+        cursor: &sys::wlr_cursor,
+        mapped_output: Option<OutputId>,
+        mapped_region: Option<Box2D>,
+        image: CursorImage,
+        hotspot: (i32, i32),
+    ) -> Self {
+        Self {
+            position: (cursor.x, cursor.y),
+            mapped_output,
+            mapped_region,
+            image,
+            hotspot,
+        }
+    }
+}
+
+/// A stable handle for an xcursor theme this runtime loaded.
+///
+/// Opaque to consumers, like [`CursorId`]: the wrapped value is the theme's
+/// own address — the identity `wlr_xcursor_theme_load` returned, so creation
+/// names the object directly (the [`VirtualKeyboardId`] discipline) and
+/// lookup is a membership check. It names a theme held in this runtime's
+/// xcursor management (loaded by [`Runtime::load_xcursor_theme`], released
+/// by [`Runtime::destroy_xcursor_theme`]) — not the `wlr_xcursor_manager`
+/// [`Runtime::create_seat`] owns, which is singleton state and needs no id.
+///
+/// Eviction is explicit-destroy-only: a `wlr_xcursor_theme` exposes no
+/// public per-object destroy signal to listen on, so unlike the
+/// listener-keyed tables there is no destroy listener that could evict it —
+/// and a stale id misses cleanly for exactly that reason (the same shape as
+/// [`KeyboardGroupId`]).
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`CursorId`]: an opaque id's
+/// ordering would promise creation-order semantics nobody asked for.
+///
+/// `Debug` is redacted: the wrapped value is a heap address — printing it
+/// would hand out an ASLR oracle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct XcursorManagerId(pub(crate) usize);
+
+impl std::fmt::Debug for XcursorManagerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("XcursorManagerId(..)")
+    }
+}
+
+impl XcursorManagerId {
+    /// An id that names no theme, for negative tests: `usize::MAX` can
+    /// never be a theme address handed out here. Mirrors
+    /// [`CursorId::dangling`].
+    #[doc(hidden)]
+    pub fn dangling() -> Self {
+        Self(usize::MAX)
+    }
+}
+
+/// One theme loaded through [`Runtime::load_xcursor_theme`].
+///
+/// `raw` is owned by this runtime — `wlr_xcursor_theme_load` allocates, and
+/// [`Runtime::destroy_xcursor_theme`] frees with `wlr_xcursor_theme_destroy`
+/// — which is the opposite of every other entry in this file (borrowed
+/// wlroots pointers evicted by destroy listeners). Owned because no signal
+/// announces a theme's death: nothing else could release it.
+pub(crate) struct XcursorThemeEntry {
+    pub(crate) raw: NonNull<sys::wlr_xcursor_theme>,
+}
+
 /// One tracked hardware tablet tool: the tablet device that announced it,
 /// and whether its client-facing `wlr_tablet_v2_tablet_tool` was created.
 ///
@@ -1741,6 +1925,46 @@ pub(crate) struct RuntimeInner {
     /// this crate's own tests.
     pub(crate) applied_cursor: std::cell::Cell<Option<Option<CursorShape>>>,
 
+    /// This runtime's `wlr_cursor`, recorded by [`Runtime::create_seat`]
+    /// keyed by the cursor's own address (which [`CursorId`] wraps
+    /// directly) and evicted by `backend.rs`'s `on_seat_destroy`. At most
+    /// one entry: exactly one cursor exists per runtime. Empty before the
+    /// seat exists, which is what makes [`Runtime::cursor_state`] and
+    /// [`Runtime::try_cursor`] miss with `None` there.
+    pub(crate) cursors: RefCell<HashMap<usize, CursorEntry>>,
+
+    /// The output [`Runtime::map_cursor_to_output`] last mapped the cursor
+    /// to, or `None` for the whole layout (the initial state, and what a
+    /// region map leaves alone — output and region mappings are recorded
+    /// independently, as wlroots keeps them). Cleared when the mapped
+    /// output is destroyed and with the cursor itself, so
+    /// [`CursorState::mapped_output`] never names a dead output.
+    pub(crate) cursor_mapped_output: RefCell<Option<OutputId>>,
+
+    /// The layout region [`Runtime::map_cursor_to_region`] last mapped the
+    /// cursor to, or `None` for unconstrained (the initial state).
+    pub(crate) cursor_mapped_region: RefCell<Option<Box2D>>,
+
+    /// What image the cursor is showing; see [`CursorImage`]. `Hidden`
+    /// until [`Runtime::ensure_cursor_image`] applies the theme image
+    /// through `apply_cursor` — the single funnel that also records here,
+    /// so the snapshot cannot drift from what was last handed to wlroots.
+    pub(crate) cursor_image: std::cell::Cell<CursorImage>,
+
+    /// The hotspot of the current buffer/surface attachment in logical
+    /// pixels; `(0, 0)` for `Hidden`/`Xcursor`. Recorded alongside
+    /// [`cursor_image`](RuntimeInner::cursor_image) when an attachment
+    /// carrying a hotspot is applied (the buffer/surface setters land with
+    /// the consumer wiring).
+    pub(crate) cursor_hotspot: std::cell::Cell<(i32, i32)>,
+
+    /// Every theme [`Runtime::load_xcursor_theme`] loaded, keyed by the
+    /// theme's own address (which [`XcursorManagerId`] wraps directly).
+    /// Owned by this runtime and released only by
+    /// [`Runtime::destroy_xcursor_theme`] — a theme exposes no destroy
+    /// signal, so this table has no listener; see [`XcursorThemeEntry`].
+    pub(crate) xcursor_themes: RefCell<HashMap<usize, XcursorThemeEntry>>,
+
     /// Every live keyboard the backend has announced, so capabilities can be
     /// recomputed as devices arrive and leave.
     ///
@@ -2454,6 +2678,12 @@ impl Runtime {
                 cursor_image_loaded: std::cell::Cell::new(false),
                 named_cursor: std::cell::Cell::new(None),
                 applied_cursor: std::cell::Cell::new(None),
+                cursors: RefCell::new(HashMap::new()),
+                cursor_mapped_output: RefCell::new(None),
+                cursor_mapped_region: RefCell::new(None),
+                cursor_image: std::cell::Cell::new(CursorImage::Hidden),
+                cursor_hotspot: std::cell::Cell::new((0, 0)),
+                xcursor_themes: RefCell::new(HashMap::new()),
                 keyboards: RefCell::new(Vec::new()),
                 pointers: RefCell::new(Vec::new()),
                 keyboard_groups: RefCell::new(HashMap::new()),
@@ -10797,6 +11027,14 @@ impl Runtime {
             *self.inner.seat.borrow_mut() = Some(seat);
             *self.inner.cursor.borrow_mut() = Some(cursor);
             *self.inner.xcursor.borrow_mut() = Some(xcursor);
+            // Keyed by the cursor's own address: creation names the object
+            // directly (the `KeyboardGroupId` discipline), and `on_seat_destroy`
+            // evicts it — the cursor dies with the seat and exposes no destroy
+            // signal of its own.
+            self.inner
+                .cursors
+                .borrow_mut()
+                .insert(cursor.as_ptr() as usize, CursorEntry { raw: cursor });
         }
         Ok(())
     }
@@ -11505,6 +11743,9 @@ impl Runtime {
             sys::wlr_cursor_set_xcursor(cursor.as_ptr(), xcursor.as_ptr(), name);
         }
         self.inner.applied_cursor.set(Some(shape));
+        // The single funnel for theme-image sets, so the snapshot records
+        // here: `CursorState.image` cannot drift from what wlroots shows.
+        self.inner.cursor_image.set(CursorImage::Xcursor);
     }
 
     /// Make sure the cursor has an image, loading the default xcursor theme
@@ -11625,6 +11866,159 @@ impl Runtime {
     #[cfg(test)]
     pub(crate) fn applied_cursor(&self) -> Option<Option<CursorShape>> {
         self.inner.applied_cursor.get()
+    }
+
+    /// The id of this runtime's cursor, or `None` before
+    /// [`create_seat`](Runtime::create_seat) has run (and after the seat —
+    /// and with it the cursor — is destroyed). The handle
+    /// [`try_cursor`](Runtime::try_cursor) resolves; a consumer that only
+    /// wants the aggregate state calls [`cursor_state`](Runtime::cursor_state)
+    /// instead and never needs this.
+    pub fn cursor_id(&self) -> Option<CursorId> {
+        let (&key, _) = self.inner.cursors.borrow().iter().next()?;
+        Some(CursorId(key))
+    }
+
+    /// The cursor's aggregate state, or `None` when no cursor is tracked
+    /// (no seat yet, or the seat destroyed). `None` mirrors the IME and
+    /// keyboard readers' miss shape.
+    pub fn cursor_state(&self) -> Option<CursorState> {
+        let id = self.cursor_id()?;
+        self.try_cursor(id)
+    }
+
+    /// The cursor's aggregate state behind `id`, or `None` for an unknown
+    /// id. Miss `None` matches every other by-id accessor in this crate
+    /// (FIX-3): a deferred delivery naming a destroyed cursor resolves to
+    /// nothing rather than to a reused object.
+    pub fn try_cursor(&self, id: CursorId) -> Option<CursorState> {
+        // Copy out, drop the borrow, then read: no table borrow is held
+        // across the snapshot below (which takes none, but the discipline
+        // is unconditional in this file).
+        let entry = *self.inner.cursors.borrow().get(&id.0)?;
+        Some(self.snapshot_cursor(entry.raw))
+    }
+
+    /// Copy the live cursor out into a [`CursorState`]. `cursor` must name
+    /// the tracked cursor — callers resolve it from the table, whose entry
+    /// is evicted before wlroots frees the cursor.
+    fn snapshot_cursor(&self, cursor: NonNull<sys::wlr_cursor>) -> CursorState {
+        // SAFETY: `cursor` names the live tracked cursor per the caller; the
+        // position read borrows wlroots-owned memory without freeing it, and
+        // the mapping/image tracking is copied out of this crate's own cells
+        // (each borrow ended) before constructing the snapshot.
+        let cursor_ref = unsafe { &*cursor.as_ptr() };
+        CursorState::from_raw(
+            cursor_ref,
+            *self.inner.cursor_mapped_output.borrow(),
+            *self.inner.cursor_mapped_region.borrow(),
+            self.inner.cursor_image.get(),
+            self.inner.cursor_hotspot.get(),
+        )
+    }
+
+    /// Load the named xcursor theme at `size` pixels for direct cursor-image
+    /// use (e.g. a grab cursor while moving a window — the
+    /// `wlr_xcursor_theme_load` doc's own example), returning the handle
+    /// [`destroy_xcursor_theme`](Runtime::destroy_xcursor_theme) releases.
+    /// `None` when the name contains a NUL or wlroots loads nothing (no
+    /// theme installed, not even a fallback).
+    ///
+    /// The theme is owned by this runtime, independent of the seat and of
+    /// any run: loading needs no seat, and the entry stands until
+    /// explicitly destroyed.
+    pub fn load_xcursor_theme(&self, name: &str, size: i32) -> Option<XcursorManagerId> {
+        let c_name = std::ffi::CString::new(name).ok()?;
+        // SAFETY: `c_name` is a live NUL-terminated string for the call;
+        // `wlr_xcursor_theme_load` copies what it needs and returns an owned
+        // theme or null on failure — null is the documented "no theme"
+        // outcome, not a fault.
+        let theme = unsafe { sys::wlr_xcursor_theme_load(c_name.as_ptr(), size) };
+        let theme = NonNull::new(theme)?;
+        let id = XcursorManagerId(theme.as_ptr() as usize);
+        self.inner
+            .xcursor_themes
+            .borrow_mut()
+            .insert(id.0, XcursorThemeEntry { raw: theme });
+        Some(id)
+    }
+
+    /// Release a theme [`load_xcursor_theme`](Runtime::load_xcursor_theme)
+    /// loaded. Returns `false` — and releases nothing — for an unknown id,
+    /// so double-destroy and dangling ids are harmless no-ops rather than
+    /// double-frees.
+    pub fn destroy_xcursor_theme(&self, id: XcursorManagerId) -> bool {
+        // Removed, not merely looked up: the entry owns the theme, and
+        // dropping the entry after the destroy keeps ownership single.
+        // The borrow ends with this statement, before the FFI call below.
+        let removed = self.inner.xcursor_themes.borrow_mut().remove(&id.0);
+        let Some(entry) = removed else {
+            return false;
+        };
+        // SAFETY: `entry` was removed from the only table holding it, so
+        // this is the single destroy of a live theme; no borrow is held.
+        unsafe { sys::wlr_xcursor_theme_destroy(entry.raw.as_ptr()) };
+        true
+    }
+
+    /// Map the cursor to `output`, constraining all its motion to that
+    /// output (which must belong to the cursor's output layout). Records the
+    /// mapping for [`CursorState::mapped_output`].
+    ///
+    /// `None` when there is no seat cursor, or `output` names no live
+    /// output of the current run — the same miss shape as the other by-id
+    /// mutators. A compositor calls this with an output announced by the
+    /// current run (e.g. from an output handler), where the output table is
+    /// populated.
+    pub fn map_cursor_to_output(&self, output: OutputId) -> Option<()> {
+        let cursor = self.cursor_ptr()?;
+        // Copy out, drop the borrow, then emit: no table borrow crosses FFI.
+        let target = *self.inner.outputs.borrow().get(&output)?;
+        // SAFETY: `cursor` is this runtime's own live cursor from
+        // `create_seat`; `target` is live — its entry stands, and
+        // `on_output_destroy` evicts entries before wlroots frees them.
+        unsafe { sys::wlr_cursor_map_to_output(cursor.as_ptr(), target.as_ptr()) };
+        *self.inner.cursor_mapped_output.borrow_mut() = Some(output);
+        Some(())
+    }
+
+    /// Map the cursor to an arbitrary layout `region`. Records the region
+    /// for [`CursorState::mapped_region`].
+    ///
+    /// `None` when there is no seat cursor; otherwise always applies (a
+    /// region needs no table resolution).
+    pub fn map_cursor_to_region(&self, region: Box2D) -> Option<()> {
+        let cursor = self.cursor_ptr()?;
+        // SAFETY: `cursor` is this runtime's own live cursor; `region.as_c`
+        // is a layout-identical view of `region`, live for the call.
+        unsafe { sys::wlr_cursor_map_to_region(cursor.as_ptr(), region.as_c()) };
+        *self.inner.cursor_mapped_region.borrow_mut() = Some(region);
+        Some(())
+    }
+
+    /// Drop the recorded output mapping when it names `output`, called from
+    /// `backend.rs`'s `on_output_destroy` before the output is freed, so
+    /// [`CursorState::mapped_output`] never names a dead output. Takes the
+    /// id rather than the pointer: the output is dying, and only the id is
+    /// needed to compare.
+    pub(crate) fn clear_cursor_mapping_for_output(&self, output: OutputId) {
+        if *self.inner.cursor_mapped_output.borrow() == Some(output) {
+            *self.inner.cursor_mapped_output.borrow_mut() = None;
+        }
+    }
+
+    /// Evict the tracked cursor and reset its mapping/image tracking,
+    /// called from `backend.rs`'s `on_seat_destroy`: the cursor dies with
+    /// the seat, so from here on [`cursor_id`](Runtime::cursor_id),
+    /// [`cursor_state`](Runtime::cursor_state) and
+    /// [`try_cursor`](Runtime::try_cursor) miss again. Clearing only drops
+    /// borrowed pointers, never dereferences them.
+    pub(crate) fn forget_cursor(&self) {
+        self.inner.cursors.borrow_mut().clear();
+        *self.inner.cursor_mapped_output.borrow_mut() = None;
+        *self.inner.cursor_mapped_region.borrow_mut() = None;
+        self.inner.cursor_image.set(CursorImage::Hidden);
+        self.inner.cursor_hotspot.set((0, 0));
     }
 
     /// Record a keyboard the backend announced, for
