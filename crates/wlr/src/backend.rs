@@ -42,7 +42,7 @@ use crate::seat::{AxisRelativeDirection, AxisSource, KeyEvent, Modifiers, Pointe
 use crate::{
     AppliedHead, Band, CommittedFields, Display, Error, EventLoop, Handlers, LayerSurface,
     LayerSurfaceId, LoopHandler, NodeId, Output, OutputHandler, OutputId, Popup, PopupId,
-    PopupParent, Region, Result, Runtime, Toplevel, ToplevelId, Transform, sys,
+    PopupParent, PowerMode, Region, Result, Runtime, Toplevel, ToplevelId, Transform, sys,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -2771,6 +2771,27 @@ impl<'d> Backend<'d> {
             });
         }
 
+        if let Some(manager) = runtime.power_manager_ptr() {
+            // SAFETY: `create_power_manager` returned a non-null manager that
+            // the display owns and destroys with itself, and this call
+            // requires the display to outlive the returned `Registration`s —
+            // the same display-ownership rule every manager block above
+            // states. The session pointer pairs this instantiation's `S`,
+            // and null liveness is correct for the same reason. This is the
+            // `set_mode` signal wlroots raises when a client requests a
+            // power mode; the handler snapshots the output id plus the mode
+            // (both owned scalars) and emits, so nothing borrowed crosses
+            // into deferred delivery.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.set_mode,
+                    on_output_power_set_mode::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
         #[cfg(wlr_has_xwayland)]
         if let Some(xwayland) = runtime.xwayland_ptr() {
             // SAFETY: `create_xwayland` returned a non-null `wlr_xwayland` owned
@@ -3212,6 +3233,7 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         }
         Event::RequestActivate(target, token) => state.request_activate(target, token),
         Event::GammaControlChanged(id) => state.gamma_control_changed(id),
+        Event::OutputPowerModeSet(id, mode) => state.output_power_mode_requested(id, mode),
         Event::InputMethodPopupCreated(popup) => state.new_popup_surface(popup),
         Event::InputMethodPopupDestroyed(popup) => state.popup_surface_destroyed(popup),
         Event::InputMethodPopupRepositioned(popup) => state.popup_repositioned(popup),
@@ -6783,6 +6805,40 @@ unsafe extern "C" fn on_gamma_control_set_gamma<S: Handlers>(
         (*session)
             .dispatcher
             .emit(&*session, Event::GammaControlChanged(id), deliver);
+    }
+}
+
+/// A client requested an output power mode: snapshot the output id plus the
+/// mode, then emit. Both are owned scalars, so nothing borrowed crosses
+/// into deferred delivery. An unrecognised mode misses (is ignored) rather
+/// than aborting: it names a request, and unknown requests are not acted on.
+unsafe extern "C" fn on_output_power_set_mode<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_output_power_manager_v1.events.set_mode`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_output_power_v1_set_mode_event`, valid only
+    // for this call, whose `output` is a live `wlr_output` with an
+    // initialised addon set (every output this crate's `on_new_output`
+    // announces gets one attached immediately).
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_output_power_v1_set_mode_event>();
+        if event.is_null() || (*event).output.is_null() {
+            return;
+        }
+        let id = OutputId(ensure_id_raw(&raw mut (*(*event).output).addons));
+        let mode = PowerMode::from_raw((*event).mode.0);
+
+        let deliver = (*session).deliver;
+        if let Some(mode) = mode {
+            (*session)
+                .dispatcher
+                .emit(&*session, Event::OutputPowerModeSet(id, mode), deliver);
+        }
     }
 }
 
@@ -10628,12 +10684,13 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         // (`Backend::register_toplevel_and_input` is `run_all`'s hook; `run`
         // uses `no_extra`), so this cannot be produced on this path.
         | Event::SessionLockChanged(..)
-        // Unreachable: `run` never registers a cursor-shape, xdg-activation or
-        // gamma-control manager either, for the same reason as the session
-        // lock manager above — so none of these three can fire on this path.
+        // Unreachable: `run` never registers a cursor-shape, xdg-activation,
+        // gamma-control, or power manager either, for the same reason as the
+        // session lock manager above — so none of these can fire on this path.
         | Event::RequestSetShape(..)
         | Event::RequestActivate(..)
         | Event::GammaControlChanged(..)
+        | Event::OutputPowerModeSet(..)
         // Unreachable: `run` never registers an input-method manager either
         // (`Backend::register_toplevel_and_input` is `run_all`'s hook; `run`
         // uses `no_extra`), so no input-method popup can be announced,

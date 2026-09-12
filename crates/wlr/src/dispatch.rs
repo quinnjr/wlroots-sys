@@ -47,8 +47,8 @@ use std::collections::VecDeque;
 use crate::{
     ActivationToken, AxisRelativeDirection, AxisSource, CommittedFields, CursorShape,
     CursorShapeDevice, DecorationMode, Edges, InputPopupSurfaceId, LayerSurfaceId, NodeId,
-    OutputId, PointerAxis, PopupId, SceneOutputId, ShortcutsInhibitorId, TabletPadId, TabletToolId,
-    ToplevelId, TransientSeatId, VirtualKeyboardId, VirtualPointerId,
+    OutputId, PointerAxis, PopupId, PowerMode, SceneOutputId, ShortcutsInhibitorId, TabletPadId,
+    TabletToolId, ToplevelId, TransientSeatId, VirtualKeyboardId, VirtualPointerId,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -245,6 +245,12 @@ pub(crate) enum Event {
     /// [`crate::OutputHandler::gamma_control_changed`]'s own doc for why
     /// there is nothing left here for a handler to *do*.
     GammaControlChanged(OutputId),
+
+    /// A client requested an output power mode. Carries what was asked for,
+    /// not what was applied: acting on it (disabling the output, say) is
+    /// the compositor's call, made with its own commit. Both fields are
+    /// owned scalars copied at emission.
+    OutputPowerModeSet(OutputId, PowerMode),
 
     /// An input-method created a `zwp_input_method_v2` candidate popup surface.
     /// Carries the crate's own [`InputPopupSurfaceId`] handle for it — an
