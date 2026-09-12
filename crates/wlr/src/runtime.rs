@@ -1040,6 +1040,81 @@ pub(crate) struct XcursorThemeEntry {
     pub(crate) raw: NonNull<sys::wlr_xcursor_theme>,
 }
 
+/// A stable handle for one tracked `wlr_pointer_constraint_v1`.
+///
+/// Opaque to consumers, like [`CursorId`]: the wrapped value is the
+/// constraint's own address — the identity `backend.rs`'s
+/// `on_new_pointer_constraint` recovers from the firing listener's matched
+/// entry (FIX-3), so creation names the object and no signal `data` is
+/// trusted. Notification-only: the handler learns *which* constraint
+/// committed through
+/// [`SeatHandler::pointer_constraint_committed`](crate::SeatHandler::pointer_constraint_committed),
+/// and a deferred delivery may name a constraint destroyed in between — the
+/// id then only tells the handler which one it was, exactly as
+/// [`InputPopupSurfaceId`] behaves after its entry is evicted. There is no
+/// resolver: the constraint table lives on the per-run `Session`, not on
+/// this runtime, so nothing outlives the run to resolve against.
+///
+/// Deliberately no `PartialOrd`/`Ord`, matching [`CursorId`]: an opaque id's
+/// ordering would promise creation-order semantics nobody asked for.
+///
+/// `Debug` is redacted: the wrapped value is a heap address — printing it
+/// would hand out an ASLR oracle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConstraintId(pub(crate) usize);
+
+impl std::fmt::Debug for ConstraintId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ConstraintId(..)")
+    }
+}
+
+impl ConstraintId {
+    /// An id that names no constraint, for negative tests: `usize::MAX - n`
+    /// can never be a constraint address handed out here (heap addresses
+    /// never sit at the top of the address space). Mirrors
+    /// [`CursorId::dangling`].
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
+/// A stable handle for a pointer gesture in flight — a swipe, pinch or hold
+/// a hardware pointer announced.
+///
+/// Opaque to consumers, like [`ConstraintId`]: the wrapped value is the
+/// announcing `wlr_pointer`'s own address — the identity every pointer-gesture
+/// signal (`swipe_begin`, `pinch_update`, `hold_end`, …) carries in its event,
+/// so a handler recovers the id from the event itself rather than from a
+/// signal `data` that may be NULL (FIX-3, the same discipline the tablet-tool
+/// ids follow). Notification-only: the handler learns that a gesture began or
+/// ended through [`SeatHandler::gesture_began`](crate::SeatHandler::gesture_began) /
+/// [`SeatHandler::gesture_ended`](crate::SeatHandler::gesture_ended), while the
+/// full-fidelity forward to gesture clients (kind, deltas, scale, rotation)
+/// goes through the `GesturePhase` token's `send_*`, driven separately.
+///
+/// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
+/// reasons [`ConstraintId`]'s doc gives.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GestureId(pub(crate) usize);
+
+impl std::fmt::Debug for GestureId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GestureId(..)")
+    }
+}
+
+impl GestureId {
+    /// An id that names no gesture, for negative tests: `usize::MAX - n` can
+    /// never be a pointer address handed out here. Mirrors
+    /// [`ConstraintId::dangling_nth_for_test`].
+    #[doc(hidden)]
+    pub fn dangling_nth_for_test(n: usize) -> Self {
+        Self(usize::MAX - n)
+    }
+}
+
 /// One tracked hardware tablet tool: the tablet device that announced it,
 /// and whether its client-facing `wlr_tablet_v2_tablet_tool` was created.
 ///
@@ -1387,6 +1462,379 @@ impl EnteredTextInput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CommitSerial(pub u32);
 
+/// One pointer input event's outgoing seat sends: every
+/// `wlr_seat_pointer_notify_*` for a single motion, button or axis event,
+/// closed by the `notify_frame` that groups them on the wire.
+///
+/// `PointerFrame` is the session-typed proof that the seat is still live:
+/// every send resolves this runtime's seat slot and no-ops when it is gone
+/// (stale — the seat was destroyed), preserving each call site's guard. It
+/// carries no borrow: each method copies the seat pointer out, drops the
+/// borrow, then emits — the same discipline [`ImeActivation`] follows — so
+/// resolving per send (rather than once at [`of`](PointerFrame::of)) stays
+/// sound even across the handler delivery between capture and use.
+///
+/// Produced only by the motion/button/axis paths (`backend.rs`'s
+/// `on_pointer_motion`, `on_pointer_motion_absolute`, `on_pointer_button`,
+/// `on_pointer_axis`); only its methods emit `send_motion`/`send_button`
+/// (and the enter/axis notifies that share the frame), and
+/// [`finish`](PointerFrame::finish) is the only path to `send_frame` — the
+/// relay handlers never touch the raw notifies. Dropping a frame without
+/// finishing sends nothing and still compiles (the locked-pointer path does
+/// exactly that: relative motion went out, absolute motion is frozen, so
+/// there is no frame to close) — the type guides, it does not enforce.
+///
+/// `Clone`, not `Copy`: the handle holds a `Runtime` (an `Rc`), which cannot
+/// be `Copy`, and a clone is the same cheap handle.
+#[derive(Clone)]
+pub(crate) struct PointerFrame {
+    runtime: Runtime,
+}
+
+impl std::fmt::Debug for PointerFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redacted like `ImeActivation`: the runtime holds heap addresses.
+        f.write_str("PointerFrame(..)")
+    }
+}
+
+impl PointerFrame {
+    /// The live frame for one input event. Infallible — a missing seat is
+    /// not an error here but a per-send no-op below, so callers keep their
+    /// shape (the handler event is still delivered; only the client forward
+    /// is skipped).
+    #[must_use]
+    pub(crate) fn of(runtime: &Runtime) -> Self {
+        Self {
+            runtime: runtime.clone(),
+        }
+    }
+
+    /// The seat this frame targets, for the helpers that need more than a
+    /// notify (grab bookkeeping reads the seat's `pointer_state`; constraint
+    /// activation compares against it). Resolved live per call, like every
+    /// send below; `None` means "no seat": those helpers return early,
+    /// exactly as their `if let Some(seat)` callers did before the token
+    /// existed.
+    pub(crate) fn seat(&self) -> Option<NonNull<sys::wlr_seat>> {
+        self.runtime.seat_ptr()
+    }
+
+    /// Forward a motion to the focused client.
+    pub(crate) fn send_motion(&self, time_msec: u32, sx: f64, sy: f64) {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return;
+        };
+        // SAFETY: `seat` is this runtime's own live seat (evicted by the
+        // seat-destroy handler before wlroots frees it); the table borrow
+        // ended inside `seat_ptr`, so no borrow crosses this emit.
+        unsafe { sys::wlr_seat_pointer_notify_motion(seat.as_ptr(), time_msec, sx, sy) };
+    }
+
+    /// Forward a button press or release to the focused client. The serial
+    /// the notify returns is of no use here: nothing in this crate cites it,
+    /// and a client that needs it reads it off its own `wl_pointer.button`.
+    pub(crate) fn send_button(
+        &self,
+        time_msec: u32,
+        button: u32,
+        state: sys::wl_pointer_button_state,
+    ) {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return;
+        };
+        // SAFETY: as for `send_motion`.
+        unsafe {
+            let _ = sys::wlr_seat_pointer_notify_button(seat.as_ptr(), time_msec, button, state);
+        }
+    }
+
+    /// Forward a scroll to the focused client.
+    ///
+    /// Seven parameters counting `&self`, one for each field a `wl_pointer`
+    /// scroll carries — the same shape `SeatHandler::pointer_axis` documents,
+    /// and for the same reason: no subset groups meaningfully.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_axis(
+        &self,
+        time_msec: u32,
+        axis: crate::seat::PointerAxis,
+        delta: f64,
+        delta_discrete: i32,
+        source: crate::seat::AxisSource,
+        relative_direction: crate::seat::AxisRelativeDirection,
+    ) {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return;
+        };
+        // SAFETY: as for `send_motion`; the scalars are plain values.
+        unsafe {
+            sys::wlr_seat_pointer_notify_axis(
+                seat.as_ptr(),
+                time_msec,
+                axis.to_raw(),
+                delta,
+                delta_discrete,
+                source.to_raw(),
+                relative_direction.to_raw(),
+            )
+        };
+    }
+
+    /// Move pointer focus to `surface` at surface-local `(sx, sy)`.
+    ///
+    /// # Safety
+    ///
+    /// `surface` must be a live, non-null `wlr_surface` from this runtime's
+    /// scene — the hit test's contract, which the callers uphold.
+    pub(crate) unsafe fn send_enter(&self, surface: *mut sys::wlr_surface, sx: f64, sy: f64) {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return;
+        };
+        // SAFETY: `seat` as for `send_motion`; `surface` is live per the
+        // caller's contract.
+        unsafe { sys::wlr_seat_pointer_notify_enter(seat.as_ptr(), surface, sx, sy) };
+    }
+
+    /// Clear pointer focus: the cursor is over nothing.
+    pub(crate) fn clear_focus(&self) {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return;
+        };
+        // SAFETY: as for `send_motion`.
+        unsafe { sys::wlr_seat_pointer_notify_clear_focus(seat.as_ptr()) };
+    }
+
+    /// Close the frame (`notify_frame`) and consume it: the conventional path
+    /// to `send_frame` — every motion/button/axis path's frame flows through
+    /// here, and nowhere else sends one.
+    pub(crate) fn finish(self) {
+        let Some(seat) = self.runtime.seat_ptr() else {
+            return;
+        };
+        // SAFETY: as for `send_motion`.
+        unsafe { sys::wlr_seat_pointer_notify_frame(seat.as_ptr()) };
+    }
+}
+
+/// A live gesture-forwarding session toward the bound gesture clients.
+///
+/// `GesturePhase` is the session-typed proof that the pointer-gestures
+/// manager *and* the seat it forwards on are both still live: every send
+/// resolves both and no-ops when either is gone (stale — the manager was
+/// never created, or the seat was destroyed), preserving each call site's
+/// guard. Same no-borrow-across-FFI discipline as [`PointerFrame`]: each
+/// method copies both pointers out, drops the borrows, then emits.
+///
+/// Produced on swipe/pinch/hold `begin` ([`of`](GesturePhase::of) plus a
+/// `send_*_begin`); only its methods emit the `update` sends; consumed on
+/// `end` — `send_*_end(self, …, cancelled)` takes the session, so a cancelled
+/// gesture consumes exactly like a completed one. Pairing is by convention at
+/// the call sites (`backend.rs`'s gesture handlers): dropping a session
+/// without ending sends nothing and still compiles — the type guides, it
+/// does not enforce. The relay handlers never touch the raw gesture sends.
+///
+/// `Clone`, not `Copy`: the handle holds a `Runtime` (an `Rc`), which cannot
+/// be `Copy`, and a clone is the same cheap handle.
+#[derive(Clone)]
+pub(crate) struct GesturePhase {
+    runtime: Runtime,
+}
+
+impl std::fmt::Debug for GesturePhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redacted like `ImeActivation`: the runtime holds heap addresses.
+        f.write_str("GesturePhase(..)")
+    }
+}
+
+impl GesturePhase {
+    /// The live forwarding session, or `None` when there is no gestures
+    /// manager or no seat to forward on (stale — every caller no-ops, while
+    /// the handler event is still delivered so shell-side gesture mapping
+    /// works without gesture clients).
+    #[must_use]
+    pub(crate) fn of(runtime: &Runtime) -> Option<Self> {
+        if runtime.pointer_gestures_manager_ptr().is_none() || runtime.seat_ptr().is_none() {
+            return None;
+        }
+        Some(Self {
+            runtime: runtime.clone(),
+        })
+    }
+
+    /// Both ends of the forward, copied out with no borrow held: the gestures
+    /// manager (display-owned, live as long as this runtime) and this
+    /// runtime's seat. `None` when either went away since `of` (stale — the
+    /// send no-ops).
+    fn ends(
+        &self,
+    ) -> Option<(
+        NonNull<sys::wlr_pointer_gestures_v1>,
+        NonNull<sys::wlr_seat>,
+    )> {
+        Some((
+            self.runtime.pointer_gestures_manager_ptr()?,
+            self.runtime.seat_ptr()?,
+        ))
+    }
+
+    /// Forward a swipe begin for `fingers` fingers.
+    pub(crate) fn send_swipe_begin(&self, time_msec: u32, fingers: u32) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: both ends are live per `ends()`; the table borrows ended
+        // inside that call, so no borrow crosses this emit.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_swipe_begin(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                fingers,
+            )
+        };
+    }
+
+    /// Forward a swipe update: the gesture centre's displacement since the
+    /// previous update.
+    pub(crate) fn send_swipe_update(&self, time_msec: u32, dx: f64, dy: f64) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: as for `send_swipe_begin`.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_swipe_update(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                dx,
+                dy,
+            )
+        };
+    }
+
+    /// Forward a swipe end and consume the session. `cancelled` is whether
+    /// the hardware cancelled the gesture rather than completing it — a
+    /// cancel consumes exactly like a completion.
+    pub(crate) fn send_swipe_end(self, time_msec: u32, cancelled: bool) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: as for `send_swipe_begin`.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_swipe_end(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                cancelled,
+            )
+        };
+    }
+
+    /// Forward a pinch begin for `fingers` fingers.
+    pub(crate) fn send_pinch_begin(&self, time_msec: u32, fingers: u32) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: as for `send_swipe_begin`.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_pinch_begin(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                fingers,
+            )
+        };
+    }
+
+    /// Forward a pinch update: the gesture centre's displacement since the
+    /// previous update, the absolute scale since begin, and the relative
+    /// rotation in degrees clockwise since the previous update.
+    ///
+    /// Six parameters counting `&self`, one for each field the wire update
+    /// carries — the same shape `PointerFrame::send_axis` documents, and for
+    /// the same reason: no subset groups meaningfully.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn send_pinch_update(
+        &self,
+        time_msec: u32,
+        dx: f64,
+        dy: f64,
+        scale: f64,
+        rotation: f64,
+    ) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: as for `send_swipe_begin`.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_pinch_update(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                dx,
+                dy,
+                scale,
+                rotation,
+            )
+        };
+    }
+
+    /// Forward a pinch end and consume the session, on the same
+    /// complete-or-cancel terms as
+    /// [`send_swipe_end`](GesturePhase::send_swipe_end).
+    pub(crate) fn send_pinch_end(self, time_msec: u32, cancelled: bool) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: as for `send_swipe_begin`.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_pinch_end(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                cancelled,
+            )
+        };
+    }
+
+    /// Forward a hold begin for `fingers` fingers (a hold has no update: the
+    /// fingers went down and have not moved).
+    pub(crate) fn send_hold_begin(&self, time_msec: u32, fingers: u32) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: as for `send_swipe_begin`.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_hold_begin(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                fingers,
+            )
+        };
+    }
+
+    /// Forward a hold end and consume the session, on the same
+    /// complete-or-cancel terms as
+    /// [`send_swipe_end`](GesturePhase::send_swipe_end).
+    pub(crate) fn send_hold_end(self, time_msec: u32, cancelled: bool) {
+        let Some((gestures, seat)) = self.ends() else {
+            return;
+        };
+        // SAFETY: as for `send_swipe_begin`.
+        unsafe {
+            sys::wlr_pointer_gestures_v1_send_hold_end(
+                gestures.as_ptr(),
+                seat.as_ptr(),
+                time_msec,
+                cancelled,
+            )
+        };
+    }
+}
+
 pub(crate) struct RuntimeInner {
     pub(crate) sources: RefCell<Vec<FdSource>>,
 
@@ -1609,6 +2057,12 @@ pub(crate) struct RuntimeInner {
     /// rationale as the other manager globals.
     pub(crate) relative_pointer_manager:
         RefCell<Option<NonNull<sys::wlr_relative_pointer_manager_v1>>>,
+
+    /// The pointer-gestures (`zwp_pointer_gestures_v1`) manager, once created —
+    /// lets a client receive swipe/pinch/hold gesture events, which this crate
+    /// forwards from the hardware pointers through the [`GesturePhase`] token.
+    /// `Option`, same rationale as the other manager globals.
+    pub(crate) pointer_gestures_manager: RefCell<Option<NonNull<sys::wlr_pointer_gestures_v1>>>,
 
     /// The cursor-shape (`wp_cursor_shape_manager_v1`) manager, once created —
     /// lets a client name the cursor image it wants instead of drawing its
@@ -2631,6 +3085,7 @@ impl Runtime {
                 screencopy_manager: RefCell::new(None),
                 pointer_constraints_manager: RefCell::new(None),
                 relative_pointer_manager: RefCell::new(None),
+                pointer_gestures_manager: RefCell::new(None),
                 cursor_shape_manager: RefCell::new(None),
                 xdg_activation_manager: RefCell::new(None),
                 gamma_control_manager: RefCell::new(None),
@@ -7937,6 +8392,36 @@ impl Runtime {
         &self,
     ) -> Option<NonNull<sys::wlr_relative_pointer_manager_v1>> {
         *self.inner.relative_pointer_manager.borrow()
+    }
+
+    /// Create the `zwp_pointer_gestures_v1` global, letting clients receive
+    /// swipe/pinch/hold gesture events. This crate forwards the hardware
+    /// pointers' gesture signals to it through the `GesturePhase` token;
+    /// without this call that forward no-ops while the handler events
+    /// (`SeatHandler::gesture_began/ended`) still fire. Errors if called
+    /// twice.
+    pub fn create_pointer_gestures_manager(&self, display: &Display) -> Result<()> {
+        if self.inner.pointer_gestures_manager.borrow().is_some() {
+            return Err(Error::Operation(
+                "Runtime::create_pointer_gestures_manager called twice",
+            ));
+        }
+        // SAFETY: `display` is live for the call; the returned manager is owned
+        // by the display and destroyed with it, so this crate never frees it.
+        let raw = unsafe { sys::wlr_pointer_gestures_v1_create(display.as_ptr()) };
+        let raw = NonNull::new(raw).ok_or(Error::Create("wlr_pointer_gestures_v1_create"))?;
+        *self.inner.pointer_gestures_manager.borrow_mut() = Some(raw);
+        Ok(())
+    }
+
+    /// The `zwp_pointer_gestures_v1` manager, once created via
+    /// [`Runtime::create_pointer_gestures_manager`] — used internally by the
+    /// [`GesturePhase`] token to forward hardware gestures to gesture
+    /// clients.
+    pub(crate) fn pointer_gestures_manager_ptr(
+        &self,
+    ) -> Option<NonNull<sys::wlr_pointer_gestures_v1>> {
+        *self.inner.pointer_gestures_manager.borrow()
     }
 
     /// Create the `ext_idle_notifier_v1` global. Clients (e.g. swayidle) bind

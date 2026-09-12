@@ -37,12 +37,13 @@ use std::rc::Rc;
 use crate::dispatch::{Dispatcher, DisplayPinGuard, Event};
 use crate::id::{SourceId, attach_id, find_id};
 use crate::layer::Layer;
-use crate::runtime::{PointerGrab, SceneObserver};
+use crate::runtime::{GesturePhase, PointerFrame, PointerGrab, SceneObserver};
 use crate::seat::{AxisRelativeDirection, AxisSource, KeyEvent, Modifiers, PointerAxis};
 use crate::{
-    AppliedHead, Band, CommittedFields, Display, Error, EventLoop, Handlers, LayerSurface,
-    LayerSurfaceId, LoopHandler, NodeId, Output, OutputHandler, OutputId, Popup, PopupId,
-    PopupParent, PowerMode, Region, Result, Runtime, Toplevel, ToplevelId, Transform, sys,
+    AppliedHead, Band, CommittedFields, ConstraintId, Display, Error, EventLoop, GestureId,
+    Handlers, LayerSurface, LayerSurfaceId, LoopHandler, NodeId, Output, OutputHandler, OutputId,
+    Popup, PopupId, PopupParent, PowerMode, Region, Result, Runtime, Toplevel, ToplevelId,
+    Transform, sys,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -3262,6 +3263,20 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
                 time_msec,
             );
         }
+        Event::RelativeMotion {
+            dx_milli,
+            dy_milli,
+            time_msec,
+        } => {
+            state.relative_motion(
+                dx_milli as f64 / 1000.0,
+                dy_milli as f64 / 1000.0,
+                time_msec,
+            );
+        }
+        Event::PointerConstraintCommitted(id) => state.pointer_constraint_committed(id),
+        Event::GestureBegan(id) => state.gesture_began(id),
+        Event::GestureEnded(id) => state.gesture_ended(id),
         Event::SessionLockChanged(locked) => state.session_lock_changed(locked),
         Event::RequestSetShape(device, serial, shape) => {
             state.request_set_shape(device, serial, shape)
@@ -6914,6 +6929,11 @@ unsafe extern "C" fn on_output_power_set_mode<S: Handlers>(
 /// into the region immediately, restoring the invariant the moment it could
 /// break.
 ///
+/// Once the region has settled, the commit is announced to the compositor
+/// (`Event::PointerConstraintCommitted`) — for the committing constraint
+/// whether or not it is the active one, since confinement is only one use of
+/// the committed state.
+///
 /// The constraint is identified from the firing listener `l` — matched against
 /// each entry's own `set_region` `Registration` — never from the signal `data`,
 /// the same discipline the destroy handler uses.
@@ -6942,27 +6962,34 @@ unsafe extern "C" fn on_pointer_constraint_set_region<S: Handlers>(
         let Some(constraint) = constraint else {
             return;
         };
-        if runtime.active_constraint() != Some(constraint) {
-            return;
+        if runtime.active_constraint() == Some(constraint) {
+            // Restore the confine invariant. If the cursor moved, re-notify the
+            // surface under its new position so pointer focus stays correct.
+            //
+            // Through `pointer_motion_to_focus`, not `enter_surface_under_cursor`
+            // directly, so a re-anchor that happens while a button is held obeys
+            // the implicit grab like any other motion. Routing it is trivially
+            // correct rather than merely safe: a confine re-anchor lands inside
+            // the constrained surface's own region, and a constraint only
+            // activates on the focused surface, so the surface under the cursor
+            // *is* the grabbed one either way — the only difference is that the
+            // client now gets coordinates on the same delta model as every other
+            // motion of the gesture, instead of a one-off leaf-relative pair.
+            if let Some((x, y)) = runtime.reanchor_cursor_into_region(constraint) {
+                let frame = PointerFrame::of(runtime);
+                pointer_motion_to_focus(session, &frame, x, y, 0);
+                frame.finish();
+            }
         }
 
-        // Restore the confine invariant. If the cursor moved, re-notify the
-        // surface under its new position so pointer focus stays correct.
-        //
-        // Through `pointer_motion_to_focus`, not `enter_surface_under_cursor`
-        // directly, so a re-anchor that happens while a button is held obeys
-        // the implicit grab like any other motion. Routing it is trivially
-        // correct rather than merely safe: a confine re-anchor lands inside
-        // the constrained surface's own region, and a constraint only
-        // activates on the focused surface, so the surface under the cursor
-        // *is* the grabbed one either way — the only difference is that the
-        // client now gets coordinates on the same delta model as every other
-        // motion of the gesture, instead of a one-off leaf-relative pair.
-        if let Some((x, y)) = runtime.reanchor_cursor_into_region(constraint)
-            && let Some(seat) = runtime.seat_ptr()
-        {
-            pointer_motion_to_focus(session, seat.as_ptr(), x, y, 0);
-        }
+        // The commit settled above (or needed no settling when the committing
+        // constraint is not the active one); announce which constraint it was.
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::PointerConstraintCommitted(ConstraintId(constraint.as_ptr() as usize)),
+            deliver,
+        );
     }
 }
 
@@ -8978,12 +9005,12 @@ struct InputDevice {
     pad: Option<NonNull<sys::wlr_tablet_pad>>,
     _destroy: Registration,
     /// The device's own signals: two for a keyboard (`key`, `modifiers`),
-    /// four for a pointer (`motion`, `motion_absolute`, `button`, `axis`),
-    /// four for a tablet (`axis`, `proximity`, `tip`, `button`), three for a
-    /// pad (`button`, `ring`, `strip`), zero for a device type this crate
-    /// does not yet wire up (the destroy watch above is still linked, so
-    /// this entry is still found and removed on destroy even for an ignored
-    /// device type).
+    /// twelve for a pointer (`motion`, `motion_absolute`, `button`, `axis`,
+    /// and the eight swipe/pinch/hold phase signals), four for a tablet
+    /// (`axis`, `proximity`, `tip`, `button`), three for a pad (`button`,
+    /// `ring`, `strip`), zero for a device type this crate does not yet wire
+    /// up (the destroy watch above is still linked, so this entry is still
+    /// found and removed on destroy even for an ignored device type).
     _listeners: Vec<Registration>,
     /// See this struct's own doc for why this is a backstop, not the
     /// primary mechanism.
@@ -9676,6 +9703,54 @@ unsafe extern "C" fn on_new_input<S: Handlers>(
                         (*bound).session,
                         &raw const *alive,
                     ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*raw_pointer).events.swipe_begin,
+                        on_pointer_swipe_begin::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*raw_pointer).events.swipe_update,
+                        on_pointer_swipe_update::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*raw_pointer).events.swipe_end,
+                        on_pointer_swipe_end::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*raw_pointer).events.pinch_begin,
+                        on_pointer_pinch_begin::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*raw_pointer).events.pinch_update,
+                        on_pointer_pinch_update::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*raw_pointer).events.pinch_end,
+                        on_pointer_pinch_end::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*raw_pointer).events.hold_begin,
+                        on_pointer_hold_begin::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
+                    listeners.push(Registration::link_bare(
+                        &raw mut (*raw_pointer).events.hold_end,
+                        on_pointer_hold_end::<S>,
+                        (*bound).session,
+                        &raw const *alive,
+                    ));
                 }
             }
             sys::wlr_input_device_type::WLR_INPUT_DEVICE_TABLET => {
@@ -10058,7 +10133,7 @@ unsafe fn update_pointer_constraint_activation<S: Handlers>(
 /// Move the pointer focus and forward a motion to whatever the cursor is
 /// over, or clear pointer focus if it is over nothing. Shared by
 /// `on_pointer_motion`, `on_pointer_motion_absolute` and `on_pointer_button`
-/// rather than factored differently: each caller already has the seat and
+/// rather than factored differently: each caller already has the frame and
 /// the cursor's current position in hand, and this only names the repeated
 /// "find the surface under the cursor and enter/clear-focus it" step, not
 /// the forwarding call itself (which differs per caller: motion sends a
@@ -10073,12 +10148,16 @@ unsafe fn update_pointer_constraint_activation<S: Handlers>(
 /// rather than the struck surface's own. `leaf_surface_at` resolves the
 /// actual struck surface, so this always notifies the right one.
 ///
+/// All client forwards go through the frame — the relay handlers never touch
+/// the raw notifies — and the frame, `finish` included, no-ops when the run
+/// has no seat, so a seatless call moves no focus and activates nothing.
+///
 /// # Safety
 ///
-/// `seat` must be a live `wlr_seat`.
+/// `session` must be this callback's own live `Session`.
 unsafe fn enter_surface_under_cursor<S: Handlers>(
     session: *const Session<'_, S>,
-    seat: *mut sys::wlr_seat,
+    frame: &PointerFrame,
     x: f64,
     y: f64,
     time_msec: u32,
@@ -10086,20 +10165,26 @@ unsafe fn enter_surface_under_cursor<S: Handlers>(
     // SAFETY: `session` is this callback's own live `Session`; `runtime`
     // outlives the call.
     let runtime = unsafe { (*session).runtime };
+    let Some(seat) = frame.seat() else {
+        return;
+    };
+    let seat = seat.as_ptr();
     let focused: *mut sys::wlr_surface = match runtime.leaf_surface_at(x, y) {
         // SAFETY: `leaf_surface_at` reads `surface` out of a live
         // `wlr_scene_surface` found in this runtime's own scene, which
-        // outlives the call; the seat is live per this function's contract.
+        // outlives the call; the seat is the frame's captured live seat, and
+        // `surface` is live per the hit test's contract, which `send_enter`
+        // upholds.
         Some((surface, sx, sy)) => unsafe {
-            sys::wlr_seat_pointer_notify_enter(seat, surface, sx, sy);
-            sys::wlr_seat_pointer_notify_motion(seat, time_msec, sx, sy);
+            frame.send_enter(surface, sx, sy);
+            frame.send_motion(time_msec, sx, sy);
             surface
         },
         // SAFETY: as above.
-        None => unsafe {
-            sys::wlr_seat_pointer_notify_clear_focus(seat);
+        None => {
+            frame.clear_focus();
             std::ptr::null_mut()
-        },
+        }
     };
     // This is the single pointer-focus chokepoint, so pointer-constraint
     // activation tracks focus exactly: whatever surface (or nothing) the
@@ -10253,11 +10338,10 @@ unsafe fn record_pointer_grab(runtime: &Runtime, seat: *mut sys::wlr_seat, x: f6
 ///
 /// # Safety
 ///
-/// `session` must be this callback's own live `Session` and `seat` a live
-/// `wlr_seat`.
+/// `session` must be this callback's own live `Session`.
 unsafe fn pointer_motion_to_focus<S: Handlers>(
     session: *const Session<'_, S>,
-    seat: *mut sys::wlr_seat,
+    frame: &PointerFrame,
     x: f64,
     y: f64,
     time_msec: u32,
@@ -10265,7 +10349,11 @@ unsafe fn pointer_motion_to_focus<S: Handlers>(
     // SAFETY: `session` is live per this function's contract; `runtime`
     // outlives the call.
     let runtime = unsafe { (*session).runtime };
-    // SAFETY: `seat` is live per this function's contract.
+    let Some(seat) = frame.seat() else {
+        return;
+    };
+    let seat = seat.as_ptr();
+    // SAFETY: `seat` is the frame's captured live seat.
     let explicit = unsafe { sys::wlr_seat_pointer_has_grab(seat) };
     if let Some(grab) = runtime.pointer_grab() {
         // SAFETY: as above.
@@ -10274,15 +10362,14 @@ unsafe fn pointer_motion_to_focus<S: Handlers>(
         let focus_matches = !focused.is_null() && focused == grab.surface;
         if grab_still_applies(explicit, held, focus_matches) {
             let (sx, sy) = grab.surface_coords(x, y);
-            // SAFETY: as above; `sx`/`sy` are plain doubles.
-            unsafe { sys::wlr_seat_pointer_notify_motion(seat, time_msec, sx, sy) };
+            frame.send_motion(time_msec, sx, sy);
             return;
         }
         // Dropped, never merely skipped — see `grab_still_applies`.
         runtime.set_pointer_grab(None);
     }
     // SAFETY: as above.
-    unsafe { enter_surface_under_cursor(session, seat, x, y, time_msec) };
+    unsafe { enter_surface_under_cursor(session, frame, x, y, time_msec) };
 }
 
 unsafe extern "C" fn on_pointer_motion<S: Handlers>(
@@ -10305,6 +10392,10 @@ unsafe extern "C" fn on_pointer_motion<S: Handlers>(
         let (dx, dy) = ((*ev).delta_x, (*ev).delta_y);
         let (udx, udy) = ((*ev).unaccel_dx, (*ev).unaccel_dy);
         let time_msec = (*ev).time_msec;
+
+        // The frame every seat forward below goes through — the relay
+        // handlers never touch the raw notifies.
+        let frame = PointerFrame::of(runtime);
 
         // Pointer-constraint enforcement, applied to the *absolute* cursor
         // motion before it is committed. A relative-pointer client still gets
@@ -10347,6 +10438,18 @@ unsafe extern "C" fn on_pointer_motion<S: Handlers>(
         // deltas to relative-pointer clients.
         if let Some(seat) = runtime.seat_ptr() {
             runtime.send_relative_pointer_motion(seat.as_ptr(), time_msec, dx, dy, udx, udy);
+            // The forward settled; announce the raw device deltas to the
+            // compositor too. Unaccelerated, matching what the clients got.
+            let deliver = (*session).deliver;
+            (*session).dispatcher.emit(
+                &*session,
+                Event::RelativeMotion {
+                    dx_milli: (udx * 1000.0) as i64,
+                    dy_milli: (udy * 1000.0) as i64,
+                    time_msec,
+                },
+                deliver,
+            );
         }
 
         // A locked pointer produced no absolute motion: nothing to reposition,
@@ -10378,10 +10481,8 @@ unsafe extern "C" fn on_pointer_motion<S: Handlers>(
             deliver,
         );
 
-        if let Some(seat) = runtime.seat_ptr() {
-            pointer_motion_to_focus(session, seat.as_ptr(), x, y, time_msec);
-            sys::wlr_seat_pointer_notify_frame(seat.as_ptr());
-        }
+        pointer_motion_to_focus(session, &frame, x, y, time_msec);
+        frame.finish();
     }
 }
 
@@ -10423,6 +10524,10 @@ unsafe extern "C" fn on_pointer_motion_absolute<S: Handlers>(
         // unaccelerated delta, so the same delta feeds both.
         let (dx, dy) = (lx - cx0, ly - cy0);
 
+        // The frame every seat forward below goes through — the relay
+        // handlers never touch the raw notifies.
+        let frame = PointerFrame::of(runtime);
+
         let active = runtime.active_constraint();
         let locked = matches!(active, Some(c)
             if (*c.as_ptr()).type_
@@ -10449,6 +10554,18 @@ unsafe extern "C" fn on_pointer_motion_absolute<S: Handlers>(
 
         if let Some(seat) = runtime.seat_ptr() {
             runtime.send_relative_pointer_motion(seat.as_ptr(), time_msec, dx, dy, dx, dy);
+            // The forward settled; announce the deltas to the compositor
+            // too.
+            let deliver = (*session).deliver;
+            (*session).dispatcher.emit(
+                &*session,
+                Event::RelativeMotion {
+                    dx_milli: (dx * 1000.0) as i64,
+                    dy_milli: (dy * 1000.0) as i64,
+                    time_msec,
+                },
+                deliver,
+            );
         }
 
         if locked {
@@ -10474,10 +10591,8 @@ unsafe extern "C" fn on_pointer_motion_absolute<S: Handlers>(
             deliver,
         );
 
-        if let Some(seat) = runtime.seat_ptr() {
-            pointer_motion_to_focus(session, seat.as_ptr(), x, y, time_msec);
-            sys::wlr_seat_pointer_notify_frame(seat.as_ptr());
-        }
+        pointer_motion_to_focus(session, &frame, x, y, time_msec);
+        frame.finish();
     }
 }
 
@@ -10501,6 +10616,10 @@ unsafe extern "C" fn on_pointer_button<S: Handlers>(
         let (x, y) = ((*cursor.as_ptr()).x, (*cursor.as_ptr()).y);
         let pressed = (*ev).state == sys::wl_pointer_button_state::WL_POINTER_BUTTON_STATE_PRESSED;
 
+        // The frame every seat forward below goes through — the relay
+        // handlers never touch the raw notifies.
+        let frame = PointerFrame::of(runtime);
+
         let deliver = (*session).deliver;
         (*session).dispatcher.emit(
             &*session,
@@ -10517,15 +10636,14 @@ unsafe extern "C" fn on_pointer_button<S: Handlers>(
         // Unconditional, unlike a key: there is no interception for a
         // button, so this always runs after the handler has had its say —
         // see `SeatHandler::pointer_button`'s own doc for why.
-        if let Some(seat) = runtime.seat_ptr() {
+        if let Some(seat) = frame.seat() {
             let seat = seat.as_ptr();
             let time_msec = (*ev).time_msec;
-            let notify = |seat: *mut sys::wlr_seat| {
+            let notify = || {
                 // The serial the notify returns is of no use here: nothing
                 // in this crate cites it, and a client that needs it reads
                 // it off its own `wl_pointer.button`.
-                let _ =
-                    sys::wlr_seat_pointer_notify_button(seat, time_msec, (*ev).button, (*ev).state);
+                frame.send_button(time_msec, (*ev).button, (*ev).state);
             };
             // An explicit seat grab (an xdg-popup grab, a drag) owns the
             // routing of both the enter and the button; leave that path
@@ -10537,8 +10655,8 @@ unsafe extern "C" fn on_pointer_button<S: Handlers>(
                 // stale one must not outlive the surface it names. Same
                 // reasoning as `grab_still_applies`'s `explicit` arm.
                 runtime.set_pointer_grab(None);
-                enter_surface_under_cursor(session, seat, x, y, time_msec);
-                notify(seat);
+                enter_surface_under_cursor(session, &frame, x, y, time_msec);
+                notify();
             } else {
                 match button_action(pressed, pointer_button_count(seat)) {
                     // The press that starts the chord. Enter/focus the
@@ -10548,8 +10666,8 @@ unsafe extern "C" fn on_pointer_button<S: Handlers>(
                     // pointer focus before the button reaches it — then take
                     // the grab from whatever that left focused.
                     ButtonAction::Begin => {
-                        enter_surface_under_cursor(session, seat, x, y, time_msec);
-                        notify(seat);
+                        enter_surface_under_cursor(session, &frame, x, y, time_msec);
+                        notify();
                         record_pointer_grab(runtime, seat, x, y);
                     }
                     // A further button while the chord is held: the grabbed
@@ -10557,20 +10675,20 @@ unsafe extern "C" fn on_pointer_button<S: Handlers>(
                     // enter. With no grab recorded (a chord that began over
                     // empty space) the enter is equally pointless — focus is
                     // wherever the ordinary path last put it.
-                    ButtonAction::Hold => notify(seat),
+                    ButtonAction::Hold => notify(),
                     // The last button comes up. Notify first, so the release
                     // still reaches the surface that was pressed, and only
                     // then re-evaluate focus — which is what gives the
                     // surface the cursor now sits over its `enter`.
                     ButtonAction::End => {
-                        notify(seat);
+                        notify();
                         runtime.set_pointer_grab(None);
-                        enter_surface_under_cursor(session, seat, x, y, time_msec);
+                        enter_surface_under_cursor(session, &frame, x, y, time_msec);
                     }
                 }
             }
-            sys::wlr_seat_pointer_notify_frame(seat);
         }
+        frame.finish();
     }
 }
 
@@ -10599,6 +10717,10 @@ unsafe extern "C" fn on_pointer_axis<S: Handlers>(
         let relative_direction = AxisRelativeDirection::from_raw((*ev).relative_direction);
         let time_msec = (*ev).time_msec;
 
+        // The frame every seat forward below goes through — the relay
+        // handlers never touch the raw notifies.
+        let frame = PointerFrame::of(runtime);
+
         let deliver = (*session).deliver;
         (*session).dispatcher.emit(
             &*session,
@@ -10626,22 +10748,272 @@ unsafe extern "C" fn on_pointer_axis<S: Handlers>(
         // surface that grab already pinned. So there is nothing to record,
         // drop, or re-enter here: no `enter_surface_under_cursor`, no
         // `set_pointer_grab`.
-        if let Some(seat) = runtime.seat_ptr() {
-            let seat = seat.as_ptr();
-            sys::wlr_seat_pointer_notify_axis(
-                seat,
-                time_msec,
-                axis.to_raw(),
-                (*ev).delta,
-                (*ev).delta_discrete,
-                source.to_raw(),
-                relative_direction.to_raw(),
-            );
-            // The frame that closes the axis group, on the same terms as the
-            // motion and button paths: one `notify_frame` per input event,
-            // after the notify, only when a seat exists.
-            sys::wlr_seat_pointer_notify_frame(seat);
+        frame.send_axis(
+            time_msec,
+            axis,
+            (*ev).delta,
+            (*ev).delta_discrete,
+            source,
+            relative_direction,
+        );
+        // The frame that closes the axis group, on the same terms as the
+        // motion and button paths: one `notify_frame` per input event,
+        // after the notify, only when a seat exists.
+        frame.finish();
+    }
+}
+
+/// A swipe began on a hardware pointer. Forwards the begin to gesture clients
+/// through the [`GesturePhase`] token, then announces the finished forward to
+/// the compositor (`Event::GestureBegan`) — the handler event fires whether
+/// or not any gesture client exists, so shell-side gesture mapping works
+/// without a gestures manager.
+unsafe extern "C" fn on_pointer_swipe_begin<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live pointer's
+    // `events.swipe_begin`, whose data is a `wlr_pointer_swipe_begin_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_pointer_swipe_begin_event>();
+        let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
+        let Some(pointer) = NonNull::new((*ev).pointer) else {
+            return;
+        };
+        let time_msec = (*ev).time_msec;
+
+        // The forward settles first; the event after it names the finished
+        // forward, not a half-applied one.
+        if let Some(phase) = GesturePhase::of(runtime) {
+            phase.send_swipe_begin(time_msec, (*ev).fingers);
         }
+
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::GestureBegan(GestureId(pointer.as_ptr() as usize)),
+            deliver,
+        );
+    }
+}
+
+/// A swipe moved. Forwards the update through the [`GesturePhase`] token;
+/// no handler event — a gesture's middle is client traffic, and the
+/// compositor already learned of the gesture from its begin.
+unsafe extern "C" fn on_pointer_swipe_update<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live pointer's
+    // `events.swipe_update`, whose data is a `wlr_pointer_swipe_update_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_pointer_swipe_update_event>();
+        let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
+        if (*ev).pointer.is_null() {
+            return;
+        }
+        let time_msec = (*ev).time_msec;
+
+        if let Some(phase) = GesturePhase::of(runtime) {
+            phase.send_swipe_update(time_msec, (*ev).dx, (*ev).dy);
+        }
+    }
+}
+
+/// A swipe ended — completed or cancelled. Forwards the end (consuming the
+/// [`GesturePhase`] session, exactly like a completion consumes a cancel),
+/// then announces it (`Event::GestureEnded`).
+unsafe extern "C" fn on_pointer_swipe_end<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live pointer's `events.swipe_end`,
+    // whose data is a `wlr_pointer_swipe_end_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_pointer_swipe_end_event>();
+        let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
+        let Some(pointer) = NonNull::new((*ev).pointer) else {
+            return;
+        };
+        let time_msec = (*ev).time_msec;
+
+        // The end forward (consuming the session) settles first; the event
+        // after it names the finished gesture.
+        if let Some(phase) = GesturePhase::of(runtime) {
+            phase.send_swipe_end(time_msec, (*ev).cancelled);
+        }
+
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::GestureEnded(GestureId(pointer.as_ptr() as usize)),
+            deliver,
+        );
+    }
+}
+
+/// A pinch began on a hardware pointer. Same forward-then-announce shape as
+/// `on_pointer_swipe_begin`.
+unsafe extern "C" fn on_pointer_pinch_begin<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live pointer's
+    // `events.pinch_begin`, whose data is a `wlr_pointer_pinch_begin_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_pointer_pinch_begin_event>();
+        let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
+        let Some(pointer) = NonNull::new((*ev).pointer) else {
+            return;
+        };
+        let time_msec = (*ev).time_msec;
+
+        if let Some(phase) = GesturePhase::of(runtime) {
+            phase.send_pinch_begin(time_msec, (*ev).fingers);
+        }
+
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::GestureBegan(GestureId(pointer.as_ptr() as usize)),
+            deliver,
+        );
+    }
+}
+
+/// A pinch moved. Forwards the update (centre displacement, absolute scale,
+/// relative rotation) through the [`GesturePhase`] token; no handler event,
+/// on the same terms as
+/// `on_pointer_swipe_update`.
+unsafe extern "C" fn on_pointer_pinch_update<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live pointer's
+    // `events.pinch_update`, whose data is a `wlr_pointer_pinch_update_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_pointer_pinch_update_event>();
+        let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
+        if (*ev).pointer.is_null() {
+            return;
+        }
+        let time_msec = (*ev).time_msec;
+
+        if let Some(phase) = GesturePhase::of(runtime) {
+            phase.send_pinch_update(time_msec, (*ev).dx, (*ev).dy, (*ev).scale, (*ev).rotation);
+        }
+    }
+}
+
+/// A pinch ended — completed or cancelled. Same end-then-announce shape as
+/// `on_pointer_swipe_end`.
+unsafe extern "C" fn on_pointer_pinch_end<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live pointer's `events.pinch_end`,
+    // whose data is a `wlr_pointer_pinch_end_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_pointer_pinch_end_event>();
+        let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
+        let Some(pointer) = NonNull::new((*ev).pointer) else {
+            return;
+        };
+        let time_msec = (*ev).time_msec;
+
+        if let Some(phase) = GesturePhase::of(runtime) {
+            phase.send_pinch_end(time_msec, (*ev).cancelled);
+        }
+
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::GestureEnded(GestureId(pointer.as_ptr() as usize)),
+            deliver,
+        );
+    }
+}
+
+/// A hold began on a hardware pointer — the fingers went down and have not
+/// moved (a hold has no update). Same forward-then-announce shape as
+/// `on_pointer_swipe_begin`.
+unsafe extern "C" fn on_pointer_hold_begin<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live pointer's
+    // `events.hold_begin`, whose data is a `wlr_pointer_hold_begin_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_pointer_hold_begin_event>();
+        let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
+        let Some(pointer) = NonNull::new((*ev).pointer) else {
+            return;
+        };
+        let time_msec = (*ev).time_msec;
+
+        if let Some(phase) = GesturePhase::of(runtime) {
+            phase.send_hold_begin(time_msec, (*ev).fingers);
+        }
+
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::GestureBegan(GestureId(pointer.as_ptr() as usize)),
+            deliver,
+        );
+    }
+}
+
+/// A hold ended — completed or cancelled. Same end-then-announce shape as
+/// `on_pointer_swipe_end`.
+unsafe extern "C" fn on_pointer_hold_end<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_input` into a live pointer's `events.hold_end`,
+    // whose data is a `wlr_pointer_hold_end_event`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let ev = data.cast::<sys::wlr_pointer_hold_end_event>();
+        let runtime = (*session).runtime;
+        runtime.notify_seat_activity();
+        let Some(pointer) = NonNull::new((*ev).pointer) else {
+            return;
+        };
+        let time_msec = (*ev).time_msec;
+
+        if let Some(phase) = GesturePhase::of(runtime) {
+            phase.send_hold_end(time_msec, (*ev).cancelled);
+        }
+
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::GestureEnded(GestureId(pointer.as_ptr() as usize)),
+            deliver,
+        );
     }
 }
 
@@ -10819,6 +11191,14 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::PointerMotion { .. }
         | Event::PointerButton { .. }
         | Event::PointerAxis { .. }
+        // Unreachable: `run` never registers a pointer-constraints,
+        // relative-pointer or pointer-gestures manager either, for the same
+        // reason — so no constraint commit, relative motion or gesture
+        // begin/end can fire on this path.
+        | Event::RelativeMotion { .. }
+        | Event::PointerConstraintCommitted(..)
+        | Event::GestureBegan(..)
+        | Event::GestureEnded(..)
         // Unreachable: `run` never registers a session-lock manager either
         // (`Backend::register_toplevel_and_input` is `run_all`'s hook; `run`
         // uses `no_extra`), so this cannot be produced on this path.
@@ -12896,5 +13276,215 @@ mod axis_delivery_tests {
                 time_msec: 1,
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod pointer_protocol_delivery_tests {
+    use super::*;
+
+    /// Records what the four pointer-protocol hooks were called with. Every
+    /// other handler method is defaulted, so the empty impls below are the
+    /// whole `Handlers` bound `deliver_all` needs.
+    #[derive(Default)]
+    struct Recorder {
+        relative: Vec<(f64, f64, u32)>,
+        constraints: Vec<ConstraintId>,
+        began: Vec<GestureId>,
+        ended: Vec<GestureId>,
+    }
+
+    impl OutputHandler for Recorder {}
+    impl crate::ToplevelHandler for Recorder {}
+    impl crate::FdHandler for Recorder {}
+    impl LoopHandler for Recorder {}
+
+    impl crate::SeatHandler for Recorder {
+        fn relative_motion(&mut self, dx: f64, dy: f64, time_msec: u32) {
+            self.relative.push((dx, dy, time_msec));
+        }
+
+        fn pointer_constraint_committed(&mut self, id: ConstraintId) {
+            self.constraints.push(id);
+        }
+
+        fn gesture_began(&mut self, id: GestureId) {
+            self.began.push(id);
+        }
+
+        fn gesture_ended(&mut self, id: GestureId) {
+            self.ended.push(id);
+        }
+    }
+
+    /// A session with nothing in it. `deliver_all`'s pointer-protocol arms
+    /// resolve nothing — the events carry everything — so this is the whole
+    /// context the routing needs, on the same terms as `axis_delivery_tests`'
+    /// own `empty_session`.
+    fn empty_session(runtime: &Runtime) -> Session<'_, Recorder> {
+        Session {
+            dispatcher: Dispatcher::new(std::ptr::null_mut()),
+            outputs: RefCell::new(HashMap::new()),
+            toplevels: RefCell::new(HashMap::new()),
+            decorations: RefCell::new(HashMap::new()),
+            layers: RefCell::new(HashMap::new()),
+            popups: RefCell::new(HashMap::new()),
+            inputs: RefCell::new(HashMap::new()),
+            drags: RefCell::new(HashMap::new()),
+            idle_inhibitors: RefCell::new(HashMap::new()),
+            shortcuts_inhibitors: RefCell::new(HashMap::new()),
+            tablet_tools: RefCell::new(HashMap::new()),
+            transient_seats: RefCell::new(HashMap::new()),
+            session_locks: RefCell::new(HashMap::new()),
+            lock_surfaces: RefCell::new(HashMap::new()),
+            scene_buffers: RefCell::new(HashMap::new()),
+            pointer_constraints: RefCell::new(HashMap::new()),
+            #[cfg(wlr_has_xwayland)]
+            xwayland_surfaces: RefCell::new(HashMap::new()),
+            last_key_consumed: Cell::new(false),
+            applied_heads: RefCell::new(VecDeque::new()),
+            runtime,
+            deliver: deliver_all::<Recorder>,
+        }
+    }
+
+    #[test]
+    fn relative_motion_survives_the_queue_with_milli_precision() {
+        let runtime = Runtime::new().expect("runtime");
+        let session = empty_session(&runtime);
+        let mut state = Recorder::default();
+
+        deliver_all(
+            &session,
+            &mut state,
+            Event::RelativeMotion {
+                dx_milli: 1_500,
+                dy_milli: -2_500,
+                time_msec: 7,
+            },
+        );
+
+        assert_eq!(
+            state.relative,
+            vec![(1.5, -2.5, 7)],
+            "the handler must see the raw deltas exactly once, converted back from milli"
+        );
+    }
+
+    #[test]
+    fn constraint_and_gesture_events_route_their_ids() {
+        let runtime = Runtime::new().expect("runtime");
+        let session = empty_session(&runtime);
+        let mut state = Recorder::default();
+
+        let constraint = ConstraintId::dangling_nth_for_test(1);
+        let gesture = GestureId::dangling_nth_for_test(2);
+        deliver_all(
+            &session,
+            &mut state,
+            Event::PointerConstraintCommitted(constraint),
+        );
+        deliver_all(&session, &mut state, Event::GestureBegan(gesture));
+        deliver_all(&session, &mut state, Event::GestureEnded(gesture));
+
+        assert_eq!(state.constraints, vec![constraint]);
+        assert_eq!(state.began, vec![gesture]);
+        assert_eq!(state.ended, vec![gesture]);
+    }
+
+    /// The defaults are no-ops, not panics: a consumer that never mentions
+    /// the pointer-protocol hooks must still be deliverable to, which is
+    /// what makes each method additive.
+    #[test]
+    fn a_handler_that_overrides_nothing_still_takes_delivery() {
+        struct Legacy;
+        impl OutputHandler for Legacy {}
+        impl crate::ToplevelHandler for Legacy {}
+        impl crate::SeatHandler for Legacy {}
+        impl crate::FdHandler for Legacy {}
+        impl LoopHandler for Legacy {}
+
+        let runtime = Runtime::new().expect("runtime");
+        // Same shape as `empty_session`, for the one other state type this
+        // module has; not worth a generic helper for a single extra use.
+        let session = Session::<'_, Legacy> {
+            dispatcher: Dispatcher::new(std::ptr::null_mut()),
+            outputs: RefCell::new(HashMap::new()),
+            toplevels: RefCell::new(HashMap::new()),
+            decorations: RefCell::new(HashMap::new()),
+            layers: RefCell::new(HashMap::new()),
+            popups: RefCell::new(HashMap::new()),
+            inputs: RefCell::new(HashMap::new()),
+            drags: RefCell::new(HashMap::new()),
+            idle_inhibitors: RefCell::new(HashMap::new()),
+            shortcuts_inhibitors: RefCell::new(HashMap::new()),
+            tablet_tools: RefCell::new(HashMap::new()),
+            transient_seats: RefCell::new(HashMap::new()),
+            session_locks: RefCell::new(HashMap::new()),
+            lock_surfaces: RefCell::new(HashMap::new()),
+            scene_buffers: RefCell::new(HashMap::new()),
+            pointer_constraints: RefCell::new(HashMap::new()),
+            #[cfg(wlr_has_xwayland)]
+            xwayland_surfaces: RefCell::new(HashMap::new()),
+            last_key_consumed: Cell::new(false),
+            applied_heads: RefCell::new(VecDeque::new()),
+            runtime: &runtime,
+            deliver: deliver_all::<Legacy>,
+        };
+
+        deliver_all(
+            &session,
+            &mut Legacy,
+            Event::RelativeMotion {
+                dx_milli: 0,
+                dy_milli: 0,
+                time_msec: 1,
+            },
+        );
+        deliver_all(
+            &session,
+            &mut Legacy,
+            Event::PointerConstraintCommitted(ConstraintId::dangling_nth_for_test(1)),
+        );
+        deliver_all(
+            &session,
+            &mut Legacy,
+            Event::GestureBegan(GestureId::dangling_nth_for_test(2)),
+        );
+        deliver_all(
+            &session,
+            &mut Legacy,
+            Event::GestureEnded(GestureId::dangling_nth_for_test(2)),
+        );
+    }
+
+    /// A frame with no seat sends nothing and closes nothing: the token
+    /// methods resolve the seat per send and no-op on a miss, so building a
+    /// frame against a seatless runtime must not fault.
+    #[test]
+    fn a_seatless_frame_is_a_quiet_no_op() {
+        let runtime = Runtime::new().expect("runtime");
+        assert!(
+            runtime.seat_ptr().is_none(),
+            "no seat was ever created on this runtime"
+        );
+        let frame = PointerFrame::of(&runtime);
+        assert!(frame.seat().is_none());
+        frame.send_motion(1, 2.0, 3.0);
+        frame.send_button(
+            1,
+            0x110,
+            sys::wl_pointer_button_state::WL_POINTER_BUTTON_STATE_PRESSED,
+        );
+        frame.clear_focus();
+        frame.finish();
+    }
+
+    /// With no gestures manager (and no seat), there is no forwarding
+    /// session: every caller no-ops while the handler events still fire.
+    #[test]
+    fn gesture_phase_misses_without_manager_or_seat() {
+        let runtime = Runtime::new().expect("runtime");
+        assert!(GesturePhase::of(&runtime).is_none());
     }
 }

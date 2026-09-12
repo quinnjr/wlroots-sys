@@ -1833,79 +1833,7 @@ note      = "Reachable only by implementing a wlroots vtable from Rust; see M13.
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_pointer_gestures_v1"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_create"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_hold_begin"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_hold_end"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_pinch_begin"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_pinch_end"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_pinch_update"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_swipe_begin"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_swipe_end"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_gestures_v1_send_swipe_update"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
 symbol    = "wlr_pointer_grab_interface"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_hold_begin_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_hold_end_event"
 reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"
@@ -1924,42 +1852,6 @@ milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_pointer_notify_button"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_pinch_begin_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_pinch_end_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_pinch_update_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_swipe_begin_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_swipe_end_event"
-reason    = "not-yet"
-note      = "Pointer, cursor, touch and switch input."
-milestone = "M7"
-
-[[waived]]
-symbol    = "wlr_pointer_swipe_update_event"
 reason    = "not-yet"
 note      = "Pointer, cursor, touch and switch input."
 milestone = "M7"

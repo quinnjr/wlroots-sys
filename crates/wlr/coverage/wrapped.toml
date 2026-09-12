@@ -859,6 +859,96 @@ module = "backend"
 item   = "SeatHandler::pointer_motion"
 
 [[wrapped]]
+symbol = "wlr_pointer_gestures_v1"
+module = "runtime"
+item   = "Runtime::create_pointer_gestures_manager"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_create"
+module = "runtime"
+item   = "Runtime::create_pointer_gestures_manager"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_hold_begin"
+module = "runtime"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_hold_end"
+module = "runtime"
+item   = "SeatHandler::gesture_ended"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_pinch_begin"
+module = "runtime"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_pinch_end"
+module = "runtime"
+item   = "SeatHandler::gesture_ended"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_pinch_update"
+module = "runtime"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_swipe_begin"
+module = "runtime"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_swipe_end"
+module = "runtime"
+item   = "SeatHandler::gesture_ended"
+
+[[wrapped]]
+symbol = "wlr_pointer_gestures_v1_send_swipe_update"
+module = "runtime"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_hold_begin_event"
+module = "backend"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_hold_end_event"
+module = "backend"
+item   = "SeatHandler::gesture_ended"
+
+[[wrapped]]
+symbol = "wlr_pointer_pinch_begin_event"
+module = "backend"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_pinch_end_event"
+module = "backend"
+item   = "SeatHandler::gesture_ended"
+
+[[wrapped]]
+symbol = "wlr_pointer_pinch_update_event"
+module = "backend"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_swipe_begin_event"
+module = "backend"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
+symbol = "wlr_pointer_swipe_end_event"
+module = "backend"
+item   = "SeatHandler::gesture_ended"
+
+[[wrapped]]
+symbol = "wlr_pointer_swipe_update_event"
+module = "backend"
+item   = "SeatHandler::gesture_began"
+
+[[wrapped]]
 symbol = "wlr_pointer_motion_absolute_event"
 module = "backend"
 item   = "SeatHandler::pointer_motion"

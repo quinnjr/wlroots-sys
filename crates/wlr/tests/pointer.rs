@@ -87,3 +87,61 @@ fn xcursor_theme_destroy_roundtrip() {
     // A NUL in the name can never load.
     assert!(rt.load_xcursor_theme("def\0ault", 24).is_none());
 }
+
+/// M7 Task 2 compile assertion: the pointer-protocol handler surface.
+///
+/// Overrides the id-only event hooks, so this binary fails to build (E0407:
+/// no such method on `SeatHandler`) until the defaulted
+/// `pointer_constraint_committed` / `gesture_began` methods land. The struct
+/// is constructed in `protocol_hooks_are_overridable` below, so every field
+/// is read and nothing here is dead code once the methods exist.
+struct ProtocolHandler {
+    constraints: Vec<wlr::ConstraintId>,
+    gestures_began: Vec<wlr::GestureId>,
+}
+
+impl wlr::SeatHandler for ProtocolHandler {
+    fn pointer_constraint_committed(&mut self, _id: wlr::ConstraintId) {
+        self.constraints.push(_id);
+    }
+
+    fn gesture_began(&mut self, _id: wlr::GestureId) {
+        self.gestures_began.push(_id);
+    }
+}
+
+#[test]
+fn protocol_hooks_are_overridable() {
+    let handler = ProtocolHandler {
+        constraints: Vec::new(),
+        gestures_began: Vec::new(),
+    };
+    assert!(handler.constraints.is_empty());
+    assert!(handler.gestures_began.is_empty());
+}
+
+/// A `SeatHandler` written before the pointer-protocol hooks existed, with an
+/// empty body, must still compile — the A12 additivity claim of this task.
+struct LegacyProtocolHandler;
+
+impl wlr::SeatHandler for LegacyProtocolHandler {}
+
+#[test]
+fn protocol_hooks_are_additive() {
+    let _legacy = LegacyProtocolHandler;
+}
+
+#[test]
+fn gestures_manager_double_create_is_refused() {
+    headless_env();
+    let display = wlr::Display::new().expect("display");
+    let rt = wlr::Runtime::new().expect("runtime");
+    rt.create_pointer_gestures_manager(&display).expect("first");
+    assert!(
+        matches!(
+            rt.create_pointer_gestures_manager(&display),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second zwp_pointer_gestures_v1 global would double-advertise the protocol"
+    );
+}

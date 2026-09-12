@@ -45,9 +45,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
 use crate::{
-    ActivationToken, AxisRelativeDirection, AxisSource, CommittedFields, CursorShape,
-    CursorShapeDevice, DecorationMode, Edges, InputPopupSurfaceId, LayerSurfaceId, NodeId,
-    OutputId, PointerAxis, PopupId, PowerMode, SceneOutputId, ShortcutsInhibitorId, TabletPadId,
+    ActivationToken, AxisRelativeDirection, AxisSource, CommittedFields, ConstraintId, CursorShape,
+    CursorShapeDevice, DecorationMode, Edges, GestureId, InputPopupSurfaceId, LayerSurfaceId,
+    NodeId, OutputId, PointerAxis, PopupId, PowerMode, SceneOutputId, ShortcutsInhibitorId,
+    TabletPadId,
     TabletToolId, ToplevelId, TransientSeatId, VirtualKeyboardId, VirtualPointerId,
 };
 #[cfg(wlr_has_xwayland)]
@@ -211,6 +212,43 @@ pub(crate) enum Event {
         relative_direction: AxisRelativeDirection,
         time_msec: u32,
     },
+
+    /// Unaccelerated relative motion for one pointer motion: the raw device
+    /// deltas, independent of the absolute cursor. `dx_milli`/`dy_milli` are
+    /// thousandths of a logical pixel, for exactly the reason `x_milli` is
+    /// (see [`Event::PointerMotion`]): `Event` derives `Eq`, and `f64`
+    /// fields would take that derive away. Emitted after the motion's
+    /// relative-pointer forward was offered (a no-op with no manager), so
+    /// observers see the settled outcome rather than a half-applied one.
+    RelativeMotion {
+        dx_milli: i64,
+        dy_milli: i64,
+        time_msec: u32,
+    },
+
+    /// A pointer constraint committed — the client (re)set its region and the
+    /// crate settled it. Carries the crate's own [`ConstraintId`] handle for
+    /// it — an opaque, `Copy`/`Eq` id (its wrapped value is the constraint's
+    /// address), so it rides the `Copy`/`Eq` `Event` like every other id. A
+    /// deferred delivery may name a constraint destroyed in between; like
+    /// `InputMethodPopupDestroyed`, the id then only tells the handler
+    /// *which* constraint committed.
+    PointerConstraintCommitted(ConstraintId),
+
+    /// A pointer gesture began — a swipe, pinch or hold the hardware pointer
+    /// announced. Carries the crate's own [`GestureId`] handle — an opaque,
+    /// `Copy`/`Eq` id (its wrapped value is the announcing pointer's
+    /// address), so it rides the `Copy`/`Eq` `Event` like every other id. The
+    /// begin forward to gesture clients has already gone out by the time this
+    /// is emitted. A deferred delivery may name a pointer whose device went
+    /// away in between; the id then only tells the handler *which* pointer
+    /// the gesture was on.
+    GestureBegan(GestureId),
+
+    /// A pointer gesture ended — completed or cancelled. Same shape as
+    /// `GestureBegan`: the end forward has already gone out, and a deferred
+    /// delivery may name a pointer whose device went away in between.
+    GestureEnded(GestureId),
 
     /// The session's lock state changed. Carries the new state — `true` when a
     /// locker takes a lock, `false` only on a genuine unlock. Never emitted

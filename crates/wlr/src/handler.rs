@@ -5,9 +5,10 @@
 //! implements only what they use.
 
 use crate::{
-    ActivationToken, AxisSource, CommittedFields, CursorShape, CursorShapeDevice, DecorationMode,
-    Edges, InputPopupSurfaceId, KeyEvent, LayerSurface, LayerSurfaceId, NodeId, Output, OutputId,
-    PointerAxis, Popup, PopupId, PowerMode, Region, SceneOutputId, Toplevel, ToplevelId, Transform,
+    ActivationToken, AxisSource, CommittedFields, ConstraintId, CursorShape, CursorShapeDevice,
+    DecorationMode, Edges, GestureId, InputPopupSurfaceId, KeyEvent, LayerSurface, LayerSurfaceId,
+    NodeId, Output, OutputId, PointerAxis, Popup, PopupId, PowerMode, Region, SceneOutputId,
+    Toplevel, ToplevelId, Transform,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -1365,6 +1366,76 @@ pub trait SeatHandler {
     /// it is defaulted, so an `impl SeatHandler for MyState {}` written
     /// against any earlier 0.20.x still compiles unchanged.
     fn transient_seat_requested(&mut self, _id: crate::TransientSeatId) {}
+
+    /// A pointer constraint committed — the client (re)set the constraint's
+    /// region, which is the protocol's commit point for constraint state, and
+    /// the crate has settled it (re-anchoring the cursor into the new region
+    /// when the committing constraint is the active one). Notification only:
+    /// the id names the constraint (keyed by its address, FIX-3), and there
+    /// is nothing left here for a handler to *apply*. A deferred delivery may
+    /// name a constraint destroyed in between; like `popup_surface_destroyed`,
+    /// the id then only tells the handler *which* constraint committed.
+    /// Write this so an unknown id is harmless.
+    ///
+    /// Lives on `SeatHandler` rather than a trait of its own for the reason
+    /// `shortcuts_inhibitor_toggled`'s own doc gives (see commit `f2cc8a9`).
+    /// Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged.
+    fn pointer_constraint_committed(&mut self, _id: ConstraintId) {}
+
+    /// Unaccelerated relative motion on the seat: the raw device deltas for
+    /// one pointer motion, independent of where the absolute cursor is (or
+    /// whether it moved at all — a locked pointer still reports). The crate
+    /// forwards the same deltas to relative-pointer clients when a manager
+    /// exists, so this is the compositor's own cue (a game-style look
+    /// control, say), not the thing that makes clients work. Defaulted
+    /// to a no-op.
+    ///
+    /// Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged (see commit
+    /// `f2cc8a9`).
+    fn relative_motion(&mut self, dx: f64, dy: f64, time_msec: u32) {
+        let _ = (dx, dy, time_msec);
+    }
+
+    /// A pointer gesture began — a swipe, pinch or hold the hardware pointer
+    /// announced. Notification only: the id names the announcing pointer
+    /// (keyed by its address, FIX-3 — the same discipline
+    /// `tablet_tool_event` follows), and the full-fidelity forward to gesture
+    /// clients (kind, finger count) has already gone out through the gesture
+    /// token by the time this runs, so there is nothing left here for a
+    /// handler to *forward*. A deferred delivery may name a pointer whose
+    /// device went away in between; like `popup_surface_destroyed`, the id
+    /// then only tells the handler *which* pointer the gesture was on. Write
+    /// this so an unknown id is harmless.
+    ///
+    /// Lives on `SeatHandler` rather than a `GestureHandler` of its own for
+    /// the reason `shortcuts_inhibitor_toggled`'s own doc gives: one more
+    /// defaulted method costs an implementor nothing, whereas a new
+    /// supertrait on [`Handlers`] would be a breaking change to a frozen
+    /// list (see commit `f2cc8a9`). Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged.
+    fn gesture_began(&mut self, _id: GestureId) {}
+
+    /// A pointer gesture ended — completed or cancelled (a cancel ends the
+    /// gesture exactly like a completion as far as this notification goes).
+    /// Notification only, on the same terms as
+    /// [`gesture_began`](SeatHandler::gesture_began): the id names the
+    /// announcing pointer, the end forward has already gone out, and an
+    /// unknown id must be harmless.
+    ///
+    /// Added additively, on the same terms as
+    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
+    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged (see commit
+    /// `f2cc8a9`).
+    fn gesture_ended(&mut self, _id: GestureId) {}
 }
 
 /// Every handler trait at once.
