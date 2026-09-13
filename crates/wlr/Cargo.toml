@@ -89,3 +89,11 @@ static_assertions = "1.1"
 # only: the crate itself never reads a consumer's fd, it only hands the
 # borrow to `FdHandler::fd_ready`.
 rustix = { version = "1", features = ["pipe", "std"] }
+# A real client for the client-driven harness: the six-leg standard had no
+# way to connect a Wayland client to the display, so commit/ack sequencing
+# could not be reached. Dev-dependency only; the crate wraps the server.
+wayland-client = "0.31"
+# xdg-shell client bindings for the seed toplevel test. `client` selects the
+# client-side generated code; `unstable` pulls the xdg-shell protocol in from
+# the protocols crate's generated tree.
+wayland-protocols = { version = "0.31", features = ["client", "unstable"] }

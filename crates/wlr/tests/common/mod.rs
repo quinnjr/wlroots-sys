@@ -11,7 +11,10 @@
 // so silence the per-binary dead-code lint for the unused half.
 #![allow(dead_code)]
 
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, Once, OnceLock};
+
+pub mod client;
 
 /// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS`/`WLR_RENDERER` are set exactly
 /// once, before any test in this binary calls `Backend::autocreate`.
@@ -40,4 +43,36 @@ pub fn headless_guard() -> MutexGuard<'static, ()> {
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Points `XDG_RUNTIME_DIR` at a fresh per-process temp directory and returns
+/// it.
+///
+/// libwayland binds `Display::add_socket_auto`'s `wayland-N` socket *under*
+/// `XDG_RUNTIME_DIR`, and `wayland_client::Connection::connect_to_env` resolves
+/// `WAYLAND_DISPLAY` against the same variable. So it must be set before
+/// [`Display::new`] runs, not merely before the client connects: a client that
+/// read the parent environment's `XDG_RUNTIME_DIR` would look for the socket in
+/// a directory the server never wrote to.
+///
+/// Idempotent per process — the first caller sets it, every later one gets the
+/// same directory — because the value is process-global and two tests racing to
+/// repoint it would each strand the other's client. The tests that create a
+/// display are serialized by [`headless_guard`], so the first call wins before
+/// any server binds.
+pub fn isolated_runtime_dir() -> PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let path = std::env::temp_dir().join(format!("wlr-test-{}", std::process::id()));
+        std::fs::create_dir_all(&path).expect("create isolated XDG_RUNTIME_DIR");
+        // SAFETY: `OnceLock::get_or_init` runs this at most once and blocks
+        // every other caller on the same cell until it returns, so no
+        // concurrent `getenv` can observe a torn write. It happens before any
+        // libwayland call in this process binds or resolves a socket.
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", &path);
+        }
+        path
+    })
+    .clone()
 }
