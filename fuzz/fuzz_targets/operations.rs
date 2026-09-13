@@ -208,6 +208,18 @@ enum Operation {
     SetOutputPosition { x: i32, y: i32 },
     /// `Runtime::schedule_frame` against the captured (stale) id.
     ScheduleFrame,
+
+    // --- Presentation feedback + tearing (M9): `presentation.rs`/`tearing.rs`
+    // by-id reads, ids from `surface.rs` ---
+    /// `Runtime::create_tearing_control_manager`; double-create guard included.
+    CreateTearingControlManager,
+    /// `Runtime::sample_presentation` against a dangling surface id. A live
+    /// surface needs a connected client, so this stays on the miss path.
+    SamplePresentation { nth: u64 },
+    /// `Runtime::tearing_hint` against a dangling surface id.
+    TearingHint { nth: u64 },
+    /// `Runtime::tearing_control` against a dangling surface id.
+    TearingControlOf { nth: u64 },
 }
 
 /// The one handler this target installs.
@@ -345,7 +357,7 @@ fn apply(
     output: Option<wlr::OutputId>,
     op: &Operation,
 ) {
-    use wlr::{Box2D, DecorationMode, LayerSurfaceId, PopupId, PopupParent, ToplevelId};
+    use wlr::{Box2D, DecorationMode, LayerSurfaceId, PopupId, PopupParent, SurfaceId, ToplevelId};
 
     let toplevel = |nth: u64| ToplevelId::dangling_nth_for_test(nth);
     let popup = |nth: u64| PopupId::dangling_nth_for_test(nth);
@@ -501,6 +513,19 @@ fn apply(
             if let Some(output) = output {
                 let _ = runtime.schedule_frame(output);
             }
+        }
+
+        Operation::CreateTearingControlManager => {
+            let _ = runtime.create_tearing_control_manager(display, 1);
+        }
+        Operation::SamplePresentation { nth } => {
+            let _ = runtime.sample_presentation(SurfaceId::dangling_nth_for_test(*nth));
+        }
+        Operation::TearingHint { nth } => {
+            let _ = runtime.tearing_hint(SurfaceId::dangling_nth_for_test(*nth));
+        }
+        Operation::TearingControlOf { nth } => {
+            let _ = runtime.tearing_control(SurfaceId::dangling_nth_for_test(*nth));
         }
     }
 }

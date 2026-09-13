@@ -1831,54 +1831,6 @@ reason    = "internal"
 note      = "Hardware-side event synthesis; real devices emit themselves and test paths inject at seat level, so device notifies are never issued."
 
 [[waived]]
-symbol    = "wlr_presentation_event"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_presentation_event_from_output"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_presentation_feedback"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_presentation_feedback_destroy"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_presentation_feedback_send_presented"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_presentation_surface_sampled"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_presentation_surface_scanned_out_on_output"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_presentation_surface_textured_on_output"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_primary_selection_source"
 reason    = "not-yet"
 note      = "Selection, drag-and-drop and the small standalone protocols."
@@ -3093,18 +3045,6 @@ note      = "Keyboard depth, tablet, and the input-method/text-input pair."
 milestone = "M8"
 
 
-
-[[waived]]
-symbol    = "wlr_tearing_control_manager_v1_surface_hint_from_surface"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_tearing_control_v1"
-reason    = "not-yet"
-note      = "Per-surface control object with set_hint signal; readable only via a surface handle (M9)."
-milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_texture_impl"

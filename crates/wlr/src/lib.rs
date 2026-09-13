@@ -90,12 +90,14 @@ mod layer;
 mod log;
 mod output;
 mod popup;
+mod presentation;
 mod region;
 mod render;
 mod runtime;
 mod scene;
 mod seat;
 mod surface;
+mod tearing;
 #[cfg(test)]
 mod test_support;
 mod toplevel;
@@ -123,6 +125,7 @@ pub use popup::{
     ConstraintAdjustment, Popup, PopupId, PopupParent, PositionerAnchor, PositionerGravity,
     PositionerRules,
 };
+pub use presentation::{PresentationEvent, PresentationFeedback};
 pub use region::{Region, RegionRef};
 pub use render::{
     Allocator, AllocatorRef, AlphaMode, BlendMode, BufferCaps, BufferPassOptions, ChromaLocation,
@@ -157,6 +160,7 @@ pub use seat::{
     Modifiers, PointerAxis, SwitchType,
 };
 pub use surface::{Surface, SurfaceId};
+pub use tearing::{TearingControl, TearingHint};
 pub use toplevel::{Edges, Toplevel, ToplevelId};
 #[cfg(wlr_has_xwayland)]
 pub use xwayland::{XwaylandSurface, XwaylandSurfaceId, XwaylandWindowType};

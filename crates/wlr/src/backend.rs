@@ -3660,7 +3660,9 @@ fn with_surface<S>(session: &Session<'_, S>, id: SurfaceId, f: impl FnOnce(&Surf
     // SAFETY: a present entry names a live surface — it is removed before
     // wlroots frees the surface — and the handle is scoped to `f`, which runs
     // with the dispatcher's handler flag set, so it cannot drive the loop.
-    let surface = unsafe { Surface::from_raw_with_id(entry.as_ptr(), id) };
+    let manager = session.runtime.tearing_control_manager();
+    let surface =
+        unsafe { Surface::from_raw_with_id(entry.as_ptr(), id) }.with_tearing_manager(manager);
     f(&surface);
 }
 

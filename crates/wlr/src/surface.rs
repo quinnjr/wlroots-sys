@@ -78,6 +78,13 @@ impl SurfaceId {
 pub struct Surface<'h> {
     raw: NonNull<sys::wlr_surface>,
     id: SurfaceId,
+    /// The runtime's `wp_tearing_control_manager_v1`, cached when the handle is
+    /// built so [`Surface::tearing_hint`](crate::Surface::tearing_hint) can read
+    /// the surface's hint without a second lookup. `None` when no manager has
+    /// been created, or for a handle built outside a runtime (the tests'
+    /// scratch constructor) — in which case the tearing accessors miss rather
+    /// than return a wrong default.
+    tearing_manager: Option<NonNull<sys::wlr_tearing_control_manager_v1>>,
     _scope: PhantomData<&'h ()>,
 }
 
@@ -105,8 +112,35 @@ impl<'h> Surface<'h> {
         Surface {
             raw: NonNull::new(raw).expect("wlroots handed us a null surface"),
             id,
+            tearing_manager: None,
             _scope: PhantomData,
         }
+    }
+
+    /// Attach the runtime's tearing-control manager, so the tearing accessors
+    /// can reach it.
+    ///
+    /// Consuming builder rather than a setter because `Surface` is not `mut` at
+    /// its construction sites and the field is private to this module; the
+    /// only two production builders (`Runtime::surface` and
+    /// `backend::with_surface`) call it once, right after `from_raw_with_id`.
+    pub(crate) fn with_tearing_manager(
+        mut self,
+        manager: Option<NonNull<sys::wlr_tearing_control_manager_v1>>,
+    ) -> Surface<'h> {
+        self.tearing_manager = manager;
+        self
+    }
+
+    /// The raw surface, for the in-crate callers that pass it to wlroots.
+    pub(crate) fn as_ptr(&self) -> *mut sys::wlr_surface {
+        self.raw.as_ptr()
+    }
+
+    /// The tearing-control manager cached on this handle, if the runtime had
+    /// one when the handle was built.
+    pub(crate) fn tearing_manager(&self) -> Option<NonNull<sys::wlr_tearing_control_manager_v1>> {
+        self.tearing_manager
     }
 
     /// This surface's stable identity, safe to store beyond the handler.

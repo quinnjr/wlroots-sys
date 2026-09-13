@@ -7656,6 +7656,20 @@ impl Runtime {
         Ok(())
     }
 
+    /// The `wp_tearing_control_manager_v1` global, once created via
+    /// [`Runtime::create_tearing_control_manager`], or `None`.
+    ///
+    /// Read by [`Runtime::surface`] and `backend.rs`'s `with_surface` to cache
+    /// the manager on every [`Surface`] handle, so the tearing accessors can
+    /// read a surface's hint. Copied out with the `RefCell` borrow released
+    /// before returning, so a caller that then re-enters wlroots cannot
+    /// double-borrow it.
+    pub(crate) fn tearing_control_manager(
+        &self,
+    ) -> Option<NonNull<sys::wlr_tearing_control_manager_v1>> {
+        *self.inner.tearing_control_manager.borrow()
+    }
+
     /// The `zwp_text_input_manager_v3` manager, once created via
     /// [`Runtime::create_text_input_manager`] — read by `backend.rs` to link
     /// the `new_text_input` listener that populates
@@ -10808,8 +10822,14 @@ impl Runtime {
         let raw = self.surface_ptr(id)?;
         // SAFETY: an entry is removed before wlroots frees the surface, so a
         // present entry names a live one; the borrow above is released before
-        // the handle is built.
-        Some(unsafe { Surface::from_raw_with_id(raw.as_ptr(), id) })
+        // the handle is built. The tearing manager is copied out of its cell
+        // (not borrowed across the return) so the handle's tearing accessors
+        // can use it without re-borrowing while a handler runs.
+        let tearing_manager = self.tearing_control_manager();
+        Some(
+            unsafe { Surface::from_raw_with_id(raw.as_ptr(), id) }
+                .with_tearing_manager(tearing_manager),
+        )
     }
 
     /// The maximum popup nesting this crate will walk.

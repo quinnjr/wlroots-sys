@@ -3084,3 +3084,53 @@ item   = "Runtime::seat_client_next_serial"
 symbol = "wlr_seat_client_validate_event_serial"
 module = "runtime"
 item   = "Runtime::seat_client_validate_serial"
+
+[[wrapped]]
+symbol = "wlr_presentation_event"
+module = "presentation"
+item   = "PresentationEvent"
+
+[[wrapped]]
+symbol = "wlr_presentation_event_from_output"
+module = "presentation"
+item   = "PresentationEvent::from_output"
+
+[[wrapped]]
+symbol = "wlr_presentation_feedback"
+module = "presentation"
+item   = "PresentationFeedback"
+
+[[wrapped]]
+symbol = "wlr_presentation_feedback_destroy"
+module = "presentation"
+item   = "PresentationFeedback (Drop)"
+
+[[wrapped]]
+symbol = "wlr_presentation_feedback_send_presented"
+module = "presentation"
+item   = "PresentationFeedback::send_presented"
+
+[[wrapped]]
+symbol = "wlr_presentation_surface_sampled"
+module = "presentation"
+item   = "Surface::sampled"
+
+[[wrapped]]
+symbol = "wlr_presentation_surface_scanned_out_on_output"
+module = "presentation"
+item   = "Surface::scanned_out_on_output"
+
+[[wrapped]]
+symbol = "wlr_presentation_surface_textured_on_output"
+module = "presentation"
+item   = "Surface::textured_on_output"
+
+[[wrapped]]
+symbol = "wlr_tearing_control_v1"
+module = "tearing"
+item   = "TearingControl"
+
+[[wrapped]]
+symbol = "wlr_tearing_control_manager_v1_surface_hint_from_surface"
+module = "tearing"
+item   = "Surface::tearing_hint"
