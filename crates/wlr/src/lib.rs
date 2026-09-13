@@ -95,6 +95,7 @@ mod render;
 mod runtime;
 mod scene;
 mod seat;
+mod surface;
 #[cfg(test)]
 mod test_support;
 mod toplevel;
@@ -155,6 +156,7 @@ pub use seat::{
     ActivationToken, AxisRelativeDirection, AxisSource, CursorShape, CursorShapeDevice, KeyEvent,
     Modifiers, PointerAxis, SwitchType,
 };
+pub use surface::{Surface, SurfaceId};
 pub use toplevel::{Edges, Toplevel, ToplevelId};
 #[cfg(wlr_has_xwayland)]
 pub use xwayland::{XwaylandSurface, XwaylandSurfaceId, XwaylandWindowType};

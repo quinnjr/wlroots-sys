@@ -1,0 +1,10 @@
+error[E0621]: explicit lifetime required in the type of `surface`
+  --> tests/ui/surface_escapes_handler.rs:11:5
+   |
+11 |     sink.push(surface);
+   |     ^^^^^^^^^^^^^^^^^^ lifetime `'h` required
+   |
+help: add explicit lifetime `'h` to the type of `surface`
+   |
+ 9 | fn handler<'h>(surface: &'h wlr::Surface<'h>, sink: &mut Vec<&'h Surface<'h>>) {
+   |                          ++++++++

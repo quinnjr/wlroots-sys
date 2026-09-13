@@ -2209,6 +2209,11 @@ module = "backend"
 item   = "ToplevelHandler::xwayland_surface_mapped"
 
 [[wrapped]]
+symbol = "wlr_subsurface"
+module = "backend"
+item   = "ToplevelHandler::new_subsurface"
+
+[[wrapped]]
 symbol = "wlr_xwayland_surface"
 module = "xwayland"
 item   = "XwaylandSurface"

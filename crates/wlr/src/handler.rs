@@ -8,7 +8,7 @@ use crate::{
     ActivationToken, AxisSource, CommittedFields, ConstraintId, CursorShape, CursorShapeDevice,
     DecorationMode, Edges, GestureId, InputPopupSurfaceId, KeyEvent, LayerSurface, LayerSurfaceId,
     NodeId, Output, OutputId, PointerAxis, Popup, PopupId, PowerMode, Region, SceneOutputId,
-    SwitchId, Toplevel, ToplevelId, TouchId, Transform,
+    Surface, SurfaceId, SwitchId, Toplevel, ToplevelId, TouchId, Transform,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -695,6 +695,74 @@ pub trait ToplevelHandler {
     /// unknown id is harmless.
     fn layer_surface_destroyed(&mut self, id: LayerSurfaceId) {
         let _ = id;
+    }
+
+    /// A tracked `wlr_surface` committed, on **every** commit — the generic
+    /// counterpart of [`layer_surface_commit`](ToplevelHandler::layer_surface_commit),
+    /// which fires for the same reason and is not limited to the first commit.
+    ///
+    /// Added additively, on the same terms as the layer-surface methods above:
+    /// it is defaulted, so an `impl ToplevelHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged.
+    ///
+    /// Fires for every surface this run tracks — a toplevel, a layer surface,
+    /// a popup, an Xwayland content surface, a session-lock surface, and every
+    /// plain sub-surface beneath them. A `Surface` is handed over rather than
+    /// a bare id because a commit is exactly when the new size is worth
+    /// reading ([`Surface::current_size`]); unlike
+    /// [`surface_mapped`](ToplevelHandler::surface_mapped), the handle still
+    /// names a live object here.
+    fn surface_committed(&mut self, surface: &Surface<'_>) {
+        let _ = surface;
+    }
+
+    /// A tracked `wlr_surface` has a buffer and should be displayed.
+    ///
+    /// Only the id, mirroring
+    /// [`layer_surface_mapped`](ToplevelHandler::layer_surface_mapped) — the
+    /// crate has already inserted the surface (or its role object) into the
+    /// scene graph by this point, and the id is what a handler remembers.
+    ///
+    /// Added additively: defaulted, so an impl written against any earlier
+    /// 0.20.x still compiles.
+    fn surface_mapped(&mut self, id: SurfaceId) {
+        let _ = id;
+    }
+
+    /// A tracked `wlr_surface` should not be displayed any more. Not the same
+    /// as destruction — a surface can unmap and map again while keeping its
+    /// id. Mirrors [`layer_surface_unmapped`](ToplevelHandler::layer_surface_unmapped).
+    ///
+    /// Added additively: defaulted, so an impl written against any earlier
+    /// 0.20.x still compiles.
+    fn surface_unmapped(&mut self, id: SurfaceId) {
+        let _ = id;
+    }
+
+    /// A tracked `wlr_surface` is gone. Only the id, for the identical reason
+    /// [`toplevel_destroyed`](ToplevelHandler::toplevel_destroyed) documents —
+    /// including that **`id` may be one you were never told about**, on the
+    /// same "queued behind a running handler" grounds. Write this so an
+    /// unknown id is harmless.
+    ///
+    /// Added additively: defaulted, so an impl written against any earlier
+    /// 0.20.x still compiles.
+    fn surface_destroyed(&mut self, id: SurfaceId) {
+        let _ = id;
+    }
+
+    /// A new child sub-surface was added to `parent`'s committed state.
+    ///
+    /// `parent` is the surface the child was added to; `child` is the child's
+    /// own generic id, which is also its [`Surface::id`] once a handler is
+    /// given it. wlroots reports this once per child, from the parent's
+    /// `new_subsurface` signal, at the moment the child joins the parent's
+    /// current state — not when the role object is created.
+    ///
+    /// Added additively: defaulted, so an impl written against any earlier
+    /// 0.20.x still compiles.
+    fn new_subsurface(&mut self, parent: SurfaceId, child: SurfaceId) {
+        let _ = (parent, child);
     }
 
     /// A client created an `xdg_popup` — a menu, tooltip, dropdown or popover —

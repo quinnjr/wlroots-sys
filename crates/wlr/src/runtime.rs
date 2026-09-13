@@ -48,7 +48,7 @@ use crate::scene::{
 use crate::{
     AllocatorRef, Backend, Box2D, Buffer, BufferId, CursorShape, Display, Error, FBox, Interest,
     LayerSurfaceId, Output, OutputId, Popup, PopupId, PopupParent, RectId, Region, RendererRef,
-    Result, ToplevelId, Transform, sys,
+    Result, Surface, SurfaceId, ToplevelId, Transform, sys,
 };
 use crate::{ColorEncoding, ColorRange, FilterMode, NamedPrimaries, TransferFunction};
 
@@ -2743,6 +2743,15 @@ pub(crate) struct RuntimeInner {
     /// its id addon lives on.
     pub(crate) toplevels: RefCell<HashMap<ToplevelId, ToplevelEntry>>,
 
+    /// Every live generic `wlr_surface` this crate has minted a [`SurfaceId`]
+    /// for. Written by `backend.rs`'s `install_surface_listeners` at each
+    /// announce site, purged synchronously by `on_surface_destroy_generic`
+    /// (and by the xwayland dissociate path) before wlroots frees the surface,
+    /// and cleared wholesale by [`Runtime::clear_surfaces`] when the `run_all`
+    /// call that populated it returns — the identical two-level discipline
+    /// `toplevels`/`popups` follow, and for the identical reason.
+    pub(crate) surfaces: RefCell<HashMap<SurfaceId, SurfaceEntry>>,
+
     /// Every live popup: the role object, its scene subtree, and the parent it
     /// was announced under.
     ///
@@ -3066,6 +3075,18 @@ pub(crate) struct RuntimeInner {
 pub(crate) struct ToplevelEntry {
     pub(crate) raw: NonNull<sys::wlr_xdg_toplevel>,
     pub(crate) tree: NonNull<sys::wlr_scene_tree>,
+}
+
+/// One live generic `wlr_surface` as this crate tracks it: the raw pointer its
+/// [`SurfaceId`] resolves to.
+///
+/// Deliberately minimal. Unlike [`ToplevelEntry`] it owns no scene tree and
+/// carries no role: a surface's role object (if any) is tracked by its own
+/// table, and this is the fallback identity for every surface — a plain
+/// subsurface, or a role surface viewed through the generic API.
+#[derive(Clone, Copy)]
+pub(crate) struct SurfaceEntry {
+    pub(crate) raw: NonNull<sys::wlr_surface>,
 }
 
 /// One live Xwayland surface (X11 window) as this crate tracks it.
@@ -3594,6 +3615,7 @@ impl Runtime {
                 lock_surface_trees: RefCell::new(HashMap::new()),
                 session_lock_fill: std::cell::Cell::new(None),
                 toplevels: RefCell::new(HashMap::new()),
+                surfaces: RefCell::new(HashMap::new()),
                 popups: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
                 layer_shell: RefCell::new(None),
@@ -10732,6 +10754,62 @@ impl Runtime {
         // Mirrors `forget_toplevel`'s own decoration purge, at run
         // granularity instead of per-toplevel — see that method's comment.
         self.inner.decorations.borrow_mut().clear();
+    }
+
+    /// Record a newly-announced surface under `id`.
+    ///
+    /// Called from `backend.rs`'s `install_surface_listeners`, before the
+    /// announcement reaches a handler, mirroring
+    /// [`record_toplevel`](Runtime::record_toplevel).
+    pub(crate) fn record_surface(&self, id: SurfaceId, raw: NonNull<sys::wlr_surface>) {
+        self.inner
+            .surfaces
+            .borrow_mut()
+            .insert(id, SurfaceEntry { raw });
+    }
+
+    /// Remove `id`'s entry. Called from `backend.rs`'s
+    /// `on_surface_destroy_generic` (and its xwayland dissociate path) before
+    /// wlroots frees the surface, mirroring
+    /// [`forget_toplevel`](Runtime::forget_toplevel).
+    pub(crate) fn forget_surface(&self, id: SurfaceId) {
+        self.inner.surfaces.borrow_mut().remove(&id);
+    }
+
+    /// This id's recorded raw surface, with the borrow released before
+    /// returning — the caller then re-enters wlroots, which can emit a signal,
+    /// which can take this same `RefCell` mutably. See
+    /// [`toplevel_entry`](Runtime::toplevel_entry)'s own doc for why that
+    /// matters.
+    pub(crate) fn surface_ptr(&self, id: SurfaceId) -> Option<NonNull<sys::wlr_surface>> {
+        self.inner.surfaces.borrow().get(&id).map(|e| e.raw)
+    }
+
+    /// Drop every surface this runtime knows of, without touching wlroots.
+    ///
+    /// Called once by `backend.rs`'s `run_inner` when the `run_all` call that
+    /// populated the table returns, on every exit path — mirroring
+    /// [`clear_toplevels`](Runtime::clear_toplevels) exactly, and for the
+    /// identical reason: a `SurfaceId` is only meaningful for the call that
+    /// announced it, because the per-surface destroy listener that would
+    /// remove a stale row is itself torn down with that call's `Session`.
+    /// Without this, a consumer who kept a `Runtime` clone could resolve a
+    /// stale id and hand wlroots memory it had already freed.
+    pub(crate) fn clear_surfaces(&self) {
+        self.inner.surfaces.borrow_mut().clear();
+    }
+
+    /// The generic handle for `id`, or `None` if no live surface has it.
+    ///
+    /// The by-id miss every id type in this crate promises: an id held past
+    /// its surface's destruction resolves to nothing rather than to a
+    /// use-after-free.
+    pub fn surface(&self, id: SurfaceId) -> Option<Surface<'_>> {
+        let raw = self.surface_ptr(id)?;
+        // SAFETY: an entry is removed before wlroots frees the surface, so a
+        // present entry names a live one; the borrow above is released before
+        // the handle is built.
+        Some(unsafe { Surface::from_raw_with_id(raw.as_ptr(), id) })
     }
 
     /// The maximum popup nesting this crate will walk.

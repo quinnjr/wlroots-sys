@@ -48,8 +48,8 @@ use crate::{
     ActivationToken, AxisRelativeDirection, AxisSource, CommittedFields, ConstraintId, CursorShape,
     CursorShapeDevice, DecorationMode, Edges, GestureId, InputPopupSurfaceId, LayerSurfaceId,
     NodeId, OutputId, PointerAxis, PopupId, PowerMode, SceneOutputId, ShortcutsInhibitorId,
-    SwitchId, TabletPadId, TabletToolId, ToplevelId, TouchId, TransientSeatId, VirtualKeyboardId,
-    VirtualPointerId,
+    SurfaceId, SwitchId, TabletPadId, TabletToolId, ToplevelId, TouchId, TransientSeatId,
+    VirtualKeyboardId, VirtualPointerId,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -124,6 +124,24 @@ pub(crate) enum Event {
     /// at delivery, so a deferred event still reports what the client
     /// actually asked for.
     RequestDecorationMode(ToplevelId, Option<DecorationMode>),
+
+    /// A tracked `wlr_surface` committed. Carries only its id — the commit
+    /// state itself is read back through [`Surface`](crate::Surface) at
+    /// delivery, and a surface destroyed between queueing and delivery simply
+    /// misses rather than naming freed memory.
+    SurfaceCommitted(SurfaceId),
+    /// A tracked surface has a buffer and should be displayed.
+    SurfaceMapped(SurfaceId),
+    /// A tracked surface should no longer be displayed. Not destruction — a
+    /// surface can unmap and map again, keeping its id.
+    SurfaceUnmapped(SurfaceId),
+    /// A tracked surface is gone. Only the id, because there is no longer an
+    /// object to borrow.
+    SurfaceDestroyed(SurfaceId),
+    /// A new child sub-surface was added to `parent`'s current state, which
+    /// wlroots signals once per surface via `wlr_surface.events.new_subsurface`.
+    /// Carries both ids so a handler can tell which tree it belongs to.
+    SubsurfaceCreated(SurfaceId, SurfaceId),
 
     NewLayerSurface(LayerSurfaceId),
     /// Fires on **every** commit of a layer surface's underlying

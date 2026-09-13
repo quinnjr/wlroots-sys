@@ -35,7 +35,7 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 
 use crate::dispatch::{Dispatcher, DisplayPinGuard, Event};
-use crate::id::{SourceId, attach_id, find_id};
+use crate::id::{SourceId, attach_id, ensure_surface_id_raw, find_id, find_surface_id};
 use crate::layer::Layer;
 use crate::runtime::{GesturePhase, PointerFrame, PointerGrab, SceneObserver, TouchFrame};
 use crate::seat::{
@@ -44,8 +44,8 @@ use crate::seat::{
 use crate::{
     AppliedHead, Band, CommittedFields, ConstraintId, Display, Error, EventLoop, GestureId,
     Handlers, LayerSurface, LayerSurfaceId, LoopHandler, NodeId, Output, OutputHandler, OutputId,
-    Popup, PopupId, PopupParent, PowerMode, Region, Result, Runtime, SwitchId, Toplevel,
-    ToplevelId, TouchId, Transform, sys,
+    Popup, PopupId, PopupParent, PowerMode, Region, Result, Runtime, Surface, SurfaceId, SwitchId,
+    Toplevel, ToplevelId, TouchId, Transform, sys,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -259,6 +259,25 @@ struct Bound {
     /// stop mattering, which is the crate's standing rule anyway.
     popup: Option<PopupId>,
 
+    /// The generic surface this listener belongs to, for the five
+    /// per-`wlr_surface` listeners `install_surface_listeners` links
+    /// (commit/map/unmap/destroy/new_subsurface); `None` for every other
+    /// listener in this file.
+    ///
+    /// A seventh id field alongside `id`/`toplevel`/`layer`/`node`/`popup`, for
+    /// the identical reason `toplevel`'s own doc gives: `Bound` is private to
+    /// this module, so widening it costs nothing outside it, and every other
+    /// call site wants its own exact type.
+    ///
+    /// Load-bearing the same way `toplevel` is, and for the same reason:
+    /// wlroots emits `wlr_surface.events.map`/`.unmap`/`.destroy` with a
+    /// **null** `data`, so those callbacks recover their [`SurfaceId`] from
+    /// here rather than from the signal. The two role-scoped listeners that
+    /// share these surfaces (`on_new_toplevel`'s and `on_new_popup`'s) carry
+    /// their own role id in their own slot; this is the generic view layered
+    /// alongside them.
+    surface: Option<SurfaceId>,
+
     /// The Xwayland surface this listener belongs to, for the per-surface
     /// listeners `on_new_xwayland_surface` links (and the map/unmap pair
     /// `on_xwayland_surface_associate` adds on the surface once it exists);
@@ -414,6 +433,7 @@ impl Registration {
             layer,
             node,
             popup: None,
+            surface: None,
             #[cfg(wlr_has_xwayland)]
             xwayland: None,
             text_input: None,
@@ -476,6 +496,7 @@ impl Registration {
             layer: None,
             node: None,
             popup: None,
+            surface: None,
             xwayland: Some(xwayland),
             text_input: None,
             input_method: None,
@@ -744,6 +765,71 @@ impl Registration {
             layer: None,
             node: None,
             popup: Some(popup),
+            surface: None,
+            #[cfg(wlr_has_xwayland)]
+            xwayland: None,
+            text_input: None,
+            input_method: None,
+            tablet_pad: None,
+            tablet_tool: None,
+            transient_seat: None,
+            switch: None,
+        });
+
+        // SAFETY: as for `link` — `signal` is an initialised `wl_signal` per the
+        // caller's contract, and the listener is a freshly boxed one whose
+        // address stays put until this `Registration` drops.
+        unsafe { sys::wl_signal_add(signal, &raw mut bound.listener) };
+
+        Registration { bound }
+    }
+
+    /// Link a per-`wlr_surface` generic listener, carrying the [`SurfaceId`]
+    /// its callback reads back from [`Bound::surface`]. Every other id slot is
+    /// `None`.
+    ///
+    /// A dedicated constructor rather than a parameter on
+    /// [`Registration::link`], following `link_popup`'s precedent and for the
+    /// reason that function's own doc gives: `link`'s slot list is frozen at
+    /// the five ids the non-surface call sites use, and threading a sixth
+    /// `Option` through it would put an extra `None` on every one of its call
+    /// sites for a value all but these leave empty. This builds the boxed
+    /// [`Bound`] directly, exactly as `link` does.
+    ///
+    /// `alive` is null, which is the **stronger** claim (see
+    /// [`Registration::drop`]): every one of these is dropped from inside the
+    /// surface's own destroy emission, while the surface is still alive, or
+    /// while the run — and so the whole session table — still stands.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Registration::link`]: `signal` must point at an initialised
+    /// `wl_signal` whose owner outlives the returned `Registration`, and
+    /// `session` must be a `*const Session<S>` for the `S` `notify` casts it
+    /// back to, valid for as long as the registration lives.
+    unsafe fn link_surface(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        surface: SurfaceId,
+    ) -> Self {
+        let mut bound = Box::new(Bound {
+            listener: sys::wl_listener {
+                link: sys::wl_list {
+                    prev: std::ptr::null_mut(),
+                    next: std::ptr::null_mut(),
+                },
+                notify,
+            },
+            session,
+            alive: std::ptr::null(),
+            flag: std::ptr::null(),
+            id: None,
+            toplevel: None,
+            layer: None,
+            node: None,
+            popup: None,
+            surface: Some(surface),
             #[cfg(wlr_has_xwayland)]
             xwayland: None,
             text_input: None,
@@ -812,6 +898,7 @@ impl Registration {
             layer: None,
             node: None,
             popup: None,
+            surface: None,
             #[cfg(wlr_has_xwayland)]
             xwayland: None,
             text_input: Some(text_input),
@@ -872,6 +959,7 @@ impl Registration {
             layer: None,
             node: None,
             popup: None,
+            surface: None,
             #[cfg(wlr_has_xwayland)]
             xwayland: None,
             text_input: None,
@@ -933,6 +1021,7 @@ impl Registration {
             layer: None,
             node: None,
             popup: None,
+            surface: None,
             #[cfg(wlr_has_xwayland)]
             xwayland: None,
             text_input: None,
@@ -997,6 +1086,7 @@ impl Registration {
             layer: None,
             node: None,
             popup: None,
+            surface: None,
             #[cfg(wlr_has_xwayland)]
             xwayland: None,
             text_input: None,
@@ -1054,6 +1144,7 @@ impl Registration {
             layer: None,
             node: None,
             popup: None,
+            surface: None,
             #[cfg(wlr_has_xwayland)]
             xwayland: None,
             text_input: None,
@@ -1126,6 +1217,7 @@ impl Registration {
             layer: None,
             node: None,
             popup: None,
+            surface: None,
             #[cfg(wlr_has_xwayland)]
             xwayland: None,
             text_input: None,
@@ -1261,6 +1353,13 @@ struct Session<'r, S> {
     /// `on_popup_destroy` — before the popup is freed, mirroring `toplevels`
     /// and `layers` above.
     popups: RefCell<HashMap<PopupId, PopupListeners>>,
+
+    /// This run's five generic listeners on every live `wlr_surface` it has
+    /// minted a [`SurfaceId`] for: the surface's commit/map/unmap/destroy and
+    /// its `new_subsurface`. Removed, and so unlinked, from
+    /// `on_surface_destroy_generic` (and from the xwayland dissociate path)
+    /// before the surface is freed, mirroring `toplevels` above.
+    surfaces: RefCell<HashMap<SurfaceId, SurfaceListeners>>,
 
     /// This run's listeners on every live input device, one [`InputDevice`]
     /// per device, keyed by the device's own `*mut wlr_input_device` address
@@ -1578,6 +1677,25 @@ struct PopupListeners {
     _new_popup: Registration,
 }
 
+/// One live generic `wlr_surface`'s five listeners: the surface's
+/// `commit`/`map`/`unmap`/`destroy`, plus the `new_subsurface` that announces
+/// a child. Field order is not load-bearing, as for [`ToplevelListeners`], but
+/// all five must drop — and so unlink — as part of removing the entry, which
+/// happens from inside the surface's own destroy emission, while the surface
+/// is still alive.
+///
+/// These are linked in addition to whatever role-scoped listeners the surface
+/// already carries (`on_new_toplevel`'s, `on_new_popup`'s, …): wlroots lets a
+/// `wl_signal` hold as many listeners as it likes, and each reads its own id
+/// slot out of its own [`Bound`].
+struct SurfaceListeners {
+    _commit: Registration,
+    _map: Registration,
+    _unmap: Registration,
+    _destroy: Registration,
+    _new_subsurface: Registration,
+}
+
 /// One live `wlr_session_lock_v1`'s three listeners: `new_surface`, `unlock`,
 /// and the lock's own `destroy`. Field order is not load-bearing, as for
 /// [`ToplevelListeners`] — all three must drop, and so unlink, as part of
@@ -1711,6 +1829,19 @@ struct PopupTableGuard<'r>(&'r Runtime);
 impl Drop for PopupTableGuard<'_> {
     fn drop(&mut self) {
         self.0.clear_popups();
+    }
+}
+
+/// Clears `Runtime`'s generic-surface table when the `run_inner` call holding
+/// this guard returns, on every exit path. Mirrors [`ToplevelTableGuard`]
+/// exactly, for the identical reason: see `Runtime::clear_surfaces`'s own doc
+/// — the per-surface destroy listener that would otherwise remove a stale row
+/// is itself torn down with this call's `Session`.
+struct SurfaceTableGuard<'r>(&'r Runtime);
+
+impl Drop for SurfaceTableGuard<'_> {
+    fn drop(&mut self) {
+        self.0.clear_surfaces();
     }
 }
 
@@ -2168,6 +2299,7 @@ impl<'d> Backend<'d> {
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
             popups: RefCell::new(HashMap::new()),
+            surfaces: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
             scene_buffers: RefCell::new(HashMap::new()),
@@ -2205,6 +2337,12 @@ impl<'d> Backend<'d> {
         // early `?` and a panic — this sits with `_toplevel_table_guard` so
         // the two cannot drift apart.
         let _popup_table_guard = PopupTableGuard(runtime);
+
+        // Generic surface ids are only meaningful for the call that announced
+        // them, for the reason `clear_surfaces` documents — the same "id good
+        // for one run" rule. Purged on every exit path, including an early `?`
+        // and a panic.
+        let _surface_table_guard = SurfaceTableGuard(runtime);
 
         // Same reasoning, for `layer_surfaces`; see that guard's own doc.
         let _layer_surface_table_guard = LayerSurfaceTableGuard(runtime);
@@ -3259,6 +3397,20 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         Event::PopupUnmapped(id) => state.popup_unmapped(id),
         Event::PopupReposition(id) => with_popup(session, id, |p| state.popup_reposition(p)),
         Event::PopupDestroyed(id) => state.popup_destroyed(id),
+        // Generic surface events. Commit is the one that hands over a handle —
+        // the committed size is worth reading, and the surface is still alive
+        // for this delivery (the destroy path removes the row first). Mapped,
+        // unmapped and destroyed carry the bare id, mirroring their
+        // layer-surface counterparts; a deferred delivery that names a surface
+        // since destroyed simply misses at `with_surface` (or is harmless as a
+        // bare id, the contract every id carries).
+        Event::SurfaceCommitted(id) => {
+            with_surface(session, id, |surface| state.surface_committed(surface))
+        }
+        Event::SurfaceMapped(id) => state.surface_mapped(id),
+        Event::SurfaceUnmapped(id) => state.surface_unmapped(id),
+        Event::SurfaceDestroyed(id) => state.surface_destroyed(id),
+        Event::SubsurfaceCreated(parent, child) => state.new_subsurface(parent, child),
         // The four scene-buffer events that name a scene output resolve
         // nothing here: both ids were resolved at emission time, and a handler
         // that gets one for a node or output since destroyed sees every by-id
@@ -3493,6 +3645,23 @@ fn with_popup<S>(session: &Session<'_, S>, id: PopupId, f: impl FnOnce(&Popup<'_
         return;
     };
     f(&popup);
+}
+
+/// Borrow the generic surface `id` names, if this runtime still knows of one.
+///
+/// Mirrors [`with_toplevel`] exactly, including its obligations on `f`: the
+/// table borrow is released before `f` runs (a handler can re-enter wlroots,
+/// which can emit a signal, which can take the borrow mutably), and `f` must
+/// not reach anything that frees the surface mid-call.
+fn with_surface<S>(session: &Session<'_, S>, id: SurfaceId, f: impl FnOnce(&Surface<'_>)) {
+    let Some(entry) = session.runtime.surface_ptr(id) else {
+        return;
+    };
+    // SAFETY: a present entry names a live surface — it is removed before
+    // wlroots frees the surface — and the handle is scoped to `f`, which runs
+    // with the dispatcher's handler flag set, so it cannot drive the loop.
+    let surface = unsafe { Surface::from_raw_with_id(entry.as_ptr(), id) };
+    f(&surface);
 }
 
 /// Borrow the layer surface `id` names, if this runtime still knows of one.
@@ -3751,6 +3920,13 @@ unsafe extern "C" fn on_xwayland_surface_associate<S: Handlers>(
             entry._commit = Some(commit);
         }
 
+        // The generic surface view for the X11 content surface, alongside the
+        // map/unmap/commit listeners just linked. Torn down in
+        // `on_xwayland_surface_dissociate`, because wlroots detaches the
+        // content surface there and this crate's own destroy watch would not
+        // see it in time.
+        let _ = install_surface_listeners(session, surface);
+
         // Build the scene node so the surface renders. Parented into the
         // toplevel band (managed-window placement for the spike; override-
         // redirect banding is M3). Skipped when graphics was never initialised,
@@ -3814,6 +3990,35 @@ unsafe extern "C" fn on_xwayland_surface_dissociate<S: Handlers>(
             entry._commit = None;
         }
         (*session).runtime.set_xwayland_surface_tree(id, None);
+
+        // Tear the generic surface view down here, before wlroots frees the
+        // content surface. `xwayland_surface_dissociate` emits this signal
+        // *before* it clears `xsurface->surface` (confirmed against the 0.20
+        // source), so the pointer is still live and its addon still carries
+        // the id — which is why the surface id is recovered from the surface
+        // rather than carried in the xwayland entry.
+        if let Some(xs) = (*session).runtime.xwayland_surface_ptr(id) {
+            let content = (*xs.as_ptr()).surface;
+            if !content.is_null()
+                && let Some(raw) = find_surface_id(&raw const (*content).addons)
+            {
+                let surface_id = SurfaceId(raw);
+                // Gated on the session row so a destroy that already ran
+                // through `on_surface_destroy_generic` cannot produce a
+                // second teardown or a duplicate `SurfaceDestroyed`.
+                let listeners = (*session).surfaces.borrow_mut().remove(&surface_id);
+                if let Some(listeners) = listeners {
+                    drop(listeners);
+                    (*session).runtime.forget_surface(surface_id);
+                    let deliver = (*session).deliver;
+                    (*session).dispatcher.emit(
+                        &*session,
+                        Event::SurfaceDestroyed(surface_id),
+                        deliver,
+                    );
+                }
+            }
+        }
 
         let deliver = (*session).deliver;
         (*session)
@@ -7516,6 +7721,12 @@ unsafe extern "C" fn on_session_lock_new_surface<S: Handlers>(
                 output: output as usize,
             },
         );
+
+        // The generic surface view, alongside this lock surface's own
+        // commit/destroy listeners. Installed last so the early returns above
+        // (no lock band, no tree) leave a surface wlroots is about to free
+        // untracked rather than recorded and then stranded.
+        let _ = install_surface_listeners(session, surface);
     }
 }
 
@@ -7840,6 +8051,11 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
 
         (*session).runtime.record_toplevel(id, raw, tree);
 
+        // The generic surface view, alongside the role view just recorded. The
+        // returned id is not needed here — the role listener above already
+        // carries the toplevel id — so it is dropped explicitly.
+        let _ = install_surface_listeners(session, surface);
+
         let deliver = (*session).deliver;
         (*session)
             .dispatcher
@@ -8125,6 +8341,233 @@ unsafe extern "C" fn on_toplevel_destroy<S: Handlers>(
         (*session)
             .dispatcher
             .emit(&*session, Event::ToplevelDestroyed(id), deliver);
+    }
+}
+
+/// Mint (or recover) `surface`'s generic [`SurfaceId`], link the five generic
+/// listeners that report on it, and record it in both the run's listener table
+/// and the runtime's by-id table.
+///
+/// Called from every announce site that hands this crate a `wlr_surface` it
+/// tracks — `on_new_toplevel`, `on_new_layer_surface`, `on_new_popup`,
+/// `on_xwayland_surface_associate` and `on_session_lock_new_surface` — and
+/// recursively from `on_new_subsurface` for a child. Idempotent per surface
+/// per run: a surface whose id already has a row here is left alone, so a
+/// second announcement of the same surface (an X11 window re-associating, say)
+/// does not link a duplicate set.
+///
+/// `None` only when `surface` is null, which no caller passes; handled rather
+/// than asserted because every caller is an `extern "C"` frame where a panic
+/// aborts the process.
+///
+/// # Safety
+///
+/// `session` must be the `*const Session<'_, S>` for this run, valid for as
+/// long as the linked registrations live, and `surface` must be a live
+/// `wlr_surface` with an initialised addon set.
+unsafe fn install_surface_listeners<S: Handlers>(
+    session: *const Session<'_, S>,
+    surface: *mut sys::wlr_surface,
+) -> Option<SurfaceId> {
+    // SAFETY: the caller guarantees `surface` is live and fully initialised,
+    // its addon set included.
+    unsafe {
+        let raw = NonNull::new(surface)?;
+
+        // Recover or attach the generic id. A present `find_surface_id` whose
+        // id already has a session row means this surface was installed
+        // earlier this run, so there is nothing to link.
+        let id = match find_surface_id(&raw const (*raw.as_ptr()).addons) {
+            Some(existing) => SurfaceId(existing),
+            None => SurfaceId(ensure_surface_id_raw(&raw mut (*raw.as_ptr()).addons)),
+        };
+        if (*session).surfaces.borrow().contains_key(&id) {
+            return Some(id);
+        }
+
+        // Five listeners, all with a null liveness flag: each is dropped from
+        // inside the surface's own destroy emission, while it is still alive,
+        // which is a stronger guarantee than any flag (see
+        // `Registration::drop`). Every one carries `id` in `Bound::surface`:
+        // wlroots emits `wlr_surface.events.map`/`.unmap`/`.destroy` with a
+        // **null** `data`, so none of those callbacks may read the id from the
+        // signal.
+        let surf = raw.as_ptr();
+        let commit = Registration::link_surface(
+            &raw mut (*surf).events.commit,
+            on_surface_commit_generic::<S>,
+            session.cast::<()>(),
+            id,
+        );
+        let map = Registration::link_surface(
+            &raw mut (*surf).events.map,
+            on_surface_map_generic::<S>,
+            session.cast::<()>(),
+            id,
+        );
+        let unmap = Registration::link_surface(
+            &raw mut (*surf).events.unmap,
+            on_surface_unmap_generic::<S>,
+            session.cast::<()>(),
+            id,
+        );
+        let destroy = Registration::link_surface(
+            &raw mut (*surf).events.destroy,
+            on_surface_destroy_generic::<S>,
+            session.cast::<()>(),
+            id,
+        );
+        let new_subsurface = Registration::link_surface(
+            &raw mut (*surf).events.new_subsurface,
+            on_new_subsurface::<S>,
+            session.cast::<()>(),
+            id,
+        );
+
+        let displaced = (*session).surfaces.borrow_mut().insert(
+            id,
+            SurfaceListeners {
+                _commit: commit,
+                _map: map,
+                _unmap: unmap,
+                _destroy: destroy,
+                _new_subsurface: new_subsurface,
+            },
+        );
+        drop(displaced);
+
+        (*session).runtime.record_surface(id, raw);
+        Some(id)
+    }
+}
+
+/// A tracked surface committed.
+unsafe extern "C" fn on_surface_commit_generic<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `install_surface_listeners` into this surface's
+    // `events.commit`, unlinked before the surface is freed. `_data` is
+    // deliberately unused: identity comes from `Bound::surface`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).surface else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::SurfaceCommitted(id), deliver);
+    }
+}
+
+/// A tracked surface has a buffer and should be displayed.
+unsafe extern "C" fn on_surface_map_generic<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_surface_commit_generic` — `wlr_surface.events.map` is
+    // one of the signals wlroots emits with a null `data`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).surface else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::SurfaceMapped(id), deliver);
+    }
+}
+
+/// A tracked surface should no longer be displayed.
+unsafe extern "C" fn on_surface_unmap_generic<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_surface_commit_generic` — `wlr_surface.events.unmap`
+    // is the other null-`data` signal.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).surface else { return };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::SurfaceUnmapped(id), deliver);
+    }
+}
+
+/// A tracked surface is about to be freed. Forget it *now*, whatever the
+/// handler does.
+unsafe extern "C" fn on_surface_destroy_generic<S: Handlers>(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `install_surface_listeners` into this surface's
+    // `events.destroy`; the surface is still alive for the duration of the
+    // emission. `_data` is deliberately unused (the signal carries a null
+    // `data`), so identity comes from `Bound::surface`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).surface else { return };
+
+        // Both tables are cleared before the event is emitted, and that
+        // ordering is the whole soundness argument for deferral: a destroy
+        // queued behind a running handler is delivered long after wlroots
+        // freed the surface, so a lookup at delivery time would resolve the id
+        // to freed memory. Clearing here means it simply misses.
+        //
+        // Removing the entry drops the registration that owns this very
+        // `Bound`. `wl_signal_emit_mutable` advances past the firing listener
+        // before calling us, so `bound` is dangling from here on and is not
+        // touched again.
+        (*session).runtime.forget_surface(id);
+        let listeners = (*session).surfaces.borrow_mut().remove(&id);
+        drop(listeners);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::SurfaceDestroyed(id), deliver);
+    }
+}
+
+/// A child sub-surface was added to a tracked surface's current state.
+///
+/// The parent is `Bound::surface`. The child pointer rides the signal as the
+/// `wlr_subsurface` the emission was made for: wlroots' `new_subsurface` signal
+/// carries `struct wlr_subsurface *` (the header comment and the 0.20 emission
+/// agree), and its `surface` field is the child `wlr_surface`. That child gets
+/// its own generic id and listeners here, so a plain sub-surface — which no
+/// role announce site ever reaches — is tracked too.
+unsafe extern "C" fn on_new_subsurface<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `install_surface_listeners` into the parent surface's
+    // `events.new_subsurface`; `data` is the live `wlr_subsurface` the emission
+    // was made for, and `Bound::surface` names the parent.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(parent) = (*bound).surface else {
+            return;
+        };
+        let subsurface = data.cast::<sys::wlr_subsurface>();
+        if subsurface.is_null() {
+            return;
+        }
+        let child_surface = (*subsurface).surface;
+        if child_surface.is_null() {
+            return;
+        }
+        let Some(child) = install_surface_listeners(session, child_surface) else {
+            return;
+        };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::SubsurfaceCreated(parent, child), deliver);
     }
 }
 
@@ -8475,6 +8918,9 @@ unsafe extern "C" fn on_new_layer_surface<S: Handlers>(
             .runtime
             .record_layer_surface(id, raw, scene_tree, scene_layer_surface, layer);
 
+        // The generic surface view, alongside the role view just recorded.
+        let _ = install_surface_listeners(session, surface);
+
         let deliver = (*session).deliver;
         (*session)
             .dispatcher
@@ -8763,6 +9209,9 @@ unsafe extern "C" fn on_new_popup<S: Handlers>(
         drop(displaced);
 
         (*session).runtime.record_popup(id, raw, tree, parent);
+
+        // The generic surface view, alongside the role view just recorded.
+        let _ = install_surface_listeners(session, surface);
 
         let deliver = (*session).deliver;
         (*session)
@@ -11621,6 +12070,17 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::PopupUnmapped(..)
         | Event::PopupReposition(..)
         | Event::PopupDestroyed(..)
+        // Unreachable for the same reason the toplevel/layer/popup events
+        // above are: `run` never registers an xdg shell or any other announce
+        // site that installs the generic surface listeners, so none of these
+        // can be produced on this path. Dropped rather than `unreachable!()`
+        // because this is on the path from an `extern "C"` frame, where a
+        // panic aborts.
+        | Event::SurfaceCommitted(..)
+        | Event::SurfaceMapped(..)
+        | Event::SurfaceUnmapped(..)
+        | Event::SurfaceDestroyed(..)
+        | Event::SubsurfaceCreated(..)
         // And for the five scene-buffer observations: `run` installs no scene
         // observer (`no_scene_observer`), so nothing can ever have linked the
         // listeners that produce these.
@@ -12201,6 +12661,7 @@ mod tests {
                 decorations: RefCell::new(HashMap::new()),
                 layers: RefCell::new(HashMap::new()),
                 popups: RefCell::new(HashMap::new()),
+                surfaces: RefCell::new(HashMap::new()),
                 inputs: RefCell::new(HashMap::new()),
                 drags: RefCell::new(HashMap::new()),
                 idle_inhibitors: RefCell::new(HashMap::new()),
@@ -12385,6 +12846,7 @@ mod tests {
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
             popups: RefCell::new(HashMap::new()),
+            surfaces: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
             shortcuts_inhibitors: RefCell::new(HashMap::new()),
@@ -12445,6 +12907,7 @@ mod tests {
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
             popups: RefCell::new(HashMap::new()),
+            surfaces: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
             shortcuts_inhibitors: RefCell::new(HashMap::new()),
@@ -12520,6 +12983,7 @@ mod tests {
                 decorations: RefCell::new(HashMap::new()),
                 layers: RefCell::new(HashMap::new()),
                 popups: RefCell::new(HashMap::new()),
+                surfaces: RefCell::new(HashMap::new()),
                 inputs: RefCell::new(HashMap::new()),
                 drags: RefCell::new(HashMap::new()),
                 idle_inhibitors: RefCell::new(HashMap::new()),
@@ -13288,6 +13752,7 @@ mod axis_delivery_tests {
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
             popups: RefCell::new(HashMap::new()),
+            surfaces: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
@@ -13694,6 +14159,7 @@ mod axis_delivery_tests {
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
             popups: RefCell::new(HashMap::new()),
+            surfaces: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
@@ -13779,6 +14245,7 @@ mod pointer_protocol_delivery_tests {
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
             popups: RefCell::new(HashMap::new()),
+            surfaces: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
@@ -13864,6 +14331,7 @@ mod pointer_protocol_delivery_tests {
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
             popups: RefCell::new(HashMap::new()),
+            surfaces: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
@@ -13989,6 +14457,7 @@ mod touch_switch_delivery_tests {
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
             popups: RefCell::new(HashMap::new()),
+            surfaces: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
@@ -14051,6 +14520,7 @@ mod touch_switch_delivery_tests {
             decorations: RefCell::new(HashMap::new()),
             layers: RefCell::new(HashMap::new()),
             popups: RefCell::new(HashMap::new()),
+            surfaces: RefCell::new(HashMap::new()),
             inputs: RefCell::new(HashMap::new()),
             drags: RefCell::new(HashMap::new()),
             idle_inhibitors: RefCell::new(HashMap::new()),
