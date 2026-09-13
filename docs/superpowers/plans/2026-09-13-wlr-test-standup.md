@@ -112,7 +112,7 @@ git commit -m "test(wlr): share headless_env across all integration test binarie
 
 **Interfaces:**
 - Consumes: `common::headless_env()`.
-- Produces: `client::ClientHandle` — a spawned client whose constructor takes the socket name and a closure that drives the client; and `client::spawn(socket: &str, drive: impl FnOnce(&mut ClientState, &wayland_client::QueueHandle<ClientState>) + Send + 'static) -> std::thread::JoinHandle<()>`.
+- Produces: `client::ClientState` and `client::spawn(socket: &str, drive: impl FnOnce(&mut ClientState, &wayland_client::QueueHandle<ClientState>) + Send + 'static) -> std::thread::JoinHandle<()>`; and `common::isolated_runtime_dir() -> std::path::PathBuf` (sets `XDG_RUNTIME_DIR` once, idempotently, to a fresh unique temp dir).
 
 - [ ] **Step 1: Add dev-dependencies**
 
@@ -150,6 +150,7 @@ impl wlr::LoopHandler for App {}
 fn a_real_client_creates_a_toplevel_the_server_observes() {
     common::headless_env();
     let _serial = common::headless_guard();
+    common::isolated_runtime_dir(); // XDG_RUNTIME_DIR must exist before the socket is bound
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");
@@ -178,12 +179,12 @@ fn a_real_client_creates_a_toplevel_the_server_observes() {
 - [ ] **Step 3: Implement `crates/wlr/tests/common/client.rs`**
 
 Provide the harness. It must:
-1. Set `XDG_RUNTIME_DIR` to a fresh unique temp dir **before** `wayland-client` connects (the server's `add_socket_auto` binds under it).
+1. Assume `common::isolated_runtime_dir()` has already set `XDG_RUNTIME_DIR` (the test calls it before `Display::new()`, so the server's `add_socket_auto` binds there and the client reuses the same value). `spawn` sets only `WAYLAND_DISPLAY`.
 2. In the client thread, call `wayland_client::Connection::connect_to_env()`, `globals::registry_queue_init::<ClientState>(&conn)`, bind `xdg_wm_base` and `wl_compositor`, then run the caller's `drive` closure.
-3. Expose `ClientState` with `on_created: Option<Arc<Mutex<usize>>>` and `fn create_toplevel(&mut self, qh: &QueueHandle<Self>)` that creates a `wl_surface` + `xdg_surface` + `xdg_toplevel`, attaches no buffer, and commits.
+3. Expose `ClientState` with `fn create_toplevel(&mut self, qh: &QueueHandle<Self>)` that creates a `wl_surface` + `xdg_surface` + `xdg_toplevel`, attaches no buffer, and commits.
 4. `spawn(socket, drive) -> JoinHandle<()>`: `unsafe { std::env::set_var("WAYLAND_DISPLAY", socket) }` inside the thread, connect, run `drive`, then `conn.flush()` and block in `conn.roundtrip()` so the server sees the requests before the thread exits.
 
-Sketch (adjust exact `wayland-client` 0.31 names at implementation time; the module's public shape — `ClientState`, `spawn` — is fixed):
+Sketch (adjust exact `wayland-client` 0.31 names at implementation time; the module's public shape — `ClientState`, `spawn`, `common::isolated_runtime_dir` — is fixed):
 ```rust
 use std::sync::{Arc, Mutex};
 use wayland_client::{Connection, Dispatch, QueueHandle, globals::registry_queue_init};
@@ -191,7 +192,6 @@ use wayland_client::protocol::{wl_compositor, wl_registry, wl_surface};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
 pub struct ClientState {
-    pub on_created: Option<Arc<Mutex<usize>>>,
     pub compositor: Option<wl_compositor::WlCompositor>,
     pub wm_base: Option<xdg_wm_base::XdgWmBase>,
 }
@@ -202,18 +202,19 @@ pub fn spawn(
 ) -> std::thread::JoinHandle<()> {
     let socket = socket.to_owned();
     std::thread::spawn(move || {
-        let dir = std::env::temp_dir().join(format!("wlr-client-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: this thread sets its own env before any libwayland call.
+        // XDG_RUNTIME_DIR was set by common::isolated_runtime_dir() before the
+        // server bound its socket; the client reuses the same value, so only
+        // WAYLAND_DISPLAY is set here.
+        // SAFETY: env is process-global; this runs before any libwayland call
+        // on this thread.
         unsafe {
-            std::env::set_var("XDG_RUNTIME_DIR", &dir);
             std::env::set_var("WAYLAND_DISPLAY", &socket);
         }
         let conn = Connection::connect_to_env().expect("connect");
         let (globals, mut queue) = registry_queue_init::<ClientState>(&conn).expect("registry");
         let qh = queue.handle();
-        let mut state = ClientState { on_created: None, compositor: None, wm_base: None };
-        // bind compositor + xdg_wm_base via globals.bind(...)
+        let mut state = ClientState { compositor: None, wm_base: None };
+        // bind compositor + xdg_wm_base via globals.bind(...) in the registry handler
         let _ = &globals;
         drive(&mut state, &qh);
         conn.flush().expect("flush");
@@ -222,6 +223,8 @@ pub fn spawn(
 }
 ```
 Implement `Dispatch<wl_registry::WlRegistry, ()>`, `Dispatch<wl_compositor::WlCompositor, ()>`, `Dispatch<xdg_wm_base::XdgWmBase, ()>`, `Dispatch<xdg_surface::XdgSurface, ()>`, `Dispatch<xdg_toplevel::XdgToplevel, ()>` for `ClientState`, binding the globals in the registry handler.
+
+Also add `common::isolated_runtime_dir()` to `tests/common/mod.rs`: idempotent via `OnceLock<PathBuf>`, creates `std::env::temp_dir().join(format!("wlr-test-{}", std::process::id()))`, `create_dir_all`s it, sets `XDG_RUNTIME_DIR` under `unsafe { std::env::set_var(...) }`, and returns the path.
 
 - [ ] **Step 4: Run the seed test**
 
