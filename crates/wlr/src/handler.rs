@@ -466,6 +466,15 @@ pub trait LoopHandler {
 /// defaulted method costs an implementor nothing, and a second trait would
 /// cost every consumer a second (also-empty) `impl` block.
 ///
+/// `surface_committed`, `surface_mapped`, `surface_unmapped`,
+/// `surface_destroyed` and `new_subsurface` — the generic `wlr_surface`
+/// lifecycle, alongside the role-specific methods above — were added in
+/// 0.20.36, on the same additive terms: every one is defaulted, so an impl
+/// written against any earlier 0.20.x still compiles unchanged. They live
+/// here rather than on a new `SurfaceHandler` for the reason this trait's own
+/// doc gives, and because adding a trait to [`Handlers`]' supertrait list
+/// would be a source-breaking change to a frozen bound.
+///
 /// # Panics
 ///
 /// As for [`OutputHandler`]: every method runs underneath an `extern "C"`

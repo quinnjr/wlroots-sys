@@ -8356,6 +8356,11 @@ unsafe extern "C" fn on_toplevel_destroy<S: Handlers>(
 /// second announcement of the same surface (an X11 window re-associating, say)
 /// does not link a duplicate set.
 ///
+/// The returned bool is **whether this call linked the listeners**, as opposed
+/// to finding them already installed. `on_new_subsurface` uses it to emit
+/// `SubsurfaceCreated` only for a child that was not already tracked, so a
+/// repeated announcement cannot produce a duplicate event.
+///
 /// `None` only when `surface` is null, which no caller passes; handled rather
 /// than asserted because every caller is an `extern "C"` frame where a panic
 /// aborts the process.
@@ -8368,7 +8373,7 @@ unsafe extern "C" fn on_toplevel_destroy<S: Handlers>(
 unsafe fn install_surface_listeners<S: Handlers>(
     session: *const Session<'_, S>,
     surface: *mut sys::wlr_surface,
-) -> Option<SurfaceId> {
+) -> Option<(SurfaceId, bool)> {
     // SAFETY: the caller guarantees `surface` is live and fully initialised,
     // its addon set included.
     unsafe {
@@ -8382,7 +8387,7 @@ unsafe fn install_surface_listeners<S: Handlers>(
             None => SurfaceId(ensure_surface_id_raw(&raw mut (*raw.as_ptr()).addons)),
         };
         if (*session).surfaces.borrow().contains_key(&id) {
-            return Some(id);
+            return Some((id, false));
         }
 
         // Five listeners, all with a null liveness flag: each is dropped from
@@ -8437,7 +8442,7 @@ unsafe fn install_surface_listeners<S: Handlers>(
         drop(displaced);
 
         (*session).runtime.record_surface(id, raw);
-        Some(id)
+        Some((id, true))
     }
 }
 
@@ -8561,9 +8566,17 @@ unsafe extern "C" fn on_new_subsurface<S: Handlers>(
         if child_surface.is_null() {
             return;
         }
-        let Some(child) = install_surface_listeners(session, child_surface) else {
+        let Some((child, newly_linked)) = install_surface_listeners(session, child_surface) else {
             return;
         };
+        // Only a child this call actually linked is announced. A repeated
+        // `new_subsurface` for one already tracked this run reports
+        // `newly_linked == false` and is dropped, so `SubsurfaceCreated`
+        // tracks a child being newly discovered rather than the signal's own
+        // bookkeeping.
+        if !newly_linked {
+            return;
+        }
         let deliver = (*session).deliver;
         (*session)
             .dispatcher
@@ -12572,6 +12585,250 @@ mod tests {
         unsafe { (*signal).listener_list.next.cast_const() == &raw const (*signal).listener_list }
     }
 
+    /// A zeroed, heap-allocated `wlr_surface` with its addon set and the five
+    /// generic signals this crate listens on initialised; freed on drop.
+    ///
+    /// Allocated rather than `std::mem::zeroed`-ed for the reason
+    /// `ScratchOutput`'s own doc gives: `wlr_surface` embeds `wl_listener`
+    /// machinery whose bare function pointers are UB to *materialise* as a zero
+    /// value, so the bytes are only ever touched through a raw pointer.
+    struct ScratchSurface(*mut sys::wlr_surface);
+
+    impl ScratchSurface {
+        fn new() -> Self {
+            let layout = Layout::new::<sys::wlr_surface>();
+            // SAFETY: `wlr_surface` has fields, so the layout is
+            // non-zero-sized and `alloc_zeroed` returns either null (checked)
+            // or a suitably aligned, zeroed allocation of exactly that size.
+            let ptr = unsafe { alloc_zeroed(layout) }.cast::<sys::wlr_surface>();
+            assert!(!ptr.is_null(), "allocation failed");
+            // SAFETY: `ptr` is a fresh, exclusively-owned, zeroed allocation
+            // sized for a whole `wlr_surface`, so every field written below is
+            // in bounds; each initialiser writes only the `wl_list` head it
+            // owns. The allocation does not move again, which matters because
+            // `wl_signal_init` makes each head point at itself.
+            unsafe {
+                sys::wlr_addon_set_init(&raw mut (*ptr).addons);
+                sys::wl_signal_init(&raw mut (*ptr).events.commit);
+                sys::wl_signal_init(&raw mut (*ptr).events.map);
+                sys::wl_signal_init(&raw mut (*ptr).events.unmap);
+                sys::wl_signal_init(&raw mut (*ptr).events.destroy);
+                sys::wl_signal_init(&raw mut (*ptr).events.new_subsurface);
+            }
+            Self(ptr)
+        }
+    }
+
+    impl Drop for ScratchSurface {
+        fn drop(&mut self) {
+            // SAFETY: the addon set was initialised in `new`, so finishing it
+            // undoes exactly that — and runs the surface id addon's destroy
+            // hook, which is why every test using this type holds
+            // `id_test_lock`.
+            unsafe { sys::wlr_addon_set_finish(&raw mut (*self.0).addons) };
+            // SAFETY: allocated by `alloc_zeroed` with this same layout in
+            // `new`, and not used again after this point.
+            unsafe { dealloc(self.0.cast::<u8>(), Layout::new::<sys::wlr_surface>()) };
+        }
+    }
+
+    /// Build a `Session` over `state` and `runtime` with `deliver` as its sink,
+    /// for tests that drive a callback directly.
+    ///
+    /// # Safety
+    ///
+    /// `state` must point at a live `Recorder` that is not aliased by any live
+    /// reference, and must outlive the returned `Session`'s use; `runtime` must
+    /// outlive the session too.
+    unsafe fn test_session<'r>(
+        state: *mut Recorder,
+        runtime: &'r Runtime,
+        deliver: fn(&Session<'_, Recorder>, &mut Recorder, Event),
+    ) -> Session<'r, Recorder> {
+        Session {
+            dispatcher: Dispatcher::new(state),
+            outputs: RefCell::new(HashMap::new()),
+            toplevels: RefCell::new(HashMap::new()),
+            decorations: RefCell::new(HashMap::new()),
+            layers: RefCell::new(HashMap::new()),
+            popups: RefCell::new(HashMap::new()),
+            surfaces: RefCell::new(HashMap::new()),
+            inputs: RefCell::new(HashMap::new()),
+            drags: RefCell::new(HashMap::new()),
+            idle_inhibitors: RefCell::new(HashMap::new()),
+            shortcuts_inhibitors: RefCell::new(HashMap::new()),
+            tablet_tools: RefCell::new(HashMap::new()),
+            transient_seats: RefCell::new(HashMap::new()),
+            session_locks: RefCell::new(HashMap::new()),
+            lock_surfaces: RefCell::new(HashMap::new()),
+            scene_buffers: RefCell::new(HashMap::new()),
+            pointer_constraints: RefCell::new(HashMap::new()),
+            #[cfg(wlr_has_xwayland)]
+            xwayland_surfaces: RefCell::new(HashMap::new()),
+            last_key_consumed: Cell::new(false),
+            applied_heads: RefCell::new(VecDeque::new()),
+            runtime,
+            deliver,
+        }
+    }
+
+    /// The keystone's delivery, driven directly: `install_surface_listeners`
+    /// must link the five generic listeners on a real `wlr_surface`, the
+    /// signals wlroots emits must reach the handler with the right ids, and the
+    /// destroy signal must drop the runtime row and unlink every listener
+    /// before the surface is freed.
+    ///
+    /// This is the positive path `tests/surfaces.rs` cannot reach on its own:
+    /// it emits the exact signals wlroots emits
+    /// (`wlr_surface.events.{commit,map,unmap,destroy}`), so if the linking in
+    /// `install_surface_listeners`, the callbacks, or the `deliver_all` arms
+    /// were removed, the recorder vectors below would stay empty and the
+    /// assertions would fail. The `signal_is_empty` checks pin the other half —
+    /// that a destroy unlinks rather than merely stops routing.
+    #[test]
+    fn generic_surface_listeners_link_deliver_and_unlink() {
+        let _serialised = crate::id::id_test_lock();
+
+        let mut state = Recorder::default();
+        let p = &raw mut state;
+        let scratch = ScratchSurface::new();
+
+        // SAFETY: `p` is a live, exclusively-derived pointer to `state` and no
+        // reference to `state` exists; `scratch` and `runtime` outlive the
+        // session. Each emission below runs with no handler on the stack, so
+        // `Dispatcher::emit` delivers it inline rather than queueing it.
+        unsafe {
+            let runtime = Runtime::new().expect("runtime");
+            let session = test_session(p, &runtime, deliver_all::<Recorder>);
+            let session_ptr = &raw const session;
+            let surface = scratch.0;
+
+            assert!(
+                signal_is_empty(&raw mut (*surface).events.commit),
+                "a fresh surface has no listener"
+            );
+
+            let (id, newly_linked) =
+                install_surface_listeners(session_ptr, surface).expect("installed");
+            assert!(newly_linked, "the first install links the listeners");
+            assert!(
+                !signal_is_empty(&raw mut (*surface).events.commit),
+                "the commit listener is linked"
+            );
+            assert!(runtime.surface(id).is_some(), "the id resolves");
+
+            let (again, newly_linked_again) =
+                install_surface_listeners(session_ptr, surface).expect("reinstalled");
+            assert_eq!(again, id, "a second install keeps the id");
+            assert!(
+                !newly_linked_again,
+                "and reports that it linked nothing new"
+            );
+
+            sys::wl_signal_emit_mutable(&raw mut (*surface).events.commit, std::ptr::null_mut());
+            sys::wl_signal_emit_mutable(&raw mut (*surface).events.map, std::ptr::null_mut());
+            sys::wl_signal_emit_mutable(&raw mut (*surface).events.unmap, std::ptr::null_mut());
+
+            assert_eq!(
+                state.surface_committed,
+                vec![id],
+                "commit reaches the handler"
+            );
+            assert_eq!(state.surface_mapped, vec![id], "map reaches the handler");
+            assert_eq!(
+                state.surface_unmapped,
+                vec![id],
+                "unmap reaches the handler"
+            );
+            assert!(state.surface_destroyed.is_empty(), "not destroyed yet");
+
+            sys::wl_signal_emit_mutable(&raw mut (*surface).events.destroy, std::ptr::null_mut());
+
+            assert_eq!(
+                state.surface_destroyed,
+                vec![id],
+                "destroy reaches the handler"
+            );
+            assert!(
+                runtime.surface(id).is_none(),
+                "the row is dropped before the surface is freed"
+            );
+            assert!(
+                session.surfaces.borrow().is_empty(),
+                "the listener row is removed"
+            );
+            for (label, sig) in [
+                ("commit", &raw mut (*surface).events.commit),
+                ("map", &raw mut (*surface).events.map),
+                ("unmap", &raw mut (*surface).events.unmap),
+                ("destroy", &raw mut (*surface).events.destroy),
+            ] {
+                assert!(
+                    signal_is_empty(sig),
+                    "the {label} listener is unlinked on destroy"
+                );
+            }
+        }
+    }
+
+    /// A child sub-surface is announced once, whatever the signal does.
+    ///
+    /// `new_subsurface` is emitted on the parent's committed state and the
+    /// crate must map it to exactly one `SubsurfaceCreated`. The second
+    /// emission below must be suppressed because `install_surface_listeners`
+    /// reports the child was already linked; without that guard the event is a
+    /// function of the signal's bookkeeping rather than of the child being
+    /// newly discovered.
+    #[test]
+    fn new_subsurface_is_announced_once_per_child() {
+        let _serialised = crate::id::id_test_lock();
+
+        let mut state = Recorder::default();
+        let p = &raw mut state;
+        let parent = ScratchSurface::new();
+        let child = ScratchSurface::new();
+        // The signal payload is the `wlr_subsurface`; only its `surface` field
+        // is ever read, so a zeroed stack value with that one field set is a
+        // faithful stand-in and needs no allocation or free.
+        let mut sub = std::mem::MaybeUninit::<sys::wlr_subsurface>::zeroed();
+        // SAFETY: `sub` is a live, exclusively-owned `MaybeUninit` on this
+        // stack frame, and writing the `surface` field of the zeroed bytes is
+        // in bounds.
+        unsafe { (*sub.as_mut_ptr()).surface = child.0 };
+        let sub = sub.as_mut_ptr();
+
+        // SAFETY: `p` is a live, exclusively-derived pointer to `state` and no
+        // reference to `state` exists; `parent`, `child` and `sub` all outlive
+        // the session, and the emissions run with no handler on the stack, so
+        // each is delivered inline.
+        unsafe {
+            let runtime = Runtime::new().expect("runtime");
+            let session = test_session(p, &runtime, deliver_all::<Recorder>);
+            let session_ptr = &raw const session;
+
+            let (parent_id, _) =
+                install_surface_listeners(session_ptr, parent.0).expect("parent installed");
+
+            sys::wl_signal_emit_mutable(&raw mut (*parent.0).events.new_subsurface, sub.cast());
+            sys::wl_signal_emit_mutable(&raw mut (*parent.0).events.new_subsurface, sub.cast());
+
+            let announcement = *state
+                .subsurface_created
+                .first()
+                .expect("the child is announced");
+            assert_eq!(announcement.0, parent_id, "the parent id is delivered");
+            assert_eq!(
+                state.subsurface_created.len(),
+                1,
+                "a repeated signal for the same child must not announce it twice"
+            );
+            assert!(
+                runtime.surface(announcement.1).is_some(),
+                "the child is tracked under the announced id"
+            );
+        }
+    }
+
     /// A handler state that records what it was told, and can be asked to
     /// destroy an output from inside `new_output`.
     #[derive(Default)]
@@ -12581,6 +12838,15 @@ mod tests {
         frames: Vec<OutputId>,
         destroyed: Vec<OutputId>,
         power_modes: Vec<(OutputId, PowerMode)>,
+
+        /// Generic-surface deliveries, recorded by the five `ToplevelHandler`
+        /// methods below so the surface-listener test can assert which events
+        /// reached the handler through the full link → emit → deliver path.
+        surface_committed: Vec<SurfaceId>,
+        surface_mapped: Vec<SurfaceId>,
+        surface_unmapped: Vec<SurfaceId>,
+        surface_destroyed: Vec<SurfaceId>,
+        subsurface_created: Vec<(SurfaceId, SurfaceId)>,
 
         /// If set, `new_output` emits this output's `destroy` signal — standing
         /// in for wlroots destroying an output from underneath a handler, which
@@ -12627,8 +12893,29 @@ mod tests {
     // The output-management `apply`/`test` handlers are generic over the full
     // `Handlers` bound (not just `OutputHandler`), so `Recorder` must satisfy
     // every handler trait to stand in for a real consumer there. All methods
-    // are defaulted, so these are empty.
-    impl crate::ToplevelHandler for Recorder {}
+    // are defaulted, so these are empty — except the five generic-surface
+    // methods, which the surface-listener test needs to observe.
+    impl crate::ToplevelHandler for Recorder {
+        fn surface_committed(&mut self, surface: &Surface<'_>) {
+            self.surface_committed.push(surface.id());
+        }
+
+        fn surface_mapped(&mut self, id: SurfaceId) {
+            self.surface_mapped.push(id);
+        }
+
+        fn surface_unmapped(&mut self, id: SurfaceId) {
+            self.surface_unmapped.push(id);
+        }
+
+        fn surface_destroyed(&mut self, id: SurfaceId) {
+            self.surface_destroyed.push(id);
+        }
+
+        fn new_subsurface(&mut self, parent: SurfaceId, child: SurfaceId) {
+            self.subsurface_created.push((parent, child));
+        }
+    }
     impl crate::SeatHandler for Recorder {}
     impl crate::FdHandler for Recorder {}
     impl LoopHandler for Recorder {}

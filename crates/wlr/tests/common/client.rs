@@ -16,8 +16,12 @@
 //! [`Connection::from_socket`], keeping `setenv`/`getenv` out of the spawned
 //! thread entirely.
 
+use std::os::fd::AsFd;
+
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
-use wayland_client::protocol::{wl_compositor, wl_registry, wl_surface};
+use wayland_client::protocol::{
+    wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+};
 use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
@@ -157,6 +161,100 @@ pub fn spawn(
     })
 }
 
+/// Like [`spawn`], but drives a toplevel all the way to **mapped**.
+///
+/// xdg-shell requires the role's first commit be bufferless, so the flow is
+/// two-phase and needs a round-trip *between* the commits — which the
+/// single-shot `drive` closure of [`spawn`] cannot do, since it is handed no
+/// event queue. Phase one creates the role, commits bufferless, and
+/// round-trips so the server's initial configure arrives and is acked (the
+/// `Dispatch<xdg_surface>` impl acks it). Phase two creates an shm pool and
+/// buffer, attaches and commits, then round-trips so the server has observed
+/// the buffered commit and mapped the surface.
+///
+/// The proxy handles are held until the second round-trip has been answered,
+/// so neither the buffer nor the surface is torn down before the server has
+/// seen the map. Returns the observed [`ClientEvents`] via the `JoinHandle`.
+#[allow(dead_code)]
+pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    // Built before the thread starts: `socket` is a borrow that cannot cross
+    // into the `'static` thread, and the closure needs an owned path anyway.
+    let shm_path = crate::common::isolated_runtime_dir().join(format!(
+        "wlr-rs-shm-{}-{}",
+        std::process::id(),
+        socket
+    ));
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            events: ClientEvents::default(),
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("bind wl_shm");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+
+        // Phase 1: role + bufferless commit, then a round-trip so the server's
+        // initial configure arrives and is acked.
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let _toplevel = xdg_surface.get_toplevel(&qh, ());
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the initial configure is dispatched and acked");
+
+        // Phase 2: an shm buffer, attached and committed. 64x64 ARGB8888 needs
+        // a 16 KiB backing file; a regular file is a valid shm backing on Linux
+        // (the server mmaps it from the fd the pool carries).
+        const W: i32 = 64;
+        const H: i32 = 64;
+        const STRIDE: i32 = W * 4;
+        let size = STRIDE * H;
+        // Read-write, not `File::create`'s write-only: the server mmaps the fd
+        // with `PROT_READ`, and mapping a write-only fd fails `EACCES`. libwayland
+        // then rejects the pool with "Failed to create memory mapping".
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&shm_path)
+            .expect("create shm backing file");
+        file.set_len(size as u64).expect("size shm backing file");
+        let pool = shm.create_pool(file.as_fd(), size, &qh, ());
+        let buffer = pool.create_buffer(0, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
+        surface.attach(Some(&buffer), 0, 0);
+        surface.damage(0, 0, W, H);
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the buffered commit and maps");
+
+        // Keep every handle alive until the round-trip above has been answered,
+        // then drop them here — after the map, not before it.
+        drop((surface, xdg_surface, _toplevel, buffer, pool, shm, file));
+        state.events
+    })
+}
+
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for ClientState {
     /// Present only to satisfy `registry_queue_init`'s bound. The initial
     /// globals are consumed through `GlobalList::bind` in [`spawn`]; this fires
@@ -241,6 +339,42 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for ClientState {
         _state: &mut Self,
         _proxy: &xdg_toplevel::XdgToplevel,
         _event: xdg_toplevel::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_shm::WlShm, ()> for ClientState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_shm::WlShm,
+        _event: wl_shm::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_shm_pool::WlShmPool, ()> for ClientState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_shm_pool::WlShmPool,
+        _event: wl_shm_pool::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_buffer::WlBuffer, ()> for ClientState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_buffer::WlBuffer,
+        _event: wl_buffer::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
