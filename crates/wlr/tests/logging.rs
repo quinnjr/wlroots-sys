@@ -12,6 +12,8 @@
 //! be either a crash or lines still containing their `%s` and `%d`, and both
 //! are asserted against below.
 
+mod common;
+
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Serialises the process-global sink. Poison-tolerant: the guarded data is
@@ -20,15 +22,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 fn sink_lock() -> MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn headless_env() {
-    // SAFETY: every test in this binary takes `sink_lock()` first, so no other
-    // harness thread can observe a torn environment read.
-    unsafe {
-        std::env::set_var("WLR_BACKENDS", "headless");
-        std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-    }
 }
 
 /// Restore wlroots' own stderr logger, so a later test in this binary is not
@@ -56,8 +49,9 @@ fn capture_at(level: wlr::LogLevel) -> Captured {
 
 #[test]
 fn an_installed_sink_receives_wlroots_log_lines_with_their_arguments_substituted() {
+    let _serial = common::headless_guard();
     let _serialised = sink_lock();
-    headless_env();
+    common::headless_env();
 
     let captured = capture_at(wlr::LogLevel::Debug);
     assert_eq!(
@@ -152,8 +146,9 @@ fn an_installed_sink_receives_wlroots_log_lines_with_their_arguments_substituted
 /// redundant.
 #[test]
 fn silent_filters_everything_and_the_verbosity_is_readable_back() {
+    let _serial = common::headless_guard();
     let _serialised = sink_lock();
-    headless_env();
+    common::headless_env();
 
     let captured = capture_at(wlr::LogLevel::Silent);
     assert_eq!(wlr::log_verbosity(), wlr::LogLevel::Silent);
@@ -185,8 +180,9 @@ fn silent_filters_everything_and_the_verbosity_is_readable_back() {
 /// no `#[should_panic]` or `catch_unwind` here could observe it.
 #[test]
 fn a_panicking_sink_does_not_take_the_process_down() {
+    let _serial = common::headless_guard();
     let _serialised = sink_lock();
-    headless_env();
+    common::headless_env();
 
     let calls = Arc::new(Mutex::new(0usize));
     let counter = Arc::clone(&calls);

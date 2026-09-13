@@ -5,10 +5,16 @@
 //! `display` a live local), so the setup lives here instead of as per-binary
 //! copies: a skew between copies presents as backend flakiness.
 
-use std::sync::Once;
+// Each binary uses the subset of these helpers it needs: one that only
+// creates a `Display` never calls `headless_env`, and one without a
+// display-creating test never calls `headless_guard`. That is by design,
+// so silence the per-binary dead-code lint for the unused half.
+#![allow(dead_code)]
 
-/// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
-/// any test in this binary calls `Backend::autocreate`.
+use std::sync::{Mutex, MutexGuard, Once, OnceLock};
+
+/// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS`/`WLR_RENDERER` are set exactly
+/// once, before any test in this binary calls `Backend::autocreate`.
 pub fn headless_env() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
@@ -21,4 +27,17 @@ pub fn headless_env() {
             std::env::set_var("WLR_RENDERER", "pixman");
         }
     });
+}
+
+static HEADLESS_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// Serializes display/backend bring-up across the tests in one binary.
+/// libwayland-server holds process-global state, so two `Display::new()`
+/// calls racing on different test threads abort with `data is non-NULL
+/// with zero alloc`. Hold this for the whole test body.
+pub fn headless_guard() -> MutexGuard<'static, ()> {
+    HEADLESS_GUARD
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }

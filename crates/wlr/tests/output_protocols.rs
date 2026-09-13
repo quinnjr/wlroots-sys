@@ -9,7 +9,6 @@
 
 mod common;
 
-use common::headless_env;
 use wlr::{Backend, BufferCaps, CommittedFields, Display, Output, Runtime, Transform, Until};
 
 #[derive(Default)]
@@ -55,7 +54,8 @@ impl wlr::LoopHandler for App {}
 /// full emit-to-delivery round trip, with no protocol client in the loop.
 #[test]
 fn send_request_state_delivers_the_staged_mask() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");
@@ -97,7 +97,8 @@ fn send_request_state_delivers_the_staged_mask() {
 /// as the presentation/tearing globals in `output_feedback.rs`.
 #[test]
 fn power_manager_global_constructs_once() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");
@@ -147,7 +148,8 @@ fn power_manager_global_constructs_once() {
 /// error in disguise.
 #[test]
 fn primary_formats_call_is_sound() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");

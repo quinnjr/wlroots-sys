@@ -9,17 +9,11 @@
 //! value — it is a use-after-free that a fuzzer, a compositor under load, or
 //! nothing at all will find later.
 
-fn headless_env() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| unsafe {
-        std::env::set_var("WLR_BACKENDS", "headless");
-        std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-    });
-}
+mod common;
 
 /// See `scene_tree.rs`'s copy for why the display and backend are leaked.
 fn scene_runtime() -> wlr::Runtime {
-    headless_env();
+    common::headless_env();
     let display: &'static wlr::Display = Box::leak(Box::new(wlr::Display::new().expect("display")));
     let backend: &'static wlr::Backend<'static> = Box::leak(Box::new(
         wlr::Backend::autocreate(&display.event_loop()).expect("backend"),
@@ -68,6 +62,7 @@ fn assert_id_is_dead(rt: &wlr::Runtime, id: wlr::NodeId, what: &str) {
 /// beneath it goes stale at once, not just the one named.
 #[test]
 fn destroying_a_tree_invalidates_every_descendant_id() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let top = rt.create_tree_in_band(wlr::Band::Top).expect("top");
     let middle = rt.create_tree_under(top).expect("middle");
@@ -102,6 +97,7 @@ fn destroying_a_tree_invalidates_every_descendant_id() {
 /// `node_children` would keep handing out an id whose node is gone.
 #[test]
 fn a_destroyed_subtree_leaves_its_parents_child_list() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let band = rt.band_node(wlr::Band::Overlay).expect("band");
     let keep = rt.create_tree_in_band(wlr::Band::Overlay).expect("keep");
@@ -118,6 +114,7 @@ fn a_destroyed_subtree_leaves_its_parents_child_list() {
 /// memory wlroots has already reclaimed.
 #[test]
 fn a_cascade_purges_the_legacy_rect_and_buffer_tables() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let rect = rt
         .add_rect_in_band(wlr::Band::Top, 4, 4, [1.0, 0.0, 0.0, 1.0])
@@ -160,6 +157,7 @@ fn a_cascade_purges_the_legacy_rect_and_buffer_tables() {
 /// because a cascade gives many more ways to reach an already-dead node.
 #[test]
 fn a_second_destroy_of_the_same_node_misses() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let tree = rt.create_tree_in_band(wlr::Band::Top).expect("tree");
     assert_eq!(rt.destroy_node(tree), Some(()));
@@ -173,6 +171,7 @@ fn a_second_destroy_of_the_same_node_misses() {
 /// pointer would have, and the whole reason ids come from a monotonic counter.
 #[test]
 fn a_new_node_never_inherits_a_destroyed_ones_id() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let first = rt.create_tree_in_band(wlr::Band::Top).expect("first");
     assert_eq!(rt.destroy_node(first), Some(()));
@@ -189,6 +188,7 @@ fn a_new_node_never_inherits_a_destroyed_ones_id() {
 /// its node row with it, not only its `RectId` row.
 #[test]
 fn remove_rect_and_remove_buffer_purge_the_node_table_too() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let rect = rt.add_rect(4, 4, [0.0; 4]).expect("rect");
     let buffer = rt.add_buffer(1, 1, &[9, 9, 9, 255]).expect("buffer");
@@ -207,6 +207,7 @@ fn remove_rect_and_remove_buffer_purge_the_node_table_too() {
 /// outlived its node would be the same use-after-free wearing a different hat.
 #[test]
 fn ids_minted_by_observation_die_with_their_nodes() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let owner = rt.create_tree_in_band(wlr::Band::Overlay).expect("owner");
     let rect = rt
@@ -230,6 +231,7 @@ fn ids_minted_by_observation_die_with_their_nodes() {
 /// rather than only a structural one.
 #[test]
 fn reparenting_out_of_a_doomed_tree_saves_the_subtree() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let doomed = rt.create_tree_in_band(wlr::Band::Top).expect("doomed");
     let rescued = rt.create_tree_under(doomed).expect("rescued");

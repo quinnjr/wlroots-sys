@@ -1,14 +1,8 @@
-fn headless_env() {
-    // SAFETY: libtest runs in parallel but all tests here set identical values.
-    unsafe {
-        std::env::set_var("WLR_BACKENDS", "headless");
-        std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-    }
-}
+mod common;
 
 #[test]
 fn dangling_keyboard_group_misses_cleanly() {
-    headless_env();
+    common::headless_env();
     let rt = wlr::Runtime::new().unwrap();
     assert!(rt.keyboard_state().is_none());
     assert!(rt.pending_keyboard_state().is_none());
@@ -88,7 +82,7 @@ fn shortcuts_inhibit_and_tablet_handlers_compile() {
 fn fresh_runtime_tracks_no_inhibitors_or_tablets() {
     use wlr::ShortcutsInhibitorId;
 
-    headless_env();
+    common::headless_env();
     let rt = wlr::Runtime::new().unwrap();
     // No inhibitor was ever announced, so nothing is inhibited.
     assert!(!rt.shortcuts_inhibited());
@@ -111,7 +105,7 @@ fn fresh_runtime_tracks_no_inhibitors_or_tablets() {
 fn keyboard_group_create_state_destroy_round_trip() {
     use wlr::KeyboardGroupId;
 
-    headless_env();
+    common::headless_env();
     let rt = wlr::Runtime::new().unwrap();
     assert_eq!(rt.rt_debug_keyboard_group_count(), 0);
 

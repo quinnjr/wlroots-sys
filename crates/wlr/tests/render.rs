@@ -11,7 +11,7 @@
 //! a buffer from that allocator, a pass drawing into the buffer, and the pixels
 //! read back out through a texture.
 
-use std::sync::Once;
+mod common;
 
 use wlr::{
     Allocator, Backend, Box2D, BufferCaps, BufferPassOptions, Display, DrmFormat, DrmFormatSet,
@@ -24,19 +24,6 @@ use wlr::{
 /// first, the word is stored little-endian.
 const RED: [u8; 4] = [0x00, 0x00, 0xff, 0xff];
 const BLUE: [u8; 4] = [0xff, 0x00, 0x00, 0xff];
-
-fn headless_env() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: single-threaded, before any other thread exists, and each
-        // integration binary is its own process.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-            std::env::set_var("WLR_RENDERER", "pixman");
-        }
-    });
-}
 
 /// The linear ARGB8888 format every test here allocates in.
 fn argb() -> DrmFormat {
@@ -220,7 +207,8 @@ fn texture_from_pixels_refuses_a_short_slice_and_a_zero_dimension() {
 /// pixman pass can draw into.
 #[test]
 fn an_allocator_hands_out_buffers_a_pass_can_draw_into() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -260,7 +248,8 @@ fn an_allocator_hands_out_buffers_a_pass_can_draw_into() {
 /// crate's own pixman bindings, so it gets its own end-to-end check.
 #[test]
 fn a_clipped_rect_leaves_the_rest_of_the_buffer_alone() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -298,7 +287,8 @@ fn a_clipped_rect_leaves_the_rest_of_the_buffer_alone() {
 /// parameter wlroots asserts on rather than checking.
 #[test]
 fn a_textured_draw_lands_where_it_was_asked_to() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -347,7 +337,8 @@ fn a_textured_draw_lands_where_it_was_asked_to() {
 /// wlroots assertion — an abort, not a failure — so the wrapper checks first.
 #[test]
 fn a_texture_from_another_renderer_is_refused_rather_than_aborting() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -372,7 +363,8 @@ fn a_texture_from_another_renderer_is_refused_rather_than_aborting() {
 /// `wlr_render_pass_add_rect` asserts non-negative extents.
 #[test]
 fn a_negative_rect_is_refused_rather_than_aborting() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -393,7 +385,8 @@ fn a_negative_rect_is_refused_rather_than_aborting() {
 
 #[test]
 fn an_allocator_refuses_a_non_positive_size() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -413,7 +406,8 @@ fn an_allocator_refuses_a_non_positive_size() {
 /// the buffer holding it is unlocked.
 #[test]
 fn a_swapchain_holds_exactly_four_buffers_in_flight() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -448,7 +442,8 @@ fn a_swapchain_holds_exactly_four_buffers_in_flight() {
 
 #[test]
 fn a_swapchain_refuses_a_non_positive_size() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -469,7 +464,8 @@ fn a_swapchain_refuses_a_non_positive_size() {
 /// deref to the same read-only `Buffer`.
 #[test]
 fn producer_and_consumer_references_share_the_read_only_surface() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -530,7 +526,8 @@ fn the_renderers_format_set_reads_the_same_way_a_built_one_does() {
 /// `Drop`, no way to acquire one.
 #[test]
 fn the_runtimes_renderer_and_allocator_are_reachable_as_views() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");
@@ -563,7 +560,8 @@ fn the_runtimes_renderer_and_allocator_are_reachable_as_views() {
 /// `produced.dmabuf().is_none()` above.
 #[test]
 fn an_shm_allocator_buffer_reports_its_shm_attributes() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -584,7 +582,8 @@ fn an_shm_allocator_buffer_reports_its_shm_attributes() {
 /// reports for the same buffer.
 #[test]
 fn data_ptr_access_writes_are_visible_after_the_guard_is_dropped_and_reopened() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -617,7 +616,8 @@ fn data_ptr_access_writes_are_visible_after_the_guard_is_dropped_and_reopened() 
 /// `renderer_calls_are_refused_while_a_data_ptr_mapping_is_open`.)
 #[test]
 fn a_second_data_ptr_access_while_the_first_is_open_is_refused() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -644,7 +644,8 @@ fn a_second_data_ptr_access_while_the_first_is_open_is_refused() {
 /// call in and abort the process.
 #[test]
 fn renderer_calls_are_refused_while_a_data_ptr_mapping_is_open() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");

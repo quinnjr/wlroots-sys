@@ -14,6 +14,8 @@
 //! flag-pinning test, which is the one that guards a value this crate had to
 //! write out by hand, runs everywhere.
 
+mod common;
+
 use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::os::fd::{AsFd, AsRawFd};
@@ -304,6 +306,7 @@ fn a_sync_file_round_trips_into_another_point() {
 /// eventfd and an event source per wait, and the other would double-free.
 #[test]
 fn a_waiter_dropped_after_firing_neither_double_frees_nor_leaks() {
+    let _serial = common::headless_guard();
     let Some(node) = drm_node() else {
         return skip("timeline waiter");
     };
@@ -344,6 +347,7 @@ fn a_waiter_dropped_after_firing_neither_double_frees_nor_leaks() {
 /// cancel cleanly, and the callback must never run afterwards.
 #[test]
 fn a_waiter_dropped_before_firing_cancels_cleanly() {
+    let _serial = common::headless_guard();
     let Some(node) = drm_node() else {
         return skip("timeline waiter cancellation");
     };
@@ -375,6 +379,7 @@ fn a_waiter_dropped_before_firing_cancels_cleanly() {
 /// is on the stack, and this pins that the waiter's callback counts as one.
 #[test]
 fn a_waiters_callback_is_a_handler_frame_and_cannot_drive_the_loop() {
+    let _serial = common::headless_guard();
     let Some(node) = drm_node() else {
         return skip("waiter reentrancy");
     };

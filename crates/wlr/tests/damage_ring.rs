@@ -5,24 +5,11 @@
 //! renderer and its shared-memory allocator — no GPU, the same choice
 //! `tests/render.rs` makes and for the same reason.
 
-use std::sync::Once;
+mod common;
 
 use wlr::{
     Allocator, Backend, Box2D, DamageRing, Display, DrmFormat, FourCc, Modifier, Region, Renderer,
 };
-
-fn headless_env() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: single-threaded, before any other thread exists, and each
-        // integration binary is its own process.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-            std::env::set_var("WLR_RENDERER", "pixman");
-        }
-    });
-}
 
 fn argb() -> DrmFormat {
     DrmFormat::new(FourCc::ARGB8888, [Modifier::LINEAR])
@@ -62,7 +49,8 @@ fn a_ring_accumulates_every_shape_of_damage() {
 /// taking it empties the accumulator.
 #[test]
 fn rotating_a_buffer_takes_the_accumulated_damage_and_empties_it() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -108,7 +96,8 @@ fn rotating_a_buffer_takes_the_accumulated_damage_and_empties_it() {
 /// `DamageRing::add_whole`'s own doc spells out.
 #[test]
 fn add_whole_is_sized_by_the_buffers_the_ring_has_seen() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -136,7 +125,8 @@ fn add_whole_is_sized_by_the_buffers_the_ring_has_seen() {
 /// be corrupt after this.
 #[test]
 fn a_ring_survives_being_moved_after_a_buffer_has_been_rotated() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");

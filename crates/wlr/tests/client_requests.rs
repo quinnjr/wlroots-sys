@@ -9,28 +9,11 @@
 //! `ToplevelHandler` methods are additive — an old, empty impl still
 //! satisfies `Handlers`.
 
-/// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
-/// any test in this binary calls `Backend::autocreate` — mirrors
-/// `tests/toplevels.rs`'s identical helper; see that file's own doc for why
-/// each integration test binary needs its own copy.
-fn headless_env() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: `Once::call_once` runs this closure at most once and blocks
-        // every other caller of `call_once` on this `Once` until it returns,
-        // so no concurrent `getenv` from another test's call to
-        // `headless_env` can observe a torn write, and this file has no
-        // other `setenv` caller to race.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-        }
-    });
-}
+mod common;
 
 #[test]
 fn configure_toplevel_on_a_dead_id_is_none() {
-    headless_env();
+    common::headless_env();
     let runtime = wlr::Runtime::new().expect("runtime");
     assert_eq!(
         runtime.configure_toplevel(wlr::ToplevelId::dangling_for_test()),

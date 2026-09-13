@@ -7,16 +7,19 @@
 //! already covers the announce/frame/destroy lifecycle; this file is purely
 //! about the layout, not re-proving that.
 
-/// Note what neither handler below does: panic, or `unwrap`. A handler runs
-/// underneath an `extern "C"` frame — see `OutputHandler`'s own docs — so
-/// anything worth asserting is recorded here and checked once control is
-/// back in the test.
-fn headless_env() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| unsafe {
-        std::env::set_var("WLR_BACKENDS", "headless");
+mod common;
+
+/// `common::headless_env` installs the single-output default; this binary is
+/// the one that needs a second output to test disjoint auto-placement, so it
+/// raises the count after the shared call.
+///
+/// SAFETY: every caller holds `common::headless_guard` for the whole test, so
+/// no concurrent `getenv` can observe this write half-applied.
+fn two_output_env() {
+    common::headless_env();
+    unsafe {
         std::env::set_var("WLR_HEADLESS_OUTPUTS", "2");
-    });
+    }
 }
 
 /// A second `init_output` for one output is an error, not a dead process.
@@ -33,7 +36,8 @@ fn headless_env() {
 /// The process surviving this test *is* the assertion.
 #[test]
 fn initialising_one_output_twice_is_refused_rather_than_fatal() {
-    headless_env();
+    let _serial = common::headless_guard();
+    two_output_env();
     struct App {
         runtime: wlr::Runtime,
         second: Option<bool>,
@@ -81,7 +85,8 @@ fn initialising_one_output_twice_is_refused_rather_than_fatal() {
 /// that brings an output up (`scene.rs`, `examples/scene_background.rs`, …).
 #[test]
 fn two_headless_outputs_get_disjoint_layout_boxes() {
-    headless_env();
+    let _serial = common::headless_guard();
+    two_output_env();
     struct App {
         boxes: Vec<(i32, i32, i32, i32)>,
         scheduled: usize,
@@ -143,7 +148,8 @@ fn two_headless_outputs_get_disjoint_layout_boxes() {
 /// wlroots may have already reused or freed for a later run's outputs.
 #[test]
 fn layout_box_after_the_run_is_stale_and_misses_cleanly() {
-    headless_env();
+    let _serial = common::headless_guard();
+    two_output_env();
     struct App {
         ids: Vec<wlr::OutputId>,
         runtime: wlr::Runtime,

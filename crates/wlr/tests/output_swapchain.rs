@@ -19,7 +19,6 @@
 
 mod common;
 
-use common::headless_env;
 use wlr::{Backend, Display, Runtime, SwapchainManager};
 
 /// Applying with nothing pending is a no-op and dropping finishes: the
@@ -29,7 +28,8 @@ use wlr::{Backend, Display, Runtime, SwapchainManager};
 /// single smoke test and says so.
 #[test]
 fn manager_apply_with_nothing_pending_is_noop() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");

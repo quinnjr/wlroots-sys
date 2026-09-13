@@ -28,7 +28,6 @@ use wlr::{
 mod common;
 #[path = "common/format.rs"]
 mod format;
-use common::headless_env;
 use format::argb;
 
 /// One commit-family delivery, in arrival order. Recording the sequence
@@ -134,7 +133,7 @@ fn covers_hotspot(delivered: &[Box2D], x: i32, y: i32) -> bool {
 }
 
 fn run_app(cursor: Cursor) -> Observed {
-    headless_env();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");
@@ -166,6 +165,7 @@ fn run_app(cursor: Cursor) -> Observed {
 /// whatever else fires around it.
 #[test]
 fn output_signal_events_fire_with_staged_payloads() {
+    let _serial = common::headless_guard();
     let seen = run_app(Cursor::Moved);
     assert_eq!(
         seen.setup_commit_ok,
@@ -205,6 +205,7 @@ fn output_signal_events_fire_with_staged_payloads() {
 /// compositor for an empty region.
 #[test]
 fn output_damage_stays_quiet_without_cursor_movement() {
+    let _serial = common::headless_guard();
     let seen = run_app(Cursor::Still);
     assert_eq!(
         seen.setup_commit_ok,
@@ -223,7 +224,8 @@ fn output_damage_stays_quiet_without_cursor_movement() {
 /// canned refusal: remove the double-create check and this fails.
 #[test]
 fn presentation_global_constructs_once() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");
@@ -245,7 +247,8 @@ fn presentation_global_constructs_once() {
 /// as presentation above.
 #[test]
 fn tearing_control_global_constructs_once() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");

@@ -1,25 +1,12 @@
 //! M7 cursor depth: snapshot readers miss cleanly with no seat.
 
-use wlr::CursorId;
+mod common;
 
-/// The headless backend is selected by environment, read once when the
-/// display and backend are created below.
-fn headless_env() {
-    // SAFETY: libtest runs the tests in a binary in parallel by default, so
-    // this is *not* safe by virtue of serial execution. It is safe because all
-    // tests in this binary set the same two variables to the same values (and
-    // no `#[test]` here spawns threads that read the environment): a
-    // concurrent write from another test writes byte-identical values, so no
-    // harness thread can observe a torn environment read.
-    unsafe {
-        std::env::set_var("WLR_BACKENDS", "headless");
-        std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-    }
-}
+use wlr::CursorId;
 
 #[test]
 fn dangling_cursor_misses_cleanly() {
-    headless_env();
+    common::headless_env();
     let rt = wlr::Runtime::new().unwrap();
     assert!(rt.cursor_state().is_none());
     assert!(rt.try_cursor(CursorId::dangling()).is_none());
@@ -27,7 +14,7 @@ fn dangling_cursor_misses_cleanly() {
 
 #[test]
 fn cursor_map_misses_without_seat() {
-    headless_env();
+    common::headless_env();
     let rt = wlr::Runtime::new().unwrap();
     assert!(
         rt.map_cursor_to_region(wlr::Box2D::new(0, 0, 100, 100))
@@ -38,9 +25,10 @@ fn cursor_map_misses_without_seat() {
 
 #[test]
 fn cursor_appears_with_seat() {
+    let _serial = common::headless_guard();
     use wlr::CursorImage;
 
-    headless_env();
+    common::headless_env();
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
     let rt = wlr::Runtime::new().expect("runtime");
@@ -71,7 +59,7 @@ fn cursor_appears_with_seat() {
 fn xcursor_theme_destroy_roundtrip() {
     use wlr::XcursorManagerId;
 
-    headless_env();
+    common::headless_env();
     let rt = wlr::Runtime::new().unwrap();
 
     // Unknown ids are harmless no-ops, never double-frees.
@@ -133,7 +121,8 @@ fn protocol_hooks_are_additive() {
 
 #[test]
 fn gestures_manager_double_create_is_refused() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = wlr::Display::new().expect("display");
     let rt = wlr::Runtime::new().expect("runtime");
     rt.create_pointer_gestures_manager(&display).expect("first");
@@ -156,7 +145,8 @@ fn gestures_manager_double_create_is_refused() {
 /// miss shape.
 #[test]
 fn touch_miss_is_clean() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let rt = wlr::Runtime::new().unwrap();
     assert!(rt.touch_state().is_none(), "no seat, so no touch state");
     assert!(rt.switch_state().is_none(), "no seat, so no switch state");

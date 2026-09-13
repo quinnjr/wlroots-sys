@@ -13,6 +13,8 @@
 //! pixman renderer answers `None` to both, which is the discrimination the
 //! whole pattern exists to make.
 
+mod common;
+
 use std::sync::Once;
 
 use wlr::{
@@ -27,20 +29,6 @@ fn pixman_env() {
         // SAFETY: single-threaded, before any other thread exists, and each
         // integration binary is its own process.
         unsafe {
-            std::env::set_var("WLR_RENDERER", "pixman");
-        }
-    });
-}
-
-/// The one test here that needs a backend needs it headless, for the same
-/// reason `tests/render.rs` does: CI has no DRM node.
-fn headless_env() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: as above.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
             std::env::set_var("WLR_RENDERER", "pixman");
         }
     });
@@ -115,7 +103,8 @@ fn a_pixman_texture_exposes_its_pixman_image() {
 /// time.
 #[test]
 fn a_pixman_renderers_buffer_image_is_created_on_demand_not_looked_up() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -234,7 +223,8 @@ fn a_renderer_reports_its_colour_encodings_as_a_set() {
 /// `output_color_transform` false explicitly.
 #[test]
 fn a_pass_refuses_a_colour_transform_the_renderer_cannot_apply() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -265,7 +255,8 @@ fn a_pass_refuses_a_colour_transform_the_renderer_cannot_apply() {
 /// function a renderer cannot honour is drawn untagged rather than refused.
 #[test]
 fn a_textured_draw_refuses_a_colour_tag_the_renderer_cannot_apply() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");

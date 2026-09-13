@@ -2,6 +2,8 @@
 //! committed with a background rect under it — the whole of what release 1
 //! owes a compositor's boot path.
 
+mod common;
+
 #[derive(Default)]
 struct App {
     runtime: Option<wlr::Runtime>,
@@ -76,12 +78,8 @@ impl wlr::OutputHandler for App {
 
 #[test]
 fn a_headless_output_renders_a_scene_with_a_background_rect() {
-    // SAFETY: the only test in this binary, so no other harness thread can
-    // observe a torn environment read.
-    unsafe {
-        std::env::set_var("WLR_BACKENDS", "headless");
-        std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-    }
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");

@@ -3,6 +3,8 @@
 //!
 //! Uses the headless backend so this needs no GPU, no seat, and no display.
 
+mod common;
+
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 
@@ -48,45 +50,10 @@ fn pipe() -> (OwnedFd, OwnedFd) {
     (read, write)
 }
 
-/// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
-/// any test in this binary calls `Backend::autocreate`.
-///
-/// `Backend::autocreate` reads `WLR_BACKENDS` via `getenv`, and libtest runs
-/// `#[test]` functions on parallel threads by default, so an unguarded
-/// `setenv` racing another thread's `getenv` is undefined behaviour — and,
-/// separately, whichever test's `setenv` loses that race would get whatever
-/// backend wlroots picks with no `WLR_BACKENDS` set at all, which on a
-/// machine with no GPU is not "headless" and not deterministic.
-///
-/// This is the single call site for both operations. **Every test in this
-/// file must call this before constructing a `Display` or a `Backend`** —
-/// there is no other guard; a test that calls `autocreate` directly reopens
-/// exactly the hazard this function exists to close. The `Once` serialises
-/// the one write against every read this binary makes, since `autocreate` is
-/// reached from nowhere else in this file — and this integration test is
-/// compiled to its own binary, its own process with its own environment, so
-/// nothing outside this file can race the write either. (`wlr`'s own library
-/// unit tests carry a sibling copy of this same helper, in
-/// `src/interest.rs`'s `mod tests`, for the identical reason — that binary is
-/// a different process too, and cannot see this one's environment.)
-fn headless_env() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: `Once::call_once` runs this closure at most once and blocks
-        // every other caller of `call_once` on this `Once` until it returns,
-        // so no concurrent `getenv` from another test's call to
-        // `headless_env` can observe a torn write. This function's own doc
-        // comment is the argument for why no other reader exists to race.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-        }
-    });
-}
-
 #[test]
 fn a_registered_fd_wakes_its_handler_and_should_stop_ends_the_run() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
@@ -117,7 +84,8 @@ fn a_registered_fd_wakes_its_handler_and_should_stop_ends_the_run() {
 
 #[test]
 fn turns_bounds_a_run_that_nothing_ever_stops() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     // No source, no stop: `Until::Turns` must return rather than block.
     let display = wlr::Display::new().expect("display");
@@ -137,7 +105,8 @@ fn turns_bounds_a_run_that_nothing_ever_stops() {
 
 #[test]
 fn a_source_registered_after_a_run_is_armed_by_the_next_run() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
@@ -186,7 +155,8 @@ fn reading_a_borrowed_fd_does_not_close_it() {
 /// display's clients, would otherwise produce silence rather than an error.
 #[test]
 fn run_all_refuses_a_display_that_does_not_own_this_backends_loop() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");

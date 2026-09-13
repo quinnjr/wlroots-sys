@@ -1,7 +1,10 @@
 //! A display can be created, dispatched and torn down.
 
+mod common;
+
 #[test]
 fn display_creates_and_dispatches() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("wl_display_create failed");
     let loop_ = display.event_loop();
 
@@ -22,6 +25,7 @@ fn display_creates_and_dispatches() {
 /// without wlroots or libwayland aborting the process.
 #[test]
 fn a_display_can_be_created_and_dropped_repeatedly() {
+    let _serial = common::headless_guard();
     for _ in 0..8 {
         let display = wlr::Display::new().expect("wl_display_create failed");
         drop(display);

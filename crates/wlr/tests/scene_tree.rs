@@ -12,13 +12,7 @@
 //! a frame or a client, and a scene is fully usable the moment
 //! `init_graphics` returns. `scene.rs` covers the frame path.
 
-fn headless_env() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| unsafe {
-        std::env::set_var("WLR_BACKENDS", "headless");
-        std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-    });
-}
+mod common;
 
 /// A runtime with a real scene.
 ///
@@ -28,7 +22,7 @@ fn headless_env() {
 /// the scene itself. `backend` is created after `display`, which is the drop
 /// order the crate requires and which leaking makes moot either way.
 fn scene_runtime() -> wlr::Runtime {
-    headless_env();
+    common::headless_env();
     let display: &'static wlr::Display = Box::leak(Box::new(wlr::Display::new().expect("display")));
     let backend: &'static wlr::Backend<'static> = Box::leak(Box::new(
         wlr::Backend::autocreate(&display.event_loop()).expect("backend"),
@@ -55,6 +49,7 @@ fn scene_runtime() -> wlr::Runtime {
 /// other appearance setter writes a scalar into the node and stays open.
 #[test]
 fn setting_the_opaque_region_is_refused_while_a_node_is_borrowed() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let band = rt.band_node(wlr::Band::Overlay).expect("band");
     let node = rt.create_scene_buffer(band, None).expect("buffer node");
@@ -107,6 +102,7 @@ fn setting_the_opaque_region_is_refused_while_a_node_is_borrowed() {
 /// use-after-free the gate was added for.
 #[test]
 fn creating_a_node_during_a_buffer_walk_is_refused() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let band = rt.band_node(wlr::Band::Overlay).expect("band");
     let tree = rt.create_tree_under(band).expect("tree");
@@ -152,6 +148,7 @@ fn creating_a_node_during_a_buffer_walk_is_refused() {
 /// into the scene, so that frees scene nodes under a live `SceneNode<'_>`.
 #[test]
 fn flush_clients_is_refused_inside_a_node_borrow() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let display = wlr::Display::new().expect("display");
     let root = rt.scene_root_node().expect("scene root");
@@ -185,9 +182,10 @@ fn flush_clients_is_refused_inside_a_node_borrow() {
 /// rather than `is_err()`: a different error would mean a different bug.
 #[test]
 fn a_node_borrow_refuses_run_all_as_well_as_dispatch() {
+    let _serial = common::headless_guard();
     // One display throughout: `Runtime` pins itself to the display
     // `init_graphics` saw, and asserts if a run drives a different one.
-    headless_env();
+    common::headless_env();
     let display: &'static wlr::Display = Box::leak(Box::new(wlr::Display::new().expect("display")));
     let backend: &'static wlr::Backend<'static> = Box::leak(Box::new(
         wlr::Backend::autocreate(&display.event_loop()).expect("backend"),
@@ -228,6 +226,7 @@ fn a_node_borrow_refuses_run_all_as_well_as_dispatch() {
 /// this fail for the right reason if the refusal is ever removed.
 #[test]
 fn a_node_borrow_refuses_the_event_loop() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let display: &'static wlr::Display = Box::leak(Box::new(wlr::Display::new().expect("display")));
     let root = rt.scene_root_node().expect("scene root");
@@ -250,6 +249,7 @@ fn a_node_borrow_refuses_the_event_loop() {
 /// that, so it is asserted directly rather than inferred.
 #[test]
 fn children_are_reported_bottom_to_top_in_creation_order() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let band = rt.band_node(wlr::Band::Top).expect("band id");
 
@@ -274,6 +274,7 @@ fn children_are_reported_bottom_to_top_in_creation_order() {
 /// above `Overlay` in 0.20.20 was caught.
 #[test]
 fn the_scene_root_reports_the_six_bands_in_order() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let root = rt.scene_root_node().expect("scene root");
     let bands: Vec<wlr::NodeId> = [
@@ -297,6 +298,7 @@ fn the_scene_root_reports_the_six_bands_in_order() {
 /// distinction `wlr_scene_node_coords`' boolean return carries.
 #[test]
 fn coordinates_compose_and_a_disabled_ancestor_hides_them() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let outer = rt.create_tree_in_band(wlr::Band::Top).expect("outer");
     let inner = rt.create_tree_under(outer).expect("inner");
@@ -332,6 +334,7 @@ fn coordinates_compose_and_a_disabled_ancestor_hides_them() {
 /// the call was accepted.
 #[test]
 fn placing_a_node_reorders_its_siblings() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let band = rt.band_node(wlr::Band::Overlay).expect("band id");
     let a = rt.create_tree_in_band(wlr::Band::Overlay).expect("a");
@@ -358,6 +361,7 @@ fn placing_a_node_reorders_its_siblings() {
 /// toplevel.
 #[test]
 fn raising_within_a_band_cannot_move_a_node_across_bands() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let root = rt.scene_root_node().expect("root");
     let bottom_band = rt.band_node(wlr::Band::Bottom).expect("band id");
@@ -382,6 +386,7 @@ fn raising_within_a_band_cannot_move_a_node_across_bands() {
 /// operation `raise_to_top` deliberately cannot express.
 #[test]
 fn reparenting_moves_a_node_between_bands() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let toplevel_band = rt.band_node(wlr::Band::Toplevel).expect("toplevel band");
     let overlay_band = rt.band_node(wlr::Band::Overlay).expect("overlay band");
@@ -414,6 +419,7 @@ fn reparenting_moves_a_node_between_bands() {
 /// relative to that node — and reports nothing where there is nothing.
 #[test]
 fn node_at_finds_rects_and_buffers_and_nothing_else() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let band = rt.band_node(wlr::Band::Overlay).expect("band id");
     let rect = rt
@@ -446,6 +452,7 @@ fn node_at_finds_rects_and_buffers_and_nothing_else() {
 /// a compositor paints in.
 #[test]
 fn for_each_buffer_visits_every_buffer_node_in_render_order() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let tree = rt.create_tree_in_band(wlr::Band::Overlay).expect("tree");
     let lower = rt.create_scene_buffer(tree, None).expect("lower");
@@ -467,6 +474,7 @@ fn for_each_buffer_visits_every_buffer_node_in_render_order() {
 /// tag-checked downcasts only succeed for the matching kind.
 #[test]
 fn handles_observe_the_node_they_were_minted_for() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let tree = rt.create_tree_in_band(wlr::Band::Top).expect("tree");
     let rect = rt
@@ -515,6 +523,7 @@ fn handles_observe_the_node_they_were_minted_for() {
 /// and every accessor on it would be a use-after-free.
 #[test]
 fn a_live_node_borrow_refuses_every_destroy() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let tree = rt.create_tree_in_band(wlr::Band::Top).expect("tree");
     let rect = rt.add_rect(4, 4, [0.0; 4]).expect("legacy rect");
@@ -546,6 +555,7 @@ fn a_live_node_borrow_refuses_every_destroy() {
 /// this guard existed; the process surviving this test is the real assertion.
 #[test]
 fn a_live_buffer_walk_refuses_every_destroy() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let tree = rt.create_tree_in_band(wlr::Band::Top).expect("tree");
     let overlay = rt.band_node(wlr::Band::Overlay).expect("overlay");
@@ -588,6 +598,7 @@ fn a_live_buffer_walk_refuses_every_destroy() {
 /// refusal was reported rather than silently swallowed.
 #[test]
 fn calls_that_would_abort_wlroots_are_refused() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let band = rt.band_node(wlr::Band::Overlay).expect("band");
     let root = rt.scene_root_node().expect("root");
@@ -683,6 +694,7 @@ fn calls_that_would_abort_wlroots_are_refused() {
 /// destroy-storm fuzz target to mean anything.
 #[test]
 fn a_dangling_node_id_misses_on_every_entry_point() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let dead = wlr::NodeId::dangling_for_test();
     let live = rt.create_tree_in_band(wlr::Band::Top).expect("tree");
@@ -752,6 +764,7 @@ fn a_dangling_node_id_misses_on_every_entry_point() {
 /// destination size, an empty source box).
 #[test]
 fn buffer_node_properties_round_trip() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let band = rt.band_node(wlr::Band::Overlay).expect("band");
     let node = rt.create_scene_buffer(band, None).expect("buffer node");
@@ -837,6 +850,7 @@ fn buffer_node_properties_round_trip() {
 /// right node without aborting is this crate's.
 #[test]
 fn buffer_node_colour_metadata_is_accepted() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let band = rt.band_node(wlr::Band::Overlay).expect("band");
     let node = rt.create_scene_buffer(band, None).expect("buffer node");
@@ -863,6 +877,7 @@ fn buffer_node_colour_metadata_is_accepted() {
 /// id, it can be restacked through the node API, and the two views of it agree.
 #[test]
 fn a_legacy_rect_reaches_the_node_api_through_its_node_id() {
+    let _serial = common::headless_guard();
     let rt = scene_runtime();
     let band = rt.band_node(wlr::Band::Top).expect("band");
     let rect = rt
@@ -893,6 +908,7 @@ fn a_legacy_rect_reaches_the_node_api_through_its_node_id() {
 /// restated for `NodeId` because the two now share the same counter.
 #[test]
 fn node_ids_are_unique_across_runtimes() {
+    let _serial = common::headless_guard();
     let first = scene_runtime();
     let second = scene_runtime();
     let a = first.create_tree_in_band(wlr::Band::Top).expect("a");

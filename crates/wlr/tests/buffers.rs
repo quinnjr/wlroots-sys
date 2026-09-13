@@ -1,23 +1,7 @@
 //! RGBA pixel-buffer scene nodes, against a real headless compositor with no
 //! client — the same shape `scene.rs`'s tests use for rects.
 
-/// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
-/// any test in this binary calls `Backend::autocreate`. See
-/// `toplevels.rs`'s sibling copy of this helper for the full argument for
-/// why this is a `Once` rather than a plain `set_var` per test.
-fn headless_env() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: `Once::call_once` runs this closure at most once and
-        // blocks every other caller of `call_once` on this `Once` until it
-        // returns, so no concurrent `getenv` from another test's call to
-        // `headless_env` can observe a torn write.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-        }
-    });
-}
+mod common;
 
 /// A runtime with graphics initialised, so `add_buffer` has a scene to
 /// attach to — `add_buffer` mirrors `add_rect`'s "no scene, no node" rule
@@ -42,7 +26,8 @@ fn graphics_runtime() -> wlr::Runtime {
 
 #[test]
 fn buffer_node_lifecycle_by_id() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let runtime = graphics_runtime();
     let px = vec![0u8; 8 * 8 * 4];
     let id = runtime.add_buffer(8, 8, &px).expect("add");
@@ -60,7 +45,7 @@ fn buffer_node_lifecycle_by_id() {
 
 #[test]
 fn add_buffer_rejects_wrong_length_and_bad_dimensions() {
-    headless_env();
+    common::headless_env();
     let runtime = wlr::Runtime::new().expect("runtime");
     assert!(runtime.add_buffer(8, 8, &[0u8; 4]).is_err());
     assert!(runtime.add_buffer(0, 8, &[]).is_err());
@@ -69,7 +54,7 @@ fn add_buffer_rejects_wrong_length_and_bad_dimensions() {
 
 #[test]
 fn in_toplevel_buffer_on_a_dead_id_is_none() {
-    headless_env();
+    common::headless_env();
     let runtime = wlr::Runtime::new().expect("runtime");
     let dead = wlr::ToplevelId::dangling_for_test();
     assert_eq!(runtime.add_buffer_in_toplevel(dead, 2, 2, &[0u8; 16]), None);
