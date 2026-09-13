@@ -232,6 +232,38 @@ jobs:
       # neither belongs in a published crate. Nothing checked before.
       - run: cargo package -p wlr --allow-dirty
 
+  bench:
+    # Informational, not a gate. Benchmark times on a shared runner are too
+    # noisy to fail a build on, and a PR has nothing to compare against — so
+    # this runs only on `develop` pushes and records the criterion output as an
+    # artifact for a human to diff across commits.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Syu --noconfirm \
+            git rust clang pkgconf \
+            wlroots0.20 wayland wayland-protocols \
+            libxkbcommon libinput libdrm pixman mesa vulkan-headers
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run the dispatch benches
+        # `continue-on-error` keeps the job from gating the run; the artifact
+        # step below still executes and records whatever was produced.
+        continue-on-error: true
+        run: cargo bench -p wlr --bench dispatch
+
+      - name: Upload criterion results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: criterion
+          path: target/criterion/**
+
   miri:
     # Validates the reentrancy-deferring dispatcher in `wlr` under Miri, which
     # caught a real harness bug during its development. Scoped to

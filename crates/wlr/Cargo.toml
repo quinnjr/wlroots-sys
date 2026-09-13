@@ -78,6 +78,9 @@ xkbcommon-sys = "1.4"
 pkg-config = "0.3"
 
 [dev-dependencies]
+# The bench harness. A dev-dependency only: it is compiled for the bench
+# target and never reaches a consumer of the crate.
+criterion = "0.5"
 trybuild = "1.0"
 # Asserts the `!Send`/`!Sync` premise the thread-local dispatch guard rests on.
 # A negative trait bound cannot be written directly, and the obvious
@@ -97,3 +100,9 @@ wayland-client = "0.31"
 # client-side generated code; `unstable` pulls the xdg-shell protocol in from
 # the protocols crate's generated tree.
 wayland-protocols = { version = "0.31", features = ["client", "unstable"] }
+
+# The dispatch bench compares each safe call with the raw `wlr_sys` call it
+# wraps. `harness = false` hands `main` to criterion instead of libtest.
+[[bench]]
+name = "dispatch"
+harness = false
