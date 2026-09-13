@@ -2,12 +2,40 @@ name: fuzz
 on:
   schedule: [{ cron: "0 3 * * *" }]
   workflow_dispatch:
+
+# This job builds the repo, and building Rust means executing build.rs (which
+# calls pkg-config and clang). It needs to read the repo and nothing else.
+permissions:
+  contents: read
+
 jobs:
   operations:
+    # wlroots 0.20 is not packaged by the runner image, and `cargo-fuzz` builds
+    # `wlr` -> `wlr-sys`, whose build.rs panics without the wlroots-0.20
+    # headers. Mirror `ci.yml`'s `test`/`miri` jobs' container and dependency
+    # set for exactly that reason. Arch is currently the only distro shipping
+    # wlroots 0.20.
     runs-on: ubuntu-latest
+    container: archlinux:base-devel
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install dependencies
+        run: |
+          # Refresh the keyring first: a stale one in the base image is the
+          # classic `pacman -Syu` container failure.
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Syu --noconfirm \
+            git rustup clang pkgconf \
+            wlroots0.20 wayland wayland-protocols \
+            libxkbcommon libinput libdrm pixman mesa vulkan-headers
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install the nightly toolchain
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
+
       - run: cargo install cargo-fuzz
+
       - run: cargo +nightly fuzz run operations -- -max_total_time=300
         working-directory: fuzz

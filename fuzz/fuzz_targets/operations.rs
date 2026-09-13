@@ -16,6 +16,18 @@
 //! correct release shape — but it means a *fresh* runtime per fuzz input leaks
 //! a scene per input and would exhaust memory long before a scheduled run ends.
 //! One compositor for the process keeps that allocation one-time and bounded.
+//! Two consequences follow, and both are accepted for this seed:
+//!
+//! * **Inputs are not independent.** Some state persists between inputs, so a
+//!   crash is not guaranteed to reproduce from its recorded artifact alone:
+//!   `cargo fuzz run operations <artifact>` replays that input against a
+//!   *fresh* compositor, not the accumulated one. The reachable operation set
+//!   is chosen to be miss-safe and idempotent, so the dependence is weak — but
+//!   it is real, and the artifact is a starting point, not a complete repro.
+//! * **The create guards saturate.** Once any input creates a manager global,
+//!   every later `Create*` op returns `Err`; only the double-create refusal
+//!   stays live, and the successful-create path is reached at most once per
+//!   process.
 //!
 //! # Why the operations drive from Rust, never from a handler
 //!
@@ -53,6 +65,32 @@ use libfuzzer_sys::fuzz_target;
 use std::cell::OnceCell;
 
 /// One compositor-side operation on a stateful wrapper.
+///
+/// # Scope: reachable-without-a-client only
+///
+/// This is the brief's `Operation` seed, minus the variants that only a wayland
+/// client can produce. The brief named `CreateToplevel`, `CreatePopup`,
+/// `ConfigureToplevel` and `DestroyToplevel`; none can be driven through the
+/// safe API without a client — a real `Toplevel`/`Popup` exists only while a
+/// client is connected, and the fuzz crate deliberately carries no
+/// `wayland-client` dependency. Per the task rule ("a variant whose API you
+/// cannot drive yet should be omitted rather than left as a no-op stub"), the
+/// committed set instead covers what *is* reachable from Rust:
+///
+/// * **manager/global double-create guards** — `CreateXdgShell`,
+///   `CreateLayerShell`, `CreateActivationManager`,
+///   `CreateSessionLockManager`, `CreateTextInputManager`,
+///   `CreateInputMethodManager`, `CreateOutputManager`;
+/// * **the shared by-id lookup/miss contract** — every `SetToplevel*`,
+///   `Popup*`, layer and output operation resolves a `*Id` through the same
+///   id-table path and must miss cleanly on an unknown one;
+/// * **state queries** — `QuerySessionLocked`, `InputMethodActive`, the IME
+///   snapshots, `ScheduleFrameAll`.
+///
+/// Client-driven create/commit/ack/destroy fuzzing — the operation sequences
+/// the roadmap ultimately wants — is **deferred until the fuzz crate takes a
+/// `wayland-client` dependency** and can bind real protocol objects. When that
+/// lands, append the create/destroy variants here; the enum is cumulative.
 ///
 /// Field names name the argument, not the C call: `nth` selects a reserved
 /// dangling id for the by-id mutators, and carries no meaning beyond giving a
