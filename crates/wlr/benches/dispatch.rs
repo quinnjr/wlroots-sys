@@ -22,8 +22,9 @@
 
 use std::cell::OnceCell;
 use std::ffi::c_void;
+use std::hint::black_box;
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 // The raw half of every pair. `wlr-sys` is a normal dependency of `wlr`, which
 // Cargo exposes to bench targets; `wlr::sys` is deliberately private.

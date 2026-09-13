@@ -19,6 +19,11 @@ static DISPLAY_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
 /// tests' `common::headless_guard`, and poison-tolerant for the same reason: a
 /// test that panicked while holding it must not poison every later test in the
 /// binary.
+///
+/// Must stay in lockstep with
+/// `crates/wlr/tests/common/mod.rs`'s `headless_guard`: the two cannot share
+/// an implementation across the `cfg(test)` lib / integration-crate boundary,
+/// so both copies are poison-tolerant for the same reason.
 pub(crate) fn test_display_guard() -> MutexGuard<'static, ()> {
     DISPLAY_GUARD
         .get_or_init(|| Mutex::new(()))

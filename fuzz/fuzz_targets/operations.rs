@@ -51,8 +51,12 @@
 //! which is the memory-safety boundary a client-driven path would eventually
 //! cross. Operations that genuinely need a client (creating a toplevel or
 //! popup, entering a session lock, redeeming an activation token) are omitted
-//! rather than stubbed; each milestone that adds a client-driven state machine
-//! appends its operations here, and the enum is cumulative.
+//! rather than stubbed. What remains reachable without a client is exactly the
+//! manager/global double-create guards, the shared id-resolution/miss contract,
+//! and the client-free state queries. Client-driven create/commit/ack/destroy
+//! fuzzing is **deferred until the fuzz crate takes a `wayland-client`
+//! dependency**; when that lands, each state machine appends its operations
+//! here, and the enum is cumulative.
 //!
 //! [`Recorder`] captures the headless output's `OutputId` from one short
 //! `Backend::run_all` so the output- and layer-config operations have a real id
@@ -68,14 +72,17 @@ use std::cell::OnceCell;
 ///
 /// # Scope: reachable-without-a-client only
 ///
-/// This is the brief's `Operation` seed, minus the variants that only a wayland
-/// client can produce. The brief named `CreateToplevel`, `CreatePopup`,
-/// `ConfigureToplevel` and `DestroyToplevel`; none can be driven through the
-/// safe API without a client — a real `Toplevel`/`Popup` exists only while a
-/// client is connected, and the fuzz crate deliberately carries no
-/// `wayland-client` dependency. Per the task rule ("a variant whose API you
-/// cannot drive yet should be omitted rather than left as a no-op stub"), the
-/// committed set instead covers what *is* reachable from Rust:
+/// This is the brief's `Operation` seed. The brief named `CreateToplevel`,
+/// `CreatePopup`, `ConfigureToplevel` and `DestroyToplevel`. The *live-object*
+/// forms of all four need a connected wayland client and are rejected here: a
+/// real `Toplevel`/`Popup` exists only while a client is connected, and the
+/// fuzz crate deliberately carries no `wayland-client` dependency. Where a
+/// client-free *dangling-id miss* form exists it is kept rather than omitted —
+/// [`ConfigureToplevel`] is the by-id `Runtime::configure_toplevel` call on an
+/// id that can only miss (see the by-id contract below), not a live
+/// reconfiguration of a client's toplevel. Per the task rule ("a variant whose
+/// API you cannot drive yet should be omitted rather than left as a no-op
+/// stub"), the committed set otherwise covers what *is* reachable from Rust:
 ///
 /// * **manager/global double-create guards** — `CreateXdgShell`,
 ///   `CreateLayerShell`, `CreateActivationManager`,
@@ -97,9 +104,10 @@ use std::cell::OnceCell;
 /// sequence several distinct unknown ids.
 #[derive(Arbitrary, Debug)]
 enum Operation {
-    // --- xdg-shell setup (toplevel/popup state machine) ---
-    /// `Runtime::create_xdg_shell`; the double-create guard is part of the
-    /// state machine, so a repeated op exercises it.
+    // --- xdg-shell global (double-create guard only; the toplevel/popup
+    // state machine itself needs a connected client) ---
+    /// `Runtime::create_xdg_shell`; repeated ops exercise only the
+    /// double-create guard, since no client can mint a toplevel here.
     CreateXdgShell,
 
     // --- Toplevel: `runtime.rs` by-id mutators, ids from `toplevel.rs` ---
@@ -233,8 +241,13 @@ impl wlr::LoopHandler for Recorder {
     }
 }
 
-/// The one headless compositor this process builds, or `None` if bring-up
-/// failed.
+/// The one headless compositor this process builds.
+///
+/// Bring-up failure is fatal: each failing step panics with the underlying
+/// error rather than caching a silent `None`, so a broken headless/pixman/
+/// wlroots path aborts the run instead of producing a green job that fuzzed
+/// nothing. The `Option` return remains only because the thread-local cell
+/// stores it; it is always `Some` on return.
 ///
 /// A `&'static` in a thread-local cell rather than an owned value: `Backend`
 /// borrows the `EventLoop` it was created from, and `Runtime` must not outlive
@@ -260,9 +273,9 @@ thread_local! {
 
 /// Build the compositor on first use, then return it.
 ///
-/// `WLR_BACKENDS` and friends are set before `Backend::autocreate` reads them;
-/// a failed bring-up is cached as `None` so the fuzzer keeps running rather
-/// than re-attempting setup on every input.
+/// `WLR_BACKENDS` and friends are set before `Backend::autocreate` reads them.
+/// Any bring-up failure panics rather than returning `None`, so the fuzzer
+/// cannot mistake an unstartable harness for a clean input.
 fn compositor() -> Option<&'static Compositor> {
     COMPOSITOR.with(|cell| {
         *cell.get_or_init(|| {
@@ -272,14 +285,19 @@ fn compositor() -> Option<&'static Compositor> {
             std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
             std::env::set_var("WLR_RENDERER", "pixman");
 
-            let display: &'static wlr::Display = Box::leak(Box::new(wlr::Display::new().ok()?));
+            let display: &'static wlr::Display = Box::leak(Box::new(
+                wlr::Display::new()
+                    .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}")),
+            ));
             let event_loop: &'static wlr::EventLoop<'static> =
                 Box::leak(Box::new(display.event_loop()));
-            let backend = wlr::Backend::autocreate(event_loop).ok()?;
-            let runtime = wlr::Runtime::new().ok()?;
-            if runtime.init_graphics(display, &backend).is_err() {
-                return None;
-            }
+            let backend = wlr::Backend::autocreate(event_loop)
+                .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}"));
+            let runtime = wlr::Runtime::new()
+                .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}"));
+            runtime
+                .init_graphics(display, &backend)
+                .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}"));
 
             // One short run so the headless backend announces its output.
             // `Recorder::new_output` only stores the id. When the run returns
@@ -287,7 +305,13 @@ fn compositor() -> Option<&'static Compositor> {
             // output-config operations exercise the documented
             // stale-id-misses-cleanly boundary rather than a live output.
             let mut recorder = Recorder::default();
-            let _ = backend.run_all(display, &mut recorder, &runtime, wlr::Until::Turns(4));
+            match backend.run_all(display, &mut recorder, &runtime, wlr::Until::Turns(4)) {
+                Ok(()) => {}
+                Err(e) => panic!("fuzz setup run failed: {e}"),
+            }
+            if recorder.output.is_none() {
+                panic!("fuzz harness could not start: setup run produced no output");
+            }
 
             Some(Box::leak(Box::new(Compositor {
                 runtime,
@@ -300,9 +324,8 @@ fn compositor() -> Option<&'static Compositor> {
 }
 
 fuzz_target!(|ops: Vec<Operation>| {
-    let Some(compositor) = compositor() else {
-        return;
-    };
+    let compositor = compositor()
+        .expect("fuzz harness could not start: compositor setup returned None");
     for op in &ops {
         apply(
             &compositor.runtime,
@@ -482,18 +505,17 @@ fn apply(
     }
 }
 
-/// ASan's default options for this target: leak detection off.
+/// LeakSanitizer suppressions for this target.
 ///
-/// LeakSanitizer treats the process-lifetime allocations a compositor is built
-/// from as leaks: `Runtime::init_graphics` deliberately never frees the scene,
-/// output layout, renderer or allocator (a real compositor owns them until it
-/// exits), and wlroots/libwayland keep their own process-global state (the
-/// pixman renderer's format set among it). Neither is a defect a fuzz run can
-/// act on, and either would fail every run, so the target opts out of leak
-/// reporting. The use-after-free/overflow oracle this target exists for is
-/// unaffected.
+/// Leak detection stays on so a genuine leak this crate owns is still reported.
+/// Only the known process-lifetime allocations are suppressed: wlroots and
+/// libwayland keep process-global state (`wlr_`/`wl_` prefixes), and
+/// `Runtime::init_graphics` deliberately never frees the scene, output layout,
+/// renderer or allocator — a real compositor owns them until it exits, so they
+/// outlive every fuzz input by design. Neither is a defect a run can act on.
+/// The use-after-free/overflow oracle this target exists for is unaffected.
 #[allow(dead_code)]
 #[no_mangle]
-pub extern "C" fn __asan_default_options() -> *const std::os::raw::c_char {
-    b"detect_leaks=0\0".as_ptr().cast()
+pub extern "C" fn __lsan_default_suppressions() -> *const std::os::raw::c_char {
+    b"leak:wlr_\nleak:wl_\0".as_ptr().cast()
 }

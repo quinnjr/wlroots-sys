@@ -19,8 +19,8 @@ impl wlr::LoopHandler for App {}
 
 #[test]
 fn a_real_client_creates_a_toplevel_the_server_observes() {
-    common::headless_env();
     let _serial = common::headless_guard();
+    common::headless_env();
     common::isolated_runtime_dir(); // XDG_RUNTIME_DIR must exist before the socket is bound
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
@@ -32,18 +32,30 @@ fn a_real_client_creates_a_toplevel_the_server_observes() {
     let handle = common::client::spawn(&socket, |state, qh| state.create_toplevel(qh));
 
     let mut app = App::default();
-    for _ in 0..40 {
+    // Drive the server until the client thread finishes rather than for a fixed
+    // count. `Until::Turns` is non-blocking, so under load the client may not
+    // have been scheduled before any fixed budget of polls runs out; the server
+    // would then block in `join` while the client blocks forever in
+    // `roundtrip`. `is_finished` couples the two: the loop cannot end before the
+    // client is done, and a panicking client marks the handle finished, turning
+    // a hang into a clean `join` error.
+    while !handle.is_finished() {
         backend
             .run_all(&display, &mut app, &runtime, Until::Turns(50))
             .expect("run_all");
-        if app.toplevels > 0 {
-            break;
-        }
     }
-    handle.join().expect("client thread");
+    let events = handle.join().expect("client thread");
 
+    assert_eq!(
+        app.toplevels, 1,
+        "server should observe exactly one toplevel from the client"
+    );
     assert!(
-        app.toplevels >= 1,
-        "server should observe the client's toplevel"
+        events.configure_events >= 1,
+        "the client should have received an xdg_surface configure"
+    );
+    assert!(
+        events.acked_configures >= 1,
+        "the client should have acked the configure it received"
     );
 }

@@ -442,3 +442,41 @@ git commit -m "ci(wlr): wire client, bench and fuzz legs; document the test stan
 - **Placeholder scan:** the one intentionally deferred item is the exact `wayland-client` 0.31 dispatch impls in Task 2 Step 3 — the module's public shape is fixed and the seed test is concrete, so the implementer has a verifiable target; this is the only place where exact upstream call names are left to the implementer.
 - **Type consistency:** `ClientState`, `spawn`, `headless_env`, and the `operations` target name are defined once and reused consistently across tasks.
 - **Open risk carried from spec:** `wayland-client`/`wayland-protocols` MSRV vs 1.88 (Task 5 Step 2 gates it).
+
+---
+
+## As-built deviations
+
+The plan body above is the historical design and is left as written. This
+section records what shipped in `e5781f3`, so a later reader does not
+re-derive the pre-fix shape from Task 2.
+
+- **Client harness, no `setenv` (Task 2).** The committed
+  `crates/wlr/tests/common/client.rs` resolves the socket path on the
+  **caller** thread (`isolated_runtime_dir().join(socket)` + a
+  `UnixStream::connect`) and hands the connected stream to the spawned
+  thread, which wraps it with `Connection::from_socket`. It never writes
+  `WAYLAND_DISPLAY`, and it does not call `Connection::connect_to_env()`.
+  `wayland-client` 0.31 has no name-taking connect, so `from_socket` is the
+  explicit-path route; the earlier `set_var`/`connect_to_env` pair raced the
+  main thread into libwayland and was undefined behaviour.
+- **No pre-flush (Task 2 Step 3.4).** The sketch's `conn.flush()` before the
+  round-trip is gone. A round-trip already flushes everything buffered plus
+  its own sync request in one write, so the server reads the toplevel
+  requests and the sync in the same dispatch turn; flushing first split them
+  and could deadlock the blocking round-trip under `Until::Turns`.
+- **Seed-test dispatch loop.** `crates/wlr/tests/client_harness.rs` pumps the
+  server with `while !handle.is_finished() { backend.run_all(&display, &mut
+  app, &runtime, Until::Turns(50)) }`, then `handle.join()`. Coupling the loop
+  to the client thread's completion closes a load-dependent deadlock: a fixed
+  turn budget could finish before a delayed client thread was scheduled,
+  leaving the server in `join` and the client in a blocking round-trip.
+  `spawn` sets a 10 s read/write timeout on the socket and returns
+  `JoinHandle<ClientEvents>`, so the seed test asserts the observed configure
+  events and acked configures alongside `toplevels == 1`.
+- **Spec reference.** The `**Spec:**` line points at
+  `docs/superpowers/specs/2026-09-13-m9-shell-completion-design.md` (Part 0),
+  which is not in this tree. Its Part 0 content is the roadmap's six-leg
+  testing standard and the PR-0 scope already restated in this plan's Goal,
+  Architecture and Global Constraints; the spec itself lands in a separate
+  PR rather than being inlined here.

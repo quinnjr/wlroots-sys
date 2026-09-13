@@ -79,8 +79,9 @@ pkg-config = "0.3"
 
 [dev-dependencies]
 # The bench harness. A dev-dependency only: it is compiled for the bench
-# target and never reaches a consumer of the crate.
-criterion = "0.5"
+# target and never reaches a consumer of the crate. 0.8 declares MSRV 1.86,
+# inside the workspace's 1.88 floor.
+criterion = "0.8"
 trybuild = "1.0"
 # Asserts the `!Send`/`!Sync` premise the thread-local dispatch guard rests on.
 # A negative trait bound cannot be written directly, and the obvious
@@ -97,9 +98,10 @@ rustix = { version = "1", features = ["pipe", "std"] }
 # could not be reached. Dev-dependency only; the crate wraps the server.
 wayland-client = "0.31"
 # xdg-shell client bindings for the seed toplevel test. `client` selects the
-# client-side generated code; `unstable` pulls the xdg-shell protocol in from
-# the protocols crate's generated tree.
-wayland-protocols = { version = "0.31", features = ["client", "unstable"] }
+# client-side generated code; xdg-shell itself is stable, so it comes from the
+# ungated `xdg` module and needs no `unstable` feature (which would only add
+# the deprecated `z`-prefixed protocols).
+wayland-protocols = { version = "0.31", features = ["client"] }
 
 # The dispatch bench compares each safe call with the raw `wlr_sys` call it
 # wraps. `harness = false` hands `main` to criterion instead of libtest.

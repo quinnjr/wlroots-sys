@@ -92,6 +92,12 @@ jobs:
       # resolve under every feature set the lint steps above compile.
       - run: cargo test --workspace
 
+      # Compile the bench target without running it. The separate `bench` job
+      # is develop-push-only and non-gating, so a bench that stopped compiling
+      # would otherwise be invisible on a PR. Not `cargo bench` for real:
+      # criterion's timed loops are meaningless on a shared runner.
+      - run: cargo bench -p wlr --bench dispatch --no-run
+
       # 100% is defined in the all-features configuration, so the ledgers are
       # reconciled against those bindings. WLR_COVERAGE_ALL_FEATURES is what
       # turns "ledger names a symbol bindgen never emitted" into a hard failure;
@@ -247,7 +253,10 @@ jobs:
     #
     # `continue-on-error` is at the *job* level, not on the bench step alone:
     # a failing dependency install must not gate the run either, which is what
-    # a step-level flag would still have allowed.
+    # a step-level flag would still have allowed. A broken bench is no longer
+    # what this hides: the `test` job's `cargo bench --no-run` step gates the
+    # bench target on every PR, so `continue-on-error` here only affects the
+    # informational timed run and its artifact upload.
     if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
     continue-on-error: true
     runs-on: ubuntu-latest
@@ -342,4 +351,8 @@ jobs:
           echo "MSRV is $msrv"
           rustup toolchain install "$msrv" --profile minimal
           rustup default "$msrv"
-      - run: cargo check --workspace --all-features
+      # `--all-targets` so the dev-dependencies (criterion, wayland-client,
+      # wayland-protocols) are actually compiled on the MSRV toolchain. A plain
+      # `cargo check --workspace --all-features` builds only lib/bin targets,
+      # leaving the plan's "1.88" constraint on those deps ungated.
+      - run: cargo check -p wlr --all-targets --all-features

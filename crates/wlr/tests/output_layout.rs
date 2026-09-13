@@ -9,17 +9,24 @@
 
 mod common;
 
-/// `common::headless_env` installs the single-output default; this binary is
-/// the one that needs a second output to test disjoint auto-placement, so it
-/// raises the count after the shared call.
+/// This binary is the one that needs a second output to test disjoint
+/// auto-placement, so it installs `WLR_HEADLESS_OUTPUTS=2` in its own `Once`
+/// rather than raising the count after the shared single-output default. A
+/// raise-afterwards would leak `2` into any later test in the binary that
+/// called only `common::headless_env`; setting the whole environment here keeps
+/// the two-output choice local to this file.
 ///
-/// SAFETY: every caller holds `common::headless_guard` for the whole test, so
-/// no concurrent `getenv` can observe this write half-applied.
-fn two_output_env() {
-    common::headless_env();
-    unsafe {
+/// SAFETY: every caller holds `common::headless_guard` for the whole test, and
+/// the `Once` runs the writes at most once. Neither makes a concurrent
+/// `getenv` impossible in general, only before the display that reads these
+/// values is created.
+fn headless_env_two_outputs() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| unsafe {
+        std::env::set_var("WLR_BACKENDS", "headless");
         std::env::set_var("WLR_HEADLESS_OUTPUTS", "2");
-    }
+        std::env::set_var("WLR_RENDERER", "pixman");
+    });
 }
 
 /// A second `init_output` for one output is an error, not a dead process.
@@ -37,7 +44,7 @@ fn two_output_env() {
 #[test]
 fn initialising_one_output_twice_is_refused_rather_than_fatal() {
     let _serial = common::headless_guard();
-    two_output_env();
+    headless_env_two_outputs();
     struct App {
         runtime: wlr::Runtime,
         second: Option<bool>,
@@ -86,7 +93,7 @@ fn initialising_one_output_twice_is_refused_rather_than_fatal() {
 #[test]
 fn two_headless_outputs_get_disjoint_layout_boxes() {
     let _serial = common::headless_guard();
-    two_output_env();
+    headless_env_two_outputs();
     struct App {
         boxes: Vec<(i32, i32, i32, i32)>,
         scheduled: usize,
@@ -149,7 +156,7 @@ fn two_headless_outputs_get_disjoint_layout_boxes() {
 #[test]
 fn layout_box_after_the_run_is_stale_and_misses_cleanly() {
     let _serial = common::headless_guard();
-    two_output_env();
+    headless_env_two_outputs();
     struct App {
         ids: Vec<wlr::OutputId>,
         runtime: wlr::Runtime,

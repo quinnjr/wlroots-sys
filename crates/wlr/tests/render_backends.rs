@@ -15,23 +15,18 @@
 
 mod common;
 
-use std::sync::Once;
-
 use wlr::{
     Allocator, Backend, Box2D, BufferCaps, BufferPassOptions, ColorEncoding, ColorPrimaries,
     ColorRange, ColorTransform, Display, DrmFormat, Error, FourCc, Modifier, NamedPrimaries,
     RectOptions, RenderColor, Renderer, TextureOptions, TransferFunction,
 };
 
+/// The `WLR_RENDERER=pixman` default is already installed by
+/// [`common::headless_env`]; this wrapper exists so the renderer-only tests
+/// (which never create a display) route through the same single source of
+/// truth. The `WLR_BACKENDS=headless` it also sets is inert here.
 fn pixman_env() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: single-threaded, before any other thread exists, and each
-        // integration binary is its own process.
-        unsafe {
-            std::env::set_var("WLR_RENDERER", "pixman");
-        }
-    });
+    common::headless_env();
 }
 
 /// The linear ARGB8888 format the allocator hands out.

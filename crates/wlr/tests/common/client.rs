@@ -21,6 +21,21 @@ use wayland_client::protocol::{wl_compositor, wl_registry, wl_surface};
 use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
+/// What the client observed while it ran, handed back by [`spawn`].
+///
+/// The seed connection is owned by the spawned thread, so a test cannot read
+/// the configure/ack flags off the [`ClientState`] it never sees. These are
+/// copied out after the round-trips and returned through the `JoinHandle`, so
+/// the test can assert the wire exchange actually happened rather than only
+/// that the server announced a toplevel.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ClientEvents {
+    /// `xdg_surface.configure` events dispatched to this client.
+    pub configure_events: u32,
+    /// `xdg_surface.ack_configure` requests sent in response to those.
+    pub acked_configures: u32,
+}
+
 /// The globals a driven client has bound.
 ///
 /// The two `Option`s are filled by [`spawn`] before the `drive` closure runs;
@@ -30,6 +45,9 @@ use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_ba
 pub struct ClientState {
     pub compositor: Option<wl_compositor::WlCompositor>,
     pub wm_base: Option<xdg_wm_base::XdgWmBase>,
+    /// Populated by the `Dispatch` impls; copied into [`ClientEvents`] and
+    /// returned by [`spawn`].
+    pub events: ClientEvents,
 }
 
 impl ClientState {
@@ -64,17 +82,35 @@ impl ClientState {
 /// so writing the former from the child while the main thread raced into
 /// libwayland was undefined behaviour.
 ///
-/// The thread ends with a blocking round-trip: it flushes everything `drive`
-/// queued and then waits for the server's sync reply, so `join` returns only
-/// once the server has dispatched those requests. Without it a fast server loop
+/// The thread ends with two blocking round-trips. The first flushes everything
+/// `drive` queued and waits for the server's sync reply, so `join` returns only
+/// once the server has dispatched those requests; without it a fast server loop
 /// could reach the caller's assertion while the last `commit` was still in the
-/// client's outgoing buffer.
+/// client's outgoing buffer. The second is what makes the configure assertion
+/// honest: wlroots schedules the answering configure from an *idle* source, so
+/// it is queued a turn after the sync reply the first round-trip stops on and
+/// is not in that read. The second round-trip (the server keeps running until
+/// this thread finishes) reads and dispatches it, and the `xdg_surface`
+/// `Dispatch` impl records and acks it before the thread returns.
+///
+/// Returns the observed [`ClientEvents`] via the `JoinHandle`.
 pub fn spawn(
     socket: &str,
     drive: impl FnOnce(&mut ClientState, &QueueHandle<ClientState>) + Send + 'static,
-) -> std::thread::JoinHandle<()> {
+) -> std::thread::JoinHandle<ClientEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
     let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    // Bound the blocking waits inside the thread. Without these a stuck hop
+    // leaves `roundtrip` blocked forever, the thread never finishes, and CI
+    // hangs where it should fail: the read call returns `TimedOut`/
+    // `WouldBlock` after ten seconds, `roundtrip` surfaces the `Err`, and the
+    // thread panics with the message below.
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
     std::thread::spawn(move || {
         let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
@@ -84,6 +120,7 @@ pub fn spawn(
         let mut state = ClientState {
             compositor: None,
             wm_base: None,
+            events: ClientEvents::default(),
         };
         // `registry_queue_init` buffers the initial globals rather than
         // forwarding them to a handler, so the standard `GlobalList::bind` is
@@ -106,6 +143,17 @@ pub fn spawn(
         queue
             .roundtrip(&mut state)
             .expect("roundtrip so the server sees the requests");
+
+        // The first round-trip stops on the server's sync reply; the configure
+        // wlroots scheduled from an idle source lands a turn later. A second
+        // round-trip dispatches it (and anything else already queued) so the
+        // assertions can see the configure/ack exchange, not just the
+        // toplevel.
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server's configure is dispatched");
+
+        state.events
     })
 }
 
@@ -169,7 +217,7 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for ClientState {
 
 impl Dispatch<xdg_surface::XdgSurface, ()> for ClientState {
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         proxy: &xdg_surface::XdgSurface,
         event: xdg_surface::Event,
         _data: &(),
@@ -177,9 +225,13 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for ClientState {
         _qh: &QueueHandle<Self>,
     ) {
         // xdg-shell requires every configure be acked; a later leg that waits
-        // for a mapped window depends on it.
+        // for a mapped window depends on it. Record both halves so the seed
+        // test can assert the exchange happened, not merely that the role was
+        // created.
         if let xdg_surface::Event::Configure { serial } = event {
+            state.events.configure_events += 1;
             proxy.ack_configure(serial);
+            state.events.acked_configures += 1;
         }
     }
 }

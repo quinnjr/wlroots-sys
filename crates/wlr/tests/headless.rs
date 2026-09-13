@@ -55,11 +55,12 @@ fn headless_backend_announces_an_output_exactly_once() {
     // `cargo test -p wlr` meaningful: without `WLR_BACKENDS` wlroots would pick
     // whatever the developer's session offers (or nothing at all in CI), and
     // the test would be measuring the machine rather than this crate.
-    common::headless_env();
     // libwayland-server keeps process-global state; hold the guard for the
     // whole body so no sibling test can bring a second display up alongside
-    // this one (see `common::headless_guard`).
+    // this one (see `common::headless_guard`). Acquired before the environment
+    // is set, matching every other site.
     let _serial = common::headless_guard();
+    common::headless_env();
 
     let display = wlr::Display::new().expect("display");
     // Declared after `display`, so it drops first: `Display::drop` destroys the

@@ -32,10 +32,43 @@ jobs:
 
       - name: Install the nightly toolchain
         run: |
-          rustup toolchain install nightly --profile minimal
-          rustup default nightly
+          # Dated, not floating `nightly`: the fuzz job runs unattended against
+          # a rolling distro, so an upstream nightly regression would otherwise
+          # be discovered as a red nightly cron rather than a deliberate bump.
+          rustup toolchain install nightly-2026-09-12 --profile minimal
+          rustup default nightly-2026-09-12
 
-      - run: cargo install cargo-fuzz
+      - run: cargo install cargo-fuzz --version 0.13.2 --locked
 
-      - run: cargo +nightly fuzz run operations -- -max_total_time=300
+      # cargo-fuzz has no `--locked` of its own, so build through cargo first:
+      # this resolves strictly against the committed fuzz/Cargo.lock, and an
+      # out-of-date lock fails the step instead of silently re-resolving. The
+      # fuzz run that follows then reuses that same lock.
+      - name: Build fuzz target against the committed lockfile
+        run: cargo +nightly-2026-09-12 build --manifest-path fuzz/Cargo.toml --locked --bin operations
+
+      # Persist the corpus between nightly runs. The key rolls each run (a cache
+      # entry is immutable, so a fixed key would freeze the corpus at its first
+      # save); restore-keys pulls back the most recent entry for this target.
+      # Keyed on the target name so a second fuzz target gets its own cache.
+      - name: Cache the fuzz corpus
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-operations-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-operations-
+
+      - run: cargo +nightly-2026-09-12 fuzz run operations -- -max_total_time=300
         working-directory: fuzz
+
+      # A crash writes its reproducer under fuzz/artifacts/, which is gitignored
+      # and lives only in this container. Upload it or the one thing this job
+      # exists to produce dies with the runner.
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-artifacts-operations
+          path: fuzz/artifacts/**
+          if-no-files-found: ignore
