@@ -96,11 +96,15 @@ it, and each leg reaches something the others cannot:
 5. **Fuzzing** — `cargo +nightly fuzz run operations`, from `fuzz/`. A
    standalone cargo-fuzz crate, excluded from the workspace and nightly-only,
    replays a cumulative operation enum against the stateful wrappers on a
-   headless backend; ASan is the UAF oracle.
-6. **Benchmarks** — `cargo bench -p wlr --bench dispatch`. Criterion pairs
-   each safe call against the raw `wlr-sys` sequence to measure wrapper
-   overhead. CI records `develop`-push results as artifacts; informational,
-   not gating.
+   headless backend; ASan is the UAF oracle. CI runs it as a scheduled
+   nightly job (also triggerable on demand).
+6. **Benchmarks** — `cargo bench -p wlr --bench dispatch`. Criterion runs
+   three groups: `handle_borrow` and `scene_op` are safe/raw pairs, each
+   measuring a safe call against the raw `wlr-sys` sequence to expose wrapper
+   overhead, while `signal_emit` measures the libwayland signal machinery
+   rather than the safe layer (no public API drives that observer outside
+   `Backend::run_all`). CI records `develop`-push results as artifacts;
+   informational, not gating.
 
 ## 0.20.21
 

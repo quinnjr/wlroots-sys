@@ -12705,6 +12705,7 @@ mod tests {
     /// bookkeeping of it.
     #[test]
     fn enable_test_touch_sets_the_capability_bit_immediately() {
+        let _guard = crate::test_support::test_display_guard();
         let display = crate::Display::new().expect("display");
         let runtime = crate::Runtime::new().expect("runtime");
         runtime.create_seat(&display, "seat0").expect("seat");
@@ -12926,6 +12927,7 @@ mod tests {
             }
         }
 
+        let _guard = crate::test_support::test_display_guard();
         crate::interest::tests::headless_env();
         let display = Display::new().expect("display");
         let backend = Backend::autocreate(&display.event_loop()).expect("backend");

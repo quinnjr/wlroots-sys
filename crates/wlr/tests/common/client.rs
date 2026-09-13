@@ -9,8 +9,12 @@
 //! requests.
 //!
 //! Call [`crate::common::isolated_runtime_dir`] before `Display::new` — the
-//! server's socket and the client both resolve `WAYLAND_DISPLAY` against
-//! `XDG_RUNTIME_DIR`, and the client thread only sets the former.
+//! server binds its socket *under* `XDG_RUNTIME_DIR`, and [`spawn`] resolves
+//! the returned socket name against the same directory itself. It never
+//! touches `WAYLAND_DISPLAY`: `wayland-client` 0.31 has no name-taking
+//! connect, so the path is built on the caller thread and handed to
+//! [`Connection::from_socket`], keeping `setenv`/`getenv` out of the spawned
+//! thread entirely.
 
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{wl_compositor, wl_registry, wl_surface};
@@ -47,12 +51,18 @@ impl ClientState {
 
 /// Connect a client on its own thread, run `drive`, then round-trip.
 ///
-/// `socket` is the name [`wlr::Display::add_socket_auto`] returned; it is
-/// assigned to `WAYLAND_DISPLAY`. `XDG_RUNTIME_DIR` is *not* set here on
-/// purpose — the caller set it via
-/// [`crate::common::isolated_runtime_dir`] before creating the display, and
-/// re-reading the same process-global here is what makes both ends agree on
-/// where the socket lives.
+/// `socket` is the name [`wlr::Display::add_socket_auto`] returned. This
+/// helper lowers it to a `UnixStream` on the **caller** thread — using the
+/// same `XDG_RUNTIME_DIR` the server bound under — and moves the connected
+/// stream into the spawned thread, which wraps it with
+/// [`Connection::from_socket`]. No `WAYLAND_DISPLAY` (or any other
+/// environment variable) is written: `wayland-client` 0.31's only
+/// env-resolving constructor is [`Connection::connect_to_env`], and there is
+/// no name-taking alternative, so `from_socket` is the explicit-path route.
+/// That removes the `setenv`/`getenv` data race the earlier env-based version
+/// carried; `connect_to_env` reads `WAYLAND_DISPLAY` *and* `XDG_RUNTIME_DIR`,
+/// so writing the former from the child while the main thread raced into
+/// libwayland was undefined behaviour.
 ///
 /// The thread ends with a blocking round-trip: it flushes everything `drive`
 /// queued and then waits for the server's sync reply, so `join` returns only
@@ -63,18 +73,10 @@ pub fn spawn(
     socket: &str,
     drive: impl FnOnce(&mut ClientState, &QueueHandle<ClientState>) + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
-    let socket = socket.to_owned();
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
     std::thread::spawn(move || {
-        // SAFETY: `set_var` writes process-global state; this thread touches no
-        // environment-dependent libwayland path before the write, and the
-        // caller has already set `XDG_RUNTIME_DIR` and stopped mutating it. The
-        // server's own `add_socket_auto` read its value on the main thread
-        // before this thread existed.
-        unsafe {
-            std::env::set_var("WAYLAND_DISPLAY", &socket);
-        }
-
-        let conn = Connection::connect_to_env().expect("connect to WAYLAND_DISPLAY");
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
             registry_queue_init::<ClientState>(&conn).expect("registry queue init");
         let qh = queue.handle();

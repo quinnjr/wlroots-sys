@@ -49,11 +49,11 @@ pub fn headless_guard() -> MutexGuard<'static, ()> {
 /// it.
 ///
 /// libwayland binds `Display::add_socket_auto`'s `wayland-N` socket *under*
-/// `XDG_RUNTIME_DIR`, and `wayland_client::Connection::connect_to_env` resolves
-/// `WAYLAND_DISPLAY` against the same variable. So it must be set before
-/// [`Display::new`] runs, not merely before the client connects: a client that
-/// read the parent environment's `XDG_RUNTIME_DIR` would look for the socket in
-/// a directory the server never wrote to.
+/// `XDG_RUNTIME_DIR`, so it must be set before [`Display::new`] runs, not merely
+/// before the client connects: the server binds the socket as soon as
+/// `add_socket_auto` returns, and [`client::spawn`] resolves the same
+/// directory when it turns that name into the socket path it hands to
+/// `wayland_client::Connection::from_socket`.
 ///
 /// Idempotent per process — the first caller sets it, every later one gets the
 /// same directory — because the value is process-global and two tests racing to
