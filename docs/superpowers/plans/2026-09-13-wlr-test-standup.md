@@ -29,7 +29,7 @@
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `common::headless_env()` (sets `WLR_BACKENDS=headless`, `WLR_HEADLESS_OUTPUTS=1`, `WLR_RENDERER=pixman` once) and `common::headless_runtime() -> (wlr::Display, wlr::Backend<'static>, wlr::Runtime)` is **not** produced here — only `headless_env()`, because `Display`/`Backend` drop order is load-bearing and must stay at each call site.
+- Produces: `common::headless_env()` (idempotently sets `WLR_BACKENDS=headless`, `WLR_HEADLESS_OUTPUTS=1`, `WLR_RENDERER=pixman`) and `common::headless_guard() -> std::sync::MutexGuard<'static, ()>` — a process-wide guard every display-creating test holds for the duration of its runtime, because libwayland-server has process-global state and the harness runs tests in parallel threads. A `headless_runtime()` helper is deliberately **not** produced: `Display`/`Backend` drop order is load-bearing and must stay at each call site.
 
 - [ ] **Step 1: Identify the duplicates**
 
@@ -41,15 +41,37 @@ Expected: ~35 files. Record the list.
 
 - [ ] **Step 2: Extend `crates/wlr/tests/common/mod.rs`**
 
-Keep the existing `headless_env()`; ensure it is `pub fn headless_env()` and idempotent via `std::sync::Once`. It must set all three vars under `unsafe { std::env::set_var(...) }` with the existing SAFETY comment. Do not add a bring-up helper.
+Keep the existing `headless_env()`; ensure it is `pub fn headless_env()` and idempotent via `std::sync::Once`. It must set all three vars under `unsafe { std::env::set_var(...) }` with the existing SAFETY comment.
 
-- [ ] **Step 3: Migrate one representative file**
+Add the serialization guard — the fix for the pre-existing libwayland-server flake (`data is non-NULL with zero alloc`, reproduced at ~5% when two display-creating tests run in parallel):
 
-In `crates/wlr/tests/headless.rs`: delete the private `headless_env()` (currently inlined as `unsafe { set_var(...) }`), add at the top of the file:
+```rust
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+static HEADLESS_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// Serializes display/backend bring-up across the tests in one binary.
+/// libwayland-server holds process-global state, so two `Display::new()`
+/// calls racing on different test threads abort with `data is non-NULL
+/// with zero alloc`. Hold this for the whole test body.
+pub fn headless_guard() -> MutexGuard<'static, ()> {
+    HEADLESS_GUARD
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+```
+
+- [ ] **Step 3: Migrate one representative file (including the guard)**
+
+In `crates/wlr/tests/headless.rs`: delete the private `headless_env()` body, add at the top of the file:
 ```rust
 mod common;
 ```
-and replace the inline `unsafe { std::env::set_var(...) }` block with `common::headless_env();`.
+replace the inline `unsafe { std::env::set_var(...) }` block with `common::headless_env();`, and acquire the guard at the start of the test body:
+```rust
+let _serial = common::headless_guard();
+```
 
 - [ ] **Step 4: Verify the representative migration**
 
@@ -58,12 +80,18 @@ Expected: PASS, same number of tests as before.
 
 - [ ] **Step 5: Migrate the remaining files**
 
-For each file from Step 1: delete the private `fn headless_env`, add `mod common;`, call `common::headless_env();`. Some files also carry private `argb()` helpers; leave those in place (only migrate `headless_env`). If a file's copy differs semantically, migrate it to the shared one and note the change in the commit body.
+For each file from Step 1: delete the private `fn headless_env`, add `mod common;`, call `common::headless_env();`, and acquire `let _serial = common::headless_guard();` at the top of every test body that creates a `Display`, holding it until that runtime is dropped. Some files also carry private `argb()` helpers; leave those in place.
 
-- [ ] **Step 6: Full test run**
+- [ ] **Step 6: Full test run + flake verification**
 
 Run: `cargo test -p wlr --tests`
-Expected: PASS. If a binary now warns "unused import: common", confirm it actually calls `common::headless_env()`.
+Expected: PASS, no `SIGABRT`.
+
+Then prove the guard fixes the flake (this failed ~1/20 before the guard):
+```bash
+for i in $(seq 1 20); do cargo test -p wlr --test output_protocols -q >/dev/null 2>&1 || echo "FAIL $i"; done
+```
+Expected: zero `FAIL` lines.
 
 - [ ] **Step 7: Commit**
 
