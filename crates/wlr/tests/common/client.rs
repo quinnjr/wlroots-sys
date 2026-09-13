@@ -23,6 +23,7 @@ use wayland_client::protocol::{
     wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
 /// What the client observed while it ran, handed back by [`spawn`].
@@ -211,11 +212,26 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
         state.compositor = Some(compositor.clone());
         state.wm_base = Some(wm_base.clone());
 
+        // Opportunistic: the global exists only when the server called
+        // `Runtime::create_presentation`. Tests that never do are unchanged —
+        // `bind` returns `Err(Missing)` and the client drives its surface
+        // without asking for feedback. Version 1 is the client bindings'
+        // maximum even though the server advertises 2.
+        let presentation: Option<wp_presentation::WpPresentation> =
+            globals.bind(&qh, 1..=1, ()).ok();
+
         // Phase 1: role + bufferless commit, then a round-trip so the server's
         // initial configure arrives and is acked.
         let surface = compositor.create_surface(&qh, ());
         let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
         let _toplevel = xdg_surface.get_toplevel(&qh, ());
+        // Ask for presentation feedback before the first commit: wlroots moves
+        // a requested feedback from the surface's pending to its current state
+        // during that commit's apply, so the server's commit handler observes
+        // it. The proxy is held until after the second round-trip.
+        let feedback = presentation
+            .as_ref()
+            .map(|presentation| presentation.feedback(&surface, &qh, ()));
         surface.commit();
         queue
             .roundtrip(&mut state)
@@ -250,7 +266,17 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
 
         // Keep every handle alive until the round-trip above has been answered,
         // then drop them here — after the map, not before it.
-        drop((surface, xdg_surface, _toplevel, buffer, pool, shm, file));
+        drop((
+            surface,
+            xdg_surface,
+            _toplevel,
+            feedback,
+            buffer,
+            pool,
+            shm,
+            presentation,
+            file,
+        ));
         state.events
     })
 }
@@ -375,6 +401,34 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for ClientState {
         _state: &mut Self,
         _proxy: &wl_buffer::WlBuffer,
         _event: wl_buffer::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wp_presentation::WpPresentation, ()> for ClientState {
+    /// Fires the `clock_id` event once on bind; nothing to record.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wp_presentation::WpPresentation,
+        _event: wp_presentation::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for ClientState {
+    /// `presented`/`discarded`/`sync_output`. The server may destroy the
+    /// feedback (sending `discarded`) once the commit handler samples it; the
+    /// events are drained by the round-trips and need no action here.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wp_presentation_feedback::WpPresentationFeedback,
+        _event: wp_presentation_feedback::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,

@@ -2541,8 +2541,9 @@ pub(crate) struct RuntimeInner {
 
     /// The `wp_tearing_control_manager_v1` global, once created — lets
     /// clients hint at tearing presentation per surface. `Option`, same
-    /// rationale as the other manager globals. Reading a surface's hint
-    /// needs the surface handle model (M9).
+    /// rationale as the other manager globals. `Runtime::surface` and
+    /// `backend::with_surface` cache it onto each [`Surface`] handle so the
+    /// tearing accessors can read a hint.
     pub(crate) tearing_control_manager:
         RefCell<Option<NonNull<sys::wlr_tearing_control_manager_v1>>>,
 
@@ -7639,7 +7640,8 @@ impl Runtime {
     /// hint at tearing presentation. `version` is the protocol version to
     /// advertise (1 is current). Errors if called twice.
     ///
-    /// Reading a surface's hint needs the surface handle model (M9).
+    /// Once created, a surface's effective hint is readable through
+    /// [`Surface::tearing_hint`] (and its by-id form [`Runtime::tearing_hint`]).
     pub fn create_tearing_control_manager(&self, display: &Display, version: u32) -> Result<()> {
         if self.inner.tearing_control_manager.borrow().is_some() {
             return Err(Error::Operation(
@@ -10830,6 +10832,20 @@ impl Runtime {
             unsafe { Surface::from_raw_with_id(raw.as_ptr(), id) }
                 .with_tearing_manager(tearing_manager),
         )
+    }
+
+    /// The borrowed handle for `id`, or `None` if no live output has it.
+    ///
+    /// The by-id miss, matching [`surface`](Runtime::surface): an id held past
+    /// its output's destruction resolves to nothing. The handle borrows the
+    /// runtime for its lifetime and is only meaningful while the run that
+    /// announced the output is on the stack.
+    pub fn output(&self, id: OutputId) -> Option<Output<'_>> {
+        let raw = self.output_ptr(id)?;
+        // SAFETY: an entry is removed before wlroots frees the output, so a
+        // present entry names a live one; the borrow above is released before
+        // the handle is built.
+        Some(unsafe { Output::from_raw_with_id(raw.as_ptr(), id) })
     }
 
     /// The maximum popup nesting this crate will walk.

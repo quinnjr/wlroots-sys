@@ -161,14 +161,21 @@ impl PresentationFeedback {
 
     /// Tell the client whose feedback this is when its buffer was presented.
     ///
-    /// The feedback stays owned until it is dropped; wlroots' own doc is to
-    /// send, then destroy. Sending through an event built for another output is
-    /// not prevented here — wlroots does not check either — but the timestamp
-    /// and refresh are what the client sees, so it is the caller's to get right.
-    pub fn send_presented(&self, event: &PresentationEvent) {
-        // SAFETY: the handle owns a live feedback (its lifetime is until the
-        // `Drop` below, and nothing else frees it), and `event` is a live local
-        // the call only reads.
+    /// Consumes the feedback: wlroots' contract is to send once and then
+    /// destroy, and this is the one shot. The `Drop` that runs when this
+    /// returns is what performs the destroy (and sends `discarded` to any
+    /// client that no longer needs the feedback). A caller that decides the
+    /// content was *not* presented simply drops the feedback instead; the same
+    /// destroy runs, so there is no way to forget either step.
+    ///
+    /// Sending through an event built for another output is not prevented here
+    /// — wlroots does not check either — but the timestamp and refresh are what
+    /// the client sees, so it is the caller's to get right.
+    pub fn send_presented(self, event: &PresentationEvent) {
+        // SAFETY: the handle owns a live feedback and has not sent yet (this
+        // method consumes it), and `event` is a live local the call only reads.
+        // The `self` drop at the end of this function then destroys it exactly
+        // once.
         unsafe {
             sys::wlr_presentation_feedback_send_presented(self.raw.as_ptr(), &raw const event.raw);
         }
@@ -314,13 +321,14 @@ mod tests {
 
     /// wlroots frees the feedback in `wlr_presentation_feedback_destroy`, and
     /// this handle owns it. A malloc'd, list-initialised feedback is exactly the
-    /// object wlroots returns, so dropping it here runs the real release path;
-    /// under ASan a double release or a use after it is reported. `calloc`
-    /// rather than a Rust allocation because the C `free` inside wlroots must
-    /// match.
+    /// object wlroots returns, so both release paths run for real here: even
+    /// iterations `send_presented` (which consumes the handle and destroys it
+    /// when it returns), odd ones drop without sending. Under ASan a double
+    /// release or a use after one is reported. `calloc` rather than a Rust
+    /// allocation because the C `free` inside wlroots must match.
     #[test]
     fn dropping_a_feedback_runs_the_wlroots_destroy_exactly_once() {
-        for _ in 0..8 {
+        for i in 0..8 {
             // SAFETY: `calloc` returns null or a zeroed, suitably aligned block
             // of exactly one `wlr_presentation_feedback`.
             let raw = unsafe {
@@ -348,8 +356,13 @@ mod tests {
             let event = PresentationEvent {
                 raw: unsafe { std::mem::zeroed() },
             };
-            feedback.send_presented(&event);
-            drop(feedback);
+            if i % 2 == 0 {
+                // Consumes the handle; the destroy runs when the method returns.
+                feedback.send_presented(&event);
+            } else {
+                // The no-send path: drop alone destroys.
+                drop(feedback);
+            }
         }
     }
 
