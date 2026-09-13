@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# The fuzz crate is nightly-only (`cargo-fuzz` + libFuzzer + ASan). It must be a
+# standalone package so the stable/MSRV lanes (`cargo build --workspace`,
+# `cargo test --workspace`) never resolve or build it; see `fuzz/Cargo.toml`.
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2024"
