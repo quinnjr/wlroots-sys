@@ -237,7 +237,12 @@ jobs:
     # noisy to fail a build on, and a PR has nothing to compare against — so
     # this runs only on `develop` pushes and records the criterion output as an
     # artifact for a human to diff across commits.
+    #
+    # `continue-on-error` is at the *job* level, not on the bench step alone:
+    # a failing dependency install must not gate the run either, which is what
+    # a step-level flag would still have allowed.
     if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    continue-on-error: true
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
@@ -252,10 +257,28 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Run the dispatch benches
-        # `continue-on-error` keeps the job from gating the run; the artifact
-        # step below still executes and records whatever was produced.
-        continue-on-error: true
         run: cargo bench -p wlr --bench dispatch
+
+      - name: Note the artifact's limits
+        # The artifact is a criterion tree with no context; a reader could take
+        # the sub-nanosecond raw figures at face value. Say otherwise in-band.
+        if: always()
+        run: |
+          mkdir -p target/criterion
+          cat > target/criterion/README.txt <<'EOF'
+          Criterion output for `cargo bench -p wlr --bench dispatch`.
+
+          Read the safe/raw *ratio* for handle_borrow and scene_op. The raw
+          figures are sub-nanosecond (roughly 0.4-1.4 ns) and therefore sit at
+          criterion's noise floor on a shared runner: their absolute value is
+          not meaningful, only that the safe call is ~30x slower.
+
+          `signal_emit` is NOT a safe-layer pair. wlr's dispatcher and its
+          wl_listener wrapper are pub(crate), and no public API drives the
+          observer outside Backend::run_all, so it compares wlr_sys's signal
+          primitives with a direct callback. See the group's doc in
+          benches/dispatch.rs.
+          EOF
 
       - name: Upload criterion results
         if: always()

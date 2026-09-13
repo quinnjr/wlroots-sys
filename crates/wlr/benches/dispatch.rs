@@ -1,10 +1,19 @@
 //! Criterion benches for the safe layer's per-operation overhead.
 //!
-//! Each group runs the same work twice: once through a `wlr` wrapper and once
-//! through the raw `wlr_sys` binding it wraps. The difference is the safe
-//! layer's cost, not wlroots'. `wlr`'s own `sys` module is private, so the raw
-//! half goes through `wlr_sys`, a normal dependency Cargo makes available to
-//! this target.
+//! Two groups — [`handle_borrow`] and [`scene_op`] — pair a `wlr` wrapper with
+//! the raw `wlr_sys` call it wraps, so the gap between the pair is the safe
+//! layer's cost rather than wlroots'. `wlr`'s own `sys` module is private, so
+//! the raw half goes through `wlr_sys`, a normal dependency Cargo makes
+//! available to this target.
+//!
+//! [`signal_emit`] is different, and its name says so. The crate's event
+//! dispatcher (`dispatch`) and its `wl_listener` wrapper (`Registration`) are
+//! both `pub(crate)`, and the only public observer that links a wlroots listener
+//! (`Runtime::observe_scene_buffer`) needs an active `Backend::run_all`. An
+//! external bench target therefore cannot drive `wlr`'s observer, so this group
+//! measures the signal primitives underneath it — `wlr_sys`'s `wl_signal_add`
+//! plus the real `wl_signal_emit_mutable` symbol — against a bare listener's
+//! callback, and is **not** a safe-layer figure. See the group's own doc.
 //!
 //! One headless runtime is brought up lazily, outside every timed loop (see
 //! [`HARNESS`]). It uses the same `WLR_BACKENDS=headless` / pixman environment
@@ -117,15 +126,21 @@ unsafe extern "C" fn bump(_listener: *mut sys::wl_listener, data: *mut c_void) {
     }
 }
 
-/// One event through the observer layer — `wl_signal_emit_mutable` over a
+/// One event through the signal machinery — `wl_signal_emit_mutable` over a
 /// `wl_listener` linked with `wl_signal_add` — against invoking a bare
 /// listener's `notify` directly.
 ///
-/// The `wlr` crate's own dispatcher and its `Registration` listener wrapper are
-/// `pub(crate)`, so an external bench target cannot drive them; this compares
-/// the signal-machinery primitives the wrapper is built on with the minimum
-/// cost of delivering the same event.
-fn listener_dispatch(c: &mut Criterion) {
+/// This is **not** a safe-layer figure, and the name says so. The `wlr` crate's
+/// dispatcher and its `Registration` listener wrapper are `pub(crate)`, and the
+/// only public observer that links a wlroots listener
+/// (`Runtime::observe_scene_buffer`) requires an active `Backend::run_all`, so
+/// an external bench target cannot drive `wlr`'s dispatch. A `run_all`-based
+/// proxy was tried: it measured ~1.1µs per event, against ~12ns of per-event
+/// work in the wrapper, i.e. almost entirely `Session` and event-loop overhead
+/// rather than the safe layer. What remains measurable is the primitive layer
+/// the wrapper is built on, so this group is named for that and its criterion
+/// ids deliberately avoid "observer".
+fn signal_emit(c: &mut Criterion) {
     // An unlinked list head. Both the signal and the listeners are fully
     // initialised: a zeroed `wl_listener` is UB (its `notify` must be non-null),
     // so the fields are written explicitly instead.
@@ -156,7 +171,7 @@ fn listener_dispatch(c: &mut Criterion) {
     let mut data: u64 = 0;
     let data_ptr = &raw mut data as *mut c_void;
 
-    c.bench_function("listener_dispatch/observer", |b| {
+    c.bench_function("signal_emit/via_signal", |b| {
         b.iter(|| {
             // SAFETY: `signal` is initialised and its only listener is live
             // with a valid `notify`; `data` outlives the call and is the type
@@ -166,7 +181,7 @@ fn listener_dispatch(c: &mut Criterion) {
         });
     });
 
-    c.bench_function("listener_dispatch/raw", |b| {
+    c.bench_function("signal_emit/direct_notify", |b| {
         b.iter(|| {
             // SAFETY: `bare` is a live listener with a `notify` callback that
             // only touches `data`, which outlives the call.
@@ -208,5 +223,5 @@ fn scene_op(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, handle_borrow, listener_dispatch, scene_op);
+criterion_group!(benches, handle_borrow, signal_emit, scene_op);
 criterion_main!(benches);
