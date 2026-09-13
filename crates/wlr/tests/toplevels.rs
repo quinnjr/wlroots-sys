@@ -7,6 +7,8 @@
 //! exists, the id-keyed mutators reject ids that were never issued rather
 //! than dereferencing them, and the handler set is implementable.
 
+mod common;
+
 #[derive(Default)]
 struct App {
     new_toplevels: Vec<wlr::ToplevelId>,
@@ -42,38 +44,10 @@ impl wlr::ToplevelHandler for App {
     }
 }
 
-/// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
-/// any test in this binary calls `Backend::autocreate`.
-///
-/// `Backend::autocreate` reads `WLR_BACKENDS` via `getenv`, and libtest runs
-/// `#[test]` functions on parallel threads by default, so an unguarded
-/// `setenv` racing another thread's `getenv` is undefined behaviour. Two of
-/// this file's three tests call `autocreate` (both need a real backend to
-/// get past `init_graphics`, which `create_xdg_shell` now requires) and both
-/// call this first, so the `Once` is what serialises them against each other
-/// — and against a future fourth caller, without anyone needing to update
-/// this comment when one is added. See `fd_sources.rs`'s sibling copy of this
-/// helper for the fuller argument; this crate's own unit tests
-/// (`src/interest.rs`) carry a third copy, for the identical reason each
-/// integration test binary is a separate process with its own environment.
-fn headless_env() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: `Once::call_once` runs this closure at most once and blocks
-        // every other caller of `call_once` on this `Once` until it returns,
-        // so no concurrent `getenv` from another test's call to
-        // `headless_env` can observe a torn write. This function's own doc
-        // comment is the argument for why no other reader exists to race.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-        }
-    });
-}
-
 #[test]
 fn an_xdg_shell_can_be_created_and_a_run_survives_it() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
@@ -105,7 +79,8 @@ fn an_xdg_shell_can_be_created_and_a_run_survives_it() {
 
 #[test]
 fn creating_the_shell_twice_is_refused_rather_than_leaking_a_second_global() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
@@ -125,6 +100,7 @@ fn creating_the_shell_twice_is_refused_rather_than_leaking_a_second_global() {
 
 #[test]
 fn creating_the_shell_before_init_graphics_is_refused_rather_than_hanging_every_client() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     assert!(

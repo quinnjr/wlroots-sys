@@ -9,6 +9,8 @@
 //! would take. Those tests drive the same `on_frame` / `on_output_destroy`
 //! callbacks wlroots calls, against a real `wl_signal`.
 
+mod common;
+
 use std::collections::HashMap;
 
 /// Note what none of these handlers do: panic. A handler runs underneath an
@@ -47,21 +49,18 @@ impl wlr::OutputHandler for App {
 
 #[test]
 fn headless_backend_announces_an_output_exactly_once() {
-    // wlroots reads both of these when the backend is created, so they have to
-    // be in place before `autocreate`. Setting them here rather than relying on
-    // the caller's environment keeps a plain `cargo test -p wlr` meaningful:
-    // without `WLR_BACKENDS` wlroots would pick whatever the developer's
-    // session offers (or nothing at all in CI), and the test would be measuring
-    // the machine rather than this crate.
-    //
-    // SAFETY: `set_var` is unsound only against a concurrent reader of the
-    // environment in another thread. This is the only test in this binary, so
-    // the harness has started no other test thread, and nothing here has yet
-    // called into wlroots or libc's locale/DNS machinery.
-    unsafe {
-        std::env::set_var("WLR_BACKENDS", "headless");
-        std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-    }
+    // wlroots reads these when the backend is created, so they have to be in
+    // place before `autocreate`. `common::headless_env` sets them idempotently
+    // rather than relying on the caller's environment, which keeps a plain
+    // `cargo test -p wlr` meaningful: without `WLR_BACKENDS` wlroots would pick
+    // whatever the developer's session offers (or nothing at all in CI), and
+    // the test would be measuring the machine rather than this crate.
+    // libwayland-server keeps process-global state; hold the guard for the
+    // whole body so no sibling test can bring a second display up alongside
+    // this one (see `common::headless_guard`). Acquired before the environment
+    // is set, matching every other site.
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     let display = wlr::Display::new().expect("display");
     // Declared after `display`, so it drops first: `Display::drop` destroys the

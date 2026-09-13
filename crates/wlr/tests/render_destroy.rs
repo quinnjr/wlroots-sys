@@ -7,25 +7,12 @@
 //! crashing rather than failing is reporting exactly the bug it was written
 //! for.
 
-use std::sync::Once;
+mod common;
 
 use wlr::{
     Allocator, Backend, Box2D, BufferPassOptions, Display, DrmFormat, Error, FourCc, Modifier,
     RectOptions, RenderColor, Renderer, SWAPCHAIN_CAP, Swapchain,
 };
-
-fn headless_env() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: single-threaded, before any other thread exists, and each
-        // integration binary is its own process.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-            std::env::set_var("WLR_RENDERER", "pixman");
-        }
-    });
-}
 
 fn argb() -> DrmFormat {
     DrmFormat::new(FourCc::ARGB8888, [Modifier::LINEAR])
@@ -43,7 +30,8 @@ fn argb() -> DrmFormat {
 /// double free rather than a clean teardown.
 #[test]
 fn a_renderer_outlives_the_display_it_was_created_alongside() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     let renderer = {
         let display = Display::new().expect("display");
@@ -74,7 +62,8 @@ fn destroying_many_renderers_does_not_trip_the_listener_assertions() {
 /// signal, which is why this crate links no listener into it.
 #[test]
 fn destroying_many_allocators_does_not_trip_the_listener_assertion() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -95,7 +84,8 @@ fn destroying_many_allocators_does_not_trip_the_listener_assertion() {
 /// behaviour the *views* rely on.
 #[test]
 fn a_swapchain_reports_its_allocator_dying() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -133,7 +123,8 @@ fn a_swapchain_reports_its_allocator_dying() {
 /// claim set and the next `begin_buffer_pass` would refuse.
 #[test]
 fn dropping_a_pass_submits_it_and_frees_the_renderer_for_the_next_one() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -166,7 +157,8 @@ fn dropping_a_pass_submits_it_and_frees_the_renderer_for_the_next_one() {
 /// stack discipline corrupts it silently rather than failing.
 #[test]
 fn a_second_pass_on_a_live_renderer_is_refused() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -199,7 +191,8 @@ fn a_second_pass_on_a_live_renderer_is_refused() {
 /// which is the refcount rule `crates/wlr/src/buffer.rs` documents.
 #[test]
 fn a_texture_keeps_its_buffer_alive_after_the_producer_reference_goes() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");
@@ -231,7 +224,8 @@ fn a_texture_keeps_its_buffer_alive_after_the_producer_reference_goes() {
 /// slots allocated but released must not double free them.
 #[test]
 fn a_swapchain_can_be_destroyed_after_a_full_cycle() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let renderer = Renderer::pixman().expect("pixman renderer");

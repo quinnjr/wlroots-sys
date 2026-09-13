@@ -95,6 +95,8 @@ mod render;
 mod runtime;
 mod scene;
 mod seat;
+#[cfg(test)]
+mod test_support;
 mod toplevel;
 #[cfg(wlr_has_xwayland)]
 mod xwayland;

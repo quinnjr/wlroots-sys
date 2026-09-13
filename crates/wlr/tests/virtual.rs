@@ -1,16 +1,10 @@
-fn headless_env() {
-    // SAFETY: libtest runs in parallel but all tests here set identical values.
-    unsafe {
-        std::env::set_var("WLR_BACKENDS", "headless");
-        std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-    }
-}
+mod common;
 
 #[test]
 fn virtual_devices_and_transient_seats_miss_cleanly() {
     use wlr::{TransientSeatAnswer, TransientSeatId, VirtualKeyboardId, VirtualPointerId};
 
-    headless_env();
+    common::headless_env();
     let rt = wlr::Runtime::new().unwrap();
     // Nothing was ever announced, so every table rests empty.
     assert_eq!(rt.rt_debug_virtual_keyboard_count(), 0);

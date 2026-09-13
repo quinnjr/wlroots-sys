@@ -182,6 +182,7 @@ pub(crate) mod tests {
     /// libwayland must report it writable on the very first turn.
     #[test]
     fn a_pipes_write_end_registered_for_writable_comes_back_writable() {
+        let _guard = crate::test_support::test_display_guard();
         headless_env();
         let display = crate::Display::new().expect("display");
         let backend = crate::Backend::autocreate(&display.event_loop()).expect("backend");
@@ -207,6 +208,7 @@ pub(crate) mod tests {
     /// very first turn must report the read end hung up.
     #[test]
     fn a_read_end_whose_peer_is_already_gone_comes_back_hung_up() {
+        let _guard = crate::test_support::test_display_guard();
         headless_env();
         let display = crate::Display::new().expect("display");
         let backend = crate::Backend::autocreate(&display.event_loop()).expect("backend");
@@ -234,6 +236,7 @@ pub(crate) mod tests {
     /// silently ignored the `WRITABLE` half.
     #[test]
     fn read_write_interest_on_a_write_only_fd_comes_back_writable_not_readable() {
+        let _guard = crate::test_support::test_display_guard();
         headless_env();
         let display = crate::Display::new().expect("display");
         let backend = crate::Backend::autocreate(&display.event_loop()).expect("backend");

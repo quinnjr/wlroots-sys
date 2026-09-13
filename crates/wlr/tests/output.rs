@@ -11,7 +11,6 @@ mod common;
 #[path = "common/format.rs"]
 mod format;
 
-use common::headless_env;
 use format::argb;
 use wlr::{
     Allocator, Backend, Box2D, CommittedFields, Display, FBox, ModeType, OwnedBuffer, Region,
@@ -141,7 +140,8 @@ impl wlr::LoopHandler for App {
 /// output; the accessors read back live truth.
 #[test]
 fn output_state_stages_fields_and_commits_atomically() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");
@@ -236,7 +236,8 @@ fn output_state_stages_fields_and_commits_atomically() {
 /// reports whether the copy ran.
 #[test]
 fn output_state_copy_carries_staged_fields() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");
@@ -302,7 +303,8 @@ fn output_state_copy_carries_staged_fields() {
 /// destroy-twice path is a compile error, not a runtime case.
 #[test]
 fn output_cursor_and_layers_round_trip() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");

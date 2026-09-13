@@ -15,6 +15,8 @@
 //! real announcement — because the guarantee is about what a consumer can reach,
 //! and a unit test poking the flag directly would prove nothing about that.
 
+mod common;
+
 /// Holds a `&Display`, which is the whole point: nothing in the signature of
 /// `new_output` hands a handler the event loop, but a handler's own state can
 /// carry one, and that is enough.
@@ -44,14 +46,8 @@ impl wlr::OutputHandler for App<'_> {
 
 #[test]
 fn a_handler_cannot_dispatch_the_event_loop() {
-    // SAFETY: `set_var` is unsound only against a concurrent reader of the
-    // environment on another thread. This is the only test in this binary, so
-    // the harness has started no other test thread, and nothing here has yet
-    // called into wlroots.
-    unsafe {
-        std::env::set_var("WLR_BACKENDS", "headless");
-        std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-    }
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     let display = wlr::Display::new().expect("display");
     // Declared after `display` so it drops first; see `headless.rs`.

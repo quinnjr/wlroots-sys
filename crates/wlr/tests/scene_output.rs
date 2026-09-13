@@ -9,26 +9,14 @@
 //! output, and the destroy listener that keeps the id honest belongs to the
 //! runtime — so the interesting calls can be made after `run_all` returns.
 
-use std::sync::Once;
+mod common;
+
 use std::time::Duration;
 
 use wlr::{
     Backend, Box2D, BufferId, Display, Error, LayerSurfaceId, NodeId, Output, OutputId, Runtime,
     SceneOutputId, SceneOutputStateOptions, SceneTimer, Until,
 };
-
-fn headless_env() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: single-threaded, before any other thread exists, and each
-        // integration binary is its own process.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-            std::env::set_var("WLR_RENDERER", "pixman");
-        }
-    });
-}
 
 /// Brings one headless output up and records what the scene-output API said
 /// while it was the only thing running.
@@ -107,7 +95,8 @@ impl wlr::OutputHandler for App {
 /// options survives a real commit.
 #[test]
 fn a_scene_output_answers_for_its_viewport_its_damage_and_its_timing() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");
@@ -253,7 +242,8 @@ fn a_scene_output_answers_for_its_viewport_its_damage_and_its_timing() {
 /// no crash — the destroy listener is what removes the row.
 #[test]
 fn a_destroyed_scene_output_misses_on_every_call() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");
@@ -289,7 +279,8 @@ fn a_destroyed_scene_output_misses_on_every_call() {
 /// still alive when the borrow ends, is what shows nothing was freed.
 #[test]
 fn a_live_borrow_refuses_a_destroy_of_the_scene_output_it_names() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");
@@ -330,7 +321,8 @@ fn a_live_borrow_refuses_a_destroy_of_the_scene_output_it_names() {
 /// the emission this crate's watch is linked into.
 #[test]
 fn destroying_the_output_underneath_a_scene_output_makes_its_id_miss() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = Display::new().expect("display");
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");

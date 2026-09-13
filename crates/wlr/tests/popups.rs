@@ -7,6 +7,8 @@
 //! dismissal, focus restore — is P2's `compositor/tests/popups.rs` against the
 //! harness, which drives a real `xdg_popup` end to end.
 
+mod common;
+
 /// A `ToplevelHandler` written against 0.20.27, with an empty body, must still
 /// compile and still be usable in 0.20.28. That is the whole additivity claim
 /// of this release, and it is a compile-time claim, so the test that asserts it
@@ -51,24 +53,6 @@ fn the_popup_handler_methods_are_additive_and_overridable() {
     assert!(handler.seen.is_empty());
 }
 
-/// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
-/// any test in this binary calls `Backend::autocreate`. See `toplevels.rs`'s
-/// identical copy for the full argument — this is a separate integration-test
-/// binary with its own environment and its own possible parallel `#[test]`
-/// threads, so it needs its own `Once`.
-fn headless_env() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: `Once::call_once` runs this closure at most once and blocks
-        // every other caller on this `Once` until it returns, so no concurrent
-        // `getenv` can observe a torn write.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-        }
-    });
-}
-
 /// A `run_all` over a headless backend with a popup-aware handler installed
 /// must start, dispatch and stop cleanly. No client connects, so no popup is
 /// ever announced — what this proves is that the six new events are wired
@@ -77,7 +61,8 @@ fn headless_env() {
 /// harness-driven coverage.
 #[test]
 fn a_run_with_a_popup_handler_starts_and_stops_cleanly() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     #[derive(Default)]
     struct App {
@@ -118,7 +103,7 @@ fn a_run_with_a_popup_handler_starts_and_stops_cleanly() {
 
 #[test]
 fn every_by_id_popup_operation_misses_on_an_id_no_popup_was_given() {
-    headless_env();
+    common::headless_env();
     let runtime = wlr::Runtime::new().expect("runtime");
     let dead = wlr::PopupId::dangling_for_test();
 
@@ -142,7 +127,7 @@ fn every_by_id_popup_operation_misses_on_an_id_no_popup_was_given() {
 /// id that resolves to nothing.
 #[test]
 fn several_dangling_popup_ids_all_miss_and_stay_distinct() {
-    headless_env();
+    common::headless_env();
     let runtime = wlr::Runtime::new().expect("runtime");
     let ids: Vec<_> = (1..=4).map(wlr::PopupId::dangling_nth_for_test).collect();
     for (i, a) in ids.iter().enumerate() {
@@ -158,7 +143,7 @@ fn several_dangling_popup_ids_all_miss_and_stay_distinct() {
 /// window" path calls on every unmap.
 #[test]
 fn a_parent_with_no_popups_has_an_empty_chain_and_dismisses_nothing() {
-    headless_env();
+    common::headless_env();
     let runtime = wlr::Runtime::new().expect("runtime");
     let window = wlr::PopupParent::Toplevel(wlr::ToplevelId::dangling_for_test());
     assert!(runtime.popups_of(window).is_empty());
@@ -171,7 +156,7 @@ fn a_parent_with_no_popups_has_an_empty_chain_and_dismisses_nothing() {
 /// exists. It must answer, not dereference.
 #[test]
 fn asking_about_an_explicit_grab_before_there_is_a_seat_is_false() {
-    headless_env();
+    common::headless_env();
     let runtime = wlr::Runtime::new().expect("runtime");
     assert!(!runtime.seat_has_explicit_grab());
 }

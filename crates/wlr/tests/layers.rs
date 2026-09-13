@@ -13,28 +13,12 @@
 //! binary like this one only ever sees the crate's public surface — the
 //! same reason this file cannot exercise anything client-driven either.
 
-/// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
-/// any test in this binary calls `Backend::autocreate`. See `toplevels.rs`'s
-/// identical copy of this helper for the full argument — this file is a
-/// separate integration-test binary with its own environment and its own
-/// possible parallel `#[test]` threads, so it needs its own `Once`.
-fn headless_env() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: `Once::call_once` runs this closure at most once and blocks
-        // every other caller of `call_once` on this `Once` until it returns,
-        // so no concurrent `getenv` from another test's call to
-        // `headless_env` can observe a torn write.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-        }
-    });
-}
+mod common;
 
 #[test]
 fn layer_shell_creates_once() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime
@@ -44,7 +28,7 @@ fn layer_shell_creates_once() {
 
 #[test]
 fn layer_mutators_on_dead_ids_are_none() {
-    headless_env();
+    common::headless_env();
     let runtime = wlr::Runtime::new().expect("runtime");
     let dead = wlr::LayerSurfaceId::dangling_for_test();
     assert_eq!(runtime.configure_layer_surface(dead, 10, 10), None);
@@ -54,7 +38,7 @@ fn layer_mutators_on_dead_ids_are_none() {
 
 #[test]
 fn add_rect_in_band_on_a_fresh_runtime_without_graphics_errors() {
-    headless_env();
+    common::headless_env();
     let runtime = wlr::Runtime::new().expect("runtime");
     // Mirrors add_rect's contract: no graphics yet -> Err, not panic.
     assert!(
@@ -74,7 +58,8 @@ fn add_rect_in_band_on_a_fresh_runtime_without_graphics_errors() {
 /// `None` — output resolution is never reached at all.
 #[test]
 fn set_layer_surface_output_on_dead_ids_is_none() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     struct App {
         output: Option<wlr::OutputId>,
         runtime: wlr::Runtime,

@@ -27,6 +27,8 @@
 //!   and is placed in the scene is icedtea's harness tests 8-10 (contract B9),
 //!   which drive a real IME client under the harness compositor.
 
+mod common;
+
 /// A `SeatHandler` written against the release before this one, with an empty
 /// body, must still compile and still be usable now: the three popup methods are
 /// defaulted, so they do not appear in a legacy impl. That is the additivity
@@ -65,23 +67,6 @@ fn the_input_method_popup_callbacks_are_additive_and_overridable() {
     assert!(handler.seen.is_empty());
 }
 
-/// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
-/// any test in this binary calls `Backend::autocreate`. See `axis.rs`'s
-/// identical copy for the full argument — this is a separate integration-test
-/// binary with its own environment.
-fn headless_env() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: `Once::call_once` runs this closure at most once and blocks
-        // every other caller on this `Once` until it returns, so no concurrent
-        // `getenv` can observe a torn write.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-        }
-    });
-}
-
 /// A `run_all` over a headless backend with an IME-popup-aware handler
 /// installed must start, dispatch and stop cleanly. No input-method is ever
 /// bound, so no popup event is ever produced — what this proves is lifecycle
@@ -90,7 +75,8 @@ fn headless_env() {
 /// pass. Routing a real popup to the handler is icedtea's harness test 8.
 #[test]
 fn a_run_with_an_input_method_popup_handler_starts_and_stops_cleanly() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     #[derive(Default)]
     struct App {
@@ -150,7 +136,7 @@ fn a_run_with_an_input_method_popup_handler_starts_and_stops_cleanly() {
 /// A regression turning a clean `None` into a panic has this as its tripwire.
 #[test]
 fn unknown_popup_ids_and_no_ime_miss_cleanly() {
-    headless_env();
+    common::headless_env();
     let runtime = wlr::Runtime::new().expect("runtime");
     let bogus = wlr::InputPopupSurfaceId::dangling_nth_for_test(0);
 

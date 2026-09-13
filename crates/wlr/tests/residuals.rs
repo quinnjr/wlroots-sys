@@ -1,16 +1,8 @@
-use std::sync::Once;
-
-fn headless_env() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| unsafe {
-        std::env::set_var("WLR_BACKENDS", "headless");
-        std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-    });
-}
+mod common;
 
 #[test]
 fn in_toplevel_rect_on_a_dead_id_is_none() {
-    headless_env();
+    common::headless_env();
     let runtime = wlr::Runtime::new().expect("runtime");
     let dead = wlr::ToplevelId::dangling_for_test();
     assert_eq!(
@@ -21,7 +13,8 @@ fn in_toplevel_rect_on_a_dead_id_is_none() {
 
 #[test]
 fn remove_rect_kills_a_root_rect_and_double_remove_is_none() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     // `add_rect` needs a scene to attach to, which only exists once
     // `init_graphics` has run against a real backend — see `scene.rs`'s own
     // integration test for the same setup.
@@ -43,7 +36,7 @@ fn remove_rect_kills_a_root_rect_and_double_remove_is_none() {
 
 #[test]
 fn remove_fd_forgets_the_declaration() {
-    headless_env();
+    common::headless_env();
     let runtime = wlr::Runtime::new().expect("runtime");
     let (r, _w) = std::io::pipe().expect("pipe");
     let id = runtime.add_fd(r.into(), wlr::Interest::READABLE);
@@ -67,7 +60,8 @@ fn remove_fd_forgets_the_declaration() {
 /// rather than killing the test.
 #[test]
 fn remove_fd_inside_a_scene_borrow_still_closes_the_descriptor() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     use std::io::Write;
 
     let display = wlr::Display::new().expect("display");
@@ -96,10 +90,11 @@ fn remove_fd_inside_a_scene_borrow_still_closes_the_descriptor() {
 
 #[test]
 fn removing_a_live_source_stops_its_callbacks() {
+    let _serial = common::headless_guard();
     // Registers two pipes, wakes both, removes one from inside its own
     // fd_ready, wakes both again, and asserts the removed source never
     // fires after removal while the surviving one does.
-    headless_env();
+    common::headless_env();
     use std::io::Write;
     struct App {
         runtime: wlr::Runtime,
@@ -183,6 +178,7 @@ fn removing_a_live_source_stops_its_callbacks() {
 
 #[test]
 fn removed_fd_stays_valid_for_the_rest_of_its_own_callback() {
+    let _serial = common::headless_guard();
     // The C1 regression test: `remove_fd` must not close the descriptor
     // while the `BorrowedFd` this very `fd_ready` call was handed is still
     // live. Calls `remove_fd` *before* touching `fd` — unlike
@@ -191,7 +187,7 @@ fn removed_fd_stays_valid_for_the_rest_of_its_own_callback() {
     // the same `fd`, which must not fail with `EBADF` ("Bad file
     // descriptor"): that specific error is what a closed-out-from-under-it
     // descriptor produces.
-    headless_env();
+    common::headless_env();
     use std::io::Write;
     struct App {
         runtime: wlr::Runtime,
@@ -310,7 +306,8 @@ fn toplevel_id_debug_and_dangling_bands_do_not_collide() {
 /// and CI runs it enough times that one eventually will.
 #[test]
 fn eintr_from_a_signal_during_a_blocking_run_all_does_not_fail_the_run() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     use std::io::Write;
     use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 

@@ -5,24 +5,12 @@
 //! integration test builds the headless environment inline, mirroring the
 //! per-binary setup that `tests/seat.rs` and `tests/decoration.rs` use.
 
-/// The headless backend is selected by environment, read once when the
-/// display and backend are created below.
-fn headless_env() {
-    // SAFETY: libtest runs the tests in a binary in parallel by default, so
-    // this is *not* safe by virtue of serial execution. It is safe because all
-    // three tests in this binary set the same two variables to the same values
-    // (and no `#[test]` here spawns threads that read the environment): a
-    // concurrent write from another test writes byte-identical values, so no
-    // harness thread can observe a torn environment read.
-    unsafe {
-        std::env::set_var("WLR_BACKENDS", "headless");
-        std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-    }
-}
+mod common;
 
 #[test]
 fn create_text_input_and_input_method_managers_once() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
@@ -46,7 +34,8 @@ fn create_text_input_and_input_method_managers_once() {
 
 #[test]
 fn managers_register_listeners_without_a_client() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
@@ -83,7 +72,8 @@ fn managers_register_listeners_without_a_client() {
 
 #[test]
 fn relay_focus_is_a_noop_with_no_text_inputs() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
@@ -110,7 +100,7 @@ fn relay_focus_is_a_noop_with_no_text_inputs() {
 
 #[test]
 fn dangling_ids_and_no_ime_read_empty_snapshots() {
-    headless_env();
+    common::headless_env();
     let runtime = wlr::Runtime::new().expect("runtime");
     let bogus = wlr::InputPopupSurfaceId::dangling_nth_for_test(0);
     assert!(runtime.pending_ime_state().is_none());

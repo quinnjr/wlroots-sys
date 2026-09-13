@@ -308,6 +308,7 @@ mod tests {
     /// the "rather than the display's own" half of the claim above.
     #[test]
     fn a_display_yields_a_non_null_event_loop() {
+        let _guard = crate::test_support::test_display_guard();
         let display = Display::new().expect("wl_display_create failed");
         let loop_ = display.event_loop();
         assert_ne!(
@@ -322,6 +323,7 @@ mod tests {
     /// for handlers must not catch it.
     #[test]
     fn dispatching_outside_a_handler_is_allowed() {
+        let _guard = crate::test_support::test_display_guard();
         let display = Display::new().expect("wl_display_create failed");
         assert_eq!(
             display.event_loop().dispatch(0),
@@ -334,6 +336,7 @@ mod tests {
     /// so it has to come back as an owned, non-empty `wayland-N`.
     #[test]
     fn a_display_can_bind_an_automatic_socket() {
+        let _guard = crate::test_support::test_display_guard();
         let display = Display::new().expect("wl_display_create failed");
         match display.add_socket_auto() {
             Ok(name) => assert!(
@@ -350,6 +353,7 @@ mod tests {
     /// than a fault — `run_all` calls it on every single turn.
     #[test]
     fn flushing_a_clientless_display_is_harmless() {
+        let _guard = crate::test_support::test_display_guard();
         let display = Display::new().expect("wl_display_create failed");
         display.flush_clients();
         display.flush_clients();

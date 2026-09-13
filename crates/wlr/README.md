@@ -71,6 +71,46 @@ guarantee that nothing observable moved.
 
 No further compatibility exception is sanctioned in the `0.20` line.
 
+## Testing the safe layer
+
+Every milestone is held to the roadmap's six-leg testing standard. The
+wrapper's correspondence to wlroots is only as good as the evidence behind
+it, and each leg reaches something the others cannot:
+
+1. **Headless integration tests** — `cargo test`. The established style:
+   bring up the headless backend (`WLR_BACKENDS=headless`), drive the
+   wrapper, assert through scene-node and event observation. The shared
+   harness is `tests/common/mod.rs`, whose serialization guard works around
+   libwayland-server's process-global state.
+2. **Client-driven protocol tests** — `cargo test`. A real `wayland-client`
+   thread drives commit/ack sequencing from the client side, which no
+   server-only test can reach. The harness lives in
+   `tests/common/client.rs`; `tests/client_harness.rs` is the seed.
+   `wayland-client` and `wayland-protocols` are dev-dependencies only.
+3. **Destroy-order / UAF tests** — `cargo test`. Every handle-owning wrapper
+   gets a test that destroys the C object first and asserts the wrapper
+   observes it. Miri cannot cross FFI, so these are the memory-safety
+   evidence.
+4. **Coverage audit** — `cargo xtask coverage --check`. CI also runs the
+   `coverage_audit` test under `--all-features` and `--no-default-features`.
+5. **Fuzzing** — `cargo +nightly fuzz run operations`, from `fuzz/`. A
+   standalone cargo-fuzz crate, excluded from the workspace and nightly-only,
+   replays a cumulative operation enum on a headless backend; ASan is the UAF
+   oracle. What the committed target reaches is the manager double-create
+   guards and the id-resolution/miss contract. The client-driven
+   state-machine operations that would exercise the stateful wrappers
+   end-to-end are **deferred**: they need a `wayland-client` dependency the
+   fuzz crate does not take yet, so the fuzzer claims only the server-side
+   surface that is reachable today. CI runs it as a scheduled nightly job
+   (also triggerable on demand).
+6. **Benchmarks** — `cargo bench -p wlr --bench dispatch`. Criterion runs
+   three groups: `handle_borrow` and `scene_op` are safe/raw pairs, each
+   measuring a safe call against the raw `wlr-sys` sequence to expose wrapper
+   overhead, while `signal_emit` measures the libwayland signal machinery
+   rather than the safe layer (no public API drives that observer outside
+   `Backend::run_all`). CI records `develop`-push results as artifacts;
+   informational, not gating.
+
 ## 0.20.21
 
 Pointer constraints and relative pointer motion. All additive.

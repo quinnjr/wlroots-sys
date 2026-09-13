@@ -20,6 +20,8 @@
 //!   with an injected `zwlr_virtual_pointer` — and which was `#[ignore]`d for
 //!   exactly the gap this release closes.
 
+mod common;
+
 /// A `SeatHandler` written against 0.20.28, with an empty body, must still
 /// compile and still be usable in 0.20.29. That is the additivity claim of
 /// this release, and it is a compile-time claim, so the test that asserts it
@@ -83,24 +85,6 @@ fn the_axis_vocabulary_is_usable_from_outside_the_crate() {
     );
 }
 
-/// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS` are set exactly once, before
-/// any test in this binary calls `Backend::autocreate`. See `popups.rs`'s
-/// identical copy for the full argument — this is a separate integration-test
-/// binary with its own environment and its own possible parallel `#[test]`
-/// threads, so it needs its own `Once`.
-fn headless_env() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        // SAFETY: `Once::call_once` runs this closure at most once and blocks
-        // every other caller on this `Once` until it returns, so no concurrent
-        // `getenv` can observe a torn write.
-        unsafe {
-            std::env::set_var("WLR_BACKENDS", "headless");
-            std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-        }
-    });
-}
-
 /// A `run_all` over a headless backend with a scroll-aware handler installed
 /// must start, dispatch and stop cleanly. No pointer is ever plugged in, so no
 /// axis event is ever produced — what this proves is that the new event is
@@ -108,7 +92,8 @@ fn headless_env() {
 /// about the ordinary lifecycle.
 #[test]
 fn a_run_with_a_scroll_handler_starts_and_stops_cleanly() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     #[derive(Default)]
     struct App {

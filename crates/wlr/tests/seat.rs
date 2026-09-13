@@ -8,6 +8,8 @@
 //! for an unknown id rather than dereferencing it, and the hit test on an
 //! empty scene finds nothing instead of faulting.
 
+mod common;
+
 #[derive(Default)]
 struct App {
     keys: Vec<u32>,
@@ -34,12 +36,8 @@ impl wlr::SeatHandler for App {
 
 #[test]
 fn a_seat_can_be_created_and_a_run_survives_it() {
-    // SAFETY: the only test in this binary, so no other harness thread can
-    // observe a torn environment read.
-    unsafe {
-        std::env::set_var("WLR_BACKENDS", "headless");
-        std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-    }
+    let _serial = common::headless_guard();
+    common::headless_env();
 
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
@@ -69,6 +67,7 @@ fn a_seat_can_be_created_and_a_run_survives_it() {
 
 #[test]
 fn creating_the_seat_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime.create_seat(&display, "seat0").expect("first");
@@ -83,6 +82,7 @@ fn creating_the_seat_twice_is_refused() {
 
 #[test]
 fn creating_the_primary_selection_manager_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime
@@ -99,6 +99,7 @@ fn creating_the_primary_selection_manager_twice_is_refused() {
 
 #[test]
 fn creating_the_data_control_manager_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime
@@ -115,6 +116,7 @@ fn creating_the_data_control_manager_twice_is_refused() {
 
 #[test]
 fn creating_the_virtual_keyboard_manager_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime
@@ -131,6 +133,7 @@ fn creating_the_virtual_keyboard_manager_twice_is_refused() {
 
 #[test]
 fn creating_the_virtual_pointer_manager_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime
@@ -147,6 +150,7 @@ fn creating_the_virtual_pointer_manager_twice_is_refused() {
 
 #[test]
 fn creating_the_screencopy_manager_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime.create_screencopy_manager(&display).expect("first");
@@ -161,6 +165,7 @@ fn creating_the_screencopy_manager_twice_is_refused() {
 
 #[test]
 fn creating_the_pointer_constraints_manager_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime
@@ -187,6 +192,7 @@ fn cursor_position_is_the_origin_without_a_seat() {
 
 #[test]
 fn creating_the_relative_pointer_manager_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime
@@ -203,6 +209,7 @@ fn creating_the_relative_pointer_manager_twice_is_refused() {
 
 #[test]
 fn creating_the_idle_notifier_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime.create_idle_notifier(&display).expect("first");
@@ -217,6 +224,7 @@ fn creating_the_idle_notifier_twice_is_refused() {
 
 #[test]
 fn creating_the_idle_inhibit_manager_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime
@@ -233,6 +241,7 @@ fn creating_the_idle_inhibit_manager_twice_is_refused() {
 
 #[test]
 fn focus_and_hit_test_report_a_miss_rather_than_dereferencing() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime.create_seat(&display, "seat0").expect("seat");
@@ -280,6 +289,7 @@ fn focus_without_a_seat_is_a_miss() {
 /// other manager global here.
 #[test]
 fn creating_the_session_lock_manager_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime
@@ -299,6 +309,7 @@ fn creating_the_session_lock_manager_twice_is_refused() {
 /// global here.
 #[test]
 fn creating_the_output_manager_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime.create_output_manager(&display).expect("first");
@@ -317,6 +328,7 @@ fn creating_the_output_manager_twice_is_refused() {
 /// state the input-isolation gates all key off of.
 #[test]
 fn a_fresh_runtime_is_not_session_locked() {
+    let _serial = common::headless_guard();
     let runtime = wlr::Runtime::new().expect("runtime");
     assert!(
         !runtime.is_session_locked(),
@@ -333,21 +345,9 @@ fn a_fresh_runtime_is_not_session_locked() {
     );
 }
 
-/// Shared by every test below that needs a real `Backend` — `init_graphics`
-/// and `create_presentation` both require one. `Once`-guarded, mirroring
-/// `output_layout.rs`'s own `headless_env`: `std::env::set_var` is process-
-/// global, so a second call racing a first from another test thread must not
-/// re-touch it mid-read.
-fn headless_env() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| unsafe {
-        std::env::set_var("WLR_BACKENDS", "headless");
-        std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
-    });
-}
-
 #[test]
 fn creating_the_viewporter_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime.create_viewporter(&display).expect("first");
@@ -362,6 +362,7 @@ fn creating_the_viewporter_twice_is_refused() {
 
 #[test]
 fn creating_the_single_pixel_buffer_manager_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime
@@ -378,6 +379,7 @@ fn creating_the_single_pixel_buffer_manager_twice_is_refused() {
 
 #[test]
 fn creating_the_content_type_manager_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime
@@ -396,6 +398,7 @@ fn creating_the_content_type_manager_twice_is_refused() {
 /// [`init_graphics`](wlr::Runtime::init_graphics) has run.
 #[test]
 fn creating_the_xdg_output_manager_before_init_graphics_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     assert!(
@@ -409,7 +412,8 @@ fn creating_the_xdg_output_manager_before_init_graphics_is_refused() {
 
 #[test]
 fn creating_the_xdg_output_manager_twice_is_refused() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = wlr::Runtime::new().expect("runtime");
@@ -426,6 +430,7 @@ fn creating_the_xdg_output_manager_twice_is_refused() {
 
 #[test]
 fn creating_the_fractional_scale_manager_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime
@@ -442,7 +447,8 @@ fn creating_the_fractional_scale_manager_twice_is_refused() {
 
 #[test]
 fn creating_the_presentation_twice_is_refused() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = wlr::Runtime::new().expect("runtime");
@@ -460,7 +466,8 @@ fn creating_the_presentation_twice_is_refused() {
 
 #[test]
 fn set_scene_presentation_before_create_presentation_is_refused() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = wlr::Runtime::new().expect("runtime");
@@ -476,7 +483,8 @@ fn set_scene_presentation_before_create_presentation_is_refused() {
 
 #[test]
 fn set_scene_presentation_before_init_graphics_is_refused() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = wlr::Runtime::new().expect("runtime");
@@ -494,6 +502,7 @@ fn set_scene_presentation_before_init_graphics_is_refused() {
 
 #[test]
 fn creating_the_cursor_shape_manager_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime
@@ -510,6 +519,7 @@ fn creating_the_cursor_shape_manager_twice_is_refused() {
 
 #[test]
 fn creating_the_xdg_activation_manager_twice_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime
@@ -526,7 +536,8 @@ fn creating_the_xdg_activation_manager_twice_is_refused() {
 
 #[test]
 fn creating_the_gamma_control_manager_twice_is_refused() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = wlr::Runtime::new().expect("runtime");
@@ -545,6 +556,7 @@ fn creating_the_gamma_control_manager_twice_is_refused() {
 
 #[test]
 fn creating_the_gamma_control_manager_before_init_graphics_is_refused() {
+    let _serial = common::headless_guard();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     assert!(
@@ -558,7 +570,8 @@ fn creating_the_gamma_control_manager_before_init_graphics_is_refused() {
 
 #[test]
 fn an_outputs_gamma_size_is_reachable_on_a_headless_output() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = wlr::Display::new().expect("display");
     let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
 
@@ -591,7 +604,8 @@ fn an_outputs_gamma_size_is_reachable_on_a_headless_output() {
 /// reason this file's header note gives about key presses.
 #[test]
 fn a_named_cursor_shape_reads_back_and_the_default_shape_clears_it() {
-    headless_env();
+    let _serial = common::headless_guard();
+    common::headless_env();
     let display = wlr::Display::new().expect("display");
     let runtime = wlr::Runtime::new().expect("runtime");
     runtime.create_seat(&display, "seat0").expect("seat");

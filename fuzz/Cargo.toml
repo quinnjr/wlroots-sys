@@ -1,0 +1,25 @@
+[package]
+name = "wlr-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Standalone workspace root. The root manifest excludes `fuzz`, but Cargo walks
+# up past this checkout to any enclosing repository root (the case when `fuzz/`
+# lives inside a linked git worktree), so the package must declare itself a
+# workspace root to be buildable by `cargo-fuzz` from any layout.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+wlr = { path = "../crates/wlr" }
+
+[[bin]]
+name = "operations"
+path = "fuzz_targets/operations.rs"
+test = false
+doc = false

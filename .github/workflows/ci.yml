@@ -83,7 +83,20 @@ jobs:
       # branch's wlroots minor; older minors live on their own support/*
       # branches, each running this same job against its own wlroots, since
       # cargo cannot resolve a manifest listing two `wlr-sys` versions.
+      #
+      # This is also where the client-driven leg runs: an integration binary
+      # needs no registration, so `cargo test` picks up
+      # `tests/client_harness.rs` (over the `tests/common/client.rs` harness)
+      # with no extra config, and the `wayland-client`/`wayland-protocols`
+      # dev-dependencies are unconditional rather than feature-gated, so they
+      # resolve under every feature set the lint steps above compile.
       - run: cargo test --workspace
+
+      # Compile the bench target without running it. The separate `bench` job
+      # is develop-push-only and non-gating, so a bench that stopped compiling
+      # would otherwise be invisible on a PR. Not `cargo bench` for real:
+      # criterion's timed loops are meaningless on a shared runner.
+      - run: cargo bench -p wlr --bench dispatch --no-run
 
       # 100% is defined in the all-features configuration, so the ledgers are
       # reconciled against those bindings. WLR_COVERAGE_ALL_FEATURES is what
@@ -232,6 +245,64 @@ jobs:
       # neither belongs in a published crate. Nothing checked before.
       - run: cargo package -p wlr --allow-dirty
 
+  bench:
+    # Informational, not a gate. Benchmark times on a shared runner are too
+    # noisy to fail a build on, and a PR has nothing to compare against — so
+    # this runs only on `develop` pushes and records the criterion output as an
+    # artifact for a human to diff across commits.
+    #
+    # `continue-on-error` is at the *job* level, not on the bench step alone:
+    # a failing dependency install must not gate the run either, which is what
+    # a step-level flag would still have allowed. A broken bench is no longer
+    # what this hides: the `test` job's `cargo bench --no-run` step gates the
+    # bench target on every PR, so `continue-on-error` here only affects the
+    # informational timed run and its artifact upload.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Syu --noconfirm \
+            git rust clang pkgconf \
+            wlroots0.20 wayland wayland-protocols \
+            libxkbcommon libinput libdrm pixman mesa vulkan-headers
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run the dispatch benches
+        run: cargo bench -p wlr --bench dispatch
+
+      - name: Note the artifact's limits
+        # The artifact is a criterion tree with no context; a reader could take
+        # the sub-nanosecond raw figures at face value. Say otherwise in-band.
+        if: always()
+        run: |
+          mkdir -p target/criterion
+          cat > target/criterion/README.txt <<'EOF'
+          Criterion output for `cargo bench -p wlr --bench dispatch`.
+
+          Read the safe/raw *ratio* for handle_borrow and scene_op. The raw
+          figures are sub-nanosecond (roughly 0.4-1.4 ns) and therefore sit at
+          criterion's noise floor on a shared runner: their absolute value is
+          not meaningful, only that the safe call is ~30x slower.
+
+          `signal_emit` is NOT a safe-layer pair. wlr's dispatcher and its
+          wl_listener wrapper are pub(crate), and no public API drives the
+          observer outside Backend::run_all, so it compares wlr_sys's signal
+          primitives with a direct callback. See the group's doc in
+          benches/dispatch.rs.
+          EOF
+
+      - name: Upload criterion results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: criterion
+          path: target/criterion/**
+
   miri:
     # Validates the reentrancy-deferring dispatcher in `wlr` under Miri, which
     # caught a real harness bug during its development. Scoped to
@@ -280,4 +351,8 @@ jobs:
           echo "MSRV is $msrv"
           rustup toolchain install "$msrv" --profile minimal
           rustup default "$msrv"
-      - run: cargo check --workspace --all-features
+      # `--all-targets` so the dev-dependencies (criterion, wayland-client,
+      # wayland-protocols) are actually compiled on the MSRV toolchain. A plain
+      # `cargo check --workspace --all-features` builds only lib/bin targets,
+      # leaving the plan's "1.88" constraint on those deps ungated.
+      - run: cargo check -p wlr --all-targets --all-features

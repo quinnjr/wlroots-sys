@@ -14811,6 +14811,7 @@ mod tests {
     /// `Graphics::background_band`'s own doc for the mechanism.
     #[test]
     fn scene_bands_are_created_bottom_to_top_in_a_fixed_order() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
 
         let scene = rt.scene_ptr().expect("scene");
@@ -14863,6 +14864,7 @@ mod tests {
     /// it already has must not touch the scene at all.
     #[test]
     fn reparent_layer_surface_if_changed_moves_the_tree_only_when_the_layer_changed() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
 
         let background = rt.layer_band_ptr(Layer::Background).expect("background");
@@ -14914,6 +14916,7 @@ mod tests {
     /// every other by-id operation in this crate follows.
     #[test]
     fn reparent_layer_surface_if_changed_is_none_for_an_unknown_id() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         let dead = LayerSurfaceId::dangling_for_test();
         assert_eq!(rt.reparent_layer_surface_if_changed(dead, Layer::Top), None);
@@ -14928,6 +14931,7 @@ mod tests {
     /// above every toplevel unconditionally, raise or no raise.
     #[test]
     fn raise_toplevel_reorders_only_within_the_toplevel_band() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
 
         let toplevel_band = rt.toplevel_band_ptr().expect("toplevel band");
@@ -14998,6 +15002,7 @@ mod tests {
     /// tradeoff `add_rect_in_band` exists to avoid).
     #[test]
     fn add_rect_in_band_parents_into_the_named_band() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         let rect = rt
             .add_rect_in_band(Band::Overlay, 4, 4, [1.0, 0.0, 0.0, 1.0])
@@ -15016,6 +15021,7 @@ mod tests {
     /// not (see `scene_bands_are_created_bottom_to_top_in_a_fixed_order`).
     #[test]
     fn add_rect_in_band_does_not_parent_into_a_different_band() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         let rect = rt
             .add_rect_in_band(Band::Background, 4, 4, [0.0, 1.0, 0.0, 1.0])
@@ -15047,6 +15053,7 @@ mod tests {
     /// distinct from `RectParent::Toplevel`.
     #[test]
     fn clear_toplevels_does_not_purge_a_band_rect() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         let toplevel_band = rt.toplevel_band_ptr().expect("toplevel band");
         let tree =
@@ -15075,6 +15082,7 @@ mod tests {
     /// short-circuit before touching the outputs table at all).
     #[test]
     fn set_layer_surface_output_on_a_dead_layer_id_is_none() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         let dead_layer = LayerSurfaceId::dangling_for_test();
         let dead_output = OutputId(next_id());
@@ -15087,6 +15095,7 @@ mod tests {
     /// wlroots setter function; see `set_layer_surface_output`'s own doc).
     #[test]
     fn set_layer_surface_output_assigns_the_raw_output_field() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
 
         // A zeroed, stack-local `wlr_layer_surface_v1` stands in for a live
@@ -15134,6 +15143,7 @@ mod tests {
     fn forget_output_nulls_the_planted_pointer_only_in_matching_layer_surfaces() {
         use std::alloc::{Layout, alloc_zeroed};
 
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
 
         // Two heap-allocated, zeroed `wlr_output`s at distinct addresses
@@ -15226,6 +15236,7 @@ mod tests {
     /// render/follow test — not this crate's unit tests — covers.
     #[test]
     fn drag_icon_position_is_none_with_no_active_drag() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         assert_eq!(rt.drag_icon_position(), None);
     }
@@ -15241,6 +15252,7 @@ mod tests {
     /// uses) is enough to exercise it without a client or a running seat.
     #[test]
     fn reposition_drag_icon_moves_the_tree_and_drag_icon_position_reads_it_back() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
 
         // Stands in for the tree `on_start_drag` would have stored, parented
@@ -15267,6 +15279,7 @@ mod tests {
     /// drag or not, rather than checking first.
     #[test]
     fn reposition_drag_icon_is_a_no_op_with_no_active_drag() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         rt.reposition_drag_icon(5, 5);
         assert_eq!(rt.drag_icon_position(), None);
@@ -15284,6 +15297,7 @@ mod tests {
     /// it happened to destroy.
     #[test]
     fn destroying_a_tree_runs_every_descendants_addon_destructor() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         let band = rt.band_node(Band::Overlay).expect("overlay band");
         let top = rt.create_tree_in_band(Band::Overlay).expect("top tree");
@@ -15318,6 +15332,7 @@ mod tests {
     /// calling `wlr_scene_node_destroy` on memory wlroots already reclaimed.
     #[test]
     fn destroying_a_legacy_rect_by_node_id_purges_its_rect_row() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         let rect = rt
             .add_rect_in_band(Band::Top, 8, 8, [0.0, 0.0, 1.0, 1.0])
@@ -15345,6 +15360,7 @@ mod tests {
     /// under a session the compositor still reports as locked.
     #[test]
     fn nothing_under_a_held_lock_is_mutable_through_the_node_api() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         // Built exactly as `install_lock_fill` builds it — an opaque black
         // rect appended to the lock band — without needing an output layout,
@@ -15408,6 +15424,7 @@ mod tests {
     /// covering the outputs the locker has not painted.
     #[test]
     fn a_lock_fill_whose_row_died_elsewhere_is_reinstalled_not_latched() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         let first = rt
             .add_rect_in_band(Band::Lock, 8, 8, [0.0, 0.0, 0.0, 1.0])
@@ -15464,6 +15481,7 @@ mod tests {
     /// there. The property is the frame, not the caller.
     #[test]
     fn a_foreign_frame_alone_refuses_scene_restructuring() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         let band = rt.band_node(Band::Overlay).expect("band");
         let doomed = rt.create_tree_under(band).expect("tree");
@@ -15514,6 +15532,7 @@ mod tests {
     /// needs the explicit refusal.
     #[test]
     fn the_lock_band_cannot_be_hidden_while_the_session_is_locked() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         let band = rt.band_node(Band::Lock).expect("lock band");
 
@@ -15553,6 +15572,7 @@ mod tests {
     /// and contradicted each of those methods' own documented `None` cases.
     #[test]
     fn appearance_setters_reach_a_foreign_node_but_placement_does_not() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         let band = rt.band_node(Band::Overlay).expect("band");
         let owned = rt.create_scene_buffer(band, None).expect("buffer node");
@@ -15594,6 +15614,7 @@ mod tests {
     /// wlroots has freed.
     #[test]
     fn remove_rect_purges_the_node_row() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         let rect = rt
             .add_rect_in_band(Band::Top, 8, 8, [0.0, 1.0, 0.0, 1.0])
@@ -15610,6 +15631,7 @@ mod tests {
     /// is the property that recomputation exists for.
     #[test]
     fn reparenting_a_legacy_rect_moves_it_between_purge_classes() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         let toplevel_band = rt.toplevel_band_ptr().expect("toplevel band");
         // SAFETY: `toplevel_band` is a live tree owned by `rt`'s own scene.
@@ -15659,6 +15681,7 @@ mod tests {
     /// the failure mode that does not announce itself.
     #[test]
     fn restacking_during_a_buffer_walk_is_refused() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         let a = rt
             .add_rect_in_band(Band::Overlay, 4, 4, [1.0, 0.0, 0.0, 1.0])
@@ -15711,6 +15734,7 @@ mod tests {
     /// on every origin, and hiding a node breaks no bookkeeping.
     #[test]
     fn a_foreign_node_refuses_the_mutators_but_still_hides() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = headless_runtime();
         let band = rt.band_ptr(Band::Toplevel).expect("band");
         // SAFETY: the band tree is this runtime's own and lives for the process.
@@ -15759,6 +15783,7 @@ mod tests {
     /// handed to `wlr_cursor_set_xcursor` is the only observable proxy.
     #[test]
     fn ensure_cursor_image_does_not_stomp_a_named_shape() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = seated_runtime();
         rt.set_cursor_shape(CursorShape::Text);
         assert_eq!(rt.cursor_shape(), Some(CursorShape::Text));
@@ -15785,6 +15810,7 @@ mod tests {
     /// did: give the cursor the default `left_ptr` image.
     #[test]
     fn ensure_cursor_image_still_applies_the_default_when_nothing_is_named() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = seated_runtime();
         assert_eq!(rt.cursor_shape(), None);
         rt.ensure_cursor_image();
@@ -15809,6 +15835,7 @@ mod tests {
     /// and the test returns early where it is not (a bare CI container).
     #[test]
     fn a_failed_theme_load_is_retried_on_the_next_pointer_event() {
+        let _guard = crate::test_support::test_display_guard();
         let control = seated_runtime();
         control.ensure_cursor_image();
         if !control.inner.cursor_image_loaded.get() {
@@ -15843,6 +15870,7 @@ mod tests {
     /// applying.
     #[test]
     fn resetting_the_named_cursor_restores_the_default_image() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = seated_runtime();
         rt.set_cursor_shape(CursorShape::Text);
         rt.reset_named_cursor();
@@ -15859,6 +15887,7 @@ mod tests {
     /// un-short-circuited call would overwrite it with `Some(Some(Text))`.
     #[test]
     fn naming_the_shape_already_in_force_is_a_no_op() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = seated_runtime();
         rt.set_cursor_shape(CursorShape::Text);
         assert_eq!(rt.applied_cursor(), Some(Some(CursorShape::Text)));
@@ -15877,6 +15906,7 @@ mod tests {
     /// anything else sees exactly the pre-0.20.26 behaviour.
     #[test]
     fn naming_the_default_shape_clears_the_named_cursor() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = seated_runtime();
         rt.set_cursor_shape(CursorShape::Text);
         rt.set_cursor_shape(CursorShape::Default);
@@ -15890,6 +15920,7 @@ mod tests {
     /// `Default` it is a real named shape and must persist.
     #[test]
     fn the_explicit_pointer_shape_is_named_rather_than_clearing() {
+        let _guard = crate::test_support::test_display_guard();
         let rt = seated_runtime();
         rt.set_cursor_shape(CursorShape::Pointer);
         assert_eq!(rt.cursor_shape(), Some(CursorShape::Pointer));
