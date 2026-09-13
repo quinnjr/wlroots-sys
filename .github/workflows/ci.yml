@@ -83,6 +83,13 @@ jobs:
       # branch's wlroots minor; older minors live on their own support/*
       # branches, each running this same job against its own wlroots, since
       # cargo cannot resolve a manifest listing two `wlr-sys` versions.
+      #
+      # This is also where the client-driven leg runs: an integration binary
+      # needs no registration, so `cargo test` picks up
+      # `tests/client_harness.rs` (over the `tests/common/client.rs` harness)
+      # with no extra config, and the `wayland-client`/`wayland-protocols`
+      # dev-dependencies are unconditional rather than feature-gated, so they
+      # resolve under every feature set the lint steps above compile.
       - run: cargo test --workspace
 
       # 100% is defined in the all-features configuration, so the ledgers are
