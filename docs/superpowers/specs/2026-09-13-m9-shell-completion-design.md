@@ -137,8 +137,9 @@ compiles, passes its own tests, and leaves the audit no worse.
   `set_preferred_buffer_transform`, `map`, `unmap`, `for_each_surface` (Rust
   closure instead of the C iterator callback), `synced` (a borrow-scoped
   `SyncedState` handle with `get_state`/`finish`/`init`),
-  `lock_pending`/`reject_pending` (the one bound C variadic: format first, pass
-  a lone `%s`), `unlock_cached`. State accessors (`wlr_surface_state`,
+  `lock_pending`/`unlock_cached`, with `reject_pending` deferred to M13 as
+  `interface-impl-only` (the one bound C variadic cannot be forwarded from
+  Rust). State accessors (`wlr_surface_state`,
   `state_field`, `state_has_buffer`) are added only if a consumer-facing
   accessor is warranted; otherwise those symbols are reclassified `internal`
   (see Rulings).
@@ -214,6 +215,7 @@ Definitive milestone re-homes (applied in `waived.toml`):
 | `wlr_ext_foreign_toplevel_image_capture_source_manager_v1*` (4) | **M10** | Depends on ext-image-capture. |
 | `wlr_surface_get_content_type_v1` | **M11** | content_type_v1 belongs to M11. |
 | `wlr_compositor_set_renderer` | **M13** | Tied to renderer-ownership design, same bucket as `begin_render_pass`. |
+| `wlr_surface_reject_pending` | **M13** | The one C variadic; Rust cannot forward a `va_list`, and wlroots only accepts it inside a client-commit hook. |
 
 In-place classifications (M9 stays, reason changes from `not-yet`):
 

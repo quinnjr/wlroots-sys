@@ -36,7 +36,7 @@ use crate::{OutputId, Runtime, sys};
 ///
 /// An owned value snapshot rather than a borrow of wlroots memory — the C
 /// `wlr_presentation_event` is a plain value the caller fills in, and
-/// [`PresentEvent::as_c`] is its only in-crate producer besides
+/// `PresentEvent::as_c` is its only in-crate producer besides
 /// [`from_output`](Self::from_output) itself.
 pub struct PresentationEvent {
     raw: sys::wlr_presentation_event,

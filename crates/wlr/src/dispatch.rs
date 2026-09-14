@@ -75,8 +75,8 @@ pub(crate) enum Event {
     OutputCommitted(OutputId, CommittedFields, std::time::Duration),
     /// An output was damaged. Carries no region — the damage accumulates in
     /// the output's registry slot (unioned, so coalesced deliveries repaint
-    /// everything) and is taken at delivery, because an owned `Region` is
-    /// not `Copy` and cannot ride this enum.
+    /// everything) and is taken at delivery; an owned `Region` is neither
+    /// `Clone` nor `Eq`, so it cannot ride this enum.
     OutputDamaged(OutputId),
     /// An output state is about to commit. Same snapshot rationale as
     /// [`Event::OutputCommitted`]; the state is staged, not yet applied.
@@ -97,8 +97,8 @@ pub(crate) enum Event {
     RendererLost,
 
     /// An fd source is ready. Carries the readiness mask rather than a
-    /// [`Readiness`](crate::Readiness) so the enum stays `Copy` and `Eq`
-    /// without exporting a public type into a private one.
+    /// [`Readiness`](crate::Readiness) to keep the public type out of this
+    /// private enum.
     FdReady(crate::SourceId, u32),
 
     NewToplevel(ToplevelId),
@@ -199,10 +199,8 @@ pub(crate) enum Event {
     /// changed.
     ///
     /// Carries no payload beyond the node, deliberately. wlroots hands the
-    /// signal a C array that is valid only for the emission, and this enum is
-    /// `Copy + Eq` (this module's own reentrancy tests compare events with
-    /// `assert_eq!`), so a `Vec` cannot live here. The array is snapshotted at
-    /// emission time into the runtime instead, and
+    /// signal a C array that is valid only for the emission, so the set is
+    /// snapshotted at emission time into the runtime and
     /// [`Runtime::scene_buffer_active_outputs`](crate::Runtime::scene_buffer_active_outputs)
     /// reads it back at delivery — see that method's own doc for what a
     /// deferred delivery therefore reports.
@@ -271,7 +269,7 @@ pub(crate) enum Event {
     /// A pointer constraint committed — the client (re)set its region and the
     /// crate settled it. Carries the crate's own [`ConstraintId`] handle for
     /// it — an opaque, `Copy`/`Eq` id (its wrapped value is the constraint's
-    /// address), so it rides the `Copy`/`Eq` `Event` like every other id. A
+    /// address), so it rides the `Eq` `Event` like every other id. A
     /// deferred delivery may name a constraint destroyed in between; like
     /// `InputMethodPopupDestroyed`, the id then only tells the handler
     /// *which* constraint committed.
@@ -280,7 +278,7 @@ pub(crate) enum Event {
     /// A pointer gesture began — a swipe, pinch or hold the hardware pointer
     /// announced. Carries the crate's own [`GestureId`] handle — an opaque,
     /// `Copy`/`Eq` id (its wrapped value is the announcing pointer's
-    /// address), so it rides the `Copy`/`Eq` `Event` like every other id. The
+    /// address), so it rides the `Eq` `Event` like every other id. The
     /// begin forward to gesture clients has already gone out by the time this
     /// is emitted. A deferred delivery may name a pointer whose device went
     /// away in between; the id then only tells the handler *which* pointer
@@ -294,7 +292,7 @@ pub(crate) enum Event {
 
     /// A touch point went down — a finger landed. Carries the crate's own
     /// [`TouchId`] handle for it — the wire `touch_id`, so it rides the
-    /// `Copy`/`Eq` `Event` like every other id, and so a handler can match
+    /// `Eq` `Event` like every other id, and so a handler can match
     /// this down to its later up. The down forward to the touch client has
     /// already gone out by the time this is emitted. Emitted only when the
     /// down found a surface to land on; a touch over no surface creates no
@@ -412,7 +410,7 @@ pub(crate) enum Event {
     /// An input-method created a `zwp_input_method_v2` candidate popup surface.
     /// Carries the crate's own [`InputPopupSurfaceId`] handle for it — an
     /// opaque, `Copy`/`Eq` id (its wrapped value is the popup's destroy-listener
-    /// address), so it rides the `Copy`/`Eq` `Event` like every other id and a
+    /// address), so it rides the `Eq` `Event` like every other id and a
     /// deferred delivery names the same popup the creation announced. The entry
     /// is recorded in the runtime table before this is emitted, so the handle
     /// resolves at delivery unless the popup was destroyed in between.
@@ -435,8 +433,7 @@ pub(crate) enum Event {
     InputMethodPopupRepositioned(InputPopupSurfaceId),
 
     /// The bound input-method committed. Carries no data — the committed
-    /// generation is owned state (`String`s) that cannot ride in a `Copy`,
-    /// `Eq` enum, so the handler reads it back via
+    /// generation is read back from the live input-method via
     /// [`Runtime::committed_ime_state`](crate::Runtime::committed_ime_state)
     /// instead (the same "carry nothing, resolve at delivery" shape
     /// `OutputConfigurationApplied` uses). Emitted once per commit, after the
@@ -467,8 +464,8 @@ pub(crate) enum Event {
     /// A tablet tool did something — proximity, motion, tip or button. The
     /// id is the hardware tool's address (FIX-3): every tool signal carries
     /// its tool in the event, so identity never depends on a signal `data`.
-    /// Payloads the tool reports (pressure, tilt, position) cannot ride in a
-    /// `Copy`/`Eq` enum and are not snapshotted: this is the compositor's
+    /// Payloads the tool reports (pressure, tilt, position) cannot ride in an
+    /// `Eq` enum and are not snapshotted: this is the compositor's
     /// cue that traffic happened, and client-bound forwarding goes through
     /// the tool's `wlr_tablet_v2_tablet_tool`, driven separately.
     TabletToolUpdate(TabletToolId),
@@ -481,7 +478,7 @@ pub(crate) enum Event {
     /// A client injected a virtual keyboard. Carries the crate's own
     /// [`VirtualKeyboardId`] handle for it — minted from the `data` object
     /// the manager's `new_virtual_keyboard` signal carried, so it rides the
-    /// `Copy`/`Eq` `Event` like every other id. The entry is recorded in
+    /// `Eq` `Event` like every other id. The entry is recorded in
     /// the runtime table before this is emitted, so the handle resolves at
     /// delivery unless the device was destroyed in between; like
     /// `InputMethodPopupDestroyed`, the id then only tells the handler
@@ -507,8 +504,8 @@ pub(crate) enum Event {
     TransientSeatRequested(TransientSeatId),
 
     /// A client's `zwlr_output_manager_v1` configuration was applied. Carries
-    /// no data — the owned `Vec<AppliedHead>` payload cannot ride in a `Copy`,
-    /// `Eq` enum, so it is staged in
+    /// no data — the owned `Vec<AppliedHead>` payload cannot ride in an `Eq`
+    /// enum, so it is staged in
     /// [`Session::applied_heads`](crate::backend) instead and popped, FIFO,
     /// when this marker is delivered. One marker is emitted per pushed payload,
     /// in the same order, so the pairing holds even under deferral (which does
@@ -518,10 +515,9 @@ pub(crate) enum Event {
     OutputConfigurationApplied,
 
     /// Xwayland's X server came up and its `xwm` is running. Carries no
-    /// payload: the `DISPLAY` name is a `String` that cannot ride in a `Copy`,
-    /// `Eq` enum, so delivery reads it back from the live `wlr_xwayland` (the
-    /// same "carry nothing, resolve at delivery" shape `OutputConfigurationApplied`
-    /// and the scene-buffer-outputs events use).
+    /// payload: delivery reads the `DISPLAY` name back from the live
+    /// `wlr_xwayland` (the same "carry nothing, resolve at delivery" shape
+    /// `OutputConfigurationApplied` and the scene-buffer-outputs events use).
     #[cfg(wlr_has_xwayland)]
     XwaylandReady,
 

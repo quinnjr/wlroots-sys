@@ -514,6 +514,88 @@ pre-map commit listener that calls the new
 `Runtime::schedule_frame_all(&self) -> usize` so XWayland's handshake frame
 callback is answered. Bounded to the handshake commits; never busy-loops.
 
+## 0.20.36 — M9 shell completion
+
+The shell-completion milestone. A compositor can now take a handle on any
+`wlr_surface` and observe its generic commit/map/unmap/destroy/subsurface
+signals; drive per-surface presentation feedback and tearing hints; walk the
+subsurface tree; finish the xdg-shell remainder; and serve the long tail
+of shell-protocol globals. All additive; the wire behavior is byte-identical
+to 0.20.35.
+
+### What you get
+
+- **The `Surface` handle model.** `SurfaceId` and a borrow-scoped
+  `Surface<'h>` over any surface the crate tracks, with the queries and
+  operations a role or compositor needs: geometry and damage (`extents`,
+  `effective_damage`, `buffer_source_box`), identity and role (`id`, `role`,
+  `as_toplevel`/`as_layer_surface`), hit-testing (`surface_at`,
+  `point_accepts_input`, `accepts_touch`), traversal (`for_each_surface`),
+  preferred scale/transform, `send_enter`/`send_leave`/`send_frame_done`, the
+  `PendingLock` commit lock, and `unmap`. Every surface the crate sees also
+  gets a generic `commit`/`map`/`unmap`/`destroy`/`new_subsurface` listener,
+  delivered through new defaulted `ToplevelHandler` methods
+  (`surface_committed`/`surface_mapped`/`surface_unmapped`/`surface_destroyed`/
+  `new_subsurface`) — additive alongside the role-specific listeners, which
+  stay in place.
+- **Presentation and tearing.** Per-surface `PresentationFeedback`
+  (`send_presented`, plus the `sampled`/`scanned_out_on_output`/
+  `textured_on_output` hints, owning the feedback object and released on
+  `Drop`) and a borrow-scoped `TearingControl` reached from
+  `Surface::tearing_hint`/`tearing_control` — the two wrappers 0.20.34
+  deferred on the surface model.
+- **Subsurface.** `Surface::subsurface_parent_id`/`subsurface_parent_state`
+  over the subcompositor pointer the crate used to discard; the parent
+  placement is an owned `SubsurfaceParentState` snapshot, not a handle —
+  wlroots frees the role with the parent while the child surface survives.
+- **xdg-shell remainder + surface/layer ops.** The `Toplevel`/`Popup` gaps:
+  `Runtime::{set_toplevel_bounds, set_toplevel_constrained,
+  set_toplevel_parent, set_toplevel_resizing, set_toplevel_suspended,
+  set_toplevel_tiled, set_toplevel_wm_capabilities}`, `Toplevel::state`/
+  `wm_capabilities`, and the show-window-menu event; the layer-surface
+  remainder lands on the same handles.
+- **Activation, dialog, foreign, system-bell.** The owned
+  `ActivationTokenHandle` (`Runtime::create_activation_token`, the
+  `add_activation_token`/`find_activation_token` client-mint and lookup path,
+  and `name`/`snapshot`/`is_alive`), the `xdg_dialog` manager with `Dialog`
+  access (`toplevel_id`/`modal`), the `xdg_foreign` registry and v1/v2 managers
+  with owned `ForeignExported`/`ForeignExportInfo` handles, and the
+  `xdg_system_bell` global.
+- **Icon and tag.** The refcounted `ToplevelIcon` — a genuine `Clone` per
+  reference, `PartialEq` identity — with the icon/tag/description events.
+- **Foreign-toplevel and workspace.** Owned `ForeignToplevelHandle` exports
+  with the full client request set, `ext_foreign_toplevel_list`, and the
+  `ext_workspace` manager/workspace/group handles with batched request
+  delivery.
+- **Security context and fixes.** The `wp_security_context_v1` manager and the
+  owned `SecurityContext` snapshot, and the core `wl_fixes` global
+  (`destroy_registry` + `ack_global_remove`, for global/registry lifetime).
+- **Lock surface.** The session-lock `LockSurface` handle (`output`,
+  `configured_size`, `state`), reached from `Surface::lock_surface`.
+
+### Additive
+
+No `Handlers` supertrait changed and no published item was re-signed. The
+generic surface hooks live on the existing `ToplevelHandler` as defaulted
+no-ops, so an impl written against 0.20.35 still compiles and still satisfies
+`Handlers`. The new `Event` variants ride the `pub(crate)` enum — internal
+dispatch, not public surface. `Event` is no longer `Copy` (it now carries the
+owned `ToplevelIcon`), which is likewise internal to the crate.
+
+### Coverage
+
+The milestone's 195 wlroots symbols were swept. 150 moved waived → wrapped —
+the surface model and its operations, the generic surface events, presentation
+feedback, tearing control, the subsurface pair, the xdg-shell remainder, the
+activation/dialog/foreign/bell set, icon/tag, foreign-toplevel management,
+ext-foreign-toplevel-list, ext-workspace, security-context, `wl_fixes`, and the
+lock surface. The rest were re-pointed rather than left in the backlog: 16 to
+**M13** (`*_from_resource`, `wlr_compositor_set_renderer`, and the
+role/synced internals), 4 to **M10** (ext-image-capture-source), 1 to **M12**
+(`wlr_surface_get_image_description_v1_data`), 1 to **M11**
+(`wlr_surface_get_content_type_v1`), and 23 to non-milestoned `internal`
+reasons. Zero `not-yet` rows tagged M9 remain.
+
 ## 0.20.35 — M7 pointer/cursor/touch batch
 
 The last of the input stack: a compositor can read its cursor, touch and
@@ -617,7 +699,7 @@ byte-identical to 0.20.33.
   `output_power_mode_requested` delivery (`PowerMode::Off`/`On`,
   unknown modes ignored, not acted on), and
   `create_tearing_control_manager`. Surface-bound feedback
-  (`sampled`/`send_presented`/hints) waits on the surface model (M9).
+  (`sampled`/`send_presented`/hints) arrived with the surface model in 0.20.36.
 - **Request emit + primary formats.** `Output::send_request_state`
   (the emit side of `output_state_requested`, with mismatch/empty
   guards) and `Output::primary_formats` (copied out — `None` means

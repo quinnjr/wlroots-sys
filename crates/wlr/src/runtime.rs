@@ -2709,8 +2709,9 @@ pub(crate) struct RuntimeInner {
     pub(crate) security_context_manager:
         RefCell<Option<NonNull<sys::wlr_security_context_manager_v1>>>,
 
-    /// The `wlr_fixes` global, once created — wlroots' compatibility fixes for
-    /// older clients. `Option`, same rationale as the other manager globals.
+    /// The `wlr_fixes` global, once created — wlroots' core `wl_fixes`
+    /// implementation (global/registry lifetime). `Option`, same rationale as
+    /// the other manager globals.
     pub(crate) fixes: RefCell<Option<NonNull<sys::wlr_fixes>>>,
 
     /// The `zwlr_output_manager_v1` global, once created — lets a client

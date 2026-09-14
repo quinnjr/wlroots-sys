@@ -65,7 +65,7 @@ impl Drop for ToplevelIcon {
 
 /// Identity, for the same reason `ToplevelId` is `Eq`: two handles name the
 /// same icon iff they wrap the same pointer. Needed because
-/// [`crate::dispatch::Event`] carries an owned icon and derives `PartialEq`.
+/// `crate::dispatch::Event` carries an owned icon and derives `PartialEq`.
 impl PartialEq for ToplevelIcon {
     fn eq(&self, other: &Self) -> bool {
         self.raw == other.raw

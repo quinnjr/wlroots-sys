@@ -596,12 +596,11 @@ impl<'h> Surface<'h> {
     /// Unmap this surface, dropping it from the screen.
     ///
     /// **A surface-role implementation operation**, by wlroots' own contract:
-    /// it does not run the role's `unmap` hook for you, so a consumer calling
-    /// it on a shell surface is responsible for every step the role would
-    /// otherwise have taken. This crate exposes it because it is the only way
-    /// to force a mapped surface off screen from outside a role, not because it
-    /// is an ordinary compositor operation. Idempotent, and wlroots delivers
-    /// the ordinary unmap event this crate forwards as
+    /// it must only be used by surface role implementations. This crate exposes
+    /// it because it is the only way to force a mapped surface off screen from
+    /// outside a role, not because it is an ordinary compositor operation.
+    /// Idempotent; wlroots emits the surface's unmap event — and runs the
+    /// role's own `unmap` hook — which this crate forwards as
     /// [`ToplevelHandler::surface_unmapped`](crate::ToplevelHandler::surface_unmapped).
     pub fn unmap(&self) {
         // SAFETY: the handle borrows a live surface; wlroots unmaps it and
