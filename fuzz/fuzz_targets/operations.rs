@@ -285,9 +285,9 @@ enum Operation {
     FindActivationToken,
     /// `Runtime::find_foreign_exported` for a handle nothing registered.
     FindForeignExported,
-    /// `Runtime::export_foreign` with no toplevel, then drop. Exercises the
-    /// allocate/init/finish/dealloc cycle the same way a compositor export
-    /// does.
+    /// `Runtime::export_foreign` against a dangling toplevel id, then drop. A
+    /// live toplevel needs a connected client, so this stays on the miss path;
+    /// it exercises the id lookup and the null-guarded return.
     ExportForeign,
 }
 
@@ -711,7 +711,7 @@ fn apply(
             let _ = runtime.find_foreign_exported("fuzz-handle");
         }
         Operation::ExportForeign => {
-            let _ = runtime.export_foreign(None);
+            let _ = runtime.export_foreign(toplevel(0));
         }
     }
 }

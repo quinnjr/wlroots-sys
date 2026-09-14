@@ -19,7 +19,9 @@
 //!   creates one behind the scenes for every client-driven export, and this
 //!   crate can also export a toplevel itself with
 //!   [`Runtime::export_foreign`]. Both land in the same registry, and
-//!   [`Runtime::find_foreign_exported`] reads one back by handle.
+//!   [`Runtime::find_foreign_exported`] reads one back by handle. A
+//!   compositor-created entry withdraws itself when its toplevel is destroyed,
+//!   so a lookup can never follow a freed pointer.
 //!
 //! The protocol objects wlroots creates for clients (`wlr_xdg_exported_v1`,
 //! `wlr_xdg_imported_v1` and their v2 siblings) are wlroots-owned and reachable
@@ -27,11 +29,25 @@
 //! one, so this crate does not name them.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::cell::Cell;
 use std::ffi::{CStr, CString};
 use std::ptr::NonNull;
 
+use crate::backend::{Registration, bound_session, remove_listener};
 use crate::id::find_id;
 use crate::{Display, Error, Result, Runtime, ToplevelId, sys};
+
+/// The state a [`ForeignExported`]'s toplevel-destroy watch shares with the
+/// handle: the entry to withdraw, and whether it is still registered.
+///
+/// Kept in a `Box` on the handle so both the address the callback receives and
+/// the [`Cell`] it clears are stable for the registration's whole life.
+struct ExportWatch {
+    entry: NonNull<sys::wlr_xdg_foreign_exported>,
+    /// `false` once the entry has been withdrawn from the registry — by the
+    /// toplevel's death or by the handle's own [`Drop`].
+    alive: Cell<bool>,
+}
 
 /// One surface this compositor has exported, owned by this crate.
 ///
@@ -44,17 +60,22 @@ use crate::{Display, Error, Result, Runtime, ToplevelId, sys};
 /// owns the memory as well as the registry membership; both are released in
 /// [`Drop`].
 ///
-/// # Keep it alive only while its toplevel is
+/// # It withdraws itself when its toplevel dies
 ///
-/// wlroots' import path follows the base's `toplevel` pointer, and nothing
-/// removes a *compositor-created* entry when that toplevel is destroyed —
-/// unlike a client-driven export, whose own listener does. Drop this handle
-/// before the toplevel it names; then the entry is gone and no later import can
-/// chase the stale pointer. This is the same obligation wlroots' C API leaves
-/// with the caller.
+/// wlroots' import path follows the base's `toplevel` pointer, so an entry left
+/// in the registry after that toplevel is freed would be a use-after-free the
+/// moment anyone imported or looked it up. This handle therefore links a
+/// listener into the toplevel's `destroy` signal: when the toplevel dies, the
+/// entry is finished out of the registry first, and this handle is marked dead.
+/// [`is_alive`](Self::is_alive) reports that, and [`Drop`] then only releases
+/// the memory it owns.
 pub struct ForeignExported {
-    raw: NonNull<sys::wlr_xdg_foreign_exported>,
-    toplevel: Option<ToplevelId>,
+    toplevel: ToplevelId,
+    /// The toplevel's `destroy` listener, unlinked by its own callback when the
+    /// toplevel dies and by this registration's `Drop` otherwise. Declared
+    /// before `watch` so it is dropped first — its `Drop` reads `watch.alive`.
+    _toplevel_destroy: Registration,
+    watch: Box<ExportWatch>,
 }
 
 impl std::fmt::Debug for ForeignExported {
@@ -62,6 +83,7 @@ impl std::fmt::Debug for ForeignExported {
         f.debug_struct("ForeignExported")
             .field("handle", &self.handle())
             .field("toplevel", &self.toplevel)
+            .field("alive", &self.is_alive())
             .finish_non_exhaustive()
     }
 }
@@ -70,39 +92,79 @@ impl ForeignExported {
     /// The opaque handle clients exchange out of band.
     ///
     /// wlroots generated it at export time and it is a NUL-terminated string in
-    /// a fixed 37-byte buffer. `None` only for a buffer that is somehow not
-    /// terminated, which cannot happen for an entry this crate created.
+    /// a fixed 37-byte buffer, readable for as long as this handle owns the
+    /// entry. Copied lossily, matching [`Runtime::find_foreign_exported`] and
+    /// every other copied C string in this crate: replacing spec-violating
+    /// bytes is preferable to rejecting the whole handle.
     pub fn handle(&self) -> Option<String> {
-        // SAFETY: the handle owns a live exported entry; `handle` is a fixed
-        // NUL-terminated `char[37]` wlroots wrote at init.
+        // SAFETY: the entry allocation lives until `Drop`, which runs after
+        // every accessor; `handle` is a fixed NUL-terminated `char[37]` wlroots
+        // wrote at init.
         unsafe {
-            let bytes = &(*self.raw.as_ptr()).handle;
-            CStr::from_ptr(bytes.as_ptr())
-                .to_str()
-                .ok()
-                .map(str::to_owned)
+            let bytes = &(*self.watch.entry.as_ptr()).handle;
+            Some(
+                CStr::from_ptr(bytes.as_ptr())
+                    .to_string_lossy()
+                    .into_owned(),
+            )
         }
     }
 
-    /// The toplevel this export names, when the compositor supplied one.
-    ///
-    /// Stored as the stable id at export time, so this never dereferences a
-    /// toplevel that may since have been destroyed.
-    pub fn toplevel_id(&self) -> Option<ToplevelId> {
+    /// The toplevel this export names.
+    pub fn toplevel_id(&self) -> ToplevelId {
         self.toplevel
+    }
+
+    /// Whether the export is still registered.
+    ///
+    /// `false` once the toplevel it names has been destroyed — wlroots has
+    /// removed the entry from the registry and
+    /// [`Runtime::find_foreign_exported`] no longer resolves the handle.
+    pub fn is_alive(&self) -> bool {
+        self.watch.alive.get()
+    }
+}
+
+/// The toplevel an export names is about to be freed.
+///
+/// Finishes the entry out of the registry *before* the pointer it carries goes
+/// stale, then marks the owning handle dead and unlinks this listener (wlroots
+/// commonly asserts the signal is empty after its own destroy).
+unsafe extern "C" fn on_exported_toplevel_destroy(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `export_foreign` into a live toplevel's `events.destroy`
+    // with a `session` pointing at the handle's boxed `ExportWatch`, which
+    // outlives the registration. Every call below is infallible and cannot
+    // unwind out of this `extern "C"` frame.
+    unsafe {
+        let session = bound_session(l);
+        if session.is_null() {
+            return;
+        }
+        let watch = &*session.cast::<ExportWatch>();
+        if watch.alive.replace(false) {
+            remove_listener(l);
+            sys::wlr_xdg_foreign_exported_finish(watch.entry.as_ptr());
+        }
     }
 }
 
 impl Drop for ForeignExported {
     fn drop(&mut self) {
-        // SAFETY: this is the sole owner of the entry (the constructor's
-        // contract) and `Drop` runs once. `finish` emits the entry's `destroy`
-        // signal — telling any importer — and unlinks it from the registry
-        // list; the memory below is this crate's own allocation.
+        if self.is_alive() {
+            // SAFETY: the entry is still registered and this is its sole owner,
+            // so `finish` emits its `destroy` signal — telling any importer —
+            // and unlinks it from the registry list. The toplevel is still
+            // alive, so the destroy registration below unlinks normally.
+            unsafe { sys::wlr_xdg_foreign_exported_finish(self.watch.entry.as_ptr()) };
+        }
+        // SAFETY: the entry memory is this crate's allocation whether or not the
+        // callback above already finished it, and `Drop` runs once.
         unsafe {
-            sys::wlr_xdg_foreign_exported_finish(self.raw.as_ptr());
             dealloc(
-                self.raw.as_ptr().cast::<u8>(),
+                self.watch.entry.as_ptr().cast::<u8>(),
                 Layout::new::<sys::wlr_xdg_foreign_exported>(),
             );
         }
@@ -191,17 +253,17 @@ impl Runtime {
     /// Export a toplevel into the registry and return the owned entry.
     ///
     /// The returned handle owns the entry: dropping it withdraws the export.
-    /// `toplevel` is recorded both as the entry's target — the `wlr_xdg_toplevel`
-    /// pointer wlroots' import path follows — and as the [`ToplevelId`] the
-    /// handle reports, resolved from the runtime's id table at export time.
-    /// Because a *compositor-created* entry is not auto-removed when its
-    /// toplevel dies, drop the handle before the toplevel is destroyed; see
-    /// [`ForeignExported`]'s own doc.
+    /// The toplevel is recorded both as the entry's target — the
+    /// `wlr_xdg_toplevel` pointer wlroots' import path follows — and as the
+    /// [`ToplevelId`] the handle reports. The handle also withdraws the entry
+    /// automatically if the toplevel is destroyed first, so neither a lookup
+    /// nor a later import can follow a freed pointer; see [`ForeignExported`].
     ///
     /// `None` when no registry was created, when `toplevel` names no live
     /// toplevel, or when wlroots could not allocate the entry.
-    pub fn export_foreign(&self, toplevel: Option<ToplevelId>) -> Option<ForeignExported> {
+    pub fn export_foreign(&self, toplevel: ToplevelId) -> Option<ForeignExported> {
         let registry = self.foreign_registry_ptr()?;
+        let toplevel_entry = self.toplevel_entry(toplevel)?;
         let layout = Layout::new::<sys::wlr_xdg_foreign_exported>();
         // SAFETY: `layout` is non-zero-sized (the aggregate embeds a list and a
         // signal), so `alloc_zeroed` returns null or a suitably aligned,
@@ -220,25 +282,36 @@ impl Runtime {
             unsafe { dealloc(raw.as_ptr().cast::<u8>(), layout) };
             return None;
         }
-        if let Some(id) = toplevel {
-            let Some(entry) = self.toplevel_entry(id) else {
-                // No such toplevel: withdraw the just-created entry and report
-                // the miss. `finish` unlinks it; then the block is released.
-                // SAFETY: the entry was just initialised and is unowned
-                // otherwise.
-                unsafe {
-                    sys::wlr_xdg_foreign_exported_finish(raw.as_ptr());
-                    dealloc(raw.as_ptr().cast::<u8>(), layout);
-                }
-                return None;
-            };
-            // SAFETY: the entry was just initialised and is exclusively owned by
-            // us; `entry.raw` is a live toplevel. wlroots does not read this
-            // field back in this crate's paths — it is set for the import
-            // side's benefit, exactly as the v1/v2 protocol code sets it.
-            unsafe { (*raw.as_ptr()).toplevel = entry.raw.as_ptr() };
-        }
-        Some(ForeignExported { raw, toplevel })
+        // SAFETY: `raw` is exclusively ours and `toplevel_entry.raw` is a live
+        // toplevel; the pointer is set for wlroots' import path, exactly as the
+        // v1/v2 protocol code sets it. The watch below removes the entry before
+        // this pointer can go stale.
+        unsafe { (*raw.as_ptr()).toplevel = toplevel_entry.raw.as_ptr() };
+
+        let watch = Box::new(ExportWatch {
+            entry: raw,
+            alive: Cell::new(true),
+        });
+        // Both the watch address and its flag are heap-stable, so the listener
+        // may name them for as long as the registration lives.
+        let session: *const () = (&*watch as *const ExportWatch).cast();
+        let alive: *const Cell<bool> = &watch.alive;
+        // SAFETY: `toplevel_entry.raw` is a live toplevel with an initialised
+        // `destroy` signal; `watch` (the session and the flag) outlives the
+        // registration, which `ForeignExported` drops before it.
+        let destroy = unsafe {
+            Registration::link_watched(
+                &raw mut (*toplevel_entry.raw.as_ptr()).events.destroy,
+                on_exported_toplevel_destroy,
+                session,
+                alive,
+            )
+        };
+        Some(ForeignExported {
+            toplevel,
+            _toplevel_destroy: destroy,
+            watch,
+        })
     }
 
     /// Look an exported surface up by handle and copy out what it names.
@@ -259,10 +332,11 @@ impl Runtime {
         };
         let raw = NonNull::new(raw)?;
         // SAFETY: `raw` is a live entry in the registry. The handle string is
-        // NUL-terminated; the toplevel, when non-null, is dereferenced only to
-        // read its addon set. The registry contract wlroots documents is that an
-        // entry is removed before its toplevel is destroyed, so a live entry's
-        // toplevel is live.
+        // NUL-terminated; the toplevel is dereferenced only to read its addon
+        // set. Every entry in the registry has a live toplevel: wlroots removes
+        // a client-driven one from the toplevel's own listener and
+        // `ForeignExported` removes a compositor-created one from the watch it
+        // installs, both before the toplevel is freed.
         unsafe {
             let entry = raw.as_ptr();
             let name = CStr::from_ptr((*entry).handle.as_ptr())

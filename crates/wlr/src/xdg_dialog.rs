@@ -118,7 +118,9 @@ impl Runtime {
     /// dialog role — the by-id miss and the role miss, both explicit. The
     /// returned handle borrows this runtime, the same scope
     /// [`Runtime::tearing_control`](crate::Runtime::tearing_control) gives its
-    /// control handle.
+    /// control handle: no event loop can run while the borrow is held, so the
+    /// dialog object cannot be freed underneath it, exactly as for that
+    /// borrow-scoped role handle.
     #[must_use]
     pub fn dialog(&self, id: ToplevelId) -> Option<Dialog<'_>> {
         let entry = self.toplevel_entry(id)?;

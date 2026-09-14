@@ -1053,6 +1053,23 @@ pub trait ToplevelHandler {
     fn xwayland_override_redirect_changed(&mut self, surface: &XwaylandSurface<'_>) {
         let _ = surface;
     }
+
+    /// A client asked, via `xdg-system-bell-v1`, that the compositor ring the
+    /// system bell. `surface` is the surface the client associated with the
+    /// request, mapped to this crate's own id — `None` when the client named no
+    /// surface, or named one this crate does not track.
+    ///
+    /// Defaulted to a no-op: wlroots does not make a sound itself (how a
+    /// compositor rings a bell — an audible beep, a visual flash, nothing at
+    /// all — is entirely its own policy), so a compositor that wants the global
+    /// to do anything overrides this.
+    ///
+    /// Added additively on the same terms as the other defaulted methods here:
+    /// an `impl ToplevelHandler for MyState {}` written against any earlier
+    /// 0.20.x still compiles unchanged.
+    fn system_bell_ring(&mut self, surface: Option<SurfaceId>) {
+        let _ = surface;
+    }
 }
 
 /// Seat, keyboard and pointer input.
@@ -1257,23 +1274,6 @@ pub trait SeatHandler {
     /// [`ActivationToken::has_seat`] is `true`.
     fn request_activate(&mut self, target: Option<ToplevelId>, token: ActivationToken) {
         let _ = (target, token);
-    }
-
-    /// A client asked, via `xdg-system-bell-v1`, that the compositor ring the
-    /// system bell. `surface` is the surface the client associated with the
-    /// request, mapped to this crate's own id — `None` when the client named no
-    /// surface, or named one this crate does not track.
-    ///
-    /// Defaulted to a no-op: wlroots does not make a sound itself (how a
-    /// compositor rings a bell — an audible beep, a visual flash, nothing at
-    /// all — is entirely its own policy), so a compositor that wants the global
-    /// to do anything overrides this.
-    ///
-    /// Added additively on the same terms as the other defaulted methods here:
-    /// an `impl ToplevelHandler for MyState {}` written against any earlier
-    /// 0.20.x still compiles unchanged.
-    fn system_bell_ring(&mut self, surface: Option<SurfaceId>) {
-        let _ = surface;
     }
 
     /// An input-method (`zwp_input_method_v2`) created a candidate *popup

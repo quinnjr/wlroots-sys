@@ -3215,12 +3215,12 @@ note      = "wlroots-owned child record of a v2 import, created and freed from t
 [[waived]]
 symbol    = "wlr_xdg_imported_v1"
 reason    = "internal"
-note      = "wlroots-owned protocol object created and freed inside the client-driven xdg-importer path; a compositor never names or holds one. Imports resolve through Runtime::find_foreign_exported."
+note      = "wlroots-owned protocol object created and freed inside the client-driven xdg-importer path; a compositor never names or holds one. The registry lookup an import performs is the one Runtime::find_foreign_exported exposes."
 
 [[waived]]
 symbol    = "wlr_xdg_imported_v2"
 reason    = "internal"
-note      = "wlroots-owned protocol object created and freed inside the client-driven xdg-importer path; a compositor never names or holds one. Imports resolve through Runtime::find_foreign_exported."
+note      = "wlroots-owned protocol object created and freed inside the client-driven xdg-importer path; a compositor never names or holds one. The registry lookup an import performs is the one Runtime::find_foreign_exported exposes."
 
 [[waived]]
 symbol    = "wlr_xdg_output_v1"

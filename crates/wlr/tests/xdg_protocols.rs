@@ -14,7 +14,7 @@ mod common;
 
 use std::thread::JoinHandle;
 
-use wlr::{Backend, Display, ForeignExportInfo, Runtime, ToplevelId, Until};
+use wlr::{Backend, Display, Runtime, ToplevelId, Until};
 
 // ---------------------------------------------------------------------------
 // Activation: client-free token lifecycle
@@ -126,10 +126,10 @@ fn system_bell_manager_creates_once() {
 // ---------------------------------------------------------------------------
 
 /// The registry and both version managers create once each, the v1/v2 managers
-/// require a registry, and an export is owned: dropping it withdraws the
-/// handle and releases its memory.
+/// require a registry, and an export needs a live toplevel (so no targetless
+/// entry can ever reach the registry and later be imported).
 #[test]
-fn foreign_registry_and_export_are_owned() {
+fn foreign_registry_and_managers_are_created_once() {
     common::headless_env();
     let display = Display::new().expect("display");
     let runtime = Runtime::new().expect("runtime");
@@ -144,7 +144,9 @@ fn foreign_registry_and_export_are_owned() {
         "v2 before the registry is refused"
     );
     assert!(
-        runtime.export_foreign(None).is_none(),
+        runtime
+            .export_foreign(ToplevelId::dangling_for_test())
+            .is_none(),
         "no registry, no export"
     );
     assert!(runtime.find_foreign_exported("anything").is_none());
@@ -161,41 +163,15 @@ fn foreign_registry_and_export_are_owned() {
     assert!(runtime.create_xdg_foreign_v1(&display).is_err());
     assert!(runtime.create_xdg_foreign_v2(&display).is_err());
 
-    // An export without a toplevel is still a registry entry with a handle.
-    let exported = runtime.export_foreign(None).expect("an export");
-    let handle = exported.handle().expect("the export has a handle");
-    assert!(!handle.is_empty(), "the handle is a non-empty string");
-    assert_eq!(exported.toplevel_id(), None);
-    assert_eq!(
-        runtime.find_foreign_exported(&handle),
-        Some(ForeignExportInfo {
-            handle: handle.clone(),
-            toplevel: None,
-        }),
-        "the registry finds the live export by handle"
-    );
-
-    // A toplevel id that names nothing withdraws the entry rather than
-    // creating one that cannot resolve.
+    // An export requires a live toplevel: an unknown id yields nothing, so no
+    // targetless entry can be created that a later import would dereference.
     assert!(
         runtime
-            .export_foreign(Some(ToplevelId::dangling_for_test()))
+            .export_foreign(ToplevelId::dangling_for_test())
             .is_none(),
         "an unknown toplevel id yields no export"
     );
-
-    drop(exported);
-    assert!(
-        runtime.find_foreign_exported(&handle).is_none(),
-        "dropping the export withdraws its handle"
-    );
-
-    // Repeated create/drop proves the allocate/init/finish/dealloc cycle is
-    // balanced; under ASan a double free or use-after-free is reported.
-    for _ in 0..16 {
-        let owned = runtime.export_foreign(None).expect("an export");
-        assert!(owned.handle().is_some());
-    }
+    assert!(runtime.find_foreign_exported("anything").is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -228,9 +204,19 @@ impl App {
 
     /// Export the live toplevel, read it back through the registry, then drop
     /// the export and confirm the handle stops resolving — all while the
-    /// toplevel is alive, so no pointer in the entry can dangle.
+    /// toplevel is alive. The repeated export/drop loop proves the
+    /// allocate/init/finish/dealloc cycle is balanced (ASan/LSan is the oracle).
     fn round_trip_foreign(&mut self, id: ToplevelId) {
-        let Some(exported) = self.runtime.export_foreign(Some(id)) else {
+        for _ in 0..16 {
+            let Some(owned) = self.runtime.export_foreign(id) else {
+                return;
+            };
+            assert!(owned.is_alive(), "a live toplevel yields a live export");
+            assert!(owned.handle().is_some());
+            assert_eq!(owned.toplevel_id(), id);
+        }
+
+        let Some(exported) = self.runtime.export_foreign(id) else {
             return;
         };
         let Some(handle) = exported.handle() else {
@@ -364,6 +350,85 @@ fn foreign_export_round_trips_a_live_toplevel() {
         Some(true),
         "dropping the export withdrew the handle"
     );
+}
+
+/// A compositor export is withdrawn when its toplevel dies first, so neither a
+/// later `find_foreign_exported` nor the handle's own `Drop` dereferences the
+/// freed toplevel. The export is held across the run deliberately so the death
+/// happens while the handle is still alive.
+#[test]
+fn foreign_export_is_withdrawn_when_its_toplevel_dies() {
+    struct DeathApp {
+        runtime: Runtime,
+        client: Option<JoinHandle<common::client::ClientEvents>>,
+        exported: Option<wlr::ForeignExported>,
+        handle: Option<String>,
+    }
+    impl wlr::OutputHandler for DeathApp {}
+    impl wlr::FdHandler for DeathApp {}
+    impl wlr::SeatHandler for DeathApp {}
+    impl wlr::LoopHandler for DeathApp {
+        fn should_stop(&mut self) -> bool {
+            self.client.as_ref().is_some_and(|h| h.is_finished())
+        }
+    }
+    impl wlr::ToplevelHandler for DeathApp {
+        fn initial_commit(&mut self, toplevel: &wlr::Toplevel<'_>) {
+            if let Some(exported) = self.runtime.export_foreign(toplevel.id()) {
+                self.handle = exported.handle();
+                self.exported = Some(exported);
+            }
+        }
+    }
+
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime
+        .create_xdg_foreign_registry(&display)
+        .expect("registry");
+    runtime.create_xdg_shell(&display, 7).expect("xdg-shell");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = DeathApp {
+        runtime: runtime.clone(),
+        client: Some(common::client::spawn(&socket, |state, qh| {
+            state.create_toplevel(qh);
+        })),
+        exported: None,
+        handle: None,
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Stop)
+        .expect("run_all");
+    let _events = app
+        .client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+
+    let handle = app
+        .handle
+        .clone()
+        .expect("the toplevel was exported while live");
+    let exported = app.exported.take().expect("the export was kept");
+    assert!(
+        !exported.is_alive(),
+        "the toplevel's destruction withdrew the export"
+    );
+    // The lookup must not dereference the freed toplevel: the entry is gone.
+    assert!(
+        app.runtime.find_foreign_exported(&handle).is_none(),
+        "a withdrawn export does not resolve"
+    );
+    // Dropping must not finish an already-withdrawn entry or touch the freed
+    // toplevel. Under ASan a stray dereference or double free would be caught.
+    drop(exported);
 }
 
 /// The dialog role downcast runs against a real committed toplevel and misses

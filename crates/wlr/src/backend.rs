@@ -582,6 +582,32 @@ impl Registration {
         unsafe { Self::link_bare(signal, on_owned_object_destroy, std::ptr::null(), alive) }
     }
 
+    /// Link a listener that carries an arbitrary `session` pointer and an
+    /// `alive` flag, for an owned object whose owner may die first and whose
+    /// callback has more to do than clear the flag.
+    ///
+    /// The generic form of [`link_owner_destroy`](Self::link_owner_destroy):
+    /// the callback recovers `session` with [`bound_session`] and must set
+    /// `alive` false and unlink itself before returning (the object asserting
+    /// its signal is empty afterwards is common). `Registration::drop` then
+    /// reads `alive` and skips its own unlink.
+    ///
+    /// # Safety
+    ///
+    /// * `signal` must point at an initialised `wl_signal`.
+    /// * `session` and `alive` must outlive the returned `Registration`.
+    /// * `notify` must recover `session` with [`bound_session`], must not
+    ///   unwind, and must set `*alive` false and unlink its listener.
+    pub(crate) unsafe fn link_watched(
+        signal: *mut sys::wl_signal,
+        notify: sys::wl_notify_func_t,
+        session: *const (),
+        alive: *const Cell<bool>,
+    ) -> Self {
+        // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
+        unsafe { Self::link_bare(signal, notify, session, alive) }
+    }
+
     /// Link a listener that does nothing but set `flag` when the signal fires.
     ///
     /// The shape [`crate::Renderer`] needs for `events.lost`: the renderer stays
@@ -4454,6 +4480,23 @@ unsafe fn bound_of(l: *mut sys::wl_listener) -> *mut Bound {
     // this is the `container_of` pattern with nothing to subtract. The `const _`
     // assertion next to the struct pins the field order.
     l.cast::<Bound>()
+}
+
+/// The type-erased `session` pointer a [`Registration`] was linked with.
+///
+/// The counterpart of [`bound_of`] for callbacks installed with
+/// [`Registration::link_watched`], which pass an arbitrary context pointer
+/// rather than a `Bound` id slot.
+///
+/// # Safety
+///
+/// `l` must be a listener created by a `Registration`, and the returned pointer
+/// is the `session` that registration was built with — valid only as long as
+/// the caller's contract for that registration holds.
+pub(crate) unsafe fn bound_session(l: *mut sys::wl_listener) -> *const () {
+    // SAFETY: the caller guarantees `l` is a `Registration` listener, so
+    // `bound_of` recovers its live `Bound`.
+    unsafe { (*bound_of(l)).session }
 }
 
 /// Give the object owning `set` an identity, reusing one already attached.

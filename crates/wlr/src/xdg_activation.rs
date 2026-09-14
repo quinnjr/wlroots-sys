@@ -166,8 +166,10 @@ impl Drop for ActivationTokenHandle {
 /// Copy a live token's evidence out as the snapshot handler methods receive.
 ///
 /// The requesting toplevel is resolved through the surface's *role* addon, the
-/// same lookup `backend.rs`'s `on_request_activate` uses — never a signal
-/// `data`.
+/// same lookup `backend.rs`'s `toplevel_id_of_surface` uses — never a signal
+/// `data`. The popup check mirrors that helper: since 0.20.28 a popup surface
+/// carries an id addon of its own, and `find_id` cannot tell a `PopupId` from
+/// a `ToplevelId`, so a popup must be filtered out rather than mislabelled.
 ///
 /// # Safety
 ///
@@ -182,7 +184,9 @@ unsafe fn snapshot_of(raw: NonNull<sys::wlr_xdg_activation_token_v1>) -> Activat
         ActivationToken {
             serial: (*token).serial,
             has_seat: !(*token).seat.is_null(),
-            requesting_toplevel: if surface.is_null() {
+            requesting_toplevel: if surface.is_null()
+                || !sys::wlr_xdg_popup_try_from_wlr_surface(surface).is_null()
+            {
                 None
             } else {
                 find_id(&raw const (*surface).addons).map(ToplevelId)
