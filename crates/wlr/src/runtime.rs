@@ -2658,6 +2658,14 @@ pub(crate) struct RuntimeInner {
     #[cfg(wlr_has_xwayland)]
     pub(crate) compositor: RefCell<Option<NonNull<sys::wlr_compositor>>>,
 
+    /// The `wlr_subcompositor` this runtime created in
+    /// [`Runtime::init_graphics`]. Display-owned exactly like the compositor
+    /// and `wlr_data_device_manager`, so there is nothing this crate destroys;
+    /// it is stored so the global wlroots registered the sub-surface protocol
+    /// under is reachable after the fact instead of discarded at the create
+    /// site. `None` until graphics is initialised.
+    pub(crate) subcompositor: RefCell<Option<NonNull<sys::wlr_subcompositor>>>,
+
     /// The `wlr_xwayland` manager, once created — advertises the X server and
     /// bridges X11 windows into the compositor. `Option`, same rationale as the
     /// other manager globals: a consumer that never calls
@@ -3605,6 +3613,7 @@ impl Runtime {
                 presentation: RefCell::new(None),
                 #[cfg(wlr_has_xwayland)]
                 compositor: RefCell::new(None),
+                subcompositor: RefCell::new(None),
                 #[cfg(wlr_has_xwayland)]
                 xwayland: RefCell::new(None),
                 #[cfg(wlr_has_xwayland)]
@@ -4004,9 +4013,13 @@ impl Runtime {
             {
                 *self.inner.compositor.borrow_mut() = NonNull::new(compositor);
             }
-            if sys::wlr_subcompositor_create(display.as_ptr()).is_null() {
-                return Err(Error::Create("wlr_subcompositor_create"));
-            }
+            let subcompositor = sys::wlr_subcompositor_create(display.as_ptr());
+            let subcompositor =
+                NonNull::new(subcompositor).ok_or(Error::Create("wlr_subcompositor_create"))?;
+            // Kept for the same reason the compositor is: it is the owning
+            // object of the sub-surface global, and looking it up again would
+            // mean re-walking the display's globals.
+            *self.inner.subcompositor.borrow_mut() = Some(subcompositor);
             if sys::wlr_data_device_manager_create(display.as_ptr()).is_null() {
                 return Err(Error::Create("wlr_data_device_manager_create"));
             }

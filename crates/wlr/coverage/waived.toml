@@ -339,8 +339,8 @@ milestone = "M12"
 [[waived]]
 symbol    = "wlr_compositor_set_renderer"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+note      = "Tied to renderer-ownership design — which component owns and may re-point the compositor's renderer — the same bucket as begin_render_pass; re-homed to M13."
+milestone = "M13"
 
 
 [[waived]]
@@ -1874,8 +1874,8 @@ note      = "data-backed buffer impl detail never named by the safe API."
 [[waived]]
 symbol    = "wlr_region_from_resource"
 reason    = "not-yet"
-note      = "Takes a wl_resource; belongs with compositor/surface depth, not util."
-milestone = "M9"
+note      = "Takes a wl_resource; exists to serve custom protocol impls, which this crate does not re-wrap. Re-homed to M13 with the other *_from_resource symbols."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_relative_pointer_v1"
@@ -2475,24 +2475,6 @@ symbol    = "wlr_single_pixel_buffer_v1_try_from_buffer"
 reason    = "not-yet"
 note      = "Buffer-sharing, screen capture and DRM lease protocols."
 milestone = "M10"
-
-[[waived]]
-symbol    = "wlr_subcompositor"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_subsurface_parent_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_subsurface_try_from_wlr_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_surface_accepts_tablet_v2"

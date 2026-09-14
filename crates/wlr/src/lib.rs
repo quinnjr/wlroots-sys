@@ -96,6 +96,7 @@ mod render;
 mod runtime;
 mod scene;
 mod seat;
+mod subsurface;
 mod surface;
 mod tearing;
 #[cfg(test)]
@@ -159,6 +160,7 @@ pub use seat::{
     ActivationToken, AxisRelativeDirection, AxisSource, CursorShape, CursorShapeDevice, KeyEvent,
     Modifiers, PointerAxis, SwitchType,
 };
+pub use subsurface::{Subsurface, SubsurfaceParentState};
 pub use surface::{Surface, SurfaceId};
 pub use tearing::{TearingControl, TearingHint};
 pub use toplevel::{Edges, Toplevel, ToplevelId};

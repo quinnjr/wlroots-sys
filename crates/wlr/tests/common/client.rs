@@ -20,7 +20,8 @@ use std::os::fd::AsFd;
 
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
-    wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+    wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface,
+    wl_surface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
@@ -281,6 +282,87 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
     })
 }
 
+/// Drive a client that creates a sub-surface.
+///
+/// Phase one creates an `xdg_toplevel` parent and commits it bufferless so the
+/// server announces and tracks it — a tracked parent is what lets the server's
+/// [`Subsurface::parent_surface_id`](wlr::Subsurface::parent_surface_id)
+/// resolve. Phase two creates a child surface and a `wl_subsurface` on that
+/// parent, commits the child bufferless, then round-trips so the server has
+/// observed the child's `new_subsurface`. No buffer is attached: the role's
+/// creation is the event under test, and mapping the child would add noise the
+/// caller did not ask for.
+///
+/// The proxy handles are held until after the second round-trip, then dropped;
+/// the connection closing on the thread's return destroys both surfaces.
+/// Returns the observed [`ClientEvents`] via the `JoinHandle`.
+pub fn spawn_subsurface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            events: ClientEvents::default(),
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        // `init_graphics` always creates the subcompositor, so the global is
+        // present before any client connects.
+        let subcompositor: wl_subcompositor::WlSubcompositor =
+            globals.bind(&qh, 1..=1, ()).expect("bind wl_subcompositor");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+
+        // Phase 1: an xdg-toplevel parent, committed bufferless and
+        // round-tripped, so the server has announced and tracked its surface.
+        let parent = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&parent, &qh, ());
+        let _toplevel = xdg_surface.get_toplevel(&qh, ());
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server announces the parent toplevel");
+
+        // Phase 2: the child surface and its sub-surface role. wlroots adds a
+        // sub-surface to the parent's *current* state on the parent's next
+        // commit — not when the object is created — and emits `new_subsurface`
+        // from that apply, so the parent is committed again here. The child's
+        // own bufferless commit is included because it is the real client
+        // sequence, and the round-trip drains both.
+        let child = compositor.create_surface(&qh, ());
+        let _subsurface = subcompositor.get_subsurface(&child, &parent, &qh, ());
+        child.commit();
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the child subsurface");
+
+        drop((
+            child,
+            _subsurface,
+            parent,
+            xdg_surface,
+            _toplevel,
+            subcompositor,
+        ));
+        state.events
+    })
+}
+
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for ClientState {
     /// Present only to satisfy `registry_queue_init`'s bound. The initial
     /// globals are consumed through `GlobalList::bind` in [`spawn`]; this fires
@@ -314,6 +396,32 @@ impl Dispatch<wl_surface::WlSurface, ()> for ClientState {
         _state: &mut Self,
         _proxy: &wl_surface::WlSurface,
         _event: wl_surface::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_subcompositor::WlSubcompositor, ()> for ClientState {
+    /// Carries no events; bound only so `get_subsurface` can be called.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_subcompositor::WlSubcompositor,
+        _event: wl_subcompositor::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_subsurface::WlSubsurface, ()> for ClientState {
+    /// Carries no events in this flow; the role is created and committed only.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_subsurface::WlSubsurface,
+        _event: wl_subsurface::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,

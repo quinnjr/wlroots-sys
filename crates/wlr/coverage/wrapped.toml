@@ -1704,6 +1704,11 @@ module = "runtime"
 item   = "Runtime::create_single_pixel_buffer_manager"
 
 [[wrapped]]
+symbol = "wlr_subcompositor"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
 symbol = "wlr_subcompositor_create"
 module = "runtime"
 item   = "Runtime::init_graphics"
@@ -2212,6 +2217,16 @@ item   = "ToplevelHandler::xwayland_surface_mapped"
 symbol = "wlr_subsurface"
 module = "backend"
 item   = "ToplevelHandler::new_subsurface"
+
+[[wrapped]]
+symbol = "wlr_subsurface_parent_state"
+module = "subsurface"
+item   = "Subsurface::parent_state"
+
+[[wrapped]]
+symbol = "wlr_subsurface_try_from_wlr_surface"
+module = "subsurface"
+item   = "Surface::as_subsurface"
 
 [[wrapped]]
 symbol = "wlr_xwayland_surface"
