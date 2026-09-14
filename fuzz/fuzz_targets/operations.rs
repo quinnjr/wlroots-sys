@@ -300,6 +300,16 @@ enum Operation {
     /// live toplevel needs a connected client, so this stays on the miss path;
     /// it exercises the id lookup and the null-guarded return.
     ExportForeign,
+
+    // --- Foreign-toplevel management (M9): manager create guard and the
+    // owned handle's client-free lifecycle ---
+    /// `Runtime::create_foreign_toplevel_manager`; double-create guard included.
+    CreateForeignToplevelManager,
+    /// Create two owned handles, drive every mutator, set one as the other's
+    /// parent, and drop them in the order the input picks. No client is needed:
+    /// the requests flow the other direction. Exercises the handle's destroy
+    /// path under ASan, including wlroots' parent-rewrite on destroy.
+    ForeignToplevelHandles { parent_first: bool },
 }
 
 /// The one handler this target installs.
@@ -732,6 +742,34 @@ fn apply(
         }
         Operation::ExportForeign => {
             let _ = runtime.export_foreign(toplevel(0));
+        }
+
+        Operation::CreateForeignToplevelManager => {
+            let _ = runtime.create_foreign_toplevel_manager(display);
+        }
+        Operation::ForeignToplevelHandles { parent_first } => {
+            let Some(a) = runtime.create_foreign_toplevel() else {
+                return;
+            };
+            let Some(b) = runtime.create_foreign_toplevel() else {
+                return;
+            };
+            let _ = a.set_title("fuzz");
+            let _ = a.set_app_id("fuzz.app");
+            let _ = a.set_maximized(true);
+            let _ = a.set_minimized(true);
+            let _ = a.set_activated(true);
+            let _ = a.set_fullscreen(true);
+            let _ = a.state();
+            let _ = b.set_parent(Some(&a));
+            // The order is the input's; both must be double-free safe.
+            if *parent_first {
+                drop(a);
+                drop(b);
+            } else {
+                drop(b);
+                drop(a);
+            }
         }
     }
 }

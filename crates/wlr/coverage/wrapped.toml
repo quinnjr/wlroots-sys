@@ -3449,3 +3449,103 @@ item   = "ToplevelHandler::toplevel_description_changed"
 symbol = "wlr_xdg_toplevel_tag_manager_v1_set_tag_event"
 module = "xdg_toplevel_tag"
 item   = "ToplevelHandler::toplevel_tag_changed"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_create"
+module = "foreign_toplevel"
+item   = "Runtime::create_foreign_toplevel"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_destroy"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle (Drop)"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_output_enter"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::output_enter"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_output_leave"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::output_leave"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_activated"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::set_activated"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_app_id"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::set_app_id"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_fullscreen"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::set_fullscreen"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_maximized"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::set_maximized"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_minimized"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::set_minimized"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_parent"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::set_parent"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_title"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::set_title"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_state"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::state"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_manager_v1"
+module = "foreign_toplevel"
+item   = "Runtime::create_foreign_toplevel_manager"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_manager_v1_create"
+module = "foreign_toplevel"
+item   = "Runtime::create_foreign_toplevel_manager"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_activated_event"
+module = "backend"
+item   = "ToplevelHandler::foreign_toplevel_activate"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_fullscreen_event"
+module = "backend"
+item   = "ToplevelHandler::foreign_toplevel_fullscreen"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_maximized_event"
+module = "backend"
+item   = "ToplevelHandler::foreign_toplevel_maximize"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_minimized_event"
+module = "backend"
+item   = "ToplevelHandler::foreign_toplevel_minimize"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_rectangle_event"
+module = "backend"
+item   = "ToplevelHandler::foreign_toplevel_set_rectangle"

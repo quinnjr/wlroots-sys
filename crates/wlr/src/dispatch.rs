@@ -46,10 +46,10 @@ use std::collections::VecDeque;
 
 use crate::{
     ActivationToken, AxisRelativeDirection, AxisSource, CommittedFields, ConstraintId, CursorShape,
-    CursorShapeDevice, DecorationMode, Edges, GestureId, InputPopupSurfaceId, LayerSurfaceId,
-    NodeId, OutputId, PointerAxis, PopupId, PowerMode, SceneOutputId, ShortcutsInhibitorId,
-    SurfaceId, SwitchId, TabletPadId, TabletToolId, ToplevelIcon, ToplevelId, TouchId,
-    TransientSeatId, VirtualKeyboardId, VirtualPointerId,
+    CursorShapeDevice, DecorationMode, Edges, ForeignToplevelId, GestureId, InputPopupSurfaceId,
+    LayerSurfaceId, NodeId, OutputId, PointerAxis, PopupId, PowerMode, SceneOutputId,
+    ShortcutsInhibitorId, SurfaceId, SwitchId, TabletPadId, TabletToolId, ToplevelIcon, ToplevelId,
+    TouchId, TransientSeatId, VirtualKeyboardId, VirtualPointerId,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -358,6 +358,28 @@ pub(crate) enum Event {
     /// track. Nothing is re-read at delivery: the event's fields are pointers
     /// that do not outlive the callback.
     SystemBellRing(Option<SurfaceId>),
+
+    /// A client asked, through `zwlr_foreign_toplevel_management_v1`, to
+    /// activate an exported toplevel. Carries the crate's own
+    /// [`ForeignToplevelId`] handle for the export the compositor owns. The
+    /// client's seat is deliberately not carried — this crate has no seat id,
+    /// and focus policy is the compositor's.
+    ForeignToplevelActivate(ForeignToplevelId),
+    /// A client asked that an exported toplevel be closed.
+    ForeignToplevelClose(ForeignToplevelId),
+    /// A client asked to (un)maximize an exported toplevel; the bool is the
+    /// requested target, read at emission time.
+    ForeignToplevelMaximize(ForeignToplevelId, bool),
+    /// A client asked to (un)minimize an exported toplevel; as
+    /// [`Event::ForeignToplevelMaximize`].
+    ForeignToplevelMinimize(ForeignToplevelId, bool),
+    /// A client asked to (un)fullscreen an exported toplevel; as
+    /// [`Event::ForeignToplevelMaximize`].
+    ForeignToplevelFullscreen(ForeignToplevelId, bool),
+    /// A client set a rectangle on one of an exported toplevel's surfaces. The
+    /// surface is resolved to this crate's own id at emission time (`None` when
+    /// untracked); the rectangle is copied.
+    ForeignToplevelSetRectangle(ForeignToplevelId, Option<SurfaceId>, i32, i32, i32, i32),
 
     /// A `zwlr_gamma_control_manager_v1` client set a gamma ramp for an
     /// output. Notification only — wlroots' own scene integration (wired in

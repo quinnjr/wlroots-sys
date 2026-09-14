@@ -82,6 +82,7 @@ mod decoration;
 mod dispatch;
 mod display;
 mod error;
+mod foreign_toplevel;
 mod geom;
 mod handler;
 mod id;
@@ -116,6 +117,7 @@ pub use buffer::{Buffer, BufferDataAccess, BufferId, DataPtrAccess};
 pub use decoration::DecorationMode;
 pub use display::{Display, EventLoop};
 pub use error::{Error, Result};
+pub use foreign_toplevel::{ForeignToplevelHandle, ForeignToplevelId, ForeignToplevelState};
 pub use geom::{Box2D, FBox, Subpixel, Transform};
 pub use handler::{
     AppliedHead, FdHandler, Handlers, LoopHandler, OutputHandler, SeatHandler, ToplevelHandler,

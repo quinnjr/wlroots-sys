@@ -2348,6 +2348,17 @@ pub(crate) struct RuntimeInner {
     /// fail on a borrow.
     pub(crate) scene_observer: std::cell::Cell<Option<SceneObserver>>,
 
+    /// The live run's ability to deliver a foreign-toplevel request to its
+    /// handler, or `None` when no run is on the stack.
+    ///
+    /// Installed and cleared alongside [`scene_observer`](Self::scene_observer)
+    /// by `run_inner`'s guard, for the same reason: the request listeners belong
+    /// to the owned [`ForeignToplevelHandle`](crate::ForeignToplevelHandle),
+    /// which outlives any one run, while delivery needs a run's session. A
+    /// request arriving with no run installed is dropped.
+    pub(crate) foreign_toplevel_observer:
+        std::cell::Cell<Option<crate::foreign_toplevel::ForeignToplevelObserver>>,
+
     /// The scene outputs each observed buffer node was last reported to be
     /// displayed on.
     ///
@@ -2399,6 +2410,27 @@ pub(crate) struct RuntimeInner {
     /// `BorrowedFd` handed out during it can still be alive, and closing is
     /// safe. See [`Runtime::remove_fd`]'s own doc for the full argument.
     pub(crate) pending_close: RefCell<Vec<OwnedFd>>,
+
+    /// Foreign-toplevel handles dropped from inside a handler delivery, whose
+    /// wlroots destroy is deferred to the turn's drain.
+    ///
+    /// A client request reaches `ToplevelHandler` from inside wlroots'
+    /// `wlr_signal_emit_safe` on the handle's own request signal. Freeing the
+    /// handle there would free that signal mid-emission, which wlroots' safe
+    /// emitter cannot survive (its cursor/end markers still point into the
+    /// freed list). So `ForeignToplevelHandle`'s `Drop` unlinks its listeners
+    /// at once — safe, they still live — but queues the handle pointer here for
+    /// [`Runtime::drain_pending_foreign_toplevel_destroys`], which runs at the
+    /// same per-turn point as `pending_close`: after every callback of the turn
+    /// has returned.
+    ///
+    /// Deliberately **not** released when this runtime drops. A queued handle
+    /// belongs to a manager that may already be freed (display teardown), so
+    /// calling destroy from `RuntimeInner`'s own drop would be the very
+    /// use-after-free this queue exists to avoid; leaking the one handle is the
+    /// safe answer.
+    pub(crate) pending_foreign_toplevel_destroys:
+        RefCell<Vec<NonNull<sys::wlr_foreign_toplevel_handle_v1>>>,
 
     /// The xdg shell, once created. `Option` because a consumer that only
     /// wants a scene never makes one, and because a second one would
@@ -2572,6 +2604,13 @@ pub(crate) struct RuntimeInner {
     /// created against the registry. Display-owned; `Option`, same rationale as
     /// the other manager globals.
     pub(crate) xdg_foreign_v2: RefCell<Option<NonNull<sys::wlr_xdg_foreign_v2>>>,
+
+    /// The foreign-toplevel-management (`zwlr_foreign_toplevel_manager_v1`)
+    /// manager, once created — lets a taskbar or dock observe and drive the
+    /// toplevels this compositor exports. Display-owned; `Option`, same
+    /// rationale as the other manager globals.
+    pub(crate) foreign_toplevel_manager:
+        RefCell<Option<NonNull<sys::wlr_foreign_toplevel_manager_v1>>>,
 
     /// The gamma-control (`zwlr_gamma_control_manager_v1`) manager, once
     /// created — lets a client (a night-light tool such as `wlsunset` or
@@ -3617,10 +3656,12 @@ impl Runtime {
                 node_borrows: std::cell::Cell::new(0),
                 buffers: RefCell::new(HashMap::new()),
                 scene_observer: std::cell::Cell::new(None),
+                foreign_toplevel_observer: std::cell::Cell::new(None),
                 scene_buffer_outputs: RefCell::new(HashMap::new()),
                 scene_outputs: RefCell::new(HashMap::new()),
                 live_sources: RefCell::new(HashMap::new()),
                 pending_close: RefCell::new(Vec::new()),
+                pending_foreign_toplevel_destroys: RefCell::new(Vec::new()),
                 xdg_shell: RefCell::new(None),
                 xdg_shell_version: std::cell::Cell::new(None),
                 xdg_decoration_manager: RefCell::new(None),
@@ -3646,6 +3687,7 @@ impl Runtime {
                 xdg_foreign_registry: RefCell::new(None),
                 xdg_foreign_v1: RefCell::new(None),
                 xdg_foreign_v2: RefCell::new(None),
+                foreign_toplevel_manager: RefCell::new(None),
                 gamma_control_manager: RefCell::new(None),
                 text_input_manager: RefCell::new(None),
                 tearing_control_manager: RefCell::new(None),
@@ -3872,6 +3914,45 @@ impl Runtime {
     /// remove nothing) drops nothing and costs one empty `Vec::clear`.
     pub(crate) fn drain_pending_closes(&self) {
         self.inner.pending_close.borrow_mut().clear();
+    }
+
+    /// Queue a foreign-toplevel handle's wlroots destroy until the turn ends.
+    ///
+    /// Called by [`ForeignToplevelHandle`](crate::ForeignToplevelHandle)'s
+    /// `Drop` when it runs inside a handler delivery; see the field's own doc
+    /// for why the destroy cannot happen there.
+    pub(crate) fn defer_foreign_toplevel_destroy(
+        &self,
+        raw: NonNull<sys::wlr_foreign_toplevel_handle_v1>,
+    ) {
+        self.inner
+            .pending_foreign_toplevel_destroys
+            .borrow_mut()
+            .push(raw);
+    }
+
+    /// Release every handle whose destroy was deferred this turn.
+    ///
+    /// Runs at the same point as [`drain_pending_closes`](Self::drain_pending_closes):
+    /// after `wl_event_loop_dispatch` returns, so the request signal that
+    /// produced the drop is no longer being emitted and the handle memory can
+    /// be freed. An empty list is the ordinary case.
+    pub(crate) fn drain_pending_foreign_toplevel_destroys(&self) {
+        let pending: Vec<NonNull<sys::wlr_foreign_toplevel_handle_v1>> = self
+            .inner
+            .pending_foreign_toplevel_destroys
+            .borrow_mut()
+            .drain(..)
+            .collect();
+        for raw in pending {
+            // SAFETY: each pointer was a live handle whose owner dropped it
+            // during this turn's dispatch and deferred the release; the manager
+            // that owns it is alive because the run driving the dispatch is on
+            // the stack. `wlr_foreign_toplevel_handle_v1_destroy` is
+            // idempotent-free: it removes the handle from the manager and frees
+            // it exactly once.
+            unsafe { sys::wlr_foreign_toplevel_handle_v1_destroy(raw.as_ptr()) };
+        }
     }
 
     /// The descriptor `id` names, borrowed for the callback that resolves it.
@@ -6722,11 +6803,31 @@ impl Runtime {
     /// Clear it again, which `run_inner`'s guard does on every exit path.
     pub(crate) fn clear_scene_observer(&self) {
         self.inner.scene_observer.set(None);
+        // The foreign-toplevel hook goes with it: its session pointer names this
+        // same run, so leaving it installed would dangle.
+        self.clear_foreign_toplevel_observer();
         // The snapshots go with it: they name scene outputs by id, which stay
         // valid, but nothing can refresh them once the listeners are gone, and
         // a stale set answered after the run had ended would be worse than a
         // miss.
         self.inner.scene_buffer_outputs.borrow_mut().clear();
+    }
+
+    /// Install the live run's foreign-toplevel delivery hook.
+    ///
+    /// Called by the same run-inner hook that installs the scene observer; no
+    /// run on the stack means no `ToplevelHandler` to deliver to, so a request
+    /// arriving then is dropped.
+    pub(crate) fn set_foreign_toplevel_observer(
+        &self,
+        observer: crate::foreign_toplevel::ForeignToplevelObserver,
+    ) {
+        self.inner.foreign_toplevel_observer.set(Some(observer));
+    }
+
+    /// Clear it again, which `run_inner`'s guard does on every exit path.
+    pub(crate) fn clear_foreign_toplevel_observer(&self) {
+        self.inner.foreign_toplevel_observer.set(None);
     }
 
     /// `id`'s node as a buffer node, if changing how it *looks* is allowed.

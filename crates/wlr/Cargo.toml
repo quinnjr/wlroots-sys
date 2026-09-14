@@ -107,6 +107,13 @@ wayland-client = "0.31"
 # icon/tag bindings; its own MSRV is 1.86, inside the workspace's 1.88 floor.
 # Dev-dependency only, like the rest.
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+# wlr-protocols client bindings (foreign-toplevel-management) for the
+# client-driven export/request tests. `wlr-protocols` is not part of
+# wayland-protocols; this companion crate carries the wlroots extensions.
+# Its own MSRV is 1.71, inside the workspace's 1.88 floor, and it resolves
+# against the same wayland-protocols 0.32 / wayland-client 0.31 already in the
+# graph. Dev-dependency only, like the rest.
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 # The dispatch bench compares each safe call with the raw `wlr_sys` call it
 # wraps. `harness = false` hands `main` to criterion instead of libtest.

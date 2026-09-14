@@ -537,7 +537,7 @@ impl Registration {
     ///
     /// As for [`Registration::link`], to which every argument is forwarded
     /// verbatim.
-    unsafe fn link_bare(
+    pub(crate) unsafe fn link_bare(
         signal: *mut sys::wl_signal,
         notify: sys::wl_notify_func_t,
         session: *const (),
@@ -2521,6 +2521,11 @@ impl<'d> Backend<'d> {
             // `Runtime::remove_fd`'s deferred-close doc promises a close
             // will actually happen by.
             runtime.drain_pending_closes();
+            // Same point, same reason: a foreign-toplevel handle dropped from
+            // inside a handler deferred its wlroots destroy until the request
+            // signal emitting it had finished. See
+            // `RuntimeInner::pending_foreign_toplevel_destroys`.
+            runtime.drain_pending_foreign_toplevel_destroys();
             if let Some(display) = display {
                 display.flush_clients();
             }
@@ -3236,15 +3241,16 @@ struct RunHooks<'d, S> {
     /// `OutputHandler`, which cannot instantiate a `Handlers`-bound callback.
     register_extra: fn(&Backend<'d>, &Runtime, &Session<'_, S>) -> Result<Vec<Registration>>,
 
-    /// Installs this run as the runtime's scene-buffer observer, so
-    /// [`Runtime::observe_scene_buffer`](crate::Runtime::observe_scene_buffer)
-    /// has a session to link listeners into.
+    /// Installs this run's runtime-owned handler hooks — the scene-buffer
+    /// observer and the foreign-toplevel request observer — so the runtime has
+    /// a session to deliver their events through.
     ///
     /// A hook for the same reason `register_extra` is one: the functions it
     /// installs are bound by `Handlers`, and `run`'s bound is `OutputHandler`.
     /// `run`'s slot ([`no_scene_observer`]) installs nothing, which is what
-    /// makes `observe_scene_buffer` report "no run to observe through" rather
-    /// than linking listeners whose events `deliver` would drop.
+    /// makes `observe_scene_buffer` and a foreign-toplevel request report "no
+    /// run to deliver through" rather than linking listeners whose events
+    /// `deliver` would drop.
     install_scene_observer: fn(&Runtime, *const ()),
 }
 
@@ -3381,6 +3387,52 @@ fn no_extra<S>(
     _session: &Session<'_, S>,
 ) -> Result<Vec<Registration>> {
     Ok(Vec::new())
+}
+
+/// Deliver a foreign-toplevel request through the run that installed the hook.
+///
+/// The `S`-carrying half of the runtime's
+/// [`ForeignToplevelObserver`](crate::foreign_toplevel::ForeignToplevelObserver):
+/// a request listener linked into an owned handle calls through this, and it
+/// emits the event on that run's dispatcher.
+///
+/// # Safety
+///
+/// `session` must be the `*const Session<'_, S>` the run installed alongside
+/// this function, and that run must still be on the stack.
+unsafe fn deliver_foreign_toplevel_request<S: Handlers>(
+    session: *const (),
+    request: crate::foreign_toplevel::ForeignToplevelRequest,
+) {
+    use crate::foreign_toplevel::ForeignToplevelRequest;
+    // SAFETY: forwarded from this function's contract; the session is the one
+    // this function was installed with and the run is still dispatching.
+    unsafe {
+        let session = session.cast::<Session<'_, S>>();
+        let event = match request {
+            ForeignToplevelRequest::Activate { id } => Event::ForeignToplevelActivate(id),
+            ForeignToplevelRequest::Close { id } => Event::ForeignToplevelClose(id),
+            ForeignToplevelRequest::Maximize { id, maximized } => {
+                Event::ForeignToplevelMaximize(id, maximized)
+            }
+            ForeignToplevelRequest::Minimize { id, minimized } => {
+                Event::ForeignToplevelMinimize(id, minimized)
+            }
+            ForeignToplevelRequest::Fullscreen { id, fullscreen } => {
+                Event::ForeignToplevelFullscreen(id, fullscreen)
+            }
+            ForeignToplevelRequest::SetRectangle {
+                id,
+                surface,
+                x,
+                y,
+                width,
+                height,
+            } => Event::ForeignToplevelSetRectangle(id, surface, x, y, width, height),
+        };
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(&*session, event, deliver);
+    }
 }
 
 /// Delivery for `run_all`: every event kind, including the ones `deliver`
@@ -3635,6 +3687,20 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         }
         Event::RequestActivate(target, token) => state.request_activate(target, token),
         Event::SystemBellRing(surface) => state.system_bell_ring(surface),
+        Event::ForeignToplevelActivate(id) => state.foreign_toplevel_activate(id),
+        Event::ForeignToplevelClose(id) => state.foreign_toplevel_close(id),
+        Event::ForeignToplevelMaximize(id, maximized) => {
+            state.foreign_toplevel_maximize(id, maximized)
+        }
+        Event::ForeignToplevelMinimize(id, minimized) => {
+            state.foreign_toplevel_minimize(id, minimized)
+        }
+        Event::ForeignToplevelFullscreen(id, fullscreen) => {
+            state.foreign_toplevel_fullscreen(id, fullscreen)
+        }
+        Event::ForeignToplevelSetRectangle(id, surface, x, y, width, height) => {
+            state.foreign_toplevel_set_rectangle(id, surface, x, y, width, height)
+        }
         Event::GammaControlChanged(id) => state.gamma_control_changed(id),
         Event::OutputPowerModeRequested(id, mode) => state.output_power_mode_requested(id, mode),
         Event::InputMethodPopupCreated(popup) => state.new_popup_surface(popup),
@@ -5410,12 +5476,15 @@ unsafe fn scene_buffer_is_watched<S: Handlers>(session: *const (), node: NodeId)
     }
 }
 
-/// Install this run as the runtime's scene-buffer observer.
+/// Install this run's runtime-owned handler hooks: the scene-buffer observer
+/// and the foreign-toplevel request observer.
 ///
-/// The `S`-carrying half of [`SceneObserverGuard`], which is what clears it
+/// The `S`-carrying half of [`SceneObserverGuard`], which is what clears them
 /// again: `run_inner` is generic over `OutputHandler` and cannot name these
 /// `Handlers`-bound functions, so `run_all` supplies them through
-/// [`RunHooks`].
+/// [`RunHooks`]. Both hooks exist because the objects they serve — scene
+/// buffers and owned foreign-toplevel handles — outlive any one run while
+/// delivery needs that run's session.
 fn install_scene_observer<S: Handlers>(runtime: &Runtime, session: *const ()) {
     runtime.set_scene_observer(SceneObserver {
         session,
@@ -5423,22 +5492,25 @@ fn install_scene_observer<S: Handlers>(runtime: &Runtime, session: *const ()) {
         unwatch: unwatch_scene_buffer::<S>,
         is_watching: scene_buffer_is_watched::<S>,
     });
+    runtime.set_foreign_toplevel_observer(crate::foreign_toplevel::ForeignToplevelObserver {
+        session,
+        request: deliver_foreign_toplevel_request::<S>,
+    });
 }
 
 /// `run`'s counterpart: [`Backend::run`] takes only an `OutputHandler`, which
-/// has no scene-buffer methods to deliver to, so it installs nothing and
-/// `Runtime::observe_scene_buffer` reports that there is no run to observe
-/// through.
+/// has neither scene-buffer methods to deliver to nor a `ToplevelHandler`, so it
+/// installs nothing and both `Runtime::observe_scene_buffer` and a foreign
+/// toplevel request report that there is no run to deliver through.
 fn no_scene_observer<S>(_runtime: &Runtime, _session: *const ()) {}
 
-/// Clears the runtime's scene-buffer observer when the `run_inner` call holding
-/// this guard returns, on every exit path — including a panic.
+/// Clears the runtime's run-scoped observer hooks when the `run_inner` call
+/// holding this guard returns, on every exit path — including a panic.
 ///
-/// The hook it clears holds a raw pointer to that call's own `Session`, so
-/// leaving it installed past the return would be a dangling pointer any later
-/// `Runtime::observe_scene_buffer` would follow. Mirrors [`ToplevelTableGuard`]
-/// in shape and in why it is a `Drop` guard rather than a statement at the end
-/// of the function.
+/// The hooks it clears hold a raw pointer to that call's own `Session`, so
+/// leaving them installed past the return would be a dangling pointer a later
+/// observer would follow. Mirrors [`ToplevelTableGuard`] in shape and in why it
+/// is a `Drop` guard rather than a statement at the end of the function.
 struct SceneObserverGuard<'r>(&'r Runtime);
 
 impl Drop for SceneObserverGuard<'_> {
@@ -12518,6 +12590,12 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::RequestSetShape(..)
         | Event::RequestActivate(..)
         | Event::SystemBellRing(..)
+        | Event::ForeignToplevelActivate(..)
+        | Event::ForeignToplevelClose(..)
+        | Event::ForeignToplevelMaximize(..)
+        | Event::ForeignToplevelMinimize(..)
+        | Event::ForeignToplevelFullscreen(..)
+        | Event::ForeignToplevelSetRectangle(..)
         | Event::GammaControlChanged(..)
         | Event::OutputPowerModeRequested(..)
         // Unreachable: `run` never registers an input-method manager either

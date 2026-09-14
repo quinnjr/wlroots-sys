@@ -6,9 +6,10 @@
 
 use crate::{
     ActivationToken, AxisSource, CommittedFields, ConstraintId, CursorShape, CursorShapeDevice,
-    DecorationMode, Edges, GestureId, InputPopupSurfaceId, KeyEvent, LayerSurface, LayerSurfaceId,
-    NodeId, Output, OutputId, PointerAxis, Popup, PopupId, PowerMode, Region, SceneOutputId,
-    Surface, SurfaceId, SwitchId, Toplevel, ToplevelIcon, ToplevelId, TouchId, Transform,
+    DecorationMode, Edges, ForeignToplevelId, GestureId, InputPopupSurfaceId, KeyEvent,
+    LayerSurface, LayerSurfaceId, NodeId, Output, OutputId, PointerAxis, Popup, PopupId, PowerMode,
+    Region, SceneOutputId, Surface, SurfaceId, SwitchId, Toplevel, ToplevelIcon, ToplevelId,
+    TouchId, Transform,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -1122,6 +1123,85 @@ pub trait ToplevelHandler {
     /// 0.20.x still compiles unchanged.
     fn toplevel_description_changed(&mut self, toplevel: &Toplevel<'_>, description: Option<&str>) {
         let _ = (toplevel, description);
+    }
+
+    /// A client asked, through `zwlr_foreign_toplevel_management_v1`, to
+    /// activate an exported toplevel. `id` names the handle the compositor
+    /// created with
+    /// [`Runtime::create_foreign_toplevel`](crate::Runtime::create_foreign_toplevel).
+    ///
+    /// wlroots does **not** apply this: the client's seat is deliberately not
+    /// forwarded (this crate has no seat id), and honoring the request is the
+    /// compositor's focus policy — the same shape
+    /// [`SeatHandler::request_activate`](crate::SeatHandler::request_activate)
+    /// has.
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn foreign_toplevel_activate(&mut self, id: ForeignToplevelId) {
+        let _ = id;
+    }
+
+    /// A client asked, through `zwlr_foreign_toplevel_management_v1`, that an
+    /// exported toplevel be closed. Closing the window is the compositor's call.
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn foreign_toplevel_close(&mut self, id: ForeignToplevelId) {
+        let _ = id;
+    }
+
+    /// A client asked to (un)maximize an exported toplevel. `maximized` is the
+    /// requested target, not a toggle: `true` for `set_maximized`, `false` for
+    /// `unset_maximized`. wlroots applies nothing; the compositor answers with
+    /// [`ForeignToplevelHandle::set_maximized`](crate::ForeignToplevelHandle::set_maximized)
+    /// if it honors the request.
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn foreign_toplevel_maximize(&mut self, id: ForeignToplevelId, maximized: bool) {
+        let _ = (id, maximized);
+    }
+
+    /// A client asked to (un)minimize an exported toplevel. Same target-not-
+    /// toggle contract as
+    /// [`foreign_toplevel_maximize`](ToplevelHandler::foreign_toplevel_maximize).
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn foreign_toplevel_minimize(&mut self, id: ForeignToplevelId, minimized: bool) {
+        let _ = (id, minimized);
+    }
+
+    /// A client asked to (un)fullscreen an exported toplevel. Same
+    /// target-not-toggle contract as
+    /// [`foreign_toplevel_maximize`](ToplevelHandler::foreign_toplevel_maximize).
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn foreign_toplevel_fullscreen(&mut self, id: ForeignToplevelId, fullscreen: bool) {
+        let _ = (id, fullscreen);
+    }
+
+    /// A client set a rectangle on one of an exported toplevel's surfaces,
+    /// asking the compositor to treat it as the window's interactive area (for
+    /// example, the area a taskbar preview should cover). `surface` is the
+    /// client-named surface resolved to this crate's own id — `None` when the
+    /// surface is not one this crate tracks. `x`/`y`/`width`/`height` are that
+    /// surface's surface-local rectangle.
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn foreign_toplevel_set_rectangle(
+        &mut self,
+        id: ForeignToplevelId,
+        surface: Option<SurfaceId>,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) {
+        let _ = (id, surface, x, y, width, height);
     }
 }
 

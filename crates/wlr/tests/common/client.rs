@@ -31,6 +31,9 @@ use wayland_protocols::xdg::toplevel_icon::v1::client::{
     xdg_toplevel_icon_manager_v1, xdg_toplevel_icon_v1,
 };
 use wayland_protocols::xdg::toplevel_tag::v1::client::xdg_toplevel_tag_manager_v1;
+use wayland_protocols_wlr::foreign_toplevel::v1::client::{
+    zwlr_foreign_toplevel_handle_v1, zwlr_foreign_toplevel_manager_v1,
+};
 
 /// What the client observed while it ran, handed back by [`spawn`].
 ///
@@ -50,6 +53,22 @@ pub struct ClientEvents {
     pub activation_token_received: bool,
     /// Whether the activation client then redeemed that token with `activate`.
     pub activation_sent: bool,
+}
+
+/// What a `zwlr_foreign_toplevel_manager_v1` client observed, returned by
+/// [`spawn_foreign_toplevel`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ForeignToplevelEvents {
+    /// How many `toplevel` events the manager delivered.
+    pub toplevels_seen: u32,
+    /// The last `title` event's string.
+    pub title: Option<String>,
+    /// The last `app_id` event's string.
+    pub app_id: Option<String>,
+    /// Whether at least one `state` array arrived.
+    pub state_events: u32,
+    /// Whether the initial `done` arrived.
+    pub saw_done: bool,
 }
 
 /// The globals a driven client has bound.
@@ -72,6 +91,12 @@ pub struct ClientState {
     /// Populated by the `Dispatch` impls; copied into [`ClientEvents`] and
     /// returned by [`spawn`].
     pub events: ClientEvents,
+    /// What a foreign-toplevel-management client observed; returned by
+    /// [`spawn_foreign_toplevel`].
+    pub foreign: ForeignToplevelEvents,
+    /// The exported foreign-toplevel handle the server replayed on bind, kept
+    /// alive so the driven client can drive its requests.
+    pub foreign_handle: Option<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1>,
 }
 
 impl ClientState {
@@ -123,6 +148,8 @@ pub fn spawn_show_window_menu(
             seat: None,
             activation_token: None,
             events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
         };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -153,6 +180,76 @@ pub fn spawn_show_window_menu(
 
         drop((surface, xdg_surface, toplevel, seat, wm_base, compositor));
         state.events
+    })
+}
+
+/// Drive a `zwlr_foreign_toplevel_manager_v1` client against a handle the
+/// compositor exported before the connection.
+///
+/// Binds the manager and round-trips so the server's bind-time replay of the
+/// exported handle — its `toplevel` event plus title, app id, state and `done`
+/// — is dispatched, then drives every handle request the protocol offers except
+/// `destroy`. The requests are round-tripped so the server observes them before
+/// the thread returns. Returns the observed [`ForeignToplevelEvents`].
+pub fn spawn_foreign_toplevel(socket: &str) -> std::thread::JoinHandle<ForeignToplevelEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            seat: None,
+            activation_token: None,
+            events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=1, ()).expect("bind wl_seat");
+        let manager: zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1 = globals
+            .bind(&qh, 1..=3, ())
+            .expect("bind zwlr_foreign_toplevel_manager_v1");
+        state.compositor = Some(compositor.clone());
+        state.seat = Some(seat.clone());
+
+        // The manager replays every toplevel that already exists when a client
+        // binds, then its details, then `done`.
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the replayed handle is dispatched");
+
+        let surface = compositor.create_surface(&qh, ());
+        let handle = state
+            .foreign_handle
+            .as_ref()
+            .expect("the manager replayed a handle")
+            .clone();
+        handle.set_maximized();
+        handle.set_minimized();
+        handle.unset_minimized();
+        handle.set_fullscreen(None);
+        handle.activate(&seat);
+        handle.set_rectangle(&surface, 5, 6, 7, 8);
+        handle.close();
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the requests");
+
+        drop((surface, handle, manager, seat, compositor));
+        state.foreign
     })
 }
 
@@ -212,6 +309,8 @@ pub fn spawn(
             seat: None,
             activation_token: None,
             events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
         };
         // `registry_queue_init` buffers the initial globals rather than
         // forwarding them to a handler, so the standard `GlobalList::bind` is
@@ -295,6 +394,8 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
             seat: None,
             activation_token: None,
             events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
         };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -408,6 +509,8 @@ pub fn spawn_subsurface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
             seat: None,
             activation_token: None,
             events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
         };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -493,6 +596,8 @@ pub fn spawn_subsurface_mapped(socket: &str) -> std::thread::JoinHandle<ClientEv
             seat: None,
             activation_token: None,
             events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
         };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -602,6 +707,8 @@ pub fn spawn_subsurface_then_destroy_parent(socket: &str) -> std::thread::JoinHa
             seat: None,
             activation_token: None,
             events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
         };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -680,6 +787,8 @@ pub fn spawn_activation_round_trip(socket: &str) -> std::thread::JoinHandle<Clie
             seat: None,
             activation_token: None,
             events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
         };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -753,6 +862,8 @@ pub fn spawn_toplevel_meta(socket: &str) -> std::thread::JoinHandle<ClientEvents
             seat: None,
             activation_token: None,
             events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
         };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -1096,5 +1207,62 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for ClientSt
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, ()> for ClientState {
+    /// The `toplevel` event hands the client its handle for an exported
+    /// toplevel; the manager replays every live one on bind.
+    fn event(
+        state: &mut Self,
+        _proxy: &zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
+        event: zwlr_foreign_toplevel_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let zwlr_foreign_toplevel_manager_v1::Event::Toplevel { toplevel } = event {
+            state.foreign.toplevels_seen += 1;
+            state.foreign_handle = Some(toplevel);
+        }
+    }
+
+    // The `toplevel` event creates the handle object; its user data is `()`,
+    // the `U` of the handle's own `Dispatch` impl below.
+    wayland_client::event_created_child!(ClientState, zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, [
+        zwlr_foreign_toplevel_manager_v1::EVT_TOPLEVEL_OPCODE => (
+            zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+            ()
+        ),
+    ]);
+}
+
+impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ()> for ClientState {
+    /// Records the title/app-id/state the server replayed. `closed` and
+    /// `parent` need no action for this flow; the client's requests are driven
+    /// by [`spawn_foreign_toplevel`].
+    fn event(
+        state: &mut Self,
+        _proxy: &zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+        event: zwlr_foreign_toplevel_handle_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_foreign_toplevel_handle_v1::Event::Title { title } => {
+                state.foreign.title = Some(title);
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
+                state.foreign.app_id = Some(app_id);
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::State { state: _ } => {
+                state.foreign.state_events += 1;
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::Done => {
+                state.foreign.saw_done = true;
+            }
+            _ => {}
+        }
     }
 }
