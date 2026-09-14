@@ -15,7 +15,7 @@ use std::ffi::CStr;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-use crate::id::find_id;
+use crate::id::{find_id, find_surface_id};
 use crate::{Surface, sys};
 
 /// Identifies a toplevel for as long as the consumer chooses to remember it.
@@ -377,7 +377,7 @@ impl<'h> Toplevel<'h> {
             if raw.is_null() {
                 return None;
             }
-            let id = find_id(&raw const (*raw).addons).map(crate::SurfaceId)?;
+            let id = find_surface_id(&raw const (*raw).addons).map(crate::SurfaceId)?;
             let surface = crate::Surface::from_raw_opt(raw, id)?;
             Some((surface, sub_x, sub_y))
         }
@@ -509,6 +509,7 @@ impl std::ops::BitOrAssign for WmCapabilities {
 /// wlroots, which can destroy the toplevel, and a view tied to the handle's
 /// lifetime would be a use-after-free the borrow checker could not see.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub struct ToplevelState {
     /// The compositor has maximized this toplevel.
     pub maximized: bool,
@@ -572,6 +573,7 @@ impl ToplevelState {
 /// xdg-shell still requires it answer with a configure. Copied out for the
 /// same reason [`ToplevelState`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub struct ToplevelRequested {
     /// The client asked to maximize.
     pub maximized: bool,

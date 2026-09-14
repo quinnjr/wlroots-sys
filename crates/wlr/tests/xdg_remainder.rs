@@ -30,6 +30,13 @@ struct App {
     mapped: Vec<ToplevelId>,
     destroyed: Vec<ToplevelId>,
     show_window_menus: Vec<(ToplevelId, i32, i32)>,
+    /// The largest surface-tree walk seen, and whether every id it yielded
+    /// resolved through `Runtime::surface` — the regression for the
+    /// role-id-versus-surface-id addon mix-up.
+    walk_visited: usize,
+    walk_all_resolved: bool,
+    /// Whether that walk yielded a surface other than the root.
+    walk_other_surface: bool,
     client: Option<JoinHandle<common::client::ClientEvents>>,
 }
 
@@ -51,6 +58,9 @@ impl App {
             mapped: Vec::new(),
             destroyed: Vec::new(),
             show_window_menus: Vec::new(),
+            walk_visited: 0,
+            walk_all_resolved: false,
+            walk_other_surface: false,
             client: None,
         }
     }
@@ -109,8 +119,15 @@ impl wlr::ToplevelHandler for App {
         toplevel.ping();
         self.pinged += 1;
         let mut count = 0usize;
-        toplevel.for_each_surface(|_surface, _x, _y| count += 1);
+        let mut all_resolved = true;
+        toplevel.for_each_surface(|surface, _x, _y| {
+            count += 1;
+            if self.runtime.surface(surface.id()).is_none() {
+                all_resolved = false;
+            }
+        });
         self.root_surfaces = count;
+        self.walk_all_resolved = all_resolved;
     }
 
     fn mapped(&mut self, toplevel: &wlr::Toplevel<'_>) {
@@ -127,8 +144,27 @@ impl wlr::ToplevelHandler for App {
 
     fn surface_committed(&mut self, surface: &wlr::Surface<'_>) {
         self.roles.push(surface.role());
-        if wlr::Toplevel::from_surface(surface).is_some() {
-            self.downcast_toplevels += 1;
+        let Some(toplevel) = wlr::Toplevel::from_surface(surface) else {
+            return;
+        };
+        self.downcast_toplevels += 1;
+        let root = surface.id();
+        let mut visited = 0usize;
+        let mut all_resolved = true;
+        let mut visited_other = false;
+        toplevel.for_each_surface(|surface, _x, _y| {
+            visited += 1;
+            if self.runtime.surface(surface.id()).is_none() {
+                all_resolved = false;
+            }
+            if surface.id() != root {
+                visited_other = true;
+            }
+        });
+        if visited >= self.walk_visited {
+            self.walk_visited = visited;
+            self.walk_all_resolved = all_resolved;
+            self.walk_other_surface = visited_other;
         }
     }
 }
@@ -200,6 +236,10 @@ fn a_live_toplevel_exposes_the_xdg_remainder() {
         app.root_surfaces >= 1,
         "for_each_surface yields at least the root, got {}",
         app.root_surfaces
+    );
+    assert!(
+        app.walk_all_resolved,
+        "the root's yielded SurfaceId resolves through Runtime::surface"
     );
     assert!(app.state_sample.is_some(), "state() reads a live snapshot");
     assert_eq!(
@@ -331,4 +371,161 @@ fn show_window_menu_reaches_the_handler() {
         "and named the announced toplevel"
     );
     assert_eq!((x, y), (11, 22), "with the client's requested point");
+}
+
+/// The surface-tree walk must yield the **surface** id, not the role id: with
+/// the wrong addon kind every yielded `SurfaceId` would fail to resolve through
+/// `Runtime::surface`, and a plain sub-surface (which carries only the surface
+/// id) would be skipped. A mapped child sub-surface makes the walk descend, so
+/// this witnesses both halves.
+#[test]
+fn traversal_yields_resolvable_ids_and_visits_a_subsurface() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime.create_xdg_shell(&display, 7).expect("xdg-shell");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = App {
+        client: Some(common::client::spawn_subsurface_mapped(&socket)),
+        ..App::new(runtime.clone())
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Stop)
+        .expect("run_all");
+    let _events = app
+        .client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("join");
+
+    assert!(
+        app.walk_visited >= 2,
+        "the walk visited the root and the mapped sub-surface, got {}",
+        app.walk_visited
+    );
+    assert!(
+        app.walk_all_resolved,
+        "every yielded SurfaceId resolved through Runtime::surface"
+    );
+    assert!(
+        app.walk_other_surface,
+        "a non-root sub-surface was yielded, not skipped"
+    );
+}
+
+/// The setters whose wlroots call asserts a minimum xdg-shell version, run
+/// against a shell created at a version that does not meet it, must report a
+/// precondition miss rather than reach the assert (which aborts the process,
+/// this distribution shipping wlroots without `NDEBUG`).
+struct GateApp {
+    runtime: Runtime,
+    results: Vec<(&'static str, Option<()>)>,
+    client: Option<JoinHandle<common::client::ClientEvents>>,
+}
+
+impl GateApp {
+    fn new(runtime: Runtime) -> GateApp {
+        GateApp {
+            runtime,
+            results: Vec::new(),
+            client: None,
+        }
+    }
+}
+
+impl wlr::OutputHandler for GateApp {}
+impl wlr::SeatHandler for GateApp {}
+impl wlr::FdHandler for GateApp {}
+impl wlr::LoopHandler for GateApp {
+    fn should_stop(&mut self) -> bool {
+        self.client.as_ref().is_some_and(|h| h.is_finished())
+    }
+}
+impl wlr::ToplevelHandler for GateApp {
+    fn initial_commit(&mut self, toplevel: &wlr::Toplevel<'_>) {
+        let id = toplevel.id();
+        self.results = vec![
+            (
+                "bounds(negative)",
+                self.runtime.set_toplevel_bounds(id, -1, 10),
+            ),
+            ("bounds(ok)", self.runtime.set_toplevel_bounds(id, 10, 10)),
+            (
+                "constrained",
+                self.runtime
+                    .set_toplevel_constrained(id, wlr::Edges::default()),
+            ),
+            (
+                "tiled",
+                self.runtime.set_toplevel_tiled(id, wlr::Edges::default()),
+            ),
+            ("suspended", self.runtime.set_toplevel_suspended(id, false)),
+            (
+                "wm_capabilities",
+                self.runtime
+                    .set_toplevel_wm_capabilities(id, WmCapabilities::MAXIMIZE),
+            ),
+        ];
+    }
+}
+
+fn gate_results(version: u32) -> Vec<(&'static str, Option<()>)> {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime
+        .create_xdg_shell(&display, version)
+        .expect("xdg-shell");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = GateApp {
+        client: Some(common::client::spawn(&socket, |state, qh| {
+            state.create_toplevel(qh);
+        })),
+        ..GateApp::new(runtime.clone())
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Stop)
+        .expect("run_all");
+    let _events = app
+        .client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("join");
+    app.results
+}
+
+#[test]
+fn version_gates_miss_instead_of_aborting() {
+    // Version 6: the constrained state (>=7) is refused; everything else the
+    // protocol allows at 6 succeeds, and a negative extent is refused.
+    let six = gate_results(6);
+    let get = |name: &str| six.iter().find(|(n, _)| *n == name).expect("row").1;
+    assert_eq!(get("bounds(negative)"), None, "negative extent refused");
+    assert_eq!(get("bounds(ok)"), Some(()), "bounds allowed at 6");
+    assert_eq!(get("constrained"), None, "constrained needs 7");
+    assert_eq!(get("tiled"), Some(()), "tiled allowed at 6");
+    assert_eq!(get("suspended"), Some(()), "suspended allowed at 6");
+    assert_eq!(get("wm_capabilities"), Some(()), "wm_caps allowed at 6");
+
+    // Version 1: only the v1-era states are reachable. Every newer setter
+    // misses rather than tripping wlroots' assert.
+    let one = gate_results(1);
+    let get = |name: &str| one.iter().find(|(n, _)| *n == name).expect("row").1;
+    assert_eq!(get("bounds(ok)"), None, "bounds needs 4");
+    assert_eq!(get("tiled"), None, "tiled needs 2");
+    assert_eq!(get("suspended"), None, "suspended needs 6");
+    assert_eq!(get("wm_capabilities"), None, "wm_caps needs 5");
+    assert_eq!(get("constrained"), None, "constrained needs 7");
 }

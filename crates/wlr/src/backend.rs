@@ -8019,7 +8019,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             std::ptr::null(),
             id,
         );
-        // The eleventh listener. The same shape as `request_resize`, on the
+        // The tenth listener. The same shape as `request_resize`, on the
         // toplevel's own `events.request_show_window_menu`.
         let request_show_window_menu = Registration::link_toplevel(
             &raw mut (*toplevel).events.request_show_window_menu,
@@ -8028,7 +8028,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             std::ptr::null(),
             id,
         );
-        // The tenth listener: popups created on this toplevel. Linked on the
+        // The eleventh listener: popups created on this toplevel. Linked on the
         // toplevel's `base` rather than on `wlr_xdg_shell` so the parent is
         // knowable — see `on_new_popup`'s own doc.
         let new_popup = Registration::link_toplevel(

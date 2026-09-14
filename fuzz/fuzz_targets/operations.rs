@@ -341,14 +341,15 @@ fn compositor() -> Option<&'static Compositor> {
             std::env::set_var("WLR_RENDERER", "pixman");
 
             let display: &'static wlr::Display = Box::leak(Box::new(
-                wlr::Display::new().unwrap_or_else(|e| panic!("fuzz harness could not start: {e}")),
+                wlr::Display::new()
+                    .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}")),
             ));
             let event_loop: &'static wlr::EventLoop<'static> =
                 Box::leak(Box::new(display.event_loop()));
             let backend = wlr::Backend::autocreate(event_loop)
                 .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}"));
-            let runtime =
-                wlr::Runtime::new().unwrap_or_else(|e| panic!("fuzz harness could not start: {e}"));
+            let runtime = wlr::Runtime::new()
+                .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}"));
             runtime
                 .init_graphics(display, &backend)
                 .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}"));
@@ -378,8 +379,8 @@ fn compositor() -> Option<&'static Compositor> {
 }
 
 fuzz_target!(|ops: Vec<Operation>| {
-    let compositor =
-        compositor().expect("fuzz harness could not start: compositor setup returned None");
+    let compositor = compositor()
+        .expect("fuzz harness could not start: compositor setup returned None");
     for op in &ops {
         apply(
             &compositor.runtime,

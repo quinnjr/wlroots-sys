@@ -441,6 +441,117 @@ pub fn spawn_subsurface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
     })
 }
 
+/// Like [`spawn_subsurface`], but **maps** the child sub-surface with a small
+/// shm buffer.
+///
+/// `wlr_surface_for_each_surface` only recurses into a sub-surface once it is
+/// `mapped` (wlroots `types/wlr_compositor.c` skips an unmapped child), so the
+/// bufferless child `spawn_subsurface` creates is never visited by the tree
+/// walk. This helper exists for the traversal regression that needs a
+/// non-root surface the walk actually yields.
+pub fn spawn_subsurface_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let shm_path = crate::common::isolated_runtime_dir().join(format!(
+        "wlr-rs-shm-{}-{}-child",
+        std::process::id(),
+        socket
+    ));
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            seat: None,
+            events: ClientEvents::default(),
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let subcompositor: wl_subcompositor::WlSubcompositor =
+            globals.bind(&qh, 1..=1, ()).expect("bind wl_subcompositor");
+        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("bind wl_shm");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+
+        // Phase 1: a parent toplevel, committed bufferless so the server
+        // announces and tracks it.
+        let parent = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&parent, &qh, ());
+        let _toplevel = xdg_surface.get_toplevel(&qh, ());
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server announces the parent toplevel");
+
+        // Phase 2: map the **parent** with an shm buffer. A sub-surface only
+        // maps once its parent is mapped (`subsurface_consider_map` checks
+        // `parent->mapped`), so this must happen before the child.
+        const W: i32 = 64;
+        const H: i32 = 64;
+        const STRIDE: i32 = W * 4;
+        let size = STRIDE * H;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&shm_path)
+            .expect("create shm backing file");
+        file.set_len((2 * size) as u64)
+            .expect("size shm backing file");
+        let pool = shm.create_pool(file.as_fd(), 2 * size, &qh, ());
+        let parent_buffer = pool.create_buffer(0, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
+        let child_buffer =
+            pool.create_buffer(size, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
+        parent.attach(Some(&parent_buffer), 0, 0);
+        parent.damage(0, 0, W, H);
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the parent maps");
+
+        // Phase 3: the child sub-surface, mapped with its own buffer, then the
+        // parent commit that folds it into the parent's current state.
+        let child = compositor.create_surface(&qh, ());
+        let subsurface = subcompositor.get_subsurface(&child, &parent, &qh, ());
+        subsurface.set_position(10, 20);
+        child.attach(Some(&child_buffer), 0, 0);
+        child.damage(0, 0, W, H);
+        child.commit();
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the mapped child subsurface");
+
+        drop((
+            child,
+            subsurface,
+            parent,
+            xdg_surface,
+            _toplevel,
+            parent_buffer,
+            child_buffer,
+            pool,
+            shm,
+            subcompositor,
+            file,
+        ));
+        state.events
+    })
+}
+
 /// Like [`spawn_subsurface`], but destroys the **parent** surface while keeping
 /// the child alive, then commits the child once more.
 ///

@@ -2405,6 +2405,16 @@ pub(crate) struct RuntimeInner {
     /// advertise a second `xdg_wm_base` global.
     pub(crate) xdg_shell: RefCell<Option<NonNull<sys::wlr_xdg_shell>>>,
 
+    /// The version passed to [`Runtime::create_xdg_shell`], or `None` before
+    /// the shell exists. Kept so the toplevel setters whose wlroots calls
+    /// assert a minimum xdg-shell version can refuse a call that would trip the
+    /// assert instead of aborting the compositor: `wlr_xdg_toplevel_set_tiled`
+    /// requires >= 2, `set_bounds` >= 4, `set_wm_capabilities` >= 5,
+    /// `set_suspended` >= 6 and `set_constrained` >= 7. The assert is on
+    /// `shell->version`, which is exactly the value stored here; the client's
+    /// own bound version does not enter into it.
+    pub(crate) xdg_shell_version: std::cell::Cell<Option<u32>>,
+
     /// The xdg-decoration manager, once created. `Option` for the same
     /// reason `xdg_shell` is: a consumer that never negotiates decorations
     /// never calls [`Runtime::create_xdg_decoration_manager`], and a second
@@ -3575,6 +3585,7 @@ impl Runtime {
                 live_sources: RefCell::new(HashMap::new()),
                 pending_close: RefCell::new(Vec::new()),
                 xdg_shell: RefCell::new(None),
+                xdg_shell_version: std::cell::Cell::new(None),
                 xdg_decoration_manager: RefCell::new(None),
                 primary_selection_manager: RefCell::new(None),
                 data_control_manager: RefCell::new(None),
@@ -7433,11 +7444,38 @@ impl Runtime {
         // apart by display, which is why the guard above rejects it
         // outright rather than refreshing.
         *self.inner.xdg_shell.borrow_mut() = Some(raw);
+        self.inner.xdg_shell_version.set(Some(version));
         Ok(())
     }
 
     pub(crate) fn xdg_shell_ptr(&self) -> Option<NonNull<sys::wlr_xdg_shell>> {
         *self.inner.xdg_shell.borrow()
+    }
+
+    /// The version passed to [`create_xdg_shell`](Runtime::create_xdg_shell),
+    /// or `None` before the shell exists. `pub(crate)` rather than public:
+    /// it exists only so the toplevel setters can enforce wlroots' own
+    /// version asserts, and a consumer that wants to know the version already
+    /// has the value it passed in.
+    pub(crate) fn xdg_shell_version(&self) -> Option<u32> {
+        self.inner.xdg_shell_version.get()
+    }
+
+    /// Whether this runtime's xdg shell was created at version `min` or newer.
+    ///
+    /// `false` when no shell exists, which is the right answer for a version
+    /// question and also cannot be reached with a live toplevel.
+    fn xdg_shell_at_least(&self, min: u32) -> bool {
+        self.xdg_shell_version().is_some_and(|v| v >= min)
+    }
+
+    /// The extent guard shared by the toplevel setters whose wlroots call
+    /// asserts `width >= 0 && height >= 0` — `set_size` and `set_bounds`.
+    /// Refusing here is what keeps that assert (live, because this
+    /// distribution ships wlroots without `NDEBUG`) from aborting the
+    /// compositor on a bad extent.
+    fn non_negative_extent(width: i32, height: i32) -> bool {
+        width >= 0 && height >= 0
     }
 
     /// Advertise `zxdg_decoration_manager_v1`.
@@ -11427,7 +11465,17 @@ impl Runtime {
     /// so an id kept past that point — even one whose client is still
     /// connected — reports `None` here rather than resolving to a stale
     /// pointer.
+    ///
+    /// A negative `width` or `height` returns `None` without calling into
+    /// wlroots: `wlr_xdg_toplevel_set_size` asserts
+    /// `width >= 0 && height >= 0`, and this distribution ships wlroots
+    /// **without `NDEBUG`**, so the assert is a process abort rather than a
+    /// no-op. [`set_toplevel_bounds`](Runtime::set_toplevel_bounds) uses the
+    /// same shared extent guard.
     pub fn set_toplevel_size(&self, id: ToplevelId, width: i32, height: i32) -> Option<()> {
+        if !Self::non_negative_extent(width, height) {
+            return None;
+        }
         let entry = self.toplevel_entry(id)?;
         // SAFETY: an entry is removed by the destroy callback, which wlroots
         // runs before it frees the toplevel, so a present entry names a live
@@ -11469,9 +11517,17 @@ impl Runtime {
     /// A hint, not a size: the client is free to exceed it, and the compositor
     /// reads the client's own size back through
     /// [`Toplevel::current_size`](crate::Toplevel::current_size). `(0, 0)`
-    /// clears the bounds. `None` for an unknown or stale id; see
-    /// `set_toplevel_size`'s doc.
+    /// clears the bounds.
+    ///
+    /// Requires xdg-shell version >= 4
+    /// (`XDG_TOPLEVEL_CONFIGURE_BOUNDS_SINCE_VERSION`); `None` if the shell
+    /// was created older. A negative extent also returns `None` — wlroots
+    /// asserts `width >= 0 && height >= 0` here too. `None` for an unknown or
+    /// stale id as well; see `set_toplevel_size`'s doc.
     pub fn set_toplevel_bounds(&self, id: ToplevelId, width: i32, height: i32) -> Option<()> {
+        if !self.xdg_shell_at_least(4) || !Self::non_negative_extent(width, height) {
+            return None;
+        }
         let entry = self.toplevel_entry(id)?;
         // SAFETY: as for `set_toplevel_size`; this only writes pending state.
         unsafe { sys::wlr_xdg_toplevel_set_bounds(entry.raw.as_ptr(), width, height) };
@@ -11481,11 +11537,20 @@ impl Runtime {
     /// Stage which edges the client should treat as **constrained** — not
     /// resizable from. `constrained_edges` is encoded through
     /// [`Edges`](crate::Edges), whose four booleans map to wlroots'
-    /// `wlr_edges` bits. `None` for an unknown or stale id; see
+    /// `wlr_edges` bits.
+    ///
+    /// Requires xdg-shell version >= 7
+    /// (`XDG_TOPLEVEL_STATE_CONSTRAINED_LEFT_SINCE_VERSION`); `None` if the
+    /// shell was created older, rather than reaching wlroots' own assert and
+    /// aborting. `None` for an unknown or stale id as well; see
     /// `set_toplevel_size`'s doc.
     pub fn set_toplevel_constrained(&self, id: ToplevelId, constrained_edges: Edges) -> Option<()> {
+        if !self.xdg_shell_at_least(7) {
+            return None;
+        }
         let entry = self.toplevel_entry(id)?;
-        // SAFETY: as for `set_toplevel_size`; this only writes pending state.
+        // SAFETY: as for `set_toplevel_size`; this only writes pending state,
+        // and the version guard above discharged wlroots' own assert.
         unsafe {
             sys::wlr_xdg_toplevel_set_constrained(entry.raw.as_ptr(), constrained_edges.to_xdg())
         };
@@ -11495,9 +11560,19 @@ impl Runtime {
     /// Stage which edges of the client sit in a tiled layout. Same
     /// [`Edges`] encoding and `None` contract as
     /// [`set_toplevel_constrained`](Runtime::set_toplevel_constrained).
+    ///
+    /// Requires xdg-shell version >= 2
+    /// (`XDG_TOPLEVEL_STATE_TILED_LEFT_SINCE_VERSION`); `None` if the shell
+    /// was created older. (Verified against the shipped wlroots binary, whose
+    /// `wlr_xdg_toplevel_set_tiled` compares `shell->version` against 2 — not
+    /// the 6 that the sibling suspended state needs.)
     pub fn set_toplevel_tiled(&self, id: ToplevelId, tiled_edges: Edges) -> Option<()> {
+        if !self.xdg_shell_at_least(2) {
+            return None;
+        }
         let entry = self.toplevel_entry(id)?;
-        // SAFETY: as for `set_toplevel_size`; this only writes pending state.
+        // SAFETY: as for `set_toplevel_size`; this only writes pending state,
+        // and the version guard above discharged wlroots' own assert.
         unsafe { sys::wlr_xdg_toplevel_set_tiled(entry.raw.as_ptr(), tiled_edges.to_xdg()) };
         Some(())
     }
@@ -11511,22 +11586,40 @@ impl Runtime {
         Some(())
     }
 
-    /// Stage whether the client is suspended (kept out of view). `None` for an
-    /// unknown or stale id; see `set_toplevel_size`'s doc.
+    /// Stage whether the client is suspended (kept out of view).
+    ///
+    /// Requires xdg-shell version >= 6
+    /// (`XDG_TOPLEVEL_STATE_SUSPENDED_SINCE_VERSION`); `None` if the shell was
+    /// created older, rather than reaching wlroots' own assert and aborting.
+    /// `None` for an unknown or stale id as well; see `set_toplevel_size`'s
+    /// doc.
     pub fn set_toplevel_suspended(&self, id: ToplevelId, suspended: bool) -> Option<()> {
+        if !self.xdg_shell_at_least(6) {
+            return None;
+        }
         let entry = self.toplevel_entry(id)?;
-        // SAFETY: as for `set_toplevel_size`; this only writes pending state.
+        // SAFETY: as for `set_toplevel_size`; this only writes pending state,
+        // and the version guard above discharged wlroots' own assert.
         unsafe { sys::wlr_xdg_toplevel_set_suspended(entry.raw.as_ptr(), suspended) };
         Some(())
     }
 
     /// Stage the window-manager capabilities the compositor advertises to the
     /// client — whether it can show a window menu, maximize, fullscreen or
-    /// minimize. `None` for an unknown or stale id; see
-    /// `set_toplevel_size`'s doc.
+    /// minimize.
+    ///
+    /// Requires xdg-shell version >= 5
+    /// (`XDG_TOPLEVEL_WM_CAPABILITIES_SINCE_VERSION`); `None` if the shell was
+    /// created older, rather than reaching wlroots' own assert and aborting.
+    /// `None` for an unknown or stale id as well; see `set_toplevel_size`'s
+    /// doc.
     pub fn set_toplevel_wm_capabilities(&self, id: ToplevelId, caps: WmCapabilities) -> Option<()> {
+        if !self.xdg_shell_at_least(5) {
+            return None;
+        }
         let entry = self.toplevel_entry(id)?;
-        // SAFETY: as for `set_toplevel_size`; this only writes pending state.
+        // SAFETY: as for `set_toplevel_size`; this only writes pending state,
+        // and the version guard above discharged wlroots' own assert.
         unsafe { sys::wlr_xdg_toplevel_set_wm_capabilities(entry.raw.as_ptr(), caps.bits()) };
         Some(())
     }

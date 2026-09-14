@@ -24,7 +24,7 @@ use std::marker::PhantomData;
 use std::os::raw::c_int;
 use std::ptr::NonNull;
 
-use crate::id::find_id;
+use crate::id::find_surface_id;
 use crate::{Toplevel, sys};
 
 /// Identifies a `wlr_surface` for as long as the consumer chooses to remember
@@ -348,7 +348,7 @@ pub(crate) unsafe fn for_each_surface_with<F>(
             // that `id` resolves to *this* surface, and inventing a value
             // would break it. In practice every surface wlroots walks has been
             // through `install_surface_listeners`.
-            let Some(id) = find_id(&raw const (*surface).addons).map(SurfaceId) else {
+            let Some(id) = find_surface_id(&raw const (*surface).addons).map(SurfaceId) else {
                 return;
             };
             let handle = Surface {
