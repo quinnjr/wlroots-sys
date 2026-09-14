@@ -82,6 +82,8 @@ mod decoration;
 mod dispatch;
 mod display;
 mod error;
+mod ext_foreign_toplevel;
+mod ext_workspace;
 mod foreign_toplevel;
 mod geom;
 mod handler;
@@ -117,6 +119,11 @@ pub use buffer::{Buffer, BufferDataAccess, BufferId, DataPtrAccess};
 pub use decoration::DecorationMode;
 pub use display::{Display, EventLoop};
 pub use error::{Error, Result};
+pub use ext_foreign_toplevel::{ExtForeignToplevelHandle, ExtForeignToplevelState};
+pub use ext_workspace::{
+    WorkspaceCapabilities, WorkspaceGroupCapabilities, WorkspaceGroupHandle, WorkspaceGroupId,
+    WorkspaceHandle, WorkspaceId, WorkspaceRequest,
+};
 pub use foreign_toplevel::{ForeignToplevelHandle, ForeignToplevelId, ForeignToplevelState};
 pub use geom::{Box2D, FBox, Subpixel, Transform};
 pub use handler::{

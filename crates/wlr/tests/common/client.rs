@@ -24,6 +24,12 @@ use wayland_client::protocol::{
     wl_subsurface, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
+    ext_foreign_toplevel_handle_v1, ext_foreign_toplevel_list_v1,
+};
+use wayland_protocols::ext::workspace::v1::client::{
+    ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
+};
 use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -71,12 +77,41 @@ pub struct ForeignToplevelEvents {
     pub saw_done: bool,
 }
 
+/// What an `ext_foreign_toplevel_list_v1` client observed, returned by
+/// [`spawn_ext_foreign_toplevel`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExtForeignToplevelEvents {
+    /// How many `toplevel` events the list delivered.
+    pub toplevels_seen: u32,
+    /// The last `title` event's string.
+    pub title: Option<String>,
+    /// The last `app_id` event's string.
+    pub app_id: Option<String>,
+    /// The last `identifier` event's string — wlroots generates a stable token.
+    pub identifier: Option<String>,
+    /// Whether the initial `done` arrived.
+    pub saw_done: bool,
+}
+
+/// What an `ext_workspace_manager_v1` client observed, returned by
+/// [`spawn_ext_workspace`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExtWorkspaceEvents {
+    /// How many `workspace_group` events the manager delivered.
+    pub groups_seen: u32,
+    /// How many `workspace` events the manager delivered.
+    pub workspaces_seen: u32,
+    /// Whether the initial `done` arrived.
+    pub saw_done: bool,
+}
+
 /// The globals a driven client has bound.
 ///
 /// The two `Option`s are filled by [`spawn`] before the `drive` closure runs;
 /// a closure can rely on both being `Some` and calling e.g.
 /// [`create_toplevel`](ClientState::create_toplevel) directly. They are public
 /// so a future leg can bind additional globals the same way.
+#[derive(Default)]
 pub struct ClientState {
     pub compositor: Option<wl_compositor::WlCompositor>,
     pub wm_base: Option<xdg_wm_base::XdgWmBase>,
@@ -97,6 +132,16 @@ pub struct ClientState {
     /// The exported foreign-toplevel handle the server replayed on bind, kept
     /// alive so the driven client can drive its requests.
     pub foreign_handle: Option<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1>,
+    /// What an `ext-foreign-toplevel-list` client observed.
+    pub ext_foreign: ExtForeignToplevelEvents,
+    /// The ext-foreign-toplevel handle the list replayed on bind.
+    pub ext_foreign_handle: Option<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1>,
+    /// What an `ext-workspace` client observed.
+    pub ext_workspace: ExtWorkspaceEvents,
+    /// The workspace group the manager replayed on bind.
+    pub ext_workspace_group: Option<ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1>,
+    /// The workspace the manager replayed on bind.
+    pub ext_workspace_handle: Option<ext_workspace_handle_v1::ExtWorkspaceHandleV1>,
 }
 
 impl ClientState {
@@ -150,6 +195,7 @@ pub fn spawn_show_window_menu(
             events: ClientEvents::default(),
             foreign: ForeignToplevelEvents::default(),
             foreign_handle: None,
+            ..ClientState::default()
         };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -214,6 +260,7 @@ pub fn spawn_foreign_toplevel(socket: &str) -> std::thread::JoinHandle<ForeignTo
             events: ClientEvents::default(),
             foreign: ForeignToplevelEvents::default(),
             foreign_handle: None,
+            ..ClientState::default()
         };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -250,6 +297,112 @@ pub fn spawn_foreign_toplevel(socket: &str) -> std::thread::JoinHandle<ForeignTo
 
         drop((surface, handle, manager, seat, compositor));
         state.foreign
+    })
+}
+
+/// Drive an `ext_foreign_toplevel_list_v1` client against a handle the
+/// compositor exported before the connection.
+///
+/// Binds the list and round-trips so the server's bind-time replay — the
+/// `toplevel` event and the handle's title, app id, identifier and `done` — is
+/// dispatched. The list has no client requests (the protocol is observation
+/// only), so nothing is driven. Returns the observed
+/// [`ExtForeignToplevelEvents`].
+pub fn spawn_ext_foreign_toplevel(
+    socket: &str,
+) -> std::thread::JoinHandle<ExtForeignToplevelEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            ..ClientState::default()
+        };
+        let list: ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind ext_foreign_toplevel_list_v1");
+
+        // The list replays every exported toplevel on bind, then its details,
+        // then `done`.
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the replayed handle is dispatched");
+
+        drop((list,));
+        state.ext_foreign
+    })
+}
+
+/// Drive an `ext_workspace_manager_v1` client that observes the workspace
+/// objects the compositor created and then commits a batch of requests.
+///
+/// Binds the manager and round-trips so the bind-time replay of the group and
+/// workspace is dispatched, then sends every workspace request the protocol
+/// offers and one `commit`. Each request is round-tripped to the server by the
+/// final `commit`'s round-trip. Returns the observed [`ExtWorkspaceEvents`].
+pub fn spawn_ext_workspace(socket: &str) -> std::thread::JoinHandle<ExtWorkspaceEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            ..ClientState::default()
+        };
+        let manager: ext_workspace_manager_v1::ExtWorkspaceManagerV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind ext_workspace_manager_v1");
+
+        // The manager replays every group and workspace that already exists on
+        // bind, then `done`.
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the replayed objects are dispatched");
+
+        let group = state
+            .ext_workspace_group
+            .as_ref()
+            .expect("the manager replayed a group")
+            .clone();
+        let workspace = state
+            .ext_workspace_handle
+            .as_ref()
+            .expect("the manager replayed a workspace")
+            .clone();
+
+        // One atomic batch: the compositor sees all five requests when the
+        // commit drains them.
+        workspace.activate();
+        workspace.deactivate();
+        workspace.assign(&group);
+        group.create_workspace("wlr-new".to_owned());
+        workspace.remove();
+        manager.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the committed requests");
+
+        drop((workspace, group, manager));
+        state.ext_workspace
     })
 }
 
@@ -311,6 +464,7 @@ pub fn spawn(
             events: ClientEvents::default(),
             foreign: ForeignToplevelEvents::default(),
             foreign_handle: None,
+            ..ClientState::default()
         };
         // `registry_queue_init` buffers the initial globals rather than
         // forwarding them to a handler, so the standard `GlobalList::bind` is
@@ -396,6 +550,7 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
             events: ClientEvents::default(),
             foreign: ForeignToplevelEvents::default(),
             foreign_handle: None,
+            ..ClientState::default()
         };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -511,6 +666,7 @@ pub fn spawn_subsurface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
             events: ClientEvents::default(),
             foreign: ForeignToplevelEvents::default(),
             foreign_handle: None,
+            ..ClientState::default()
         };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -598,6 +754,7 @@ pub fn spawn_subsurface_mapped(socket: &str) -> std::thread::JoinHandle<ClientEv
             events: ClientEvents::default(),
             foreign: ForeignToplevelEvents::default(),
             foreign_handle: None,
+            ..ClientState::default()
         };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -709,6 +866,7 @@ pub fn spawn_subsurface_then_destroy_parent(socket: &str) -> std::thread::JoinHa
             events: ClientEvents::default(),
             foreign: ForeignToplevelEvents::default(),
             foreign_handle: None,
+            ..ClientState::default()
         };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -789,6 +947,7 @@ pub fn spawn_activation_round_trip(socket: &str) -> std::thread::JoinHandle<Clie
             events: ClientEvents::default(),
             foreign: ForeignToplevelEvents::default(),
             foreign_handle: None,
+            ..ClientState::default()
         };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -864,6 +1023,7 @@ pub fn spawn_toplevel_meta(socket: &str) -> std::thread::JoinHandle<ClientEvents
             events: ClientEvents::default(),
             foreign: ForeignToplevelEvents::default(),
             foreign_handle: None,
+            ..ClientState::default()
         };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -1264,5 +1424,129 @@ impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ()> 
             }
             _ => {}
         }
+    }
+}
+
+impl Dispatch<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, ()> for ClientState {
+    /// The `toplevel` event hands the client its handle for an exported
+    /// toplevel; the list replays every live one on bind.
+    fn event(
+        state: &mut Self,
+        _proxy: &ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1,
+        event: ext_foreign_toplevel_list_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let ext_foreign_toplevel_list_v1::Event::Toplevel { toplevel } = event {
+            state.ext_foreign.toplevels_seen += 1;
+            state.ext_foreign_handle = Some(toplevel);
+        }
+    }
+
+    wayland_client::event_created_child!(ClientState, ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, [
+        ext_foreign_toplevel_list_v1::EVT_TOPLEVEL_OPCODE => (
+            ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+            ()
+        ),
+    ]);
+}
+
+impl Dispatch<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()> for ClientState {
+    /// Records the title/app-id/identifier the list replayed; `closed` and the
+    /// list's `finished` need no action for this flow.
+    fn event(
+        state: &mut Self,
+        _proxy: &ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+        event: ext_foreign_toplevel_handle_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_foreign_toplevel_handle_v1::Event::Title { title } => {
+                state.ext_foreign.title = Some(title);
+            }
+            ext_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
+                state.ext_foreign.app_id = Some(app_id);
+            }
+            ext_foreign_toplevel_handle_v1::Event::Identifier { identifier } => {
+                state.ext_foreign.identifier = Some(identifier);
+            }
+            ext_foreign_toplevel_handle_v1::Event::Done => {
+                state.ext_foreign.saw_done = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, ()> for ClientState {
+    /// `workspace_group` and `workspace` hand the client handles for the
+    /// objects the compositor created; the manager replays each live one on
+    /// bind, then `done`. Requests are driven by [`spawn_ext_workspace`].
+    fn event(
+        state: &mut Self,
+        _proxy: &ext_workspace_manager_v1::ExtWorkspaceManagerV1,
+        event: ext_workspace_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_workspace_manager_v1::Event::WorkspaceGroup { workspace_group } => {
+                state.ext_workspace.groups_seen += 1;
+                state.ext_workspace_group = Some(workspace_group);
+            }
+            ext_workspace_manager_v1::Event::Workspace { workspace } => {
+                state.ext_workspace.workspaces_seen += 1;
+                state.ext_workspace_handle = Some(workspace);
+            }
+            ext_workspace_manager_v1::Event::Done => {
+                state.ext_workspace.saw_done = true;
+            }
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(ClientState, ext_workspace_manager_v1::ExtWorkspaceManagerV1, [
+        ext_workspace_manager_v1::EVT_WORKSPACE_GROUP_OPCODE => (
+            ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
+            ()
+        ),
+        ext_workspace_manager_v1::EVT_WORKSPACE_OPCODE => (
+            ext_workspace_handle_v1::ExtWorkspaceHandleV1,
+            ()
+        ),
+    ]);
+}
+
+impl Dispatch<ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1, ()> for ClientState {
+    /// `capabilities`/`output_enter`/`output_leave`/`workspace_enter`/
+    /// `workspace_leave`/`removed` are advisory for this flow; the group is
+    /// bound only so [`spawn_ext_workspace`] can call `create_workspace`.
+    fn event(
+        _state: &mut Self,
+        _proxy: &ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
+        _event: ext_workspace_group_handle_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for ClientState {
+    /// `id`/`name`/`coordinates`/`state`/`capabilities`/`removed` are advisory
+    /// for this flow; the workspace is bound only so [`spawn_ext_workspace`]
+    /// can send its requests.
+    fn event(
+        _state: &mut Self,
+        _proxy: &ext_workspace_handle_v1::ExtWorkspaceHandleV1,
+        _event: ext_workspace_handle_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
     }
 }

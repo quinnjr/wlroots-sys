@@ -49,7 +49,7 @@ use crate::{
     CursorShapeDevice, DecorationMode, Edges, ForeignToplevelId, GestureId, InputPopupSurfaceId,
     LayerSurfaceId, NodeId, OutputId, PointerAxis, PopupId, PowerMode, SceneOutputId,
     ShortcutsInhibitorId, SurfaceId, SwitchId, TabletPadId, TabletToolId, ToplevelIcon, ToplevelId,
-    TouchId, TransientSeatId, VirtualKeyboardId, VirtualPointerId,
+    TouchId, TransientSeatId, VirtualKeyboardId, VirtualPointerId, WorkspaceRequest,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -380,6 +380,13 @@ pub(crate) enum Event {
     /// surface is resolved to this crate's own id at emission time (`None` when
     /// untracked); the rectangle is copied.
     ForeignToplevelSetRectangle(ForeignToplevelId, Option<SurfaceId>, i32, i32, i32, i32),
+
+    /// A client committed a batch of `ext_workspace_v1` requests. The batch is
+    /// copied into owned [`WorkspaceRequest`]s at emission time, because the
+    /// wlroots request list is freed the instant the commit emission returns;
+    /// it may therefore be delivered later (a deferred delivery still carries
+    /// what the client asked for) and holds no wlroots pointer.
+    WorkspaceCommit(Vec<WorkspaceRequest>),
 
     /// A `zwlr_gamma_control_manager_v1` client set a gamma ramp for an
     /// output. Notification only — wlroots' own scene integration (wired in

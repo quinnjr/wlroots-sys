@@ -9,7 +9,7 @@ use crate::{
     DecorationMode, Edges, ForeignToplevelId, GestureId, InputPopupSurfaceId, KeyEvent,
     LayerSurface, LayerSurfaceId, NodeId, Output, OutputId, PointerAxis, Popup, PopupId, PowerMode,
     Region, SceneOutputId, Surface, SurfaceId, SwitchId, Toplevel, ToplevelIcon, ToplevelId,
-    TouchId, Transform,
+    TouchId, Transform, WorkspaceRequest,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -1202,6 +1202,26 @@ pub trait ToplevelHandler {
         height: i32,
     ) {
         let _ = (id, surface, x, y, width, height);
+    }
+
+    /// A client committed a batch of `ext_workspace_v1` requests.
+    ///
+    /// The whole batch is delivered at once, copied out of wlroots' request
+    /// list at emission time, because the protocol requires the requests be
+    /// processed atomically. Each [`WorkspaceRequest`] names the workspace
+    /// and/or group it applies to by this crate's own id — the handles created
+    /// with [`Runtime::create_workspace`](crate::Runtime::create_workspace) and
+    /// [`Runtime::create_workspace_group`](crate::Runtime::create_workspace_group).
+    /// wlroots applies none of them; the compositor answers each with the
+    /// matching `WorkspaceHandle`/`WorkspaceGroupHandle` mutator.
+    ///
+    /// Requires
+    /// [`Runtime::create_ext_workspace_manager`](crate::Runtime::create_ext_workspace_manager).
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn workspace_commit(&mut self, requests: &[WorkspaceRequest]) {
+        let _ = requests;
     }
 }
 

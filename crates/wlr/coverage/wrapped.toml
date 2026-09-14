@@ -3549,3 +3549,133 @@ item   = "ToplevelHandler::foreign_toplevel_minimize"
 symbol = "wlr_foreign_toplevel_handle_v1_set_rectangle_event"
 module = "backend"
 item   = "ToplevelHandler::foreign_toplevel_set_rectangle"
+
+[[wrapped]]
+symbol = "wlr_ext_foreign_toplevel_list_v1"
+module = "ext_foreign_toplevel"
+item   = "Runtime::create_ext_foreign_toplevel_list"
+
+[[wrapped]]
+symbol = "wlr_ext_foreign_toplevel_list_v1_create"
+module = "ext_foreign_toplevel"
+item   = "Runtime::create_ext_foreign_toplevel_list"
+
+[[wrapped]]
+symbol = "wlr_ext_foreign_toplevel_handle_v1"
+module = "ext_foreign_toplevel"
+item   = "ExtForeignToplevelHandle"
+
+[[wrapped]]
+symbol = "wlr_ext_foreign_toplevel_handle_v1_create"
+module = "ext_foreign_toplevel"
+item   = "Runtime::create_ext_foreign_toplevel"
+
+[[wrapped]]
+symbol = "wlr_ext_foreign_toplevel_handle_v1_destroy"
+module = "ext_foreign_toplevel"
+item   = "ExtForeignToplevelHandle (Drop)"
+
+[[wrapped]]
+symbol = "wlr_ext_foreign_toplevel_handle_v1_state"
+module = "ext_foreign_toplevel"
+item   = "ExtForeignToplevelState"
+
+[[wrapped]]
+symbol = "wlr_ext_foreign_toplevel_handle_v1_update_state"
+module = "ext_foreign_toplevel"
+item   = "ExtForeignToplevelHandle::update_state"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_manager_v1"
+module = "ext_workspace"
+item   = "Runtime::create_ext_workspace_manager"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_manager_v1_create"
+module = "ext_workspace"
+item   = "Runtime::create_ext_workspace_manager"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_group_handle_v1"
+module = "ext_workspace"
+item   = "WorkspaceGroupHandle"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_group_handle_v1_create"
+module = "ext_workspace"
+item   = "Runtime::create_workspace_group"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_group_handle_v1_destroy"
+module = "ext_workspace"
+item   = "WorkspaceGroupHandle (Drop)"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_group_handle_v1_output_enter"
+module = "ext_workspace"
+item   = "WorkspaceGroupHandle::output_enter"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_group_handle_v1_output_leave"
+module = "ext_workspace"
+item   = "WorkspaceGroupHandle::output_leave"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1"
+module = "ext_workspace"
+item   = "WorkspaceHandle"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_create"
+module = "ext_workspace"
+item   = "Runtime::create_workspace"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_destroy"
+module = "ext_workspace"
+item   = "WorkspaceHandle (Drop)"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_set_active"
+module = "ext_workspace"
+item   = "WorkspaceHandle::set_active"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_set_coordinates"
+module = "ext_workspace"
+item   = "WorkspaceHandle::set_coordinates"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_set_group"
+module = "ext_workspace"
+item   = "WorkspaceHandle::set_group"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_set_hidden"
+module = "ext_workspace"
+item   = "WorkspaceHandle::set_hidden"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_set_name"
+module = "ext_workspace"
+item   = "WorkspaceHandle::set_name"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_set_urgent"
+module = "ext_workspace"
+item   = "WorkspaceHandle::set_urgent"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_v1_commit_event"
+module = "backend"
+item   = "ToplevelHandler::workspace_commit"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_v1_request"
+module = "ext_workspace"
+item   = "WorkspaceRequest"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_v1_request_type"
+module = "ext_workspace"
+item   = "WorkspaceRequest"

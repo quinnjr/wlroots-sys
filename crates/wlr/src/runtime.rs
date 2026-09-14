@@ -267,11 +267,11 @@ impl ImePreedit {
 }
 
 /// Copy a wlroots-owned nullable C string into an owned `String`, `None` for
-/// null. The single site encoding the null-guarded copy every snapshot field
-/// of this shape shares. Non-UTF-8 bytes are replaced per `to_string_lossy` —
-/// spec-violating input only, since the Wayland protocol requires strings to
-/// be valid UTF-8.
-fn copy_nullable_string(text: *const std::ffi::c_char) -> Option<String> {
+/// null. The null-guarded copy every snapshot field of this shape shares,
+/// including the `ext` protocol modules' handle accessors. Non-UTF-8 bytes are
+/// replaced per `to_string_lossy` — spec-violating input only, since the Wayland
+/// protocol requires strings to be valid UTF-8.
+pub(crate) fn copy_nullable_string(text: *const std::ffi::c_char) -> Option<String> {
     if text.is_null() {
         return None;
     }
@@ -2612,6 +2612,18 @@ pub(crate) struct RuntimeInner {
     pub(crate) foreign_toplevel_manager:
         RefCell<Option<NonNull<sys::wlr_foreign_toplevel_manager_v1>>>,
 
+    /// The `ext_foreign_toplevel_list_v1` list, once created — lets a client
+    /// observe the toplevels this compositor exports through the standardized
+    /// `ext` protocol. Display-owned; `Option`, same rationale as the other
+    /// manager globals.
+    pub(crate) ext_foreign_toplevel_list:
+        RefCell<Option<NonNull<sys::wlr_ext_foreign_toplevel_list_v1>>>,
+
+    /// The `ext_workspace_manager_v1` manager, once created — lets a taskbar or
+    /// dock list and drive the compositor's workspaces. Display-owned; `Option`,
+    /// same rationale as the other manager globals.
+    pub(crate) ext_workspace_manager: RefCell<Option<NonNull<sys::wlr_ext_workspace_manager_v1>>>,
+
     /// The gamma-control (`zwlr_gamma_control_manager_v1`) manager, once
     /// created — lets a client (a night-light tool such as `wlsunset` or
     /// `gammastep`) set a per-output gamma ramp. `Option`, same rationale as
@@ -3688,6 +3700,8 @@ impl Runtime {
                 xdg_foreign_v1: RefCell::new(None),
                 xdg_foreign_v2: RefCell::new(None),
                 foreign_toplevel_manager: RefCell::new(None),
+                ext_foreign_toplevel_list: RefCell::new(None),
+                ext_workspace_manager: RefCell::new(None),
                 gamma_control_manager: RefCell::new(None),
                 text_input_manager: RefCell::new(None),
                 tearing_control_manager: RefCell::new(None),

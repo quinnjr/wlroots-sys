@@ -310,6 +310,28 @@ enum Operation {
     /// the requests flow the other direction. Exercises the handle's destroy
     /// path under ASan, including wlroots' parent-rewrite on destroy.
     ForeignToplevelHandles { parent_first: bool },
+
+    // --- ext-foreign-toplevel-list (M9): manager create guard and the owned
+    // handle's client-free lifecycle ---
+    /// `Runtime::create_ext_foreign_toplevel_list`; double-create guard
+    /// included. The list is observation-only, so no client is needed to drive
+    /// the handle's export/update/destroy path.
+    CreateExtForeignToplevelList,
+    /// Create two owned handles, set and update their state, and drop them in
+    /// the order the input picks. Exercises the handle's destroy path under
+    /// ASan.
+    ExtForeignToplevelHandles { first_first: bool },
+
+    // --- ext-workspace (M9): manager create guard and the owned
+    // group/workspace lifecycle ---
+    /// `Runtime::create_ext_workspace_manager`; double-create guard included.
+    CreateExtWorkspaceManager,
+    /// Create a group and two workspaces, assign one to the group, drive every
+    /// workspace mutator, then drop the group and workspaces in the order the
+    /// input picks. No client is needed: the commit requests flow the other
+    /// direction. Exercises both destroy paths under ASan, including wlroots'
+    /// group-rewrite of the workspace's group pointer.
+    ExtWorkspaceHandles { group_first: bool },
 }
 
 /// The one handler this target installs.
@@ -447,8 +469,8 @@ fn apply(
     op: &Operation,
 ) {
     use wlr::{
-        Box2D, DecorationMode, LayerSurfaceId, PopupId, PopupParent, SurfaceId, ToplevelId,
-        WmCapabilities,
+        Box2D, DecorationMode, ExtForeignToplevelState, LayerSurfaceId, PopupId, PopupParent,
+        SurfaceId, ToplevelId, WmCapabilities, WorkspaceCapabilities, WorkspaceGroupCapabilities,
     };
 
     let toplevel = |nth: u64| ToplevelId::dangling_nth_for_test(nth);
@@ -769,6 +791,77 @@ fn apply(
             } else {
                 drop(b);
                 drop(a);
+            }
+        }
+
+        Operation::CreateExtForeignToplevelList => {
+            let _ = runtime.create_ext_foreign_toplevel_list(display, 1);
+        }
+        Operation::ExtForeignToplevelHandles { first_first } => {
+            let Some(a) = runtime.create_ext_foreign_toplevel(&ExtForeignToplevelState {
+                title: Some("fuzz-a".to_owned()),
+                app_id: Some("fuzz.app".to_owned()),
+            }) else {
+                return;
+            };
+            let Some(b) = runtime.create_ext_foreign_toplevel(&ExtForeignToplevelState {
+                title: Some("fuzz-b".to_owned()),
+                app_id: None,
+            }) else {
+                return;
+            };
+            let _ = a.state();
+            let _ = a.identifier();
+            let _ = a.update_state(&ExtForeignToplevelState {
+                title: Some("fuzz-a2".to_owned()),
+                app_id: None,
+            });
+            // The order is the input's; both must be double-free safe.
+            if *first_first {
+                drop(a);
+                drop(b);
+            } else {
+                drop(b);
+                drop(a);
+            }
+        }
+
+        Operation::CreateExtWorkspaceManager => {
+            let _ = runtime.create_ext_workspace_manager(display, 1);
+        }
+        Operation::ExtWorkspaceHandles { group_first } => {
+            let Some(group) = runtime
+                .create_workspace_group(WorkspaceGroupCapabilities::CREATE_WORKSPACE)
+            else {
+                return;
+            };
+            let caps = WorkspaceCapabilities::ACTIVATE
+                | WorkspaceCapabilities::DEACTIVATE
+                | WorkspaceCapabilities::ASSIGN
+                | WorkspaceCapabilities::REMOVE;
+            let Some(a) = runtime.create_workspace("fuzz-a", caps) else {
+                return;
+            };
+            let Some(b) = runtime.create_workspace("fuzz-b", caps) else {
+                return;
+            };
+            let _ = a.set_name("fuzz");
+            let _ = a.set_coordinates(&[1, 2, 3]);
+            let _ = a.set_active(true);
+            let _ = a.set_urgent(true);
+            let _ = a.set_hidden(true);
+            let _ = a.set_group(Some(&group));
+            let _ = b.set_group(Some(&group));
+            // The order is the input's; both must be double-free safe, and the
+            // group's own destroy rewrites the workspaces' group pointers.
+            if *group_first {
+                drop(group);
+                drop(a);
+                drop(b);
+            } else {
+                drop(a);
+                drop(b);
+                drop(group);
             }
         }
     }
