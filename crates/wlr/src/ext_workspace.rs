@@ -181,9 +181,12 @@ impl std::ops::BitOrAssign for WorkspaceCapabilities {
 ///
 /// Copied out of wlroots' request list at emission time — the list and its
 /// entries are freed when the commit emission returns, so nothing may be held
-/// past the callback. A request naming a workspace or group the client's object
-/// was destroyed before is dropped at collection: there is nothing left to act
-/// on, and wlroots NULLs the pointers anyway.
+/// past the callback. A request that names only a destroyed workspace (that is,
+/// `Activate`/`Deactivate`/`Assign`/`Remove`) is dropped at collection: there is
+/// nothing left to act on, and wlroots NULLs the pointer anyway. A
+/// [`CreateWorkspace`](WorkspaceRequest::CreateWorkspace) is different — it names
+/// a group, not a workspace, and a `None` group there means the group was
+/// destroyed, not that the request was dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceRequest {
     /// A client asked a group to create a workspace. `name` is the requested
@@ -192,19 +195,24 @@ pub enum WorkspaceRequest {
     CreateWorkspace {
         /// The requested workspace name.
         name: Option<String>,
-        /// The group the workspace was requested in.
+        /// The named group, or `None` if it was destroyed before the commit
+        /// drained.
         group: Option<WorkspaceGroupId>,
     },
     /// A client asked that a workspace become active.
     Activate(WorkspaceId),
     /// A client asked that a workspace become inactive.
     Deactivate(WorkspaceId),
-    /// A client asked that a workspace be moved to a group, or (with `None`)
-    /// removed from its group.
+    /// A client asked that a workspace be moved to a group.
+    ///
+    /// The `assign` request's group argument is non-nullable, so a client can
+    /// never ask to unassign; `group` is `None` here only because wlroots NULLed
+    /// it when the group was destroyed before the commit drained.
     Assign {
         /// The workspace being assigned.
         workspace: WorkspaceId,
-        /// The target group, or `None` to unassign.
+        /// The named group, or `None` if it was destroyed before the commit
+        /// drained.
         group: Option<WorkspaceGroupId>,
     },
     /// A client asked that a workspace be removed.
@@ -219,7 +227,10 @@ pub enum WorkspaceRequest {
 /// contents, so the listener may name its address for the registration's whole
 /// life.
 struct HandleListeners<T> {
-    /// Keeps the runtime the handle was created against alive.
+    /// The runtime the handle was created against, read once at creation to
+    /// look up the display-owned manager and link the watch. Holding this clone
+    /// does not keep the manager (or any object) alive; it is a handle to the
+    /// runtime, not the object being watched.
     runtime: Runtime,
     /// The live object, until `alive` is cleared.
     raw: NonNull<T>,

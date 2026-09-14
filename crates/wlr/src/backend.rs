@@ -12629,8 +12629,9 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         // uses `no_extra`), so this cannot be produced on this path.
         | Event::SessionLockChanged(..)
         // Unreachable: `run` never registers a cursor-shape, xdg-activation,
-        // gamma-control, or power manager either, for the same reason as the
-        // session lock manager above — so none of these can fire on this path.
+        // gamma-control, power, ext-workspace or any other `run_all`-only
+        // manager either, for the same reason as the session lock manager above
+        // — so none of these can fire on this path.
         | Event::RequestSetShape(..)
         | Event::RequestActivate(..)
         | Event::SystemBellRing(..)

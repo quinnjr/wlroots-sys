@@ -55,7 +55,10 @@ pub struct ExtForeignToplevelState {
 /// Heap-stable: the handle boxes it and never moves the box's contents, so the
 /// listener may name its address for the registration's whole life.
 struct HandleListeners {
-    /// Keeps the runtime the handle was created against alive.
+    /// The runtime the handle was created against, read once at creation to
+    /// look up the display-owned list and link the watch. Holding this clone
+    /// does not keep the list (or any object) alive; it is a handle to the
+    /// runtime, not the object being watched.
     runtime: Runtime,
     /// The live handle, until `alive` is cleared.
     raw: NonNull<sys::wlr_ext_foreign_toplevel_handle_v1>,
