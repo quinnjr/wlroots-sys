@@ -8,7 +8,7 @@ use crate::{
     ActivationToken, AxisSource, CommittedFields, ConstraintId, CursorShape, CursorShapeDevice,
     DecorationMode, Edges, GestureId, InputPopupSurfaceId, KeyEvent, LayerSurface, LayerSurfaceId,
     NodeId, Output, OutputId, PointerAxis, Popup, PopupId, PowerMode, Region, SceneOutputId,
-    Surface, SurfaceId, SwitchId, Toplevel, ToplevelId, TouchId, Transform,
+    Surface, SurfaceId, SwitchId, Toplevel, ToplevelIcon, ToplevelId, TouchId, Transform,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -1069,6 +1069,59 @@ pub trait ToplevelHandler {
     /// 0.20.x still compiles unchanged.
     fn system_bell_ring(&mut self, surface: Option<SurfaceId>) {
         let _ = surface;
+    }
+
+    /// A client assigned (or cleared) this toplevel's icon via
+    /// `xdg-toplevel-icon-v1`. `icon` owns the icon: keep it for as long as the
+    /// compositor wants to draw it, or drop it to release the reference at
+    /// once. `None` means the client reset the toplevel to its default icon.
+    ///
+    /// wlroots only keeps an icon alive while a reference is held, and the
+    /// client may destroy the resource that created it the instant this event
+    /// returns — so [`ToplevelIcon`] is a genuine owned handle, not a borrow.
+    /// Its [`Clone`] takes another reference and its `Drop` releases one; the
+    /// icon is freed when the last goes.
+    ///
+    /// A handler that ignores icons can leave this defaulted; the crate takes
+    /// the reference and, since nothing else keeps it, the icon is released
+    /// when this default's `icon` parameter is dropped at the end of the call.
+    /// Requires [`Runtime::create_xdg_toplevel_icon_manager`](crate::Runtime::create_xdg_toplevel_icon_manager).
+    ///
+    /// Added additively on the same terms as the other defaulted methods here:
+    /// an `impl ToplevelHandler for MyState {}` written against any earlier
+    /// 0.20.x still compiles unchanged.
+    fn toplevel_icon_changed(&mut self, toplevel: &Toplevel<'_>, icon: Option<ToplevelIcon>) {
+        let _ = (toplevel, icon);
+    }
+
+    /// A client set this toplevel's persistence *tag* via
+    /// `xdg-toplevel-tag-v1`. `tag` is the untranslated string the compositor
+    /// should match against its own window rules; `None` only if wlroots
+    /// reported no string at all, which the protocol does not otherwise allow
+    /// (the empty string is a real tag and arrives as `Some("")`).
+    ///
+    /// The string is a copy taken when the signal fired — wlroots does not
+    /// store the tag on the toplevel, so there is nothing to re-read later.
+    /// Requires [`Runtime::create_xdg_toplevel_tag_manager`](crate::Runtime::create_xdg_toplevel_tag_manager).
+    ///
+    /// Added additively on the same terms as the other defaulted methods here:
+    /// an `impl ToplevelHandler for MyState {}` written against any earlier
+    /// 0.20.x still compiles unchanged.
+    fn toplevel_tag_changed(&mut self, toplevel: &Toplevel<'_>, tag: Option<&str>) {
+        let _ = (toplevel, tag);
+    }
+
+    /// A client set this toplevel's human-readable *description* via
+    /// `xdg-toplevel-tag-v1`, the translated counterpart of
+    /// [`toplevel_tag_changed`](ToplevelHandler::toplevel_tag_changed) — for
+    /// display or a screen reader. Same ownership and `None` rules as the tag.
+    /// Requires [`Runtime::create_xdg_toplevel_tag_manager`](crate::Runtime::create_xdg_toplevel_tag_manager).
+    ///
+    /// Added additively on the same terms as the other defaulted methods here:
+    /// an `impl ToplevelHandler for MyState {}` written against any earlier
+    /// 0.20.x still compiles unchanged.
+    fn toplevel_description_changed(&mut self, toplevel: &Toplevel<'_>, description: Option<&str>) {
+        let _ = (toplevel, description);
     }
 }
 

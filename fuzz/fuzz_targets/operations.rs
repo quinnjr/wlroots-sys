@@ -270,6 +270,17 @@ enum Operation {
     CreateXdgDialogManager,
     /// `Runtime::create_xdg_system_bell`; double-create guard included.
     CreateXdgSystemBell,
+    /// `Runtime::create_xdg_toplevel_icon_manager`; double-create guard
+    /// included. A client-driven `set_icon` needs a connected client, so the
+    /// event path is not reachable here.
+    CreateXdgToplevelIconManager,
+    /// `Runtime::set_toplevel_icon_sizes` with a small preference list. A no-op
+    /// until the icon manager exists, and free of any client.
+    SetToplevelIconSizes,
+    /// `Runtime::create_xdg_toplevel_tag_manager`; double-create guard
+    /// included. As the icon manager, the tag/description event paths need a
+    /// connected client.
+    CreateXdgToplevelTagManager,
     /// `Runtime::create_xdg_foreign_registry`; double-create guard included.
     CreateForeignRegistry,
     /// `Runtime::create_xdg_foreign_v1`; misses until a registry exists, and
@@ -689,6 +700,15 @@ fn apply(
         }
         Operation::CreateXdgSystemBell => {
             let _ = runtime.create_xdg_system_bell(display, 1);
+        }
+        Operation::CreateXdgToplevelIconManager => {
+            let _ = runtime.create_xdg_toplevel_icon_manager(display, 1);
+        }
+        Operation::SetToplevelIconSizes => {
+            runtime.set_toplevel_icon_sizes(&[16, 32, 64]);
+        }
+        Operation::CreateXdgToplevelTagManager => {
+            let _ = runtime.create_xdg_toplevel_tag_manager(display, 1);
         }
         Operation::CreateForeignRegistry => {
             let _ = runtime.create_xdg_foreign_registry(display);

@@ -106,6 +106,8 @@ mod xdg_activation;
 mod xdg_dialog;
 mod xdg_foreign;
 mod xdg_system_bell;
+mod xdg_toplevel_icon;
+mod xdg_toplevel_tag;
 #[cfg(wlr_has_xwayland)]
 mod xwayland;
 
@@ -171,6 +173,7 @@ pub use toplevel::{Edges, Toplevel, ToplevelId, ToplevelRequested, ToplevelState
 pub use xdg_activation::ActivationTokenHandle;
 pub use xdg_dialog::Dialog;
 pub use xdg_foreign::{ForeignExportInfo, ForeignExported};
+pub use xdg_toplevel_icon::ToplevelIcon;
 #[cfg(wlr_has_xwayland)]
 pub use xwayland::{XwaylandSurface, XwaylandSurfaceId, XwaylandWindowType};
 

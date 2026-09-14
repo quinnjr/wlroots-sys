@@ -48,8 +48,8 @@ use crate::{
     ActivationToken, AxisRelativeDirection, AxisSource, CommittedFields, ConstraintId, CursorShape,
     CursorShapeDevice, DecorationMode, Edges, GestureId, InputPopupSurfaceId, LayerSurfaceId,
     NodeId, OutputId, PointerAxis, PopupId, PowerMode, SceneOutputId, ShortcutsInhibitorId,
-    SurfaceId, SwitchId, TabletPadId, TabletToolId, ToplevelId, TouchId, TransientSeatId,
-    VirtualKeyboardId, VirtualPointerId,
+    SurfaceId, SwitchId, TabletPadId, TabletToolId, ToplevelIcon, ToplevelId, TouchId,
+    TransientSeatId, VirtualKeyboardId, VirtualPointerId,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -57,8 +57,12 @@ use crate::{Box2D, XwaylandSurfaceId};
 /// An event awaiting delivery.
 ///
 /// Carries ids rather than handles precisely because a deferred event may name
-/// an object that no longer exists by the time it is delivered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// an object that no longer exists by the time it is delivered. The one
+/// exception is an **owned, reference-counted** payload —
+/// [`ToplevelIcon`](crate::ToplevelIcon) — which keeps its own object alive
+/// across the deferral, so it is safe to carry even though it is not `Copy`;
+/// such a variant is moved through the queue, never duplicated.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Event {
     NewOutput(OutputId),
     OutputFrame(OutputId),
@@ -102,6 +106,18 @@ pub(crate) enum Event {
     ToplevelUnmapped(ToplevelId),
     ToplevelTitleChanged(ToplevelId),
     ToplevelDestroyed(ToplevelId),
+
+    /// A client assigned or cleared this toplevel's icon. Carries the owned,
+    /// reference-counted icon — see the enum's own doc for why this one variant
+    /// is not `Copy` — which stays alive across a deferred delivery.
+    ToplevelIconChanged(ToplevelId, Option<ToplevelIcon>),
+    /// A client set this toplevel's persistence tag. The string is copied at
+    /// emission time; wlroots does not store it, so it cannot be re-read at
+    /// delivery.
+    ToplevelTagChanged(ToplevelId, Option<String>),
+    /// A client set this toplevel's human-readable description. As
+    /// [`Event::ToplevelTagChanged`].
+    ToplevelDescriptionChanged(ToplevelId, Option<String>),
 
     /// A client requested (un)maximize. The bool is the requested state —
     /// read from `wlr_xdg_toplevel::requested.maximized` at emission time,
@@ -924,12 +940,13 @@ mod tests {
     /// Records delivery order, and re-enters the dispatcher from inside a
     /// handler — exactly what wlroots does when a handler destroys an object.
     ///
-    /// `reenter_with` is a `Cell`, not a `RefCell`: `Event` is `Copy` and
-    /// `Option<Event>` is `Default`, so `Cell::take` is a drop-in replacement
-    /// that never holds a borrow guard live across the reentrant `emit` call
+    /// `reenter_with` is a `Cell`, not a `RefCell`: `Option<Event>` is
+    /// `Default`, so `Cell::take` moves the event out and leaves `None` behind
+    /// without holding a borrow guard live across the reentrant `emit` call
     /// below — a `RefCell`'s `RefMut` from `borrow_mut().take()` remains live
     /// through the `if let` body in edition 2024 (rescoping only moved it
     /// ahead of the `else` block), so the reentrant call would double-borrow.
+    /// `Cell::take` needs no `Copy`; the value is moved.
     struct Recorder {
         seen: Vec<Event>,
         reenter_with: Cell<Option<Event>>,
@@ -979,10 +996,9 @@ mod tests {
     }
 
     /// A scroll deferred behind another handler must arrive with every one
-    /// of its eight fields intact. `Event` is `Copy` and queued by value, so
-    /// the only way this breaks is a variant that stopped being `Copy` — a
-    /// single `f64` field would do it — which is exactly why the delta is
-    /// carried as `delta_milli`.
+    /// of its eight fields intact. `Event` is queued by value, so the only way
+    /// this breaks is a variant that stopped being sound to move — the delta is
+    /// carried as `delta_milli` rather than an `f64` for exactly that reason.
     #[test]
     fn a_deferred_pointer_axis_survives_the_queue_unchanged() {
         let scroll = Event::PointerAxis {
@@ -998,7 +1014,7 @@ mod tests {
 
         let mut state = Recorder {
             seen: Vec::new(),
-            reenter_with: Cell::new(Some(scroll)),
+            reenter_with: Cell::new(Some(scroll.clone())),
             dispatcher: std::ptr::null(),
         };
         // One provenance throughout, as in the tests above.
@@ -1058,7 +1074,7 @@ mod tests {
     /// final *event* order at one level of reentrancy, but only naive
     /// recursion nests an `Enter` inside another handler's `Enter`/`Exit`
     /// pair.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     enum Trace {
         Enter(Event),
         Exit(Event),
@@ -1071,7 +1087,7 @@ mod tests {
     }
 
     fn tracing_deliver(_ctx: &(), state: &mut TracingRecorder, ev: Event) {
-        state.trace.push(Trace::Enter(ev));
+        state.trace.push(Trace::Enter(ev.clone()));
         if let Some(inner) = state.reenter_with.take() {
             // SAFETY: the dispatcher outlives the test body.
             unsafe { (*state.dispatcher).emit(&(), inner, tracing_deliver) };

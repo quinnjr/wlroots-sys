@@ -2546,6 +2546,18 @@ pub(crate) struct RuntimeInner {
     /// rationale as the other manager globals.
     pub(crate) xdg_system_bell: RefCell<Option<NonNull<sys::wlr_xdg_system_bell_v1>>>,
 
+    /// The xdg-toplevel-icon (`xdg_toplevel_icon_manager_v1`) manager, once
+    /// created — lets a client assign a per-toplevel icon. Display-owned;
+    /// `Option`, same rationale as the other manager globals.
+    pub(crate) xdg_toplevel_icon_manager:
+        RefCell<Option<NonNull<sys::wlr_xdg_toplevel_icon_manager_v1>>>,
+
+    /// The xdg-toplevel-tag (`xdg_toplevel_tag_manager_v1`) manager, once
+    /// created — lets a client tag a toplevel for persistence. Display-owned;
+    /// `Option`, same rationale as the other manager globals.
+    pub(crate) xdg_toplevel_tag_manager:
+        RefCell<Option<NonNull<sys::wlr_xdg_toplevel_tag_manager_v1>>>,
+
     /// The xdg-foreign registry, once created — the shared table the v1 and v2
     /// managers export into and import from. Display-owned, so this crate only
     /// borrows it. `Option`, same rationale as the other manager globals.
@@ -3629,6 +3641,8 @@ impl Runtime {
                 xdg_activation_manager: RefCell::new(None),
                 xdg_dialog_manager: RefCell::new(None),
                 xdg_system_bell: RefCell::new(None),
+                xdg_toplevel_icon_manager: RefCell::new(None),
+                xdg_toplevel_tag_manager: RefCell::new(None),
                 xdg_foreign_registry: RefCell::new(None),
                 xdg_foreign_v1: RefCell::new(None),
                 xdg_foreign_v2: RefCell::new(None),

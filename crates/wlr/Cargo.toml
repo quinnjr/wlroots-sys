@@ -101,10 +101,12 @@ wayland-client = "0.31"
 # client-side generated code; xdg-shell itself is stable, so it comes from the
 # ungated `xdg` module and needs no `unstable` feature (which would only add
 # the deprecated `z`-prefixed protocols).
-# `staging` adds xdg-activation-v1, which lives under staging in this
-# wayland-protocols revision; the activation token round-trip test needs its
-# client bindings. Dev-dependency only, like the rest.
-wayland-protocols = { version = "0.31", features = ["client", "staging"] }
+# `staging` adds the staging protocols the client-driven tests drive —
+# xdg-activation-v1 (Task 5) plus xdg-toplevel-icon-v1 and
+# xdg-toplevel-tag-v1 (Task 6). 0.32 is the first line that carries the
+# icon/tag bindings; its own MSRV is 1.86, inside the workspace's 1.88 floor.
+# Dev-dependency only, like the rest.
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 
 # The dispatch bench compares each safe call with the raw `wlr_sys` call it
 # wraps. `harness = false` hands `main` to criterion instead of libtest.

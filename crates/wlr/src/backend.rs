@@ -45,7 +45,7 @@ use crate::{
     AppliedHead, Band, CommittedFields, ConstraintId, Display, Error, EventLoop, GestureId,
     Handlers, LayerSurface, LayerSurfaceId, LoopHandler, NodeId, Output, OutputHandler, OutputId,
     Popup, PopupId, PopupParent, PowerMode, Region, Result, Runtime, Surface, SurfaceId, SwitchId,
-    Toplevel, ToplevelId, TouchId, Transform, sys,
+    Toplevel, ToplevelIcon, ToplevelId, TouchId, Transform, sys,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -3047,6 +3047,48 @@ impl<'d> Backend<'d> {
             });
         }
 
+        if let Some(manager) = runtime.xdg_toplevel_icon_manager_ptr() {
+            // SAFETY: `create_xdg_toplevel_icon_manager` returned a non-null
+            // manager owned by the display, which this call requires to outlive
+            // it — null liveness is correct. This is the `set_icon` signal a
+            // client raises via `xdg_toplevel_icon_manager_v1.set_icon`;
+            // `on_toplevel_icon_changed` takes its own reference to the icon
+            // and fans it out to the handler as an owned handle.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.set_icon,
+                    on_toplevel_icon_changed::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
+        if let Some(manager) = runtime.xdg_toplevel_tag_manager_ptr() {
+            // SAFETY: `create_xdg_toplevel_tag_manager` returned a non-null
+            // manager owned by the display, which this call requires to outlive
+            // it — null liveness is correct. These are the `set_tag` and
+            // `set_description` signals a client raises via
+            // `xdg_toplevel_tag_manager_v1.set_toplevel_tag`/`_description`;
+            // the callbacks copy the strings out at emission time.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.set_tag,
+                    on_toplevel_tag_changed::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.set_description,
+                    on_toplevel_description_changed::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
         if let Some(manager) = runtime.gamma_control_manager_ptr() {
             // SAFETY: `create_gamma_control_manager` returned a non-null
             // manager owned by the display, which this call requires to
@@ -3380,6 +3422,15 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         Event::ToplevelUnmapped(id) => state.unmapped(id),
         Event::ToplevelTitleChanged(id) => with_toplevel(session, id, |t| state.title_changed(t)),
         Event::ToplevelDestroyed(id) => state.toplevel_destroyed(id),
+        Event::ToplevelIconChanged(id, icon) => {
+            with_toplevel(session, id, |t| state.toplevel_icon_changed(t, icon))
+        }
+        Event::ToplevelTagChanged(id, tag) => with_toplevel(session, id, |t| {
+            state.toplevel_tag_changed(t, tag.as_deref())
+        }),
+        Event::ToplevelDescriptionChanged(id, description) => with_toplevel(session, id, |t| {
+            state.toplevel_description_changed(t, description.as_deref())
+        }),
         Event::RequestMaximize(id, maximize) => {
             with_toplevel(session, id, |t| state.request_maximize(t, maximize));
             // xdg-shell requires an answer to *every* maximize/fullscreen
@@ -7271,6 +7322,157 @@ unsafe extern "C" fn on_system_bell_ring<S: Handlers>(
         (*session)
             .dispatcher
             .emit(&*session, Event::SystemBellRing(surface), deliver);
+    }
+}
+
+/// Recover the [`ToplevelId`] a live `wlr_xdg_toplevel` carries on its base
+/// surface's id addon.
+///
+/// Manager-scoped signals (`xdg-toplevel-icon-v1`, `xdg-toplevel-tag-v1`)
+/// carry a bare `wlr_xdg_toplevel` rather than being linked per toplevel, so
+/// `Bound::toplevel` is not available to them the way it is for the
+/// `wlr_xdg_toplevel.events.*` listeners. This walks to the id the same way
+/// `toplevel_id_of_surface` reads it, popup-filter included.
+///
+/// # Safety
+///
+/// `toplevel` must be a live `wlr_xdg_toplevel`; a live one always has a
+/// non-null `base` and `base->surface`, both set once at role creation.
+unsafe fn toplevel_id_of_toplevel(toplevel: *mut sys::wlr_xdg_toplevel) -> Option<ToplevelId> {
+    // SAFETY: the caller guarantees the toplevel is live.
+    unsafe {
+        let base = (*toplevel).base;
+        if base.is_null() {
+            return None;
+        }
+        let surface = (*base).surface;
+        if surface.is_null() {
+            return None;
+        }
+        toplevel_id_of_surface(surface)
+    }
+}
+
+/// Copy a NUL-terminated C string out, or `None` if the pointer is null.
+///
+/// # Safety
+///
+/// `p` must be null or a live NUL-terminated string valid for the duration of
+/// this call.
+unsafe fn cstr_option(p: *const std::os::raw::c_char) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: the caller guarantees `p` is live and NUL-terminated; this copies
+    // the bytes out and never frees the original.
+    Some(
+        unsafe { std::ffi::CStr::from_ptr(p) }
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// A client assigned or cleared a toplevel's icon via
+/// `xdg_toplevel_icon_manager_v1.set_icon`.
+///
+/// The icon is reference-counted and the event's pointer is valid only for this
+/// emission, so this takes its own reference with
+/// `wlr_xdg_toplevel_icon_v1_ref` and hands that ownership to the handler as an
+/// owned [`ToplevelIcon`].
+unsafe extern "C" fn on_toplevel_icon_changed<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_xdg_toplevel_icon_manager_v1.events.set_icon`, whose `session` is
+    // the `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_xdg_toplevel_icon_manager_v1_set_icon_event`
+    // valid only for this call; its `icon` is documented as nullable and its
+    // `toplevel` is a live toplevel.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_xdg_toplevel_icon_manager_v1_set_icon_event>();
+        let toplevel = (*event).toplevel;
+        if toplevel.is_null() {
+            return;
+        }
+        let Some(id) = toplevel_id_of_toplevel(toplevel) else {
+            return;
+        };
+        let icon = (*event).icon;
+        let icon = if icon.is_null() {
+            None
+        } else {
+            // SAFETY: the event's icon is live for this call; `ref` takes a
+            // reference and returns the same pointer, whose ownership the
+            // handle below takes.
+            let referenced = sys::wlr_xdg_toplevel_icon_v1_ref(icon);
+            NonNull::new(referenced).map(|raw| ToplevelIcon::from_raw(raw))
+        };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::ToplevelIconChanged(id, icon), deliver);
+    }
+}
+
+/// A client set a toplevel's persistence tag via
+/// `xdg_toplevel_tag_manager_v1.set_toplevel_tag`.
+unsafe extern "C" fn on_toplevel_tag_changed<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_toplevel_icon_changed`, against
+    // `wlr_xdg_toplevel_tag_manager_v1.events.set_tag` and its `set_tag_event`.
+    // The `tag` string is valid only for this call and is copied out.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_xdg_toplevel_tag_manager_v1_set_tag_event>();
+        let toplevel = (*event).toplevel;
+        if toplevel.is_null() {
+            return;
+        }
+        let Some(id) = toplevel_id_of_toplevel(toplevel) else {
+            return;
+        };
+        let tag = cstr_option((*event).tag);
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::ToplevelTagChanged(id, tag), deliver);
+    }
+}
+
+/// A client set a toplevel's description via
+/// `xdg_toplevel_tag_manager_v1.set_toplevel_description`.
+unsafe extern "C" fn on_toplevel_description_changed<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: as for `on_toplevel_icon_changed`, against
+    // `wlr_xdg_toplevel_tag_manager_v1.events.set_description` and its
+    // `set_description_event`. The `description` string is valid only for this
+    // call and is copied out.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_xdg_toplevel_tag_manager_v1_set_description_event>();
+        let toplevel = (*event).toplevel;
+        if toplevel.is_null() {
+            return;
+        }
+        let Some(id) = toplevel_id_of_toplevel(toplevel) else {
+            return;
+        };
+        let description = cstr_option((*event).description);
+        let deliver = (*session).deliver;
+        (*session).dispatcher.emit(
+            &*session,
+            Event::ToplevelDescriptionChanged(id, description),
+            deliver,
+        );
     }
 }
 
@@ -12245,6 +12447,9 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::ToplevelUnmapped(..)
         | Event::ToplevelTitleChanged(..)
         | Event::ToplevelDestroyed(..)
+        | Event::ToplevelIconChanged(..)
+        | Event::ToplevelTagChanged(..)
+        | Event::ToplevelDescriptionChanged(..)
         | Event::RequestMaximize(..)
         | Event::RequestFullscreen(..)
         | Event::RequestMove(..)

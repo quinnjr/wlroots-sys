@@ -3287,81 +3287,9 @@ note      = "Shell completion: xdg-shell remainder, foreign toplevels, composito
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_xdg_toplevel_icon_manager_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_icon_manager_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_icon_manager_v1_set_icon_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_icon_manager_v1_set_sizes"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_icon_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_icon_v1_buffer"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_icon_v1_ref"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_icon_v1_unref"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_xdg_toplevel_move_event"
 reason    = "internal"
 note      = "the payload struct wlroots hands `request_move`, whose seat and serial this crate deliberately drops; only the id of `ToplevelHandler::request_move` is exposed, so the type is never named."
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_tag_manager_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_tag_manager_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_tag_manager_v1_set_description_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_tag_manager_v1_set_tag_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_xwayland_create_with_server"

@@ -27,6 +27,10 @@ use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::toplevel_icon::v1::client::{
+    xdg_toplevel_icon_manager_v1, xdg_toplevel_icon_v1,
+};
+use wayland_protocols::xdg::toplevel_tag::v1::client::xdg_toplevel_tag_manager_v1;
 
 /// What the client observed while it ran, handed back by [`spawn`].
 ///
@@ -716,6 +720,118 @@ pub fn spawn_activation_round_trip(socket: &str) -> std::thread::JoinHandle<Clie
     })
 }
 
+/// Drive the xdg-toplevel-icon and xdg-toplevel-tag state machines together.
+///
+/// Creates a mapped toplevel, attaches an icon carrying both a stock name and
+/// a 64x64 shm pixel buffer, sets it with `xdg_toplevel_icon_manager_v1`, then
+/// sets a tag and description with `xdg_toplevel_tag_manager_v1`. The icon is
+/// double-buffered, so its `set_icon` is applied by the surface commit that
+/// follows; the tag and description are applied when their requests arrive.
+/// Each phase is round-tripped so the server has observed it before the client
+/// returns. No [`ClientEvents`] field records the exchange — the server-side
+/// handler assertions are the proof.
+pub fn spawn_toplevel_meta(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let shm_path = crate::common::isolated_runtime_dir()
+        .join(format!("wlr-rs-shm-{}-meta", std::process::id()));
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            seat: None,
+            activation_token: None,
+            events: ClientEvents::default(),
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("bind wl_shm");
+        let icon_manager: xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind xdg_toplevel_icon_manager_v1");
+        let tag_manager: xdg_toplevel_tag_manager_v1::XdgToplevelTagManagerV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind xdg_toplevel_tag_manager_v1");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+
+        // Phase 1: an xdg-toplevel parent, committed bufferless and
+        // round-tripped, so the server has announced and tracked it.
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let toplevel = xdg_surface.get_toplevel(&qh, ());
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server announces the toplevel");
+
+        // Phase 2: a square shm buffer for the icon, then an icon carrying both
+        // a name and that buffer, assigned to the toplevel. 64x64 ARGB8888
+        // needs a 16 KiB backing file.
+        const W: i32 = 64;
+        const H: i32 = 64;
+        const STRIDE: i32 = W * 4;
+        let size = STRIDE * H;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&shm_path)
+            .expect("create shm backing file");
+        file.set_len(size as u64).expect("size shm backing file");
+        let pool = shm.create_pool(file.as_fd(), size, &qh, ());
+        let buffer = pool.create_buffer(0, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
+        let icon = icon_manager.create_icon(&qh, ());
+        icon.set_name("wlr-test-icon".to_owned());
+        icon.add_buffer(&buffer, 1);
+        icon_manager.set_icon(&toplevel, Some(&icon));
+        // The icon is double-buffered: the commit applies it and wlroots emits
+        // its `set_icon` during that apply.
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server applies the icon");
+
+        // Phase 3: the tag and its translated description. wlroots forwards
+        // each request immediately rather than at commit.
+        tag_manager.set_toplevel_tag(&toplevel, "wlr-test-tag".to_owned());
+        tag_manager.set_toplevel_description(&toplevel, "WlR test description".to_owned());
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the tag and description");
+
+        drop((
+            icon,
+            tag_manager,
+            icon_manager,
+            buffer,
+            pool,
+            file,
+            surface,
+            xdg_surface,
+            toplevel,
+            shm,
+            wm_base,
+            compositor,
+        ));
+        state.events
+    })
+}
+
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for ClientState {
     /// Present only to satisfy `registry_queue_init`'s bound. The initial
     /// globals are consumed through `GlobalList::bind` in [`spawn`]; this fires
@@ -912,6 +1028,46 @@ impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for ClientState
             state.events.activation_token_received = true;
             state.activation_token = Some(token);
         }
+    }
+}
+
+impl Dispatch<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1, ()> for ClientState {
+    /// The `icon_size`/`done` preference events are advisory; the client
+    /// ignores them and sets its own icon size.
+    fn event(
+        _state: &mut Self,
+        _proxy: &xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1,
+        _event: xdg_toplevel_icon_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<xdg_toplevel_icon_v1::XdgToplevelIconV1, ()> for ClientState {
+    /// `xdg_toplevel_icon_v1` carries no events.
+    fn event(
+        _state: &mut Self,
+        _proxy: &xdg_toplevel_icon_v1::XdgToplevelIconV1,
+        _event: xdg_toplevel_icon_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<xdg_toplevel_tag_manager_v1::XdgToplevelTagManagerV1, ()> for ClientState {
+    /// `xdg_toplevel_tag_manager_v1` carries no events.
+    fn event(
+        _state: &mut Self,
+        _proxy: &xdg_toplevel_tag_manager_v1::XdgToplevelTagManagerV1,
+        _event: xdg_toplevel_tag_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
     }
 }
 
