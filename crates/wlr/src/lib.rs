@@ -161,9 +161,9 @@ pub use seat::{
     Modifiers, PointerAxis, SwitchType,
 };
 pub use subsurface::SubsurfaceParentState;
-pub use surface::{Surface, SurfaceId};
+pub use surface::{Surface, SurfaceId, SurfaceRole};
 pub use tearing::{TearingControl, TearingHint};
-pub use toplevel::{Edges, Toplevel, ToplevelId};
+pub use toplevel::{Edges, Toplevel, ToplevelId, ToplevelRequested, ToplevelState, WmCapabilities};
 #[cfg(wlr_has_xwayland)]
 pub use xwayland::{XwaylandSurface, XwaylandSurfaceId, XwaylandWindowType};
 

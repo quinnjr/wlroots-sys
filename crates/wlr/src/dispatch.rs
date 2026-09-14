@@ -117,6 +117,13 @@ pub(crate) enum Event {
     /// reported dragging.
     RequestResize(ToplevelId, Edges),
 
+    /// The client asked for a window menu at a surface-local point
+    /// (`xdg_toplevel.show_window_menu`). `x`/`y` are read from the move
+    /// event's payload at emission time, so a deferred event still reports the
+    /// point the client actually asked about. Seat and serial are deliberately
+    /// not carried, matching `RequestMove`.
+    RequestShowWindowMenu(ToplevelId, i32, i32),
+
     /// The client asked for a decoration mode on a toplevel's
     /// `zxdg_toplevel_decoration_v1`. The `Option<DecorationMode>` is read
     /// from `wlr_xdg_toplevel_decoration_v1::requested_mode` at emission

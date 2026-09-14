@@ -15,7 +15,8 @@ use std::ffi::CStr;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-use crate::sys;
+use crate::id::find_id;
+use crate::{Surface, sys};
 
 /// Identifies a toplevel for as long as the consumer chooses to remember it.
 ///
@@ -221,9 +222,167 @@ impl<'h> Toplevel<'h> {
             u32::try_from(pid).ok()
         }
     }
-}
 
-/// Which edge(s) of a toplevel an interactive resize is dragging.
+    /// Downgrade a generic [`Surface`] to its toplevel role, if it has one.
+    ///
+    /// The counterpart of `wlr_xdg_toplevel_try_from_wlr_surface`. `None` when
+    /// the surface is not an `xdg_toplevel`, when its xdg/toplevel role object
+    /// has been destroyed, or — defensively — when the surface carries no
+    /// toplevel id, which cannot happen for a surface this crate announced but
+    /// is handled rather than asserted because a consumer may hand in any
+    /// surface.
+    ///
+    /// The returned handle borrows `surface`, so it cannot outlive it; that is
+    /// the same escape-proof rule every role handle follows.
+    #[must_use]
+    pub fn from_surface(surface: &'h Surface<'_>) -> Option<Toplevel<'h>> {
+        // SAFETY: `surface`'s handle borrows a live surface for its lifetime,
+        // so its addon set is initialised and the `try_from` is a read.
+        unsafe {
+            let raw = sys::wlr_xdg_toplevel_try_from_wlr_surface(surface.as_ptr());
+            if raw.is_null() {
+                return None;
+            }
+            let id = find_id(&raw const (*surface.as_ptr()).addons).map(ToplevelId)?;
+            Some(Self::from_raw_with_id(raw, id))
+        }
+    }
+
+    /// The toplevel's **current** committed state, copied out.
+    ///
+    /// Reads `(*toplevel).current`; see [`ToplevelState`] for what each field
+    /// means and why the snapshot is a copy rather than a borrow.
+    #[must_use]
+    pub fn state(&self) -> ToplevelState {
+        // SAFETY: the handle's lifetime guarantees the toplevel is live;
+        // `current` is a plain embedded `wlr_xdg_toplevel_state`.
+        unsafe { ToplevelState::from_c(&(*self.raw.as_ptr()).current) }
+    }
+
+    /// The state the client last **requested**, copied out.
+    ///
+    /// Reads `(*toplevel).requested`; see [`ToplevelRequested`].
+    #[must_use]
+    pub fn requested(&self) -> ToplevelRequested {
+        // SAFETY: as for `state`; `requested` is a plain embedded struct whose
+        // booleans `from_c` reads and whose pointers it deliberately does not.
+        unsafe { ToplevelRequested::from_c(&(*self.raw.as_ptr()).requested) }
+    }
+
+    /// The window-manager capabilities most recently configured for this
+    /// toplevel, as a bitmask.
+    ///
+    /// Reads `(*toplevel).scheduled.wm_capabilities` — the capabilities
+    /// wlroots will put in the next configure, which for a toplevel already
+    /// mapped are what the client was last told. The client's own request is
+    /// not retained by xdg-shell; a compositor decides, and the answer travels
+    /// in [`Runtime::set_toplevel_wm_capabilities`](crate::Runtime).
+    #[must_use]
+    pub fn wm_capabilities(&self) -> WmCapabilities {
+        // SAFETY: the handle's lifetime guarantees the toplevel is live;
+        // `scheduled` is a plain embedded `wlr_xdg_toplevel_configure`.
+        let scheduled: &sys::wlr_xdg_toplevel_configure =
+            unsafe { &(*self.raw.as_ptr()).scheduled };
+        WmCapabilities::from_raw(scheduled.wm_capabilities)
+    }
+
+    /// `wlr_xdg_surface_ping` — ask the client to prove it is still alive.
+    ///
+    /// A no-op if wlroots later finds the client unresponsive: it emits
+    /// `ping_timeout` on the xdg-surface, which this crate exposes through its
+    /// own destroy/announce lifecycle. The base is guaranteed non-null for a
+    /// live toplevel, so there is nothing to check and no result to report.
+    pub fn ping(&self) {
+        // SAFETY: the handle's lifetime guarantees the toplevel is live, and a
+        // live one always has a non-null `base`; wlroots only sends a ping.
+        unsafe { sys::wlr_xdg_surface_ping((*self.raw.as_ptr()).base) };
+    }
+
+    /// Call `f` for every surface in this toplevel's **entire** xdg tree —
+    /// its own surface, its sub-surfaces and any popups — root first.
+    ///
+    /// This is the xdg-tree sibling of [`Surface::for_each_surface`]: it wraps
+    /// `wlr_xdg_surface_for_each_surface`, so the walk descends through
+    /// popups as well as sub-surfaces. See [`Surface::for_each_surface`] for
+    /// the closure/handle/tearing-manager rules, which apply verbatim.
+    pub fn for_each_surface(&self, mut f: impl FnMut(&Surface<'_>, i32, i32)) {
+        // SAFETY: the handle's lifetime guarantees the toplevel is live, so
+        // its `base` is a live `wlr_xdg_surface`; the helper runs the walk
+        // synchronously and `f` does not outlive the call.
+        unsafe {
+            let base = (*self.raw.as_ptr()).base;
+            crate::surface::for_each_surface_with(&mut f, |iterate, data| {
+                sys::wlr_xdg_surface_for_each_surface(base, iterate, data);
+            });
+        }
+    }
+
+    /// Call `f` for every surface in this toplevel's **popup** tree only,
+    /// root first.
+    ///
+    /// The `wlr_xdg_surface_for_each_popup_surface` sibling of
+    /// [`for_each_surface`](Self::for_each_surface), for a compositor that
+    /// wants to place or render only the popup surfaces. Same closure rules.
+    pub fn for_each_popup_surface(&self, mut f: impl FnMut(&Surface<'_>, i32, i32)) {
+        // SAFETY: as for `for_each_surface`.
+        unsafe {
+            let base = (*self.raw.as_ptr()).base;
+            crate::surface::for_each_surface_with(&mut f, |iterate, data| {
+                sys::wlr_xdg_surface_for_each_popup_surface(base, iterate, data);
+            });
+        }
+    }
+
+    /// Hit-test this toplevel's tree at a point in its own surface-local
+    /// coordinates.
+    ///
+    /// Returns the struck leaf surface, its id, and the point in that leaf's
+    /// coordinates; `None` for a miss. This wraps
+    /// `wlr_xdg_surface_surface_at` — the walk includes the toplevel's
+    /// sub-surfaces.
+    #[must_use]
+    pub fn surface_at(&self, sx: f64, sy: f64) -> Option<(crate::Surface<'_>, f64, f64)> {
+        self.surface_at_impl(sys::wlr_xdg_surface_surface_at, sx, sy)
+    }
+
+    /// As [`surface_at`](Self::surface_at), but restricted to the toplevel's
+    /// **popup** tree; wraps `wlr_xdg_surface_popup_surface_at`.
+    #[must_use]
+    pub fn popup_surface_at(&self, sx: f64, sy: f64) -> Option<(crate::Surface<'_>, f64, f64)> {
+        self.surface_at_impl(sys::wlr_xdg_surface_popup_surface_at, sx, sy)
+    }
+
+    /// Shared body of the two hit-tests, which differ only in which wlroots
+    /// walk they call.
+    fn surface_at_impl(
+        &self,
+        walk: unsafe extern "C" fn(
+            *mut sys::wlr_xdg_surface,
+            f64,
+            f64,
+            *mut f64,
+            *mut f64,
+        ) -> *mut sys::wlr_surface,
+        sx: f64,
+        sy: f64,
+    ) -> Option<(crate::Surface<'_>, f64, f64)> {
+        let mut sub_x = 0.0;
+        let mut sub_y = 0.0;
+        // SAFETY: the handle's lifetime guarantees the toplevel is live, so
+        // `base` is live; both out-parameters are live locals that outlive the
+        // call, and wlroots only reads the coordinates.
+        unsafe {
+            let base = (*self.raw.as_ptr()).base;
+            let raw = walk(base, sx, sy, &raw mut sub_x, &raw mut sub_y);
+            if raw.is_null() {
+                return None;
+            }
+            let id = find_id(&raw const (*raw).addons).map(crate::SurfaceId)?;
+            let surface = crate::Surface::from_raw_opt(raw, id)?;
+            Some((surface, sub_x, sub_y))
+        }
+    }
+}
 ///
 /// A plain `bool` per edge rather than a bitflags type: xdg-shell's
 /// `xdg_toplevel_resize_edge` is a small, closed, protocol-frozen set (a
@@ -267,6 +426,177 @@ impl Edges {
             right,
         }
     }
+
+    /// Encode these edges back into wlroots' `wlr_edges` / xdg resize-edge
+    /// bitmask — the exact inverse of [`from_xdg`](Edges::from_xdg), and used
+    /// by the `set_tiled`/`set_constrained` setters, which are the two wlroots
+    /// calls that take the mask rather than the four booleans.
+    pub(crate) fn to_xdg(self) -> u32 {
+        (self.top as u32)
+            | ((self.bottom as u32) << 1)
+            | ((self.left as u32) << 2)
+            | ((self.right as u32) << 3)
+    }
+}
+
+/// The window-manager capabilities a compositor advertises to a toplevel.
+///
+/// A bitmask of `enum wlr_xdg_toplevel_wm_capabilities`, hand-rolled rather
+/// than a `bitflags` dependency following
+/// [`ConstraintAdjustment`](crate::ConstraintAdjustment): the four bits are
+/// the whole domain and are pinned against the generated constants by this
+/// module's own tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct WmCapabilities(u32);
+
+impl WmCapabilities {
+    /// No capabilities advertised; the protocol's initial value, and
+    /// [`Default`].
+    pub const NONE: WmCapabilities = WmCapabilities(0);
+    /// The compositor can show a client window menu.
+    pub const WINDOW_MENU: WmCapabilities = WmCapabilities(1);
+    /// The compositor can maximize.
+    pub const MAXIMIZE: WmCapabilities = WmCapabilities(2);
+    /// The compositor can fullscreen.
+    pub const FULLSCREEN: WmCapabilities = WmCapabilities(4);
+    /// The compositor can minimize.
+    pub const MINIMIZE: WmCapabilities = WmCapabilities(8);
+
+    /// Whether **every** bit of `other` is advertised here — the semantics of
+    /// [`ConstraintAdjustment::contains`](crate::ConstraintAdjustment::contains),
+    /// for the same reason it is not "any".
+    #[must_use]
+    pub fn contains(self, other: WmCapabilities) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// The raw mask, as the protocol numbers it.
+    #[must_use]
+    pub fn bits(self) -> u32 {
+        self.0
+    }
+
+    /// Build from the raw `enum wlr_xdg_toplevel_wm_capabilities` value.
+    ///
+    /// Unknown bits are kept, not dropped: the mask is handed straight back to
+    /// wlroots by [`Runtime::set_toplevel_wm_capabilities`](crate::Runtime),
+    /// which is the code that interprets it, so silently clearing a bit would
+    /// change the caller's request rather than merely fail to describe it.
+    pub(crate) fn from_raw(raw: u32) -> WmCapabilities {
+        WmCapabilities(raw)
+    }
+}
+
+impl std::ops::BitOr for WmCapabilities {
+    type Output = WmCapabilities;
+
+    fn bitor(self, rhs: WmCapabilities) -> WmCapabilities {
+        WmCapabilities(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for WmCapabilities {
+    fn bitor_assign(&mut self, rhs: WmCapabilities) {
+        self.0 |= rhs.0;
+    }
+}
+
+/// A snapshot of a toplevel's **current** state — what wlroots most recently
+/// committed, read from `wlr_xdg_toplevel.current`.
+///
+/// Copied out rather than borrowed, for the same reason
+/// [`PositionerRules`](crate::PositionerRules) is: the caller will re-enter
+/// wlroots, which can destroy the toplevel, and a view tied to the handle's
+/// lifetime would be a use-after-free the borrow checker could not see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ToplevelState {
+    /// The compositor has maximized this toplevel.
+    pub maximized: bool,
+    /// The compositor has fullscreened this toplevel.
+    pub fullscreen: bool,
+    /// The compositor is interactively resizing.
+    pub resizing: bool,
+    /// The toplevel is active (has focus).
+    pub activated: bool,
+    /// The toplevel is suspended (not visible to the user).
+    pub suspended: bool,
+    /// Edges adjacent to another part of the tiling grid.
+    pub tiled: Edges,
+    /// Edges the toplevel should not resize from.
+    pub constrained: Edges,
+    /// Current width, in surface-local pixels.
+    pub width: i32,
+    /// Current height, in surface-local pixels.
+    pub height: i32,
+    /// Maximum width the client asked for, `0` if unbounded.
+    pub max_width: i32,
+    /// Maximum height the client asked for, `0` if unbounded.
+    pub max_height: i32,
+    /// Minimum width the client asked for, `0` if unbounded.
+    pub min_width: i32,
+    /// Minimum height the client asked for, `0` if unbounded.
+    pub min_height: i32,
+}
+
+impl ToplevelState {
+    /// Copy wlroots' `wlr_xdg_toplevel_state` out.
+    ///
+    /// # Safety
+    ///
+    /// `state` must point at a live, initialised `wlr_xdg_toplevel_state`.
+    /// Only reads.
+    unsafe fn from_c(state: &sys::wlr_xdg_toplevel_state) -> ToplevelState {
+        ToplevelState {
+            maximized: state.maximized,
+            fullscreen: state.fullscreen,
+            resizing: state.resizing,
+            activated: state.activated,
+            suspended: state.suspended,
+            tiled: Edges::from_xdg(state.tiled),
+            constrained: Edges::from_xdg(state.constrained),
+            width: state.width,
+            height: state.height,
+            max_width: state.max_width,
+            max_height: state.max_height,
+            min_width: state.min_width,
+            min_height: state.min_height,
+        }
+    }
+}
+
+/// A snapshot of the state a client **requested** through
+/// `xdg_toplevel.set_maximized`/`set_minimized`/`set_fullscreen`, read from
+/// `wlr_xdg_toplevel.requested`.
+///
+/// These are requests, not applied state: a compositor is free to decline, and
+/// xdg-shell still requires it answer with a configure. Copied out for the
+/// same reason [`ToplevelState`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ToplevelRequested {
+    /// The client asked to maximize.
+    pub maximized: bool,
+    /// The client asked to minimize.
+    pub minimized: bool,
+    /// The client asked to fullscreen.
+    pub fullscreen: bool,
+}
+
+impl ToplevelRequested {
+    /// Copy the three plain booleans out of wlroots' struct.
+    ///
+    /// # Safety
+    ///
+    /// `requested` must point at a live, initialised
+    /// `wlr_xdg_toplevel_requested`. Only the three booleans are read; the
+    /// `fullscreen_output` pointer and the embedded listener are deliberately
+    /// never touched.
+    unsafe fn from_c(requested: &sys::wlr_xdg_toplevel_requested) -> ToplevelRequested {
+        ToplevelRequested {
+            maximized: requested.maximized,
+            minimized: requested.minimized,
+            fullscreen: requested.fullscreen,
+        }
+    }
 }
 
 /// Decode a `top`=1/`bottom`=2/`left`=4/`right`=8 edge bitmask into its four
@@ -300,7 +630,7 @@ unsafe fn cstr_field(p: *mut std::os::raw::c_char) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Edges, Toplevel, ToplevelId};
+    use super::{Edges, Toplevel, ToplevelId, WmCapabilities};
     use crate::sys;
     use std::alloc::{Layout, alloc_zeroed, dealloc};
 
@@ -564,5 +894,49 @@ mod tests {
             ToplevelId::dangling_nth_for_test(0),
             ToplevelId::dangling_for_test()
         );
+    }
+
+    /// `WmCapabilities`' four bits are the ones `enum
+    /// wlr_xdg_toplevel_wm_capabilities` declares. Pinning them against the
+    /// generated constants is what makes the hand-rolled bitmask a checked
+    /// decision: a protocol renumbering changes the constants and this test
+    /// fails rather than every advertisement being wrong in silence.
+    #[test]
+    fn wm_capability_bits_are_the_ones_the_protocol_declares() {
+        use sys::wlr_xdg_toplevel_wm_capabilities as C;
+        assert_eq!(
+            WmCapabilities::WINDOW_MENU.bits(),
+            C::WLR_XDG_TOPLEVEL_WM_CAPABILITIES_WINDOW_MENU.0
+        );
+        assert_eq!(
+            WmCapabilities::MAXIMIZE.bits(),
+            C::WLR_XDG_TOPLEVEL_WM_CAPABILITIES_MAXIMIZE.0
+        );
+        assert_eq!(
+            WmCapabilities::FULLSCREEN.bits(),
+            C::WLR_XDG_TOPLEVEL_WM_CAPABILITIES_FULLSCREEN.0
+        );
+        assert_eq!(
+            WmCapabilities::MINIMIZE.bits(),
+            C::WLR_XDG_TOPLEVEL_WM_CAPABILITIES_MINIMIZE.0
+        );
+        assert_eq!(
+            (WmCapabilities::MAXIMIZE | WmCapabilities::MINIMIZE).bits(),
+            C::WLR_XDG_TOPLEVEL_WM_CAPABILITIES_MAXIMIZE.0
+                | C::WLR_XDG_TOPLEVEL_WM_CAPABILITIES_MINIMIZE.0
+        );
+        let both = WmCapabilities::MAXIMIZE | WmCapabilities::MINIMIZE;
+        assert!(both.contains(WmCapabilities::MAXIMIZE));
+        assert!(both.contains(WmCapabilities::MINIMIZE));
+        assert!(!WmCapabilities::MAXIMIZE.contains(WmCapabilities::MINIMIZE));
+    }
+
+    /// `Edges::to_xdg` is the exact inverse of `from_xdg` over the whole
+    /// domain, which is what the tiled/constrained setters rely on.
+    #[test]
+    fn edges_round_trip_through_the_xdg_bitmask() {
+        for bits in [0u32, 1, 2, 4, 8, 0b1111, 0b0101] {
+            assert_eq!(Edges::from_xdg(bits).to_xdg(), bits, "bits {bits:#b}");
+        }
     }
 }

@@ -20,8 +20,8 @@ use std::os::fd::AsFd;
 
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
-    wl_buffer, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface,
-    wl_surface,
+    wl_buffer, wl_compositor, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_subcompositor,
+    wl_subsurface, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
@@ -51,6 +51,10 @@ pub struct ClientEvents {
 pub struct ClientState {
     pub compositor: Option<wl_compositor::WlCompositor>,
     pub wm_base: Option<xdg_wm_base::XdgWmBase>,
+    /// The seat, when the server advertised one. Bound opportunistically by
+    /// [`spawn`] so a driven client can send seat-parameterised requests such
+    /// as `xdg_toplevel.show_window_menu`; `None` when no seat global exists.
+    pub seat: Option<wl_seat::WlSeat>,
     /// Populated by the `Dispatch` impls; copied into [`ClientEvents`] and
     /// returned by [`spawn`].
     pub events: ClientEvents,
@@ -71,6 +75,70 @@ impl ClientState {
         let _toplevel = xdg_surface.get_toplevel(qh, ());
         surface.commit();
     }
+}
+
+/// Drive a client that asks for a window menu after its toplevel is configured.
+///
+/// `xdg_toplevel.show_window_menu` is refused with "surface has not been
+/// configured yet" until the initial configure has been acked, so this is the
+/// two-phase shape [`spawn_mapped`] uses — create, bufferless commit,
+/// round-trip so the configure is acked — with the menu request in phase two
+/// instead of a buffer. Returns the observed [`ClientEvents`].
+pub fn spawn_show_window_menu(
+    socket: &str,
+    x: i32,
+    y: i32,
+) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            seat: None,
+            events: ClientEvents::default(),
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=1, ()).expect("bind wl_seat");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+        state.seat = Some(seat.clone());
+
+        // Phase 1: role + bufferless commit, then a round-trip so the initial
+        // configure is dispatched and acked.
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let toplevel = xdg_surface.get_toplevel(&qh, ());
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the initial configure is dispatched and acked");
+
+        // Phase 2: the menu request, then a round-trip so the server has
+        // observed it.
+        let seat = state.seat.clone().expect("wl_seat");
+        toplevel.show_window_menu(&seat, 0, x, y);
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the show-window-menu request");
+
+        drop((surface, xdg_surface, toplevel, seat, wm_base, compositor));
+        state.events
+    })
 }
 
 /// Connect a client on its own thread, run `drive`, then round-trip.
@@ -126,6 +194,7 @@ pub fn spawn(
         let mut state = ClientState {
             compositor: None,
             wm_base: None,
+            seat: None,
             events: ClientEvents::default(),
         };
         // `registry_queue_init` buffers the initial globals rather than
@@ -134,6 +203,10 @@ pub fn spawn(
         // before `drive` runs.
         state.compositor = Some(globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor"));
         state.wm_base = Some(globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base"));
+        // Opportunistic: a seat exists only when the server called
+        // `Runtime::create_seat`. A test that needs one creates it; the rest
+        // leave this `None` and never ask for it.
+        state.seat = globals.bind(&qh, 1..=1, ()).ok();
 
         drive(&mut state, &qh);
 
@@ -203,6 +276,7 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
         let mut state = ClientState {
             compositor: None,
             wm_base: None,
+            seat: None,
             events: ClientEvents::default(),
         };
         let compositor: wl_compositor::WlCompositor =
@@ -314,6 +388,7 @@ pub fn spawn_subsurface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
         let mut state = ClientState {
             compositor: None,
             wm_base: None,
+            seat: None,
             events: ClientEvents::default(),
         };
         let compositor: wl_compositor::WlCompositor =
@@ -394,6 +469,7 @@ pub fn spawn_subsurface_then_destroy_parent(socket: &str) -> std::thread::JoinHa
         let mut state = ClientState {
             compositor: None,
             wm_base: None,
+            seat: None,
             events: ClientEvents::default(),
         };
         let compositor: wl_compositor::WlCompositor =
@@ -474,6 +550,20 @@ impl Dispatch<wl_surface::WlSurface, ()> for ClientState {
         _state: &mut Self,
         _proxy: &wl_surface::WlSurface,
         _event: wl_surface::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_seat::WlSeat, ()> for ClientState {
+    /// Carries `capabilities`/`name`; the harness sends `show_window_menu`
+    /// without waiting on them, so nothing is recorded.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_seat::WlSeat,
+        _event: wl_seat::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,

@@ -129,6 +129,37 @@ enum Operation {
     ConfigureToplevel { nth: u64 },
     /// `Runtime::close_toplevel`.
     CloseToplevel { nth: u64 },
+    /// `Runtime::set_toplevel_bounds`.
+    SetToplevelBounds { nth: u64, width: i32, height: i32 },
+    /// `Runtime::set_toplevel_constrained`.
+    SetToplevelConstrained {
+        nth: u64,
+        top: bool,
+        bottom: bool,
+        left: bool,
+        right: bool,
+    },
+    /// `Runtime::set_toplevel_parent`; both ids are dangling, so the parent
+    /// lookup misses before the assignment is attempted.
+    SetToplevelParent { nth: u64, parent_nth: u64 },
+    /// `Runtime::set_toplevel_resizing`.
+    SetToplevelResizing { nth: u64, resizing: bool },
+    /// `Runtime::set_toplevel_suspended`.
+    SetToplevelSuspended { nth: u64, suspended: bool },
+    /// `Runtime::set_toplevel_tiled`.
+    SetToplevelTiled {
+        nth: u64,
+        top: bool,
+        bottom: bool,
+        left: bool,
+        right: bool,
+    },
+    /// `Runtime::set_toplevel_wm_capabilities`.
+    SetToplevelWmCapabilities { nth: u64, caps: u32 },
+    /// `Runtime::decoration_state`.
+    DecorationState { nth: u64 },
+    /// `Runtime::decoration_configure`.
+    DecorationConfigure { nth: u64 },
     /// `Runtime::set_decoration_mode`.
     SetDecorationMode { nth: u64, server_side: bool },
     /// `Runtime::focus_toplevel_keyboard`.
@@ -228,6 +259,10 @@ enum Operation {
     SubsurfaceParentId { nth: u64 },
     /// `Surface::subsurface_parent_state` against a dangling surface id.
     SubsurfaceParentState { nth: u64 },
+    /// `Runtime::toplevel_of` against a dangling surface id.
+    ToplevelOf { nth: u64 },
+    /// `Runtime::popup_of` against a dangling surface id.
+    PopupOf { nth: u64 },
 }
 
 /// The one handler this target installs.
@@ -306,15 +341,14 @@ fn compositor() -> Option<&'static Compositor> {
             std::env::set_var("WLR_RENDERER", "pixman");
 
             let display: &'static wlr::Display = Box::leak(Box::new(
-                wlr::Display::new()
-                    .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}")),
+                wlr::Display::new().unwrap_or_else(|e| panic!("fuzz harness could not start: {e}")),
             ));
             let event_loop: &'static wlr::EventLoop<'static> =
                 Box::leak(Box::new(display.event_loop()));
             let backend = wlr::Backend::autocreate(event_loop)
                 .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}"));
-            let runtime = wlr::Runtime::new()
-                .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}"));
+            let runtime =
+                wlr::Runtime::new().unwrap_or_else(|e| panic!("fuzz harness could not start: {e}"));
             runtime
                 .init_graphics(display, &backend)
                 .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}"));
@@ -344,8 +378,8 @@ fn compositor() -> Option<&'static Compositor> {
 }
 
 fuzz_target!(|ops: Vec<Operation>| {
-    let compositor = compositor()
-        .expect("fuzz harness could not start: compositor setup returned None");
+    let compositor =
+        compositor().expect("fuzz harness could not start: compositor setup returned None");
     for op in &ops {
         apply(
             &compositor.runtime,
@@ -365,7 +399,10 @@ fn apply(
     output: Option<wlr::OutputId>,
     op: &Operation,
 ) {
-    use wlr::{Box2D, DecorationMode, LayerSurfaceId, PopupId, PopupParent, SurfaceId, ToplevelId};
+    use wlr::{
+        Box2D, DecorationMode, LayerSurfaceId, PopupId, PopupParent, SurfaceId, ToplevelId,
+        WmCapabilities,
+    };
 
     let toplevel = |nth: u64| ToplevelId::dangling_nth_for_test(nth);
     let popup = |nth: u64| PopupId::dangling_nth_for_test(nth);
@@ -401,6 +438,74 @@ fn apply(
         }
         Operation::CloseToplevel { nth } => {
             let _ = runtime.close_toplevel(toplevel(*nth));
+        }
+        Operation::SetToplevelBounds { nth, width, height } => {
+            let _ = runtime.set_toplevel_bounds(toplevel(*nth), *width, *height);
+        }
+        Operation::SetToplevelConstrained {
+            nth,
+            top,
+            bottom,
+            left,
+            right,
+        } => {
+            let _ = runtime.set_toplevel_constrained(
+                toplevel(*nth),
+                wlr::Edges {
+                    top: *top,
+                    bottom: *bottom,
+                    left: *left,
+                    right: *right,
+                },
+            );
+        }
+        Operation::SetToplevelParent { nth, parent_nth } => {
+            let _ = runtime.set_toplevel_parent(toplevel(*nth), Some(toplevel(*parent_nth)));
+        }
+        Operation::SetToplevelResizing { nth, resizing } => {
+            let _ = runtime.set_toplevel_resizing(toplevel(*nth), *resizing);
+        }
+        Operation::SetToplevelSuspended { nth, suspended } => {
+            let _ = runtime.set_toplevel_suspended(toplevel(*nth), *suspended);
+        }
+        Operation::SetToplevelTiled {
+            nth,
+            top,
+            bottom,
+            left,
+            right,
+        } => {
+            let _ = runtime.set_toplevel_tiled(
+                toplevel(*nth),
+                wlr::Edges {
+                    top: *top,
+                    bottom: *bottom,
+                    left: *left,
+                    right: *right,
+                },
+            );
+        }
+        Operation::SetToplevelWmCapabilities { nth, caps } => {
+            let mut c = WmCapabilities::NONE;
+            if caps & 1 != 0 {
+                c |= WmCapabilities::WINDOW_MENU;
+            }
+            if caps & 2 != 0 {
+                c |= WmCapabilities::MAXIMIZE;
+            }
+            if caps & 4 != 0 {
+                c |= WmCapabilities::FULLSCREEN;
+            }
+            if caps & 8 != 0 {
+                c |= WmCapabilities::MINIMIZE;
+            }
+            let _ = runtime.set_toplevel_wm_capabilities(toplevel(*nth), c);
+        }
+        Operation::DecorationState { nth } => {
+            let _ = runtime.decoration_state(toplevel(*nth));
+        }
+        Operation::DecorationConfigure { nth } => {
+            let _ = runtime.decoration_configure(toplevel(*nth));
         }
         Operation::SetDecorationMode { nth, server_side } => {
             let mode = if *server_side {
@@ -545,6 +650,12 @@ fn apply(
             let _ = runtime
                 .surface(SurfaceId::dangling_nth_for_test(*nth))
                 .map(|surface| surface.subsurface_parent_state());
+        }
+        Operation::ToplevelOf { nth } => {
+            let _ = runtime.toplevel_of(SurfaceId::dangling_nth_for_test(*nth));
+        }
+        Operation::PopupOf { nth } => {
+            let _ = runtime.popup_of(SurfaceId::dangling_nth_for_test(*nth));
         }
     }
 }

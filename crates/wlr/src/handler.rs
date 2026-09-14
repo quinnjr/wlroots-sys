@@ -615,6 +615,23 @@ pub trait ToplevelHandler {
         let _ = (id, edges);
     }
 
+    /// The client asked for its window menu to be shown at a surface-local
+    /// point (`xdg_toplevel.show_window_menu`).
+    ///
+    /// `x`/`y` are in the toplevel surface's own coordinates. Only the id, not
+    /// a [`Toplevel`] handle, for the same reason
+    /// [`request_move`](ToplevelHandler::request_move) passes one: showing a
+    /// menu needs the compositor's own placement policy and current input
+    /// state, none of which the handle carries, and the seat/serial the wire
+    /// event also carried are deliberately dropped.
+    ///
+    /// Added in 0.20.37, additively: defaulted, so an
+    /// `impl ToplevelHandler for MyState {}` written against any earlier
+    /// 0.20.x still compiles unchanged.
+    fn request_show_window_menu(&mut self, id: ToplevelId, x: i32, y: i32) {
+        let _ = (id, x, y);
+    }
+
     /// The client (un)stated a decoration-mode preference for this toplevel,
     /// via `zxdg_decoration_manager_v1`/`zxdg_toplevel_decoration_v1`.
     ///

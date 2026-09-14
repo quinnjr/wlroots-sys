@@ -3149,3 +3149,128 @@ item   = "TearingControl"
 symbol = "wlr_tearing_control_manager_v1_surface_hint_from_surface"
 module = "tearing"
 item   = "Surface::tearing_hint"
+
+[[wrapped]]
+symbol = "wlr_surface_for_each_surface"
+module = "surface"
+item   = "Surface::for_each_surface"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_for_each_surface"
+module = "toplevel"
+item   = "Toplevel::for_each_surface"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_for_each_popup_surface"
+module = "toplevel"
+item   = "Toplevel::for_each_popup_surface"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_for_each_surface"
+module = "layer"
+item   = "LayerSurface::for_each_surface"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_ping"
+module = "toplevel"
+item   = "Toplevel::ping"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_role"
+module = "surface"
+item   = "SurfaceRole"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_surface_at"
+module = "toplevel"
+item   = "Toplevel::surface_at"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_popup_surface_at"
+module = "toplevel"
+item   = "Toplevel::popup_surface_at"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_try_from_wlr_surface"
+module = "surface"
+item   = "Surface::role"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_configure"
+module = "toplevel"
+item   = "Toplevel::wm_capabilities"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_requested"
+module = "toplevel"
+item   = "Toplevel::requested"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_state"
+module = "toplevel"
+item   = "Toplevel::state"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_wm_capabilities"
+module = "toplevel"
+item   = "WmCapabilities"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_bounds"
+module = "runtime"
+item   = "Runtime::set_toplevel_bounds"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_constrained"
+module = "runtime"
+item   = "Runtime::set_toplevel_constrained"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_parent"
+module = "runtime"
+item   = "Runtime::set_toplevel_parent"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_resizing"
+module = "runtime"
+item   = "Runtime::set_toplevel_resizing"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_suspended"
+module = "runtime"
+item   = "Runtime::set_toplevel_suspended"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_tiled"
+module = "runtime"
+item   = "Runtime::set_toplevel_tiled"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_wm_capabilities"
+module = "runtime"
+item   = "Runtime::set_toplevel_wm_capabilities"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_try_from_wlr_surface"
+module = "toplevel"
+item   = "Toplevel::from_surface"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_show_window_menu_event"
+module = "backend"
+item   = "ToplevelHandler::request_show_window_menu"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_decoration_v1_configure"
+module = "runtime"
+item   = "Runtime::decoration_configure"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_decoration_v1_state"
+module = "runtime"
+item   = "Runtime::decoration_state"
+
+[[wrapped]]
+symbol = "wlr_surface_iterator_func_t"
+module = "surface"
+item   = "Surface::for_each_surface"

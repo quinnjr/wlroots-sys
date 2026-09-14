@@ -19,10 +19,13 @@
 //! its own. wlroots runs the addon's destructor when the surface dies, so the
 //! id stops resolving at exactly the right moment and nothing has to be swept.
 
+use std::ffi::c_void;
 use std::marker::PhantomData;
+use std::os::raw::c_int;
 use std::ptr::NonNull;
 
-use crate::sys;
+use crate::id::find_id;
+use crate::{Toplevel, sys};
 
 /// Identifies a `wlr_surface` for as long as the consumer chooses to remember
 /// it.
@@ -74,6 +77,45 @@ impl SurfaceId {
     }
 }
 
+/// The xdg-shell role a surface currently carries.
+///
+/// Read from `wlr_xdg_surface.role` through
+/// [`Surface::role`](crate::Surface::role), which first asks
+/// `wlr_xdg_surface_try_from_wlr_surface` whether the surface is an
+/// xdg-surface at all. A surface with no xdg-surface role (a plain
+/// sub-surface, or a surface whose xdg role object has already been destroyed)
+/// reports [`SurfaceRole::None`] rather than being an error: "no role" is a
+/// perfectly ordinary state, not a failure to look one up.
+///
+/// `#[non_exhaustive]`: the protocol defines exactly three roles today, but a
+/// future wlroots that grows a fourth should not force a breaking change on a
+/// match over this value. An unrecognized wire value maps to `None`, the
+/// "cannot be interpreted" answer, rather than panicking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SurfaceRole {
+    /// No xdg-surface role: a plain surface, or one whose xdg role is gone.
+    None,
+    /// An `xdg_toplevel`.
+    Toplevel,
+    /// An `xdg_popup`.
+    Popup,
+}
+
+impl SurfaceRole {
+    /// Decode `enum wlr_xdg_surface_role`. Values `0`/`1`/`2` are the
+    /// protocol's own; anything else is a value this build does not know and
+    /// reads as [`SurfaceRole::None`], never a panic — the value is set by
+    /// wlroots from a client's request, and a compositor must not abort on it.
+    pub(crate) fn from_raw(role: sys::wlr_xdg_surface_role) -> SurfaceRole {
+        match role.0 {
+            1 => SurfaceRole::Toplevel,
+            2 => SurfaceRole::Popup,
+            _ => SurfaceRole::None,
+        }
+    }
+}
+
 /// A surface, borrowed for the duration of a handler call.
 pub struct Surface<'h> {
     raw: NonNull<sys::wlr_surface>,
@@ -115,6 +157,31 @@ impl<'h> Surface<'h> {
             tearing_manager: None,
             _scope: PhantomData,
         }
+    }
+
+    /// Build a handle from a raw surface and a known id, or `None` for a null
+    /// pointer.
+    ///
+    /// The non-panicking sibling of [`from_raw_with_id`](Self::from_raw_with_id):
+    /// call sites reached from `extern "C"` (the surface-tree walk) or from a
+    /// hit-test that may return null use this one, because a panic there
+    /// aborts the process. It still carries the same obligation —
+    ///
+    /// # Safety
+    ///
+    /// `raw` must be null or a live `wlr_surface` whose addon set carries
+    /// `id`, and the returned handle must not outlive the callback it was
+    /// created for.
+    pub(crate) unsafe fn from_raw_opt(
+        raw: *mut sys::wlr_surface,
+        id: SurfaceId,
+    ) -> Option<Surface<'h>> {
+        NonNull::new(raw).map(|raw| Surface {
+            raw,
+            id,
+            tearing_manager: None,
+            _scope: PhantomData,
+        })
     }
 
     /// Attach the runtime's tearing-control manager, so the tearing accessors
@@ -183,6 +250,118 @@ impl<'h> Surface<'h> {
         // SAFETY: the handle borrows a live surface for its lifetime.
         unsafe { (*self.raw.as_ptr()).mapped }
     }
+
+    /// The xdg-shell role this surface currently carries, if any.
+    ///
+    /// A thin read over [`SurfaceRole`]; see that type for the unknown-value
+    /// and no-role rules.
+    #[must_use]
+    pub fn role(&self) -> SurfaceRole {
+        // SAFETY: the handle borrows a live surface for its lifetime; the
+        // `try_from` is a read and may return null, which is checked.
+        unsafe {
+            let xdg = sys::wlr_xdg_surface_try_from_wlr_surface(self.raw.as_ptr());
+            if xdg.is_null() {
+                return SurfaceRole::None;
+            }
+            SurfaceRole::from_raw((*xdg).role)
+        }
+    }
+
+    /// Downgrade this generic surface to its [`Toplevel`] role, if it has one.
+    ///
+    /// `None` for a surface that is not an `xdg_toplevel` (a popup, a layer
+    /// surface, a plain sub-surface), for one whose xdg role object has been
+    /// destroyed, and — defensively — for one this crate never attached a
+    /// toplevel id to. The returned handle borrows this `Surface` and cannot
+    /// outlive it, exactly as the role handle itself cannot outlive a handler.
+    #[must_use]
+    pub fn as_toplevel(&self) -> Option<Toplevel<'_>> {
+        Toplevel::from_surface(self)
+    }
+
+    /// Call `f` for every surface in this surface's tree, with each surface's
+    /// position relative to the root, root first (wlroots' own rendering
+    /// order).
+    ///
+    /// This is the Rust-closure form of `wlr_surface_for_each_surface`: the
+    /// callback is a `FnMut`, never a raw C function pointer, so a consumer
+    /// never touches `wlr_surface_iterator_func_t`. The handle handed to `f`
+    /// is built without a tearing manager (the iterator carries no runtime),
+    /// so [`Surface::tearing_hint`] on it reports the no-hint answer; every
+    /// other accessor reads the live surface normally.
+    ///
+    /// wlroots walks the *current* committed tree synchronously inside this
+    /// call, so `f` must not destroy any surface it is handed — the same
+    /// obligation `Backend::run_all` documents for its handlers, and the
+    /// reason this method is not an iterator: an escape-proof closure is what
+    /// keeps a destroyed surface from being revisited.
+    pub fn for_each_surface(&self, mut f: impl FnMut(&Surface<'_>, i32, i32)) {
+        // SAFETY: the handle borrows a live surface; the helper runs
+        // `wlr_surface_for_each_surface` synchronously against it, and the
+        // closure `f` does not outlive the call.
+        unsafe {
+            for_each_surface_with(&mut f, |iterate, data| {
+                sys::wlr_surface_for_each_surface(self.raw.as_ptr(), iterate, data);
+            });
+        }
+    }
+}
+
+/// Run `call` with a monomorphized `wlr_surface_iterator_func_t` trampoline
+/// that forwards each visited surface to `f`.
+///
+/// # Safety
+///
+/// `call` must invoke the iterator it is handed **synchronously**, exactly
+/// once, with a live `wlr_surface` as its first argument, and must pass the
+/// `user_data` pointer straight through without retaining it. The surfaces it
+/// names must stay alive for the duration of that call; `f` must not destroy
+/// any of them.
+pub(crate) unsafe fn for_each_surface_with<F>(
+    f: &mut F,
+    call: impl FnOnce(sys::wlr_surface_iterator_func_t, *mut c_void),
+) where
+    F: FnMut(&Surface<'_>, i32, i32),
+{
+    /// The one closure-to-C thunk the whole crate shares. Rebuilt generic per
+    /// closure type, so there is no erased vtable and no allocation.
+    unsafe extern "C" fn visit<F: FnMut(&Surface<'_>, i32, i32)>(
+        surface: *mut sys::wlr_surface,
+        sx: c_int,
+        sy: c_int,
+        data: *mut c_void,
+    ) {
+        // wlroots never hands this callback null, but a null here would be a
+        // crash in an `extern "C"` frame, so it is refused rather than
+        // dereferenced. No panic: a panic out of an `extern "C"` frame aborts.
+        if surface.is_null() || data.is_null() {
+            return;
+        }
+        // SAFETY: `data` is the `&mut F` `for_each_surface_with` passed, still
+        // live because the walk is synchronous; `surface` is live per that
+        // function's contract.
+        unsafe {
+            let f = &mut *data.cast::<F>();
+            // A surface the crate never attached an id to is skipped rather
+            // than handed a fabricated one: the handle's whole contract is
+            // that `id` resolves to *this* surface, and inventing a value
+            // would break it. In practice every surface wlroots walks has been
+            // through `install_surface_listeners`.
+            let Some(id) = find_id(&raw const (*surface).addons).map(SurfaceId) else {
+                return;
+            };
+            let handle = Surface {
+                raw: NonNull::new_unchecked(surface),
+                id,
+                tearing_manager: None,
+                _scope: PhantomData,
+            };
+            f(&handle, sx, sy);
+        }
+    }
+
+    call(Some(visit::<F>), std::ptr::from_mut(f).cast());
 }
 
 #[cfg(test)]

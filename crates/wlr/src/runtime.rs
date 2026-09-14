@@ -37,7 +37,7 @@ use std::rc::Rc;
 use crate::XwaylandSurfaceId;
 use crate::buffer::create_pixel_buffer;
 use crate::decoration::{DecorationEntry, DecorationMode};
-use crate::id::{SourceId, next_id};
+use crate::id::{SourceId, find_id, next_id};
 use crate::layer::Layer;
 use crate::scene::output::SceneOutputEntry;
 use crate::scene::{
@@ -46,9 +46,9 @@ use crate::scene::{
     find_node_id, timespec_of,
 };
 use crate::{
-    AllocatorRef, Backend, Box2D, Buffer, BufferId, CursorShape, Display, Error, FBox, Interest,
-    LayerSurfaceId, Output, OutputId, Popup, PopupId, PopupParent, RectId, Region, RendererRef,
-    Result, Surface, SurfaceId, ToplevelId, Transform, sys,
+    AllocatorRef, Backend, Box2D, Buffer, BufferId, CursorShape, Display, Edges, Error, FBox,
+    Interest, LayerSurfaceId, Output, OutputId, Popup, PopupId, PopupParent, RectId, Region,
+    RendererRef, Result, Surface, SurfaceId, Toplevel, ToplevelId, Transform, WmCapabilities, sys,
 };
 use crate::{ColorEncoding, ColorRange, FilterMode, NamedPrimaries, TransferFunction};
 
@@ -11283,6 +11283,51 @@ impl Runtime {
         self.inner.decorations.borrow().get(&id).map(|e| e.raw)
     }
 
+    /// The decoration mode currently **applied** to this toplevel's
+    /// decoration — `wlr_xdg_toplevel_decoration_v1_state.mode`, copied out.
+    ///
+    /// This is the mode the client has acked, not the one last configured; for
+    /// the in-flight answer use
+    /// [`decoration_configure`](Runtime::decoration_configure). `None` when
+    /// the id is unknown or stale, or names a toplevel with no decoration.
+    #[must_use]
+    pub fn decoration_state(&self, id: ToplevelId) -> Option<DecorationMode> {
+        let raw = self.decoration_ptr(id)?;
+        // SAFETY: a present entry names a live decoration — it is removed
+        // before wlroots frees it — and `current` is a plain embedded
+        // `wlr_xdg_toplevel_decoration_v1_state`.
+        let state: &sys::wlr_xdg_toplevel_decoration_v1_state = unsafe { &(*raw.as_ptr()).current };
+        DecorationMode::from_raw(state.mode.0)
+    }
+
+    /// The decoration mode queued in the **next** configure for this
+    /// toplevel's decoration, read from the head of wlroots' configure list.
+    ///
+    /// `None` when nothing is queued (the common case between configures) or
+    /// when the id names no decoration. The record's `link` is its first
+    /// field, so the list node *is* the record pointer; see
+    /// [`DecorationMode`] for the wire values.
+    #[must_use]
+    pub fn decoration_configure(&self, id: ToplevelId) -> Option<DecorationMode> {
+        let raw = self.decoration_ptr(id)?;
+        // SAFETY: a present entry names a live decoration; its `configure_list`
+        // is a wlroots-initialised circular `wl_list`, and any queued
+        // `configure` node is a live `wlr_xdg_toplevel_decoration_v1_configure`
+        // whose `link` field is at offset 0, so the node pointer and the
+        // record pointer coincide.
+        unsafe {
+            let list = &(*raw.as_ptr()).configure_list;
+            let head = list as *const sys::wl_list as *mut sys::wl_list;
+            if list.next == head {
+                return None;
+            }
+            let record = list
+                .next
+                .cast::<sys::wlr_xdg_toplevel_decoration_v1_configure>();
+            DecorationMode::from_raw((*record).mode.0)
+        }
+    }
+
     /// Clear the "a mode was set for the request currently in flight" flag
     /// on `id`'s decoration, if it has one. Called right before this
     /// toplevel's `request_mode` event is delivered — see
@@ -11417,6 +11462,142 @@ impl Runtime {
         // SAFETY: as above.
         unsafe { sys::wlr_xdg_toplevel_set_fullscreen(entry.raw.as_ptr(), fullscreen) };
         Some(())
+    }
+
+    /// Stage a recommended **bounds** for the client's window geometry.
+    ///
+    /// A hint, not a size: the client is free to exceed it, and the compositor
+    /// reads the client's own size back through
+    /// [`Toplevel::current_size`](crate::Toplevel::current_size). `(0, 0)`
+    /// clears the bounds. `None` for an unknown or stale id; see
+    /// `set_toplevel_size`'s doc.
+    pub fn set_toplevel_bounds(&self, id: ToplevelId, width: i32, height: i32) -> Option<()> {
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: as for `set_toplevel_size`; this only writes pending state.
+        unsafe { sys::wlr_xdg_toplevel_set_bounds(entry.raw.as_ptr(), width, height) };
+        Some(())
+    }
+
+    /// Stage which edges the client should treat as **constrained** — not
+    /// resizable from. `constrained_edges` is encoded through
+    /// [`Edges`](crate::Edges), whose four booleans map to wlroots'
+    /// `wlr_edges` bits. `None` for an unknown or stale id; see
+    /// `set_toplevel_size`'s doc.
+    pub fn set_toplevel_constrained(&self, id: ToplevelId, constrained_edges: Edges) -> Option<()> {
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: as for `set_toplevel_size`; this only writes pending state.
+        unsafe {
+            sys::wlr_xdg_toplevel_set_constrained(entry.raw.as_ptr(), constrained_edges.to_xdg())
+        };
+        Some(())
+    }
+
+    /// Stage which edges of the client sit in a tiled layout. Same
+    /// [`Edges`] encoding and `None` contract as
+    /// [`set_toplevel_constrained`](Runtime::set_toplevel_constrained).
+    pub fn set_toplevel_tiled(&self, id: ToplevelId, tiled_edges: Edges) -> Option<()> {
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: as for `set_toplevel_size`; this only writes pending state.
+        unsafe { sys::wlr_xdg_toplevel_set_tiled(entry.raw.as_ptr(), tiled_edges.to_xdg()) };
+        Some(())
+    }
+
+    /// Stage whether the client is being interactively resized. `None` for an
+    /// unknown or stale id; see `set_toplevel_size`'s doc.
+    pub fn set_toplevel_resizing(&self, id: ToplevelId, resizing: bool) -> Option<()> {
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: as for `set_toplevel_size`; this only writes pending state.
+        unsafe { sys::wlr_xdg_toplevel_set_resizing(entry.raw.as_ptr(), resizing) };
+        Some(())
+    }
+
+    /// Stage whether the client is suspended (kept out of view). `None` for an
+    /// unknown or stale id; see `set_toplevel_size`'s doc.
+    pub fn set_toplevel_suspended(&self, id: ToplevelId, suspended: bool) -> Option<()> {
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: as for `set_toplevel_size`; this only writes pending state.
+        unsafe { sys::wlr_xdg_toplevel_set_suspended(entry.raw.as_ptr(), suspended) };
+        Some(())
+    }
+
+    /// Stage the window-manager capabilities the compositor advertises to the
+    /// client — whether it can show a window menu, maximize, fullscreen or
+    /// minimize. `None` for an unknown or stale id; see
+    /// `set_toplevel_size`'s doc.
+    pub fn set_toplevel_wm_capabilities(&self, id: ToplevelId, caps: WmCapabilities) -> Option<()> {
+        let entry = self.toplevel_entry(id)?;
+        // SAFETY: as for `set_toplevel_size`; this only writes pending state.
+        unsafe { sys::wlr_xdg_toplevel_set_wm_capabilities(entry.raw.as_ptr(), caps.bits()) };
+        Some(())
+    }
+
+    /// Set (or clear) this toplevel's parent toplevel.
+    ///
+    /// `parent: None` clears it. Returns `Some(false)` when wlroots refuses the
+    /// assignment because it would create a parent loop, `Some(true)` on
+    /// success, and `None` when either the toplevel or a named parent is
+    /// unknown or stale — the same by-id miss contract every setter shares.
+    /// See `set_toplevel_size`'s doc for what "stale" means.
+    pub fn set_toplevel_parent(&self, id: ToplevelId, parent: Option<ToplevelId>) -> Option<bool> {
+        let entry = self.toplevel_entry(id)?;
+        let parent_raw = match parent {
+            Some(parent) => self.toplevel_entry(parent)?.raw.as_ptr(),
+            None => std::ptr::null_mut(),
+        };
+        // SAFETY: a present entry names a live toplevel, and a named parent's
+        // present entry names a live one too; wlroots only reads both and
+        // writes parent bookkeeping.
+        let ok = unsafe { sys::wlr_xdg_toplevel_set_parent(entry.raw.as_ptr(), parent_raw) };
+        Some(ok)
+    }
+
+    /// Resolve a generic [`SurfaceId`] to its [`Toplevel`] role, if it has one.
+    ///
+    /// The downcast counterpart of [`Runtime::surface`], wrapping
+    /// `wlr_xdg_toplevel_try_from_wlr_surface`. `None` for a surface that is
+    /// not a toplevel, for an unknown or stale surface id, or — defensively —
+    /// for a surface this crate never attached a toplevel id to.
+    #[must_use]
+    pub fn toplevel_of(&self, id: SurfaceId) -> Option<Toplevel<'_>> {
+        let raw = self.surface_ptr(id)?;
+        // SAFETY: `surface_ptr` only returns a live surface (the row is
+        // removed before wlroots frees it); both calls are reads.
+        unsafe {
+            let toplevel = sys::wlr_xdg_toplevel_try_from_wlr_surface(raw.as_ptr());
+            if toplevel.is_null() {
+                return None;
+            }
+            let toplevel_id = ToplevelId(find_id(&raw const (*raw.as_ptr()).addons)?);
+            Some(Toplevel::from_raw_with_id(toplevel, toplevel_id))
+        }
+    }
+
+    /// Resolve a generic [`SurfaceId`] to its [`Popup`] role, if it has one.
+    ///
+    /// The popup counterpart of [`toplevel_of`](Runtime::toplevel_of). Unlike
+    /// that downcast this one **is** runtime-bound: a layer-shell popup is
+    /// created with a NULL xdg parent and reparented afterwards, so the
+    /// popup's own struct cannot answer "what does this hang off?" — only the
+    /// parent recorded at announcement time can, and that lives in this
+    /// runtime's table (see [`PopupParent`]).
+    #[must_use]
+    pub fn popup_of(&self, id: SurfaceId) -> Option<Popup<'_>> {
+        let raw = self.surface_ptr(id)?;
+        // SAFETY: `surface_ptr` only returns a live surface; the `try_from`
+        // and the addon read are reads.
+        let popup_id = unsafe {
+            let popup = sys::wlr_xdg_popup_try_from_wlr_surface(raw.as_ptr());
+            if popup.is_null() {
+                return None;
+            }
+            PopupId(find_id(&raw const (*raw.as_ptr()).addons)?)
+        };
+        // Copied out before the handle is built, because the borrow must be
+        // released before the caller re-enters wlroots.
+        let parent = self.inner.popups.borrow().get(&popup_id)?.parent;
+        let raw = self.popup_raw(popup_id)?;
+        // SAFETY: a present table entry names a live popup; see `popup`.
+        Some(unsafe { Popup::from_raw_with_id(raw.as_ptr(), popup_id, parent) })
     }
 
     /// Move the toplevel's scene node. Coordinates are the scene's, which for

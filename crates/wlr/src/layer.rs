@@ -473,6 +473,24 @@ impl<'h> LayerSurface<'h> {
         // SAFETY: as `output_id`.
         unsafe { (*self.raw.as_ptr()).current.keyboard_interactive.0 != 0 }
     }
+
+    /// Call `f` for every surface in this layer surface's tree — its own
+    /// surface, its sub-surfaces and any popups — root first.
+    ///
+    /// The layer-shell sibling of
+    /// [`Surface::for_each_surface`](crate::Surface::for_each_surface),
+    /// wrapping `wlr_layer_surface_v1_for_each_surface`; see that method for
+    /// the closure/handle rules, which apply verbatim (the handle is built
+    /// without a tearing manager).
+    pub fn for_each_surface(&self, mut f: impl FnMut(&crate::Surface<'_>, i32, i32)) {
+        // SAFETY: the handle's lifetime guarantees the layer surface is live;
+        // the helper runs the walk synchronously and `f` does not outlive it.
+        unsafe {
+            crate::surface::for_each_surface_with(&mut f, |iterate, data| {
+                sys::wlr_layer_surface_v1_for_each_surface(self.raw.as_ptr(), iterate, data);
+            });
+        }
+    }
 }
 
 #[cfg(test)]

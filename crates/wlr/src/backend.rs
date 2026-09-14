@@ -1625,6 +1625,7 @@ struct ToplevelListeners {
     _request_fullscreen: Registration,
     _request_move: Registration,
     _request_resize: Registration,
+    _request_show_window_menu: Registration,
     _new_popup: Registration,
 }
 
@@ -3335,6 +3336,7 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
         }
         Event::RequestMove(id) => state.request_move(id),
         Event::RequestResize(id, edges) => state.request_resize(id, edges),
+        Event::RequestShowWindowMenu(id, x, y) => state.request_show_window_menu(id, x, y),
         Event::RequestDecorationMode(id, preference) => {
             // Cleared here, immediately before the handler runs, rather
             // than back in `on_decoration_request_mode` at emit time — see
@@ -8017,6 +8019,15 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
             std::ptr::null(),
             id,
         );
+        // The eleventh listener. The same shape as `request_resize`, on the
+        // toplevel's own `events.request_show_window_menu`.
+        let request_show_window_menu = Registration::link_toplevel(
+            &raw mut (*toplevel).events.request_show_window_menu,
+            on_toplevel_request_show_window_menu::<S>,
+            (*bound).session,
+            std::ptr::null(),
+            id,
+        );
         // The tenth listener: popups created on this toplevel. Linked on the
         // toplevel's `base` rather than on `wlr_xdg_shell` so the parent is
         // knowable — see `on_new_popup`'s own doc.
@@ -8046,6 +8057,7 @@ unsafe extern "C" fn on_new_toplevel<S: Handlers>(
                 _request_fullscreen: request_fullscreen,
                 _request_move: request_move,
                 _request_resize: request_resize,
+                _request_show_window_menu: request_show_window_menu,
                 _new_popup: new_popup,
             },
         );
@@ -9487,6 +9499,36 @@ unsafe extern "C" fn on_toplevel_request_resize<S: Handlers>(
         (*session)
             .dispatcher
             .emit(&*session, Event::RequestResize(id, edges), deliver);
+    }
+}
+
+/// The client asked for its window menu.
+unsafe extern "C" fn on_toplevel_request_show_window_menu<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `on_new_toplevel` into `wlr_xdg_toplevel.events.
+    // request_show_window_menu`, whose `data` is a live
+    // `wlr_xdg_toplevel_show_window_menu_event` (`wlr_xdg_shell.h`) for the
+    // duration of this emission. Seat and serial are deliberately dropped —
+    // this crate does not forward them, by design — and only `x`/`y` is read.
+    // Guarded against null on the same "an `extern "C"` frame does not get to
+    // panic, and reading a null pointer would abort just as surely" footing as
+    // `on_toplevel_request_resize`.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let Some(id) = (*bound).toplevel else { return };
+        let event = data.cast::<sys::wlr_xdg_toplevel_show_window_menu_event>();
+        let (x, y) = if event.is_null() {
+            (0, 0)
+        } else {
+            ((*event).x, (*event).y)
+        };
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::RequestShowWindowMenu(id, x, y), deliver);
     }
 }
 
@@ -12069,6 +12111,7 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::RequestFullscreen(..)
         | Event::RequestMove(..)
         | Event::RequestResize(..)
+        | Event::RequestShowWindowMenu(..)
         | Event::RequestDecorationMode(..)
         | Event::NewLayerSurface(..)
         | Event::LayerSurfaceCommit(..)
