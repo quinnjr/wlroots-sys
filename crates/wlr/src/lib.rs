@@ -84,6 +84,7 @@ mod display;
 mod error;
 mod ext_foreign_toplevel;
 mod ext_workspace;
+mod fixes;
 mod foreign_toplevel;
 mod geom;
 mod handler;
@@ -99,6 +100,8 @@ mod render;
 mod runtime;
 mod scene;
 mod seat;
+mod security_context;
+mod session_lock;
 mod subsurface;
 mod surface;
 mod tearing;
@@ -175,6 +178,8 @@ pub use seat::{
     ActivationToken, AxisRelativeDirection, AxisSource, CursorShape, CursorShapeDevice, KeyEvent,
     Modifiers, PointerAxis, SwitchType,
 };
+pub use security_context::{SecurityContext, SecurityContextState};
+pub use session_lock::{LockSurface, LockSurfaceState};
 pub use subsurface::SubsurfaceParentState;
 pub use surface::{Surface, SurfaceId, SurfaceRole};
 pub use tearing::{TearingControl, TearingHint};

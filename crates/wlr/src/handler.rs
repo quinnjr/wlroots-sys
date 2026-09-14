@@ -1223,6 +1223,24 @@ pub trait ToplevelHandler {
     fn workspace_commit(&mut self, requests: &[WorkspaceRequest]) {
         let _ = requests;
     }
+
+    /// A sandbox client committed a `wp_security_context_v1`.
+    ///
+    /// `context` is the metadata the sandbox engine attached — sandbox-engine
+    /// name, application id and instance id — copied out of wlroots at emission
+    /// time, so it owns its strings and may be kept after this call. wlroots
+    /// has already attached the context to the connections the sandbox will
+    /// accept; a compositor resolves one of those later with
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
+    ///
+    /// Requires
+    /// [`Runtime::create_security_context_manager`](crate::Runtime::create_security_context_manager).
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn security_context_committed(&mut self, context: &crate::SecurityContext) {
+        let _ = context;
+    }
 }
 
 /// Seat, keyboard and pointer input.

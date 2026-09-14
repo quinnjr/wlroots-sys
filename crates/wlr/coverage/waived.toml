@@ -906,18 +906,6 @@ note      = "Buffer-sharing, screen capture and DRM lease protocols."
 milestone = "M10"
 
 [[waived]]
-symbol    = "wlr_fixes"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_fixes_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol = "wlr_foreign_toplevel_handle_v1_output"
 reason = "internal"
 note   = "wlroots' per-output bookkeeping node for a toplevel. The crate names an output through Output and only calls output_enter/output_leave, so this struct is never addressed."
@@ -1925,36 +1913,6 @@ reason    = "internal"
 note      = "Read field-wise (touch_points walk plus has_grab) through Runtime::touch_state; the struct type itself is never named."
 
 [[waived]]
-symbol    = "wlr_security_context_manager_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_security_context_manager_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_security_context_manager_v1_lookup_client"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_security_context_v1_commit_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_security_context_v1_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_send_tablet_v2_tablet_pad_button"
 reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
@@ -2143,18 +2101,6 @@ symbol    = "wlr_session_find_gpus"
 reason    = "not-yet"
 note      = "Backend-specific construction and the interfaces milestone."
 milestone = "M13"
-
-[[waived]]
-symbol    = "wlr_session_lock_surface_v1_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_session_lock_surface_v1_try_from_wlr_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_session_open_file"

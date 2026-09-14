@@ -213,6 +213,17 @@ enum Operation {
     CreateSessionLockManager,
     /// `Runtime::is_session_locked`.
     QuerySessionLocked,
+    /// `Runtime::lock_surface` against a dangling surface id. A live lock
+    /// surface needs a connected locker client, so this stays on the miss path.
+    LockSurfaceOf { nth: u64 },
+    /// `Runtime::create_security_context_manager`; double-create guard included.
+    CreateSecurityContextManager,
+    /// `Runtime::lookup_security_context` for a null client — the documented
+    /// no-client miss, refused before any wlroots call. A live client needs a
+    /// connected sandbox.
+    LookupSecurityContext,
+    /// `Runtime::create_fixes`; double-create guard included.
+    CreateFixes,
 
     // --- Input method / IME: `runtime.rs` ---
     /// `Runtime::create_text_input_manager`; double-create guard included.
@@ -654,6 +665,21 @@ fn apply(
         }
         Operation::QuerySessionLocked => {
             let _ = runtime.is_session_locked();
+        }
+        Operation::LockSurfaceOf { nth } => {
+            let _ = runtime.lock_surface(SurfaceId::dangling_nth_for_test(*nth));
+        }
+
+        Operation::CreateSecurityContextManager => {
+            let _ = runtime.create_security_context_manager(display);
+        }
+        Operation::LookupSecurityContext => {
+            // SAFETY: null is the explicit "no client" case, refused before
+            // any wlroots call.
+            let _ = unsafe { runtime.lookup_security_context(std::ptr::null()) };
+        }
+        Operation::CreateFixes => {
+            let _ = runtime.create_fixes(display, 1);
         }
 
         Operation::CreateTextInputManager => {

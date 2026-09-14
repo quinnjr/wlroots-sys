@@ -3679,3 +3679,48 @@ item   = "WorkspaceRequest"
 symbol = "wlr_ext_workspace_v1_request_type"
 module = "ext_workspace"
 item   = "WorkspaceRequest"
+
+[[wrapped]]
+symbol = "wlr_security_context_manager_v1"
+module = "security_context"
+item   = "Runtime::create_security_context_manager"
+
+[[wrapped]]
+symbol = "wlr_security_context_manager_v1_create"
+module = "security_context"
+item   = "Runtime::create_security_context_manager"
+
+[[wrapped]]
+symbol = "wlr_security_context_manager_v1_lookup_client"
+module = "security_context"
+item   = "Runtime::lookup_security_context"
+
+[[wrapped]]
+symbol = "wlr_security_context_v1_commit_event"
+module = "backend"
+item   = "ToplevelHandler::security_context_committed"
+
+[[wrapped]]
+symbol = "wlr_security_context_v1_state"
+module = "security_context"
+item   = "SecurityContext::state"
+
+[[wrapped]]
+symbol = "wlr_fixes"
+module = "fixes"
+item   = "Runtime::create_fixes"
+
+[[wrapped]]
+symbol = "wlr_fixes_create"
+module = "fixes"
+item   = "Runtime::create_fixes"
+
+[[wrapped]]
+symbol = "wlr_session_lock_surface_v1_state"
+module = "session_lock"
+item   = "LockSurface::state"
+
+[[wrapped]]
+symbol = "wlr_session_lock_surface_v1_try_from_wlr_surface"
+module = "session_lock"
+item   = "Surface::lock_surface"

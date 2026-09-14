@@ -2950,6 +2950,23 @@ impl<'d> Backend<'d> {
             });
         }
 
+        if let Some(manager) = runtime.security_context_manager_ptr() {
+            // SAFETY: `create_security_context_manager` returned a non-null
+            // manager owned by the display, which this call requires to outlive
+            // it — null liveness is correct. This is the `commit` signal a
+            // sandbox client raises via `wp_security_context_v1.commit`;
+            // `on_security_context_commit` copies the metadata out and fans it
+            // out to the handler as an owned value.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.commit,
+                    on_security_context_commit::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
         if let Some(manager) = runtime.pointer_constraints_manager_ptr() {
             // SAFETY: `create_pointer_constraints_manager` returned a non-null
             // manager owned by the display, which this call requires to outlive
@@ -3719,6 +3736,7 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
             state.foreign_toplevel_set_rectangle(id, surface, x, y, width, height)
         }
         Event::WorkspaceCommit(requests) => state.workspace_commit(&requests),
+        Event::SecurityContextCommitted(context) => state.security_context_committed(&context),
         Event::GammaControlChanged(id) => state.gamma_control_changed(id),
         Event::OutputPowerModeRequested(id, mode) => state.output_power_mode_requested(id, mode),
         Event::InputMethodPopupCreated(popup) => state.new_popup_surface(popup),
@@ -7438,6 +7456,36 @@ unsafe extern "C" fn on_workspace_commit<S: Handlers>(
         (*session)
             .dispatcher
             .emit(&*session, Event::WorkspaceCommit(requests), deliver);
+    }
+}
+
+/// A sandbox client committed a `wp_security_context_v1`.
+unsafe extern "C" fn on_security_context_commit<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_security_context_manager_v1.events.commit`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_security_context_v1_commit_event` valid only for
+    // this call; the state pointer it holds is copied out before the emission
+    // returns, because the context that owns it dies with its client.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_security_context_v1_commit_event>();
+        if event.is_null() {
+            return;
+        }
+        let state = (*event).state;
+        if state.is_null() {
+            return;
+        }
+        let context = crate::security_context::snapshot(state);
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::SecurityContextCommitted(context), deliver);
     }
 }
 
@@ -12642,6 +12690,7 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         | Event::ForeignToplevelFullscreen(..)
         | Event::ForeignToplevelSetRectangle(..)
         | Event::WorkspaceCommit(..)
+        | Event::SecurityContextCommitted(..)
         | Event::GammaControlChanged(..)
         | Event::OutputPowerModeRequested(..)
         // Unreachable: `run` never registers an input-method manager either

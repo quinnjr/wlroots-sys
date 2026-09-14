@@ -48,8 +48,9 @@ use crate::{
     ActivationToken, AxisRelativeDirection, AxisSource, CommittedFields, ConstraintId, CursorShape,
     CursorShapeDevice, DecorationMode, Edges, ForeignToplevelId, GestureId, InputPopupSurfaceId,
     LayerSurfaceId, NodeId, OutputId, PointerAxis, PopupId, PowerMode, SceneOutputId,
-    ShortcutsInhibitorId, SurfaceId, SwitchId, TabletPadId, TabletToolId, ToplevelIcon, ToplevelId,
-    TouchId, TransientSeatId, VirtualKeyboardId, VirtualPointerId, WorkspaceRequest,
+    SecurityContext, ShortcutsInhibitorId, SurfaceId, SwitchId, TabletPadId, TabletToolId,
+    ToplevelIcon, ToplevelId, TouchId, TransientSeatId, VirtualKeyboardId, VirtualPointerId,
+    WorkspaceRequest,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -387,6 +388,12 @@ pub(crate) enum Event {
     /// it may therefore be delivered later (a deferred delivery still carries
     /// what the client asked for) and holds no wlroots pointer.
     WorkspaceCommit(Vec<WorkspaceRequest>),
+
+    /// A sandbox client committed a `wp_security_context_v1`. The metadata is
+    /// copied out of wlroots' state at emission time, so the owned
+    /// [`SecurityContext`] may be delivered later and outlives the client that
+    /// produced it.
+    SecurityContextCommitted(SecurityContext),
 
     /// A `zwlr_gamma_control_manager_v1` client set a gamma ramp for an
     /// output. Notification only — wlroots' own scene integration (wired in

@@ -2700,6 +2700,19 @@ pub(crate) struct RuntimeInner {
     /// second one.
     pub(crate) session_lock_manager: RefCell<Option<NonNull<sys::wlr_session_lock_manager_v1>>>,
 
+    /// The `wp_security_context_v1` manager, once created — lets a sandbox
+    /// engine attach security metadata to the connections it spawns. `Option`,
+    /// same rationale as the other manager globals: a consumer that never calls
+    /// [`create_security_context_manager`](Runtime::create_security_context_manager)
+    /// never advertises the global, and a second call would advertise a second
+    /// one.
+    pub(crate) security_context_manager:
+        RefCell<Option<NonNull<sys::wlr_security_context_manager_v1>>>,
+
+    /// The `wlr_fixes` global, once created — wlroots' compatibility fixes for
+    /// older clients. `Option`, same rationale as the other manager globals.
+    pub(crate) fixes: RefCell<Option<NonNull<sys::wlr_fixes>>>,
+
     /// The `zwlr_output_manager_v1` global, once created — lets a client
     /// (e.g. a display-settings app) enumerate output heads and request an
     /// atomic reconfiguration. `Option`, same rationale as the other manager
@@ -3715,6 +3728,8 @@ impl Runtime {
                 idle_inhibit_manager: RefCell::new(None),
                 idle_inhibitors: std::cell::Cell::new(0),
                 session_lock_manager: RefCell::new(None),
+                security_context_manager: RefCell::new(None),
+                fixes: RefCell::new(None),
                 output_manager: RefCell::new(None),
                 power_manager: RefCell::new(None),
                 viewporter: RefCell::new(None),

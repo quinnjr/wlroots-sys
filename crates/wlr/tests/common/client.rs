@@ -31,6 +31,9 @@ use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
 };
 use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
+use wayland_protocols::wp::security_context::v1::client::{
+    wp_security_context_manager_v1, wp_security_context_v1,
+};
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols::xdg::toplevel_icon::v1::client::{
@@ -403,6 +406,58 @@ pub fn spawn_ext_workspace(socket: &str) -> std::thread::JoinHandle<ExtWorkspace
 
         drop((workspace, group, manager));
         state.ext_workspace
+    })
+}
+
+/// Drive a `wp_security_context_manager_v1` client that creates a security
+/// context with a real listening socket, attaches its metadata and commits it.
+///
+/// The commit is the only thing the server observes: `wp_security_context_v1`
+/// carries no events, so the thread returns nothing. A round-trip after the
+/// commit makes `join` wait until the server has dispatched it. The listening
+/// socket and the pipe end kept alive until after the round-trip are what make
+/// the context valid — the compositor accepts on the listen fd and watches the
+/// close fd for hangup.
+pub fn spawn_security_context(socket: &str) -> std::thread::JoinHandle<()> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            ..ClientState::default()
+        };
+        let manager: wp_security_context_manager_v1::WpSecurityContextManagerV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind wp_security_context_manager_v1");
+
+        // A listening socket for the sandbox connection the compositor would
+        // accept, and a pipe whose read end is the hangup signal.
+        let listener = std::os::unix::net::UnixListener::bind(
+            crate::common::isolated_runtime_dir().join("security-context-listen"),
+        )
+        .expect("bind the security-context listen socket");
+        let (close_read, close_write) = rustix::pipe::pipe().expect("security-context close pipe");
+
+        let context = manager.create_listener(listener.as_fd(), close_read.as_fd(), &qh, ());
+        context.set_sandbox_engine("org.wlr.test".to_owned());
+        context.set_app_id("org.wlr.test.app".to_owned());
+        context.set_instance_id("instance-1".to_owned());
+        context.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the committed context");
+
+        drop((context, listener, close_write, manager));
     })
 }
 
@@ -1544,6 +1599,34 @@ impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for ClientState
         _state: &mut Self,
         _proxy: &ext_workspace_handle_v1::ExtWorkspaceHandleV1,
         _event: ext_workspace_handle_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wp_security_context_manager_v1::WpSecurityContextManagerV1, ()> for ClientState {
+    /// `wp_security_context_manager_v1` carries no events; the Dispatch impl
+    /// exists only so [`spawn_security_context`] can bind the global.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wp_security_context_manager_v1::WpSecurityContextManagerV1,
+        _event: wp_security_context_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wp_security_context_v1::WpSecurityContextV1, ()> for ClientState {
+    /// `wp_security_context_v1` carries no events; the Dispatch impl exists
+    /// only so [`spawn_security_context`] can create and commit the context.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wp_security_context_v1::WpSecurityContextV1,
+        _event: wp_security_context_v1::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
