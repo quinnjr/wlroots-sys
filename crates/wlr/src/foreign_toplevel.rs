@@ -53,6 +53,8 @@ use crate::{Display, Error, Output, Result, Runtime, SurfaceId, sys};
 /// address, which is the identity wlroots' request events carry; hiding it keeps
 /// that an implementation detail.
 ///
+/// Valid only while a handle is alive: the address may be reused after the handle is dropped.
+///
 /// Deliberately no `PartialOrd`/`Ord`, matching the other id types in this
 /// crate: an opaque id's ordering would promise creation-order semantics nobody
 /// asked for, and this API is frozen within the wlroots minor.

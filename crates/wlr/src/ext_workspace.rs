@@ -43,6 +43,8 @@ use crate::{Display, Error, Output, Result, Runtime, sys};
 /// address, which is the identity wlroots' request payloads carry; hiding it
 /// keeps that an implementation detail.
 ///
+/// Valid only while a handle is alive: the address may be reused after the handle is dropped.
+///
 /// Deliberately no `PartialOrd`/`Ord`, matching the other id types in this
 /// crate, and `Debug` is redacted because the wrapped value is a heap address.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]

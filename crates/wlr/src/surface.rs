@@ -18,6 +18,11 @@
 //! `ID_ADDON_IMPL`), so one surface carries both and each resolver finds only
 //! its own. wlroots runs the addon's destructor when the surface dies, so the
 //! id stops resolving at exactly the right moment and nothing has to be swept.
+//!
+//! `surface_committed` takes `&Surface` because a commit fires while the
+//! surface is synchronously live and its new state is worth reading, while
+//! `surface_mapped`/`surface_unmapped`/`surface_destroyed` take `SurfaceId`
+//! because they name a recorded identity that may already be gone.
 
 use std::ffi::c_void;
 use std::marker::PhantomData;
