@@ -2134,6 +2134,12 @@ reason    = "internal"
 note      = "Bookkeeping node for a surface's per-output enter list; a struct, not a call."
 
 [[waived]]
+symbol    = "wlr_surface_reject_pending"
+reason    = "interface-impl-only"
+note      = "Only valid inside a client-commit hook (wlroots asserts handling_commit), which the crate does not link; a Rust role impl in M13 is the first caller that can hold that window."
+milestone = "M13"
+
+[[waived]]
 symbol    = "wlr_surface_role"
 reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
@@ -2141,13 +2147,15 @@ milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_set_role"
-reason    = "internal"
-note      = "wlroots assigns a surface's role from its own protocol handlers; a consumer can supply neither the vtable nor the error resource."
+reason    = "interface-impl-only"
+note      = "Implements wlr_surface_role; a caller must supply the vtable and the error resource, so it belongs with the M13 role impl."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_set_role_object"
-reason    = "internal"
-note      = "Paired with set_role; the role object is the client's own resource, which this crate never owns."
+reason    = "interface-impl-only"
+note      = "Implements wlr_surface_role; the role object is the client's own resource, so it belongs with the M13 role impl."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_state"
@@ -2166,18 +2174,21 @@ note      = "The state-struct form of the buffer test; Surface::has_buffer repor
 
 [[waived]]
 symbol    = "wlr_surface_synced"
-reason    = "internal"
-note      = "A vtable-backed synced-state object; the crate creates none, and a consumer cannot supply the impl without writing C callbacks."
+reason    = "interface-impl-only"
+note      = "The synced-state object whose lifecycle wlr_surface_synced_impl drives; belongs with the M13 vtable impl."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_synced_finish"
-reason    = "internal"
-note      = "Part of the synced-state vtable lifecycle; unreachable without the impl."
+reason    = "interface-impl-only"
+note      = "Part of the wlr_surface_synced_impl lifecycle; belongs with the M13 vtable impl."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_synced_get_state"
-reason    = "internal"
-note      = "Part of the synced-state vtable lifecycle; unreachable without the impl."
+reason    = "interface-impl-only"
+note      = "Part of the wlr_surface_synced_impl lifecycle; belongs with the M13 vtable impl."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_synced_impl"
@@ -2187,8 +2198,9 @@ milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_synced_init"
-reason    = "internal"
-note      = "Part of the synced-state vtable lifecycle; unreachable without the impl."
+reason    = "interface-impl-only"
+note      = "Part of the wlr_surface_synced_impl lifecycle; belongs with the M13 vtable impl."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_switch_finish"

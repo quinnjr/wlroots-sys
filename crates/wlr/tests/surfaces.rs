@@ -116,8 +116,8 @@ impl wlr::ToplevelHandler for App {
         // time for no added coverage.
         if !self.probe.locked_once {
             self.probe.locked_once = true;
-            let seq = surface.lock_pending();
-            surface.unlock_cached(seq);
+            let lock = surface.lock_pending();
+            let _ = surface.unlock_cached(lock);
         }
 
         // Unmap once, after the surface is mapped. The queued

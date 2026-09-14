@@ -3791,11 +3791,6 @@ module = "surface"
 item   = "Surface::point_accepts_input"
 
 [[wrapped]]
-symbol = "wlr_surface_reject_pending"
-module = "surface"
-item   = "Surface::reject_pending"
-
-[[wrapped]]
 symbol = "wlr_surface_send_enter"
 module = "surface"
 item   = "Surface::send_enter"

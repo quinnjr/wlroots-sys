@@ -12371,11 +12371,12 @@ impl Runtime {
     /// event stream reports the surface destroyed as on any other path.
     ///
     /// `None` for an unknown or stale id, the by-id miss every mutator in this
-    /// crate keeps — and, deliberately, no way to call it from inside a
-    /// wlroots callback is offered: freeing an object wlroots is still walking
-    /// is a use-after-free, so call it from between turns (a
-    /// [`LoopHandler::should_stop`](crate::LoopHandler::should_stop), say), the
-    /// same way this crate's own layer test does.
+    /// crate keeps. **Do not call it from inside a wlroots callback**: it frees
+    /// the layer surface wlroots may still be walking, which is a
+    /// use-after-free. Call it from between turns instead — a
+    /// [`LoopHandler::should_stop`](crate::LoopHandler::should_stop), say, the
+    /// same way this crate's own layer test does; the method is `&self` and
+    /// cannot forbid the unsafe call, so the precondition is on the caller.
     pub fn destroy_layer_surface(&self, id: LayerSurfaceId) -> Option<()> {
         let raw = self.layer_surface_ptr(id)?;
         // SAFETY: a present `layer_surfaces` entry names a live layer surface

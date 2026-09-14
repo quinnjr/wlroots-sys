@@ -356,8 +356,6 @@ enum Operation {
     SurfaceAcceptsTouch { nth: u64 },
     /// `Surface::{lock_pending,unlock_cached}`.
     SurfaceLockPending { nth: u64 },
-    /// `Surface::reject_pending`.
-    SurfaceRejectPending { nth: u64 },
     /// `Surface::unmap`.
     SurfaceUnmap { nth: u64 },
 
@@ -939,13 +937,8 @@ fn apply(
                 .surface(SurfaceId::dangling_nth_for_test(*nth))
                 .map(|surface| {
                     let lock = surface.lock_pending();
-                    surface.unlock_cached(lock);
+                    let _ = surface.unlock_cached(lock);
                 });
-        }
-        Operation::SurfaceRejectPending { nth } => {
-            let _ = runtime
-                .surface(SurfaceId::dangling_nth_for_test(*nth))
-                .map(|surface| surface.reject_pending(1, "fuzz"));
         }
         Operation::SurfaceUnmap { nth } => {
             let _ = runtime

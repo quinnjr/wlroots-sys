@@ -19,7 +19,7 @@
 //! its own. wlroots runs the addon's destructor when the surface dies, so the
 //! id stops resolving at exactly the right moment and nothing has to be swept.
 
-use std::ffi::{CString, c_void};
+use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::os::raw::c_int;
 use std::ptr::NonNull;
@@ -124,14 +124,17 @@ impl SurfaceRole {
 ///
 /// Opaque, and neither `Clone` nor `Copy`. wlroots'
 /// `wlr_surface_unlock_cached` aborts when a state is unlocked with no matching
-/// lock, so the type system — a value only `lock_pending` can mint, consumed on
-/// release — is what keeps that unreachable from safe code. The lifetime ties
-/// the token to the surface handle that produced it, so it cannot be replayed
-/// against a different surface either.
+/// lock, so the type system is the first guard: a value only `lock_pending` can
+/// mint, consumed on release. The second is the recorded surface identity:
+/// `unlock_cached` compares it before the call and refuses a token minted by a
+/// different surface, which is otherwise reachable because two handles from one
+/// [`Runtime`](crate::Runtime) share a scope lifetime. The lifetime ties the
+/// token to the scope that produced it, and the pointer makes it `!Send`/`!Sync`.
 #[derive(Debug)]
 #[must_use = "a pending lock must be released or the surface stops committing"]
 pub struct PendingLock<'h> {
     seq: u32,
+    surface: *mut sys::wlr_surface,
     _scope: PhantomData<&'h ()>,
 }
 
@@ -435,6 +438,12 @@ impl<'h> Surface<'h> {
     /// Returns the leaf surface the point lands on, and the point in that
     /// leaf's own coordinates; `None` for a miss. Mirrors
     /// [`Toplevel::surface_at`](crate::Toplevel::surface_at).
+    ///
+    /// The returned leaf is built without this handle's cached seat, so
+    /// [`accepts_touch`](Surface::accepts_touch) on it always reports `false`.
+    /// The leaf is a hit-test result, not a new compositor context; call
+    /// `accepts_touch` on the surface that carries the seat (the handler's own
+    /// handle, or [`Runtime::surface`](crate::Runtime::surface)).
     #[must_use]
     pub fn surface_at(&self, sx: f64, sy: f64) -> Option<(Surface<'_>, f64, f64)> {
         self.surface_at_impl(sys::wlr_surface_surface_at, sx, sy)
@@ -561,6 +570,7 @@ impl<'h> Surface<'h> {
         // own state.
         PendingLock {
             seq: unsafe { sys::wlr_surface_lock_pending(self.raw.as_ptr()) },
+            surface: self.raw.as_ptr(),
             _scope: PhantomData,
         }
     }
@@ -568,56 +578,30 @@ impl<'h> Surface<'h> {
     /// Release one [`lock_pending`](Surface::lock_pending) on this surface.
     ///
     /// The state is not guaranteed to commit immediately, because another lock
-    /// may still be outstanding.
-    pub fn unlock_cached(&self, lock: PendingLock<'h>) {
-        // SAFETY: `lock` is only constructible by `lock_pending` on a surface,
-        // so it names a held lock; the handle borrows a live surface.
-        unsafe { sys::wlr_surface_unlock_cached(self.raw.as_ptr(), lock.seq) };
-    }
-
-    /// Reject this surface's pending state, sending the client the protocol
-    /// error `code` with `message`.
-    ///
-    /// Only meaningful while processing that client's commit request, when its
-    /// pending state is a protocol violation. `None` outside that window —
-    /// wlroots' `wlr_surface_reject_pending` asserts it and this distribution
-    /// ships wlroots without `NDEBUG`, so the check is what keeps a safe caller
-    /// from aborting the compositor — and also `None` when the surface has no
-    /// `wl_surface` resource left to error on or when `message` contains an
-    /// interior NUL. The variadic C function is reached through a hand-written
-    /// `%s` call site; Rust cannot forward a `va_list`.
-    pub fn reject_pending(&self, code: u32, message: &str) -> Option<()> {
-        // SAFETY: the handle borrows a live surface, so `resource` is either
-        // null or a live `wl_resource` wlroots owns, and the private flag is a
-        // plain bool.
-        let (resource, handling_commit) = unsafe {
-            let surface = &*self.raw.as_ptr();
-            (surface.resource, surface.WLR_PRIVATE.handling_commit)
-        };
-        if resource.is_null() || !handling_commit {
+    /// may still be outstanding. `None` when `lock` was minted by a different
+    /// surface: two handles can share a scope lifetime, so the check is what
+    /// keeps a cross-surface replay from reaching wlroots' assert — the token
+    /// embeds the issuing surface's address and this method refuses any other.
+    pub fn unlock_cached(&self, lock: PendingLock<'h>) -> Option<()> {
+        if lock.surface != self.raw.as_ptr() {
             return None;
         }
-        let message = CString::new(message).ok()?;
-        // SAFETY: `resource` is non-null and live and wlroots is inside the
-        // commit that set `handling_commit`; `%s` matches the single
-        // `c_char *` argument, and `message` outlives the call.
-        unsafe {
-            sys::wlr_surface_reject_pending(
-                self.raw.as_ptr(),
-                resource,
-                code,
-                c"%s".as_ptr(),
-                message.as_ptr(),
-            );
-        }
+        // SAFETY: `lock` names a lock this exact surface took (the identity
+        // check above), so wlroots' `cached_state_locks > 0` assert holds; the
+        // handle borrows a live surface.
+        unsafe { sys::wlr_surface_unlock_cached(self.raw.as_ptr(), lock.seq) };
         Some(())
     }
 
-    /// Unmap this surface, as if it had committed a null buffer.
+    /// Unmap this surface, dropping it from the screen.
     ///
-    /// Normally a surface-role implementation operation; a consumer only calls
-    /// it to force a mapped surface back off screen. Idempotent, and wlroots
-    /// delivers the ordinary unmap event this crate forwards as
+    /// **A surface-role implementation operation**, by wlroots' own contract:
+    /// it does not run the role's `unmap` hook for you, so a consumer calling
+    /// it on a shell surface is responsible for every step the role would
+    /// otherwise have taken. This crate exposes it because it is the only way
+    /// to force a mapped surface off screen from outside a role, not because it
+    /// is an ordinary compositor operation. Idempotent, and wlroots delivers
+    /// the ordinary unmap event this crate forwards as
     /// [`ToplevelHandler::surface_unmapped`](crate::ToplevelHandler::surface_unmapped).
     pub fn unmap(&self) {
         // SAFETY: the handle borrows a live surface; wlroots unmaps it and
@@ -791,16 +775,6 @@ mod tests {
         assert!(!surface.accepts_touch());
     }
 
-    /// A surface whose resource has already gone has nowhere to send a
-    /// protocol error, so the rejection is refused in Rust rather than
-    /// dereferenced.
-    #[test]
-    fn reject_pending_without_a_resource_is_none() {
-        let scratch = ScratchSurface::new();
-        let surface = unsafe { scratch.surface(SurfaceId(0)) };
-        assert_eq!(surface.reject_pending(1, "bad"), None);
-    }
-
     /// A nonpositive preferred scale trips wlroots' own assert, so the safe
     /// wrapper refuses it before reaching the call.
     #[test]
@@ -809,5 +783,20 @@ mod tests {
         let surface = unsafe { scratch.surface(SurfaceId(0)) };
         assert_eq!(surface.set_preferred_buffer_scale(0), None);
         assert_eq!(surface.set_preferred_buffer_scale(-1), None);
+    }
+
+    /// Two handles from one runtime share a scope lifetime, so `'h` alone does
+    /// not stop a token minted on one surface from being offered to another —
+    /// and per-surface sequence numbers start at the same values, so replaying
+    /// it would reach wlroots' `cached_state_locks > 0` assert and abort. The
+    /// identity check refuses it instead.
+    #[test]
+    fn a_pending_lock_cannot_be_replayed_on_another_surface() {
+        let a = ScratchSurface::new();
+        let b = ScratchSurface::new();
+        let surface_a = unsafe { a.surface(SurfaceId(1)) };
+        let surface_b = unsafe { b.surface(SurfaceId(2)) };
+        let lock = surface_a.lock_pending();
+        assert_eq!(surface_b.unlock_cached(lock), None);
     }
 }
