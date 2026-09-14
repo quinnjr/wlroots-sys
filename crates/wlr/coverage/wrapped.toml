@@ -2221,12 +2221,12 @@ item   = "ToplevelHandler::new_subsurface"
 [[wrapped]]
 symbol = "wlr_subsurface_parent_state"
 module = "subsurface"
-item   = "Subsurface::parent_state"
+item   = "Surface::subsurface_parent_state"
 
 [[wrapped]]
 symbol = "wlr_subsurface_try_from_wlr_surface"
 module = "subsurface"
-item   = "Surface::as_subsurface"
+item   = "Surface::subsurface_parent_id"
 
 [[wrapped]]
 symbol = "wlr_xwayland_surface"

@@ -187,61 +187,16 @@ impl<'h> Surface<'h> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Surface, SurfaceId};
-    use crate::sys;
-    use std::alloc::{Layout, alloc_zeroed, dealloc};
-
-    /// A zeroed, heap-allocated `wlr_surface`, wired up just enough for
-    /// [`Surface::current_size`], [`Surface::has_buffer`] and
-    /// [`Surface::mapped`] to read real values.
-    ///
-    /// `alloc_zeroed` rather than `std::mem::zeroed`, for the same reason
-    /// `toplevel.rs`'s `ScratchToplevel` uses it: `wlr_surface` embeds
-    /// `wl_signal`/`wl_listener` machinery with bare function pointers, a bit
-    /// pattern `std::mem::zeroed` refuses to produce as a materialised *value*.
-    /// Touching the bytes only through a raw pointer sidesteps that.
-    struct ScratchSurface {
-        surface: *mut sys::wlr_surface,
-    }
-
-    impl ScratchSurface {
-        fn new() -> Self {
-            let layout = Layout::new::<sys::wlr_surface>();
-            // SAFETY: `wlr_surface` is a nonzero-sized type, so `alloc_zeroed`
-            // returns either null (checked below) or a suitably aligned,
-            // zeroed allocation of exactly that size.
-            let surface = unsafe { alloc_zeroed(layout) }.cast::<sys::wlr_surface>();
-            assert!(!surface.is_null(), "allocation failed");
-            Self { surface }
-        }
-
-        /// # Safety
-        ///
-        /// The returned handle borrows this `ScratchSurface`'s allocation and
-        /// must not outlive it.
-        unsafe fn surface(&self, id: SurfaceId) -> Surface<'_> {
-            // SAFETY: `self.surface` is a live allocation for as long as
-            // `self` is; the caller upholds the lifetime bound.
-            unsafe { Surface::from_raw_with_id(self.surface, id) }
-        }
-    }
-
-    impl Drop for ScratchSurface {
-        fn drop(&mut self) {
-            // SAFETY: `self.surface` was allocated by `alloc_zeroed` with the
-            // matching layout, is still exclusively owned, and nothing else
-            // frees or aliases it.
-            unsafe { dealloc(self.surface.cast(), Layout::new::<sys::wlr_surface>()) };
-        }
-    }
+    use super::SurfaceId;
+    use crate::test_support::ScratchSurface;
 
     #[test]
     fn current_size_reads_the_committed_state() {
         let scratch = ScratchSurface::new();
         // SAFETY: `scratch` outlives every use of the handle below.
         unsafe {
-            (*scratch.surface).current.width = 640;
-            (*scratch.surface).current.height = 480;
+            (*scratch.raw).current.width = 640;
+            (*scratch.raw).current.height = 480;
         }
         let surface = unsafe { scratch.surface(SurfaceId(0)) };
         assert_eq!(surface.current_size(), (640, 480));
@@ -261,7 +216,7 @@ mod tests {
         // Copied before the handle borrows `scratch`, so the writes below go
         // through an independent raw pointer and do not conflict with the
         // handle's shared borrow.
-        let p = scratch.surface;
+        let p = scratch.raw;
         let surface = unsafe { scratch.surface(SurfaceId(0)) };
         assert!(!surface.has_buffer(), "a fresh surface has no buffer");
         assert!(!surface.mapped(), "and is not mapped");

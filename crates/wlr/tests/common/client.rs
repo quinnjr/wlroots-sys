@@ -286,7 +286,7 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
 ///
 /// Phase one creates an `xdg_toplevel` parent and commits it bufferless so the
 /// server announces and tracks it — a tracked parent is what lets the server's
-/// [`Subsurface::parent_surface_id`](wlr::Subsurface::parent_surface_id)
+/// [`Surface::subsurface_parent_id`](wlr::Surface::subsurface_parent_id)
 /// resolve. Phase two creates a child surface and a `wl_subsurface` on that
 /// parent, commits the child bufferless, then round-trips so the server has
 /// observed the child's `new_subsurface`. No buffer is attached: the role's
@@ -342,9 +342,12 @@ pub fn spawn_subsurface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
         // commit — not when the object is created — and emits `new_subsurface`
         // from that apply, so the parent is committed again here. The child's
         // own bufferless commit is included because it is the real client
-        // sequence, and the round-trip drains both.
+        // sequence, and the round-trip drains both. `set_position` is applied
+        // from the sub-surface's pending state by that same parent commit, so
+        // the server reads a non-default `(10, 20)` through the role.
         let child = compositor.create_surface(&qh, ());
-        let _subsurface = subcompositor.get_subsurface(&child, &parent, &qh, ());
+        let subsurface = subcompositor.get_subsurface(&child, &parent, &qh, ());
+        subsurface.set_position(10, 20);
         child.commit();
         parent.commit();
         queue
@@ -353,12 +356,87 @@ pub fn spawn_subsurface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
 
         drop((
             child,
-            _subsurface,
+            subsurface,
             parent,
             xdg_surface,
             _toplevel,
             subcompositor,
         ));
+        state.events
+    })
+}
+
+/// Like [`spawn_subsurface`], but destroys the **parent** surface while keeping
+/// the child alive, then commits the child once more.
+///
+/// This is the destroy-order witness for the sub-surface role: wlroots frees the
+/// `wlr_subsurface` from the parent surface's own `destroy` signal
+/// (`subsurface_handle_parent_destroy`), while the child `wlr_surface` survives.
+/// The extra child commit after the parent is gone gives the server a handler
+/// that runs *after* the role object has been freed, so a trailing
+/// `subsurface_parent_id`/`subsurface_parent_state` call there must miss rather
+/// than dereference freed memory.
+pub fn spawn_subsurface_then_destroy_parent(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            events: ClientEvents::default(),
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let subcompositor: wl_subcompositor::WlSubcompositor =
+            globals.bind(&qh, 1..=1, ()).expect("bind wl_subcompositor");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+
+        // Parent toplevel, committed bufferless so the server tracks it.
+        let parent = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&parent, &qh, ());
+        let _toplevel = xdg_surface.get_toplevel(&qh, ());
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server announces the parent toplevel");
+
+        // Child sub-surface, committed so the server observes `new_subsurface`.
+        let child = compositor.create_surface(&qh, ());
+        let subsurface = subcompositor.get_subsurface(&child, &parent, &qh, ());
+        child.commit();
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the child subsurface");
+
+        // xdg-shell requires a surface's role objects be destroyed before the
+        // surface itself, so tear the toplevel and its xdg_surface down first,
+        // then destroy the now-roleless parent surface while keeping the child.
+        // The extra child commit gives the server a handler that runs after
+        // wlroots has freed the role object.
+        _toplevel.destroy();
+        xdg_surface.destroy();
+        parent.destroy();
+        child.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the post-destroy child commit");
+
+        drop((child, subsurface, subcompositor));
         state.events
     })
 }

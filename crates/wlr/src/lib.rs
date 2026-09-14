@@ -160,7 +160,7 @@ pub use seat::{
     ActivationToken, AxisRelativeDirection, AxisSource, CursorShape, CursorShapeDevice, KeyEvent,
     Modifiers, PointerAxis, SwitchType,
 };
-pub use subsurface::{Subsurface, SubsurfaceParentState};
+pub use subsurface::SubsurfaceParentState;
 pub use surface::{Surface, SurfaceId};
 pub use tearing::{TearingControl, TearingHint};
 pub use toplevel::{Edges, Toplevel, ToplevelId};

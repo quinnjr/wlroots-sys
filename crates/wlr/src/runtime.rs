@@ -2661,9 +2661,10 @@ pub(crate) struct RuntimeInner {
     /// The `wlr_subcompositor` this runtime created in
     /// [`Runtime::init_graphics`]. Display-owned exactly like the compositor
     /// and `wlr_data_device_manager`, so there is nothing this crate destroys;
-    /// it is stored so the global wlroots registered the sub-surface protocol
-    /// under is reachable after the fact instead of discarded at the create
-    /// site. `None` until graphics is initialised.
+    /// it is kept rather than discarded at the create site so a future accessor
+    /// can reach the global's owning object without re-walking the display.
+    /// Nothing reads it yet, so it is currently write-only. `None` until
+    /// graphics is initialised.
     pub(crate) subcompositor: RefCell<Option<NonNull<sys::wlr_subcompositor>>>,
 
     /// The `wlr_xwayland` manager, once created — advertises the X server and

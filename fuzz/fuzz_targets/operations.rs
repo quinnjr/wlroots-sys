@@ -224,11 +224,9 @@ enum Operation {
     // --- Sub-surface role (M9): `subsurface.rs`, reached by id from
     // `surface.rs`. A positive path needs a connected client to mint a real
     // sub-surface, so these stay on the by-id miss the surface lookup reports.
-    /// `Surface::as_subsurface` against a dangling surface id.
-    AsSubsurface { nth: u64 },
-    /// `Subsurface::parent_surface_id` through the same miss path.
+    /// `Surface::subsurface_parent_id` against a dangling surface id.
     SubsurfaceParentId { nth: u64 },
-    /// `Subsurface::parent_state` through the same miss path.
+    /// `Surface::subsurface_parent_state` against a dangling surface id.
     SubsurfaceParentState { nth: u64 },
 }
 
@@ -538,26 +536,15 @@ fn apply(
             let _ = runtime.tearing_control(SurfaceId::dangling_nth_for_test(*nth));
         }
 
-        Operation::AsSubsurface { nth } => {
+        Operation::SubsurfaceParentId { nth } => {
             let _ = runtime
                 .surface(SurfaceId::dangling_nth_for_test(*nth))
-                .and_then(|surface| surface.as_subsurface());
-        }
-        Operation::SubsurfaceParentId { nth } => {
-            if let Some(subsurface) = runtime
-                .surface(SurfaceId::dangling_nth_for_test(*nth))
-                .and_then(|surface| surface.as_subsurface())
-            {
-                let _ = subsurface.parent_surface_id();
-            }
+                .map(|surface| surface.subsurface_parent_id());
         }
         Operation::SubsurfaceParentState { nth } => {
-            if let Some(subsurface) = runtime
+            let _ = runtime
                 .surface(SurfaceId::dangling_nth_for_test(*nth))
-                .and_then(|surface| surface.as_subsurface())
-            {
-                let _ = subsurface.parent_state();
-            }
+                .map(|surface| surface.subsurface_parent_state());
         }
     }
 }

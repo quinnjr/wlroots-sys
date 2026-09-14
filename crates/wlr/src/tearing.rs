@@ -204,34 +204,9 @@ mod tests {
     use super::{TearingControl, TearingHint};
     use crate::surface::{Surface, SurfaceId};
     use crate::sys;
+    use crate::test_support::ScratchSurface;
     use std::alloc::{Layout, alloc_zeroed, dealloc};
     use std::ptr::NonNull;
-
-    /// A zeroed `wlr_surface` with an initialised (empty) addon set, enough for
-    /// the hint lookup's `wlr_addon_find` to return null cleanly.
-    struct ScratchSurface(*mut sys::wlr_surface);
-
-    impl ScratchSurface {
-        fn new() -> Self {
-            let layout = Layout::new::<sys::wlr_surface>();
-            // SAFETY: `wlr_surface` is non-zero-sized.
-            let ptr = unsafe { alloc_zeroed(layout) }.cast::<sys::wlr_surface>();
-            assert!(!ptr.is_null(), "allocation failed");
-            // SAFETY: `ptr` is sized for the addon set it embeds.
-            unsafe { sys::wlr_addon_set_init(&raw mut (*ptr).addons) };
-            Self(ptr)
-        }
-    }
-
-    impl Drop for ScratchSurface {
-        fn drop(&mut self) {
-            // SAFETY: initialised in `new`, no addon attached (or finished
-            // through the control's own path first), so this undoes the init.
-            unsafe { sys::wlr_addon_set_finish(&raw mut (*self.0).addons) };
-            // SAFETY: allocated with this layout in `new`.
-            unsafe { dealloc(self.0.cast::<u8>(), Layout::new::<sys::wlr_surface>()) };
-        }
-    }
 
     /// A zeroed manager whose `surface_hints` list is initialised to empty.
     struct ScratchManager(*mut sys::wlr_tearing_control_manager_v1);
@@ -336,7 +311,7 @@ mod tests {
         let surface_scratch = ScratchSurface::new();
         let manager = ScratchManager::new();
         // SAFETY: both scratch objects outlive the handle.
-        let surface = unsafe { Surface::from_raw_with_id(surface_scratch.0, SurfaceId(1)) }
+        let surface = unsafe { Surface::from_raw_with_id(surface_scratch.raw, SurfaceId(1)) }
             .with_tearing_manager(Some(
                 NonNull::new(manager.0).expect("scratch manager is non-null"),
             ));
@@ -356,7 +331,7 @@ mod tests {
     fn hint_lookup_misses_without_a_manager() {
         let surface_scratch = ScratchSurface::new();
         // SAFETY: the scratch surface outlives the handle.
-        let surface = unsafe { Surface::from_raw_with_id(surface_scratch.0, SurfaceId(1)) };
+        let surface = unsafe { Surface::from_raw_with_id(surface_scratch.raw, SurfaceId(1)) };
         assert_eq!(surface.tearing_hint(), None, "no manager, no hint");
         assert!(surface.tearing_control().is_none());
     }
@@ -367,13 +342,13 @@ mod tests {
         let other_scratch = ScratchSurface::new();
         let mut manager = ScratchManager::new();
         let control = ScratchControl::new(
-            surface_scratch.0,
+            surface_scratch.raw,
             TearingHint::Async,
             TearingHint::Vsync,
             TearingHint::Vsync,
         );
         let other = ScratchControl::new(
-            other_scratch.0,
+            other_scratch.raw,
             TearingHint::Vsync,
             TearingHint::Async,
             TearingHint::Vsync,
@@ -386,7 +361,7 @@ mod tests {
         }
 
         // SAFETY: the scratch objects outlive the handle.
-        let surface = unsafe { Surface::from_raw_with_id(surface_scratch.0, SurfaceId(1)) }
+        let surface = unsafe { Surface::from_raw_with_id(surface_scratch.raw, SurfaceId(1)) }
             .with_tearing_manager(Some(
                 NonNull::new(manager.0).expect("scratch manager is non-null"),
             ));
@@ -404,7 +379,7 @@ mod tests {
 
         // The lookup is keyed by surface, not by list position: the other
         // surface in the same manager resolves to its own (vsync) control.
-        let other_surface = unsafe { Surface::from_raw_with_id(other_scratch.0, SurfaceId(2)) }
+        let other_surface = unsafe { Surface::from_raw_with_id(other_scratch.raw, SurfaceId(2)) }
             .with_tearing_manager(Some(
                 NonNull::new(manager.0).expect("scratch manager is non-null"),
             ));
@@ -423,7 +398,7 @@ mod tests {
     fn control_accessors_read_the_current_pending_and_previous_hints() {
         let surface_scratch = ScratchSurface::new();
         let control = ScratchControl::new(
-            surface_scratch.0,
+            surface_scratch.raw,
             TearingHint::Vsync,
             TearingHint::Async,
             TearingHint::Async,
