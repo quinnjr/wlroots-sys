@@ -1065,58 +1065,20 @@ milestone = "M8"
 
 
 [[waived]]
-symbol    = "wlr_layer_surface_v1_destroy"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_layer_surface_v1_for_each_popup_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_layer_surface_v1_from_resource"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_layer_surface_v1_get_exclusive_edge"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_layer_surface_v1_popup_surface_at"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+note      = "Client-driven identity; custom protocol implementations belong to the interfaces milestone."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_layer_surface_v1_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "The layer surface's state struct, read field by field through LayerSurface accessors."
 
 [[waived]]
 symbol    = "wlr_layer_surface_v1_state_field"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_layer_surface_v1_surface_at"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_layer_surface_v1_try_from_wlr_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "Bitmask naming which layer fields a commit changed; never inspected."
 
 [[waived]]
 symbol    = "wlr_libinput_backend_create"
@@ -2140,87 +2102,36 @@ milestone = "M10"
 
 [[waived]]
 symbol    = "wlr_surface_accepts_tablet_v2"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_accepts_touch"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "The per-tablet tablet object is wlroots-internal; this crate exposes no handle for it."
 
 [[waived]]
 symbol    = "wlr_surface_from_resource"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_get_buffer_source_box"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+note      = "Client-driven identity; custom protocol implementations belong to the interfaces milestone."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_get_content_type_v1"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_get_effective_damage"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_get_extents"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+note      = "content-type-v1 belongs to the buffer/protocol milestone."
+milestone = "M11"
 
 [[waived]]
 symbol    = "wlr_surface_get_image_description_v1_data"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_get_root_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+note      = "The image-description and color-management milestone."
+milestone = "M12"
 
 [[waived]]
 symbol    = "wlr_surface_get_texture"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_lock_pending"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "Returns a surface-owned texture the surface frees on its next commit; this crate's Texture owns and destroys, so wrapping it would double-free."
 
 [[waived]]
 symbol    = "wlr_surface_output"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_point_accepts_input"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_reject_pending"
-reason    = "not-yet"
-note      = "Shell completion. The one bound C variadic: Rust cannot forward into a va_list, so the wrapper must format first and pass a lone %s."
-milestone = "M9"
+reason    = "internal"
+note      = "Bookkeeping node for a surface's per-output enter list; a struct, not a call."
 
 [[waived]]
 symbol    = "wlr_surface_role"
@@ -2229,88 +2140,44 @@ note      = "Reachable only by implementing a wlroots vtable from Rust; see M13.
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_surface_send_enter"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_send_frame_done"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_send_leave"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_set_preferred_buffer_scale"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_set_preferred_buffer_transform"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_surface_set_role"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots assigns a surface's role from its own protocol handlers; a consumer can supply neither the vtable nor the error resource."
 
 [[waived]]
 symbol    = "wlr_surface_set_role_object"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "Paired with set_role; the role object is the client's own resource, which this crate never owns."
 
 [[waived]]
 symbol    = "wlr_surface_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "The committed-state struct, read field by field through Surface accessors."
 
 [[waived]]
 symbol    = "wlr_surface_state_field"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "Bitmask naming which state fields a commit changed; the crate never inspects it."
 
 [[waived]]
 symbol    = "wlr_surface_state_has_buffer"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_surface_at"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "The state-struct form of the buffer test; Surface::has_buffer reports the same fact."
 
 [[waived]]
 symbol    = "wlr_surface_synced"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "A vtable-backed synced-state object; the crate creates none, and a consumer cannot supply the impl without writing C callbacks."
 
 [[waived]]
 symbol    = "wlr_surface_synced_finish"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "Part of the synced-state vtable lifecycle; unreachable without the impl."
 
 [[waived]]
 symbol    = "wlr_surface_synced_get_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "Part of the synced-state vtable lifecycle; unreachable without the impl."
 
 [[waived]]
 symbol    = "wlr_surface_synced_impl"
@@ -2320,22 +2187,8 @@ milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_synced_init"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_unlock_cached"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_unmap"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
+reason    = "internal"
+note      = "Part of the synced-state vtable lifecycle; unreachable without the impl."
 
 [[waived]]
 symbol    = "wlr_switch_finish"

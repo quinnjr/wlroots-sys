@@ -102,7 +102,7 @@
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-use crate::id::find_id;
+use crate::id::{find_id, find_surface_id};
 use crate::{OutputId, sys};
 
 /// Identifies a layer surface for as long as the consumer chooses to
@@ -490,6 +490,89 @@ impl<'h> LayerSurface<'h> {
                 sys::wlr_layer_surface_v1_for_each_surface(self.raw.as_ptr(), iterate, data);
             });
         }
+    }
+
+    /// Call `f` for every surface in this layer surface's **popup** tree only,
+    /// root first.
+    ///
+    /// The `wlr_layer_surface_v1_for_each_popup_surface` sibling of
+    /// [`for_each_surface`](Self::for_each_surface), for a compositor that wants
+    /// to place or render only a panel's menus. Same closure/handle rules.
+    pub fn for_each_popup_surface(&self, mut f: impl FnMut(&crate::Surface<'_>, i32, i32)) {
+        // SAFETY: as for `for_each_surface`.
+        unsafe {
+            crate::surface::for_each_surface_with(&mut f, |iterate, data| {
+                sys::wlr_layer_surface_v1_for_each_popup_surface(self.raw.as_ptr(), iterate, data);
+            });
+        }
+    }
+
+    /// Hit-test this layer surface's tree at a point in its own surface-local
+    /// coordinates.
+    ///
+    /// Returns the struck leaf surface and the point in that leaf's
+    /// coordinates; `None` for a miss. Mirrors
+    /// [`Toplevel::surface_at`](crate::Toplevel::surface_at), wrapping
+    /// `wlr_layer_surface_v1_surface_at`.
+    #[must_use]
+    pub fn surface_at(&self, sx: f64, sy: f64) -> Option<(crate::Surface<'_>, f64, f64)> {
+        self.surface_at_impl(sys::wlr_layer_surface_v1_surface_at, sx, sy)
+    }
+
+    /// As [`surface_at`](Self::surface_at), but restricted to this layer
+    /// surface's **popup** tree; wraps
+    /// `wlr_layer_surface_v1_popup_surface_at`.
+    #[must_use]
+    pub fn popup_surface_at(&self, sx: f64, sy: f64) -> Option<(crate::Surface<'_>, f64, f64)> {
+        self.surface_at_impl(sys::wlr_layer_surface_v1_popup_surface_at, sx, sy)
+    }
+
+    /// Shared body of the two hit-tests, which differ only in which wlroots
+    /// walk they call.
+    fn surface_at_impl(
+        &self,
+        walk: unsafe extern "C" fn(
+            *mut sys::wlr_layer_surface_v1,
+            f64,
+            f64,
+            *mut f64,
+            *mut f64,
+        ) -> *mut sys::wlr_surface,
+        sx: f64,
+        sy: f64,
+    ) -> Option<(crate::Surface<'_>, f64, f64)> {
+        let mut sub_x = 0.0;
+        let mut sub_y = 0.0;
+        // SAFETY: the handle's lifetime guarantees the layer surface is live;
+        // both out-parameters are live locals that outlive the call, and
+        // wlroots only reads the coordinates.
+        unsafe {
+            let raw = walk(self.raw.as_ptr(), sx, sy, &raw mut sub_x, &raw mut sub_y);
+            if raw.is_null() {
+                return None;
+            }
+            let id = find_surface_id(&raw const (*raw).addons).map(crate::SurfaceId)?;
+            let surface = crate::Surface::from_raw_opt(raw, id)?;
+            Some((surface, sub_x, sub_y))
+        }
+    }
+
+    /// The edge its exclusive zone applies to, if any.
+    ///
+    /// `None` when the committed exclusive zone is nonpositive or must not be
+    /// applied — wlroots' own `WLR_EDGE_NONE` answer; otherwise the anchored
+    /// edge wlroots names. Read from the committed state, so it is only
+    /// meaningful once the surface has committed (call it from
+    /// [`ToplevelHandler::layer_surface_commit`](crate::ToplevelHandler::layer_surface_commit)).
+    #[must_use]
+    pub fn exclusive_edge(&self) -> Option<crate::Edges> {
+        // SAFETY: the handle's lifetime guarantees the layer surface is live;
+        // the call only reads its committed state.
+        let raw = unsafe { sys::wlr_layer_surface_v1_get_exclusive_edge(self.raw.as_ptr()) };
+        // `Edges::from_xdg` decodes the shared `wlr_edges` bit values: `top` =
+        // 1, `bottom` = 2, `left` = 4, `right` = 8, `none` = 0.
+        let edges = crate::Edges::from_xdg(raw.0);
+        if edges.is_empty() { None } else { Some(edges) }
     }
 }
 

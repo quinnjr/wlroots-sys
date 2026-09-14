@@ -19,13 +19,16 @@
 //! its own. wlroots runs the addon's destructor when the surface dies, so the
 //! id stops resolving at exactly the right moment and nothing has to be swept.
 
-use std::ffi::c_void;
+use std::ffi::{CString, c_void};
 use std::marker::PhantomData;
 use std::os::raw::c_int;
 use std::ptr::NonNull;
+use std::time::Duration;
 
-use crate::id::find_surface_id;
-use crate::{Toplevel, sys};
+use crate::geom::{Box2D, FBox, Transform};
+use crate::id::{find_id, find_surface_id};
+use crate::region::Region;
+use crate::{LayerSurface, LayerSurfaceId, Output, Toplevel, sys};
 
 /// Identifies a `wlr_surface` for as long as the consumer chooses to remember
 /// it.
@@ -116,6 +119,22 @@ impl SurfaceRole {
     }
 }
 
+/// A held [`Surface::lock_pending`](crate::Surface::lock_pending), released by
+/// handing it back to [`Surface::unlock_cached`](crate::Surface::unlock_cached).
+///
+/// Opaque, and neither `Clone` nor `Copy`. wlroots'
+/// `wlr_surface_unlock_cached` aborts when a state is unlocked with no matching
+/// lock, so the type system — a value only `lock_pending` can mint, consumed on
+/// release — is what keeps that unreachable from safe code. The lifetime ties
+/// the token to the surface handle that produced it, so it cannot be replayed
+/// against a different surface either.
+#[derive(Debug)]
+#[must_use = "a pending lock must be released or the surface stops committing"]
+pub struct PendingLock<'h> {
+    seq: u32,
+    _scope: PhantomData<&'h ()>,
+}
+
 /// A surface, borrowed for the duration of a handler call.
 pub struct Surface<'h> {
     raw: NonNull<sys::wlr_surface>,
@@ -127,6 +146,13 @@ pub struct Surface<'h> {
     /// scratch constructor) — in which case the tearing accessors miss rather
     /// than return a wrong default.
     tearing_manager: Option<NonNull<sys::wlr_tearing_control_manager_v1>>,
+    /// The runtime's `wlr_seat`, cached for the same reason as the tearing
+    /// manager: [`Surface::accepts_touch`](crate::Surface::accepts_touch) is a
+    /// query against the compositor's own seat, and a handle can only reach it
+    /// if its builder put it here. `None` for a handle built without a runtime
+    /// (the surface-tree walk, the scratch constructor), where the query
+    /// answers `false` rather than guessing.
+    seat: Option<NonNull<sys::wlr_seat>>,
     _scope: PhantomData<&'h ()>,
 }
 
@@ -155,6 +181,7 @@ impl<'h> Surface<'h> {
             raw: NonNull::new(raw).expect("wlroots handed us a null surface"),
             id,
             tearing_manager: None,
+            seat: None,
             _scope: PhantomData,
         }
     }
@@ -180,6 +207,7 @@ impl<'h> Surface<'h> {
             raw,
             id,
             tearing_manager: None,
+            seat: None,
             _scope: PhantomData,
         })
     }
@@ -196,6 +224,15 @@ impl<'h> Surface<'h> {
         manager: Option<NonNull<sys::wlr_tearing_control_manager_v1>>,
     ) -> Surface<'h> {
         self.tearing_manager = manager;
+        self
+    }
+
+    /// Attach the runtime's seat, so [`accepts_touch`](Surface::accepts_touch)
+    /// can reach it. Consuming builder, mirroring
+    /// [`with_tearing_manager`](Surface::with_tearing_manager) and for the same
+    /// reason.
+    pub(crate) fn with_seat(mut self, seat: Option<NonNull<sys::wlr_seat>>) -> Surface<'h> {
+        self.seat = seat;
         self
     }
 
@@ -306,6 +343,307 @@ impl<'h> Surface<'h> {
             });
         }
     }
+
+    /// The union of this surface and every sub-surface's current extent, in
+    /// surface-local coordinates.
+    ///
+    /// `x`/`y` may be negative, because a sub-surface may sit at a negative
+    /// offset. An uncommitted surface reports all-zero, the same as
+    /// [`current_size`](Surface::current_size).
+    #[must_use]
+    pub fn extents(&self) -> Box2D {
+        let mut box_ = sys::wlr_box {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        };
+        // SAFETY: the handle borrows a live surface; `box_` is a live local
+        // wlroots writes into and this method then reads.
+        unsafe { sys::wlr_surface_get_extents(self.raw.as_ptr(), &raw mut box_) };
+        Box2D::new(box_.x, box_.y, box_.width, box_.height)
+    }
+
+    /// The effective damage of the last commit, in surface-local coordinates.
+    ///
+    /// This is wlroots' own accumulated damage — client surface damage merged
+    /// with buffer damage and clipped — not the raw client-stated region.
+    #[must_use]
+    pub fn effective_damage(&self) -> Region {
+        let mut region = Region::new();
+        // SAFETY: the handle borrows a live surface; `region` is a live,
+        // initialised pixman region wlroots writes into.
+        unsafe {
+            sys::wlr_surface_get_effective_damage(self.raw.as_ptr(), region.as_mut_ptr());
+        }
+        region
+    }
+
+    /// The region of the attached buffer that has to be sampled to render this
+    /// surface, in buffer-local coordinates.
+    ///
+    /// A surface with no viewport set — the ordinary case — reports the whole
+    /// buffer. An uncommitted surface reports an empty box.
+    #[must_use]
+    pub fn buffer_source_box(&self) -> FBox {
+        let mut box_ = sys::wlr_fbox {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        };
+        // SAFETY: as for `extents`: a live surface and a live out-parameter.
+        unsafe { sys::wlr_surface_get_buffer_source_box(self.raw.as_ptr(), &raw mut box_) };
+        FBox::new(box_.x, box_.y, box_.width, box_.height)
+    }
+
+    /// This surface's stable id at the root of its sub-surface tree.
+    ///
+    /// wlroots returns the surface itself when it is already the root, and
+    /// never returns null. A root this crate never tracked — impossible for a
+    /// surface it announced, possible only for a scratch handle — falls back to
+    /// this handle's own id rather than inventing one.
+    #[must_use]
+    pub fn root_id(&self) -> SurfaceId {
+        // SAFETY: the handle borrows a live surface; `get_root_surface` only
+        // reads and never returns null for a live surface.
+        unsafe {
+            let root = sys::wlr_surface_get_root_surface(self.raw.as_ptr());
+            if root.is_null() || root == self.raw.as_ptr() {
+                return self.id;
+            }
+            find_surface_id(&raw const (*root).addons)
+                .map(SurfaceId)
+                .unwrap_or(self.id)
+        }
+    }
+
+    /// Whether this surface accepts an input event at the given surface-local
+    /// point.
+    ///
+    /// Consults only this surface's own input region, not its sub-surfaces';
+    /// [`surface_at`](Surface::surface_at) is the tree-wide hit-test.
+    #[must_use]
+    pub fn point_accepts_input(&self, sx: f64, sy: f64) -> bool {
+        // SAFETY: the handle borrows a live surface; the call only reads it.
+        unsafe { sys::wlr_surface_point_accepts_input(self.raw.as_ptr(), sx, sy) }
+    }
+
+    /// Hit-test this surface's whole tree at a point in the root's
+    /// surface-local coordinates.
+    ///
+    /// Returns the leaf surface the point lands on, and the point in that
+    /// leaf's own coordinates; `None` for a miss. Mirrors
+    /// [`Toplevel::surface_at`](crate::Toplevel::surface_at).
+    #[must_use]
+    pub fn surface_at(&self, sx: f64, sy: f64) -> Option<(Surface<'_>, f64, f64)> {
+        self.surface_at_impl(sys::wlr_surface_surface_at, sx, sy)
+    }
+
+    /// Shared body of the surface-tree hit-tests, which differ only in which
+    /// wlroots walk they call.
+    fn surface_at_impl(
+        &self,
+        walk: unsafe extern "C" fn(
+            *mut sys::wlr_surface,
+            f64,
+            f64,
+            *mut f64,
+            *mut f64,
+        ) -> *mut sys::wlr_surface,
+        sx: f64,
+        sy: f64,
+    ) -> Option<(Surface<'_>, f64, f64)> {
+        let mut sub_x = 0.0;
+        let mut sub_y = 0.0;
+        // SAFETY: the handle borrows a live surface; both out-parameters are
+        // live locals that outlive the call, and wlroots only reads the
+        // coordinates.
+        unsafe {
+            let raw = walk(self.raw.as_ptr(), sx, sy, &raw mut sub_x, &raw mut sub_y);
+            if raw.is_null() {
+                return None;
+            }
+            let id = find_surface_id(&raw const (*raw).addons).map(SurfaceId)?;
+            let surface = Surface::from_raw_opt(raw, id)?;
+            Some((surface, sub_x, sub_y))
+        }
+    }
+
+    /// Whether the client behind this surface has bound touch on the
+    /// compositor's seat.
+    ///
+    /// `false` when the crate has no seat (no `Runtime::create_seat` ran) and
+    /// for a handle built outside a runtime, rather than a wrong answer: no
+    /// seat means no touch can be delivered.
+    #[must_use]
+    pub fn accepts_touch(&self) -> bool {
+        let Some(seat) = self.seat else {
+            return false;
+        };
+        // SAFETY: the handle borrows a live surface and the seat was cached
+        // from the runtime it came from, so both are live for this call.
+        unsafe { sys::wlr_surface_accepts_touch(self.raw.as_ptr(), seat.as_ptr()) }
+    }
+
+    /// Tell the client this surface entered `output`.
+    ///
+    /// A no-op when the surface has already entered it. wlroots sends the
+    /// `wl_surface.enter` event only to the client's matching `wl_output`
+    /// resources, so this is client-visible only when the client bound the
+    /// output global.
+    pub fn send_enter(&self, output: &Output<'_>) {
+        // SAFETY: the handle borrows a live surface and `output` a live output;
+        // wlroots only reads both.
+        unsafe { sys::wlr_surface_send_enter(self.raw.as_ptr(), output.as_ptr()) };
+    }
+
+    /// Tell the client this surface left `output`. The mirror of
+    /// [`send_enter`](Surface::send_enter), and a no-op when it never entered.
+    pub fn send_leave(&self, output: &Output<'_>) {
+        // SAFETY: as for `send_enter`.
+        unsafe { sys::wlr_surface_send_leave(self.raw.as_ptr(), output.as_ptr()) };
+    }
+
+    /// Complete this surface's queued frame callbacks, telling the client now
+    /// is a good time to draw again.
+    ///
+    /// `when` is the presentation timestamp the callback carries, on the same
+    /// monotonic clock [`Runtime::send_scene_surface_frame_done`](crate::Runtime::send_scene_surface_frame_done)
+    /// uses.
+    pub fn send_frame_done(&self, when: Duration) {
+        let now = crate::scene::timespec_of(when);
+        // SAFETY: the handle borrows a live surface; `now` is a live local
+        // wlroots reads out of.
+        unsafe { sys::wlr_surface_send_frame_done(self.raw.as_ptr(), &raw const now) };
+    }
+
+    /// Ask the client to use `scale` for buffers on this surface.
+    ///
+    /// Sends a `wl_surface.preferred_buffer_scale` event; the client is free to
+    /// ignore it. `None` for a nonpositive `scale`, which wlroots'
+    /// `wlr_surface_set_preferred_buffer_scale` rejects with an `assert` — and
+    /// this distribution ships wlroots without `NDEBUG`, so forwarding it would
+    /// abort the whole compositor rather than merely fail. A compositor must
+    /// never hand a client's bad scale straight through.
+    pub fn set_preferred_buffer_scale(&self, scale: i32) -> Option<()> {
+        if scale <= 0 {
+            return None;
+        }
+        // SAFETY: the handle borrows a live surface; the call only reads it and
+        // sends on its resource when one exists, and `scale` is positive as its
+        // own assert requires.
+        unsafe { sys::wlr_surface_set_preferred_buffer_scale(self.raw.as_ptr(), scale) };
+        Some(())
+    }
+
+    /// Ask the client to use `transform` for buffers on this surface.
+    ///
+    /// Sends a `wl_surface.preferred_buffer_transform` event; the client is
+    /// free to ignore it.
+    pub fn set_preferred_buffer_transform(&self, transform: Transform) {
+        // SAFETY: as for `set_preferred_buffer_scale`.
+        unsafe {
+            sys::wlr_surface_set_preferred_buffer_transform(self.raw.as_ptr(), transform.into());
+        }
+    }
+
+    /// Lock this surface's pending state, returning a token that releases it.
+    ///
+    /// While locked the pending state is not committed but cached; every lock
+    /// must be released through [`unlock_cached`](Surface::unlock_cached) or
+    /// the surface stops committing. The token is deliberately opaque and
+    /// single-use: wlroots' `wlr_surface_unlock_cached` aborts when a state is
+    /// unlocked with no matching lock, so safe code must not be able to invent
+    /// a sequence number or release the same lock twice.
+    pub fn lock_pending(&self) -> PendingLock<'h> {
+        // SAFETY: the handle borrows a live surface; the call only touches its
+        // own state.
+        PendingLock {
+            seq: unsafe { sys::wlr_surface_lock_pending(self.raw.as_ptr()) },
+            _scope: PhantomData,
+        }
+    }
+
+    /// Release one [`lock_pending`](Surface::lock_pending) on this surface.
+    ///
+    /// The state is not guaranteed to commit immediately, because another lock
+    /// may still be outstanding.
+    pub fn unlock_cached(&self, lock: PendingLock<'h>) {
+        // SAFETY: `lock` is only constructible by `lock_pending` on a surface,
+        // so it names a held lock; the handle borrows a live surface.
+        unsafe { sys::wlr_surface_unlock_cached(self.raw.as_ptr(), lock.seq) };
+    }
+
+    /// Reject this surface's pending state, sending the client the protocol
+    /// error `code` with `message`.
+    ///
+    /// Only meaningful while processing that client's commit request, when its
+    /// pending state is a protocol violation. `None` outside that window —
+    /// wlroots' `wlr_surface_reject_pending` asserts it and this distribution
+    /// ships wlroots without `NDEBUG`, so the check is what keeps a safe caller
+    /// from aborting the compositor — and also `None` when the surface has no
+    /// `wl_surface` resource left to error on or when `message` contains an
+    /// interior NUL. The variadic C function is reached through a hand-written
+    /// `%s` call site; Rust cannot forward a `va_list`.
+    pub fn reject_pending(&self, code: u32, message: &str) -> Option<()> {
+        // SAFETY: the handle borrows a live surface, so `resource` is either
+        // null or a live `wl_resource` wlroots owns, and the private flag is a
+        // plain bool.
+        let (resource, handling_commit) = unsafe {
+            let surface = &*self.raw.as_ptr();
+            (surface.resource, surface.WLR_PRIVATE.handling_commit)
+        };
+        if resource.is_null() || !handling_commit {
+            return None;
+        }
+        let message = CString::new(message).ok()?;
+        // SAFETY: `resource` is non-null and live and wlroots is inside the
+        // commit that set `handling_commit`; `%s` matches the single
+        // `c_char *` argument, and `message` outlives the call.
+        unsafe {
+            sys::wlr_surface_reject_pending(
+                self.raw.as_ptr(),
+                resource,
+                code,
+                c"%s".as_ptr(),
+                message.as_ptr(),
+            );
+        }
+        Some(())
+    }
+
+    /// Unmap this surface, as if it had committed a null buffer.
+    ///
+    /// Normally a surface-role implementation operation; a consumer only calls
+    /// it to force a mapped surface back off screen. Idempotent, and wlroots
+    /// delivers the ordinary unmap event this crate forwards as
+    /// [`ToplevelHandler::surface_unmapped`](crate::ToplevelHandler::surface_unmapped).
+    pub fn unmap(&self) {
+        // SAFETY: the handle borrows a live surface; wlroots unmaps it and
+        // emits its own unmap signal through the listeners this crate linked.
+        unsafe { sys::wlr_surface_unmap(self.raw.as_ptr()) };
+    }
+
+    /// This surface's `wlr_layer_surface_v1` role, if it is one.
+    ///
+    /// `None` for any other role, for a destroyed layer surface, and when this
+    /// crate never attached a layer-surface id to the surface. The returned
+    /// handle borrows this `Surface` and cannot outlive it.
+    #[must_use]
+    pub fn as_layer_surface(&self) -> Option<LayerSurface<'_>> {
+        // SAFETY: the handle borrows a live surface; the downcast reads its
+        // role and returns null rather than a wrong object when it is not a
+        // layer surface, or when wlroots has already freed the role.
+        unsafe {
+            let raw = sys::wlr_layer_surface_v1_try_from_wlr_surface(self.raw.as_ptr());
+            if raw.is_null() {
+                return None;
+            }
+            let id = find_id(&raw const (*self.raw.as_ptr()).addons).map(LayerSurfaceId)?;
+            Some(LayerSurface::from_raw_with_id(raw, id))
+        }
+    }
 }
 
 /// Run `call` with a monomorphized `wlr_surface_iterator_func_t` trampoline
@@ -355,6 +693,7 @@ pub(crate) unsafe fn for_each_surface_with<F>(
                 raw: NonNull::new_unchecked(surface),
                 id,
                 tearing_manager: None,
+                seat: None,
                 _scope: PhantomData,
             };
             f(&handle, sx, sy);
@@ -432,5 +771,43 @@ mod tests {
                 SurfaceId::dangling_nth_for_test(n)
             );
         }
+    }
+
+    /// A surface with no role sits at the root of its own tree, and the id
+    /// resolver hands that same surface back rather than inventing one.
+    #[test]
+    fn root_id_of_a_roleless_surface_is_its_own_id() {
+        let scratch = ScratchSurface::new();
+        let surface = unsafe { scratch.surface(SurfaceId(7)) };
+        assert_eq!(surface.root_id(), SurfaceId(7));
+    }
+
+    /// With no seat cached (a handle built outside a runtime) the touch query
+    /// answers `false` without touching wlroots.
+    #[test]
+    fn accepts_touch_without_a_seat_is_false() {
+        let scratch = ScratchSurface::new();
+        let surface = unsafe { scratch.surface(SurfaceId(0)) };
+        assert!(!surface.accepts_touch());
+    }
+
+    /// A surface whose resource has already gone has nowhere to send a
+    /// protocol error, so the rejection is refused in Rust rather than
+    /// dereferenced.
+    #[test]
+    fn reject_pending_without_a_resource_is_none() {
+        let scratch = ScratchSurface::new();
+        let surface = unsafe { scratch.surface(SurfaceId(0)) };
+        assert_eq!(surface.reject_pending(1, "bad"), None);
+    }
+
+    /// A nonpositive preferred scale trips wlroots' own assert, so the safe
+    /// wrapper refuses it before reaching the call.
+    #[test]
+    fn nonpositive_preferred_scale_is_refused() {
+        let scratch = ScratchSurface::new();
+        let surface = unsafe { scratch.surface(SurfaceId(0)) };
+        assert_eq!(surface.set_preferred_buffer_scale(0), None);
+        assert_eq!(surface.set_preferred_buffer_scale(-1), None);
     }
 }

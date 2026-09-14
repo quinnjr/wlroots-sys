@@ -112,3 +112,226 @@ fn the_layer_methods_are_additive() {
     fn takes_handlers<S: wlr::Handlers>(_s: &S) {}
     takes_handlers(&Old);
 }
+
+/// What the client-driven layer run observed through the new `LayerSurface`
+/// operations.
+#[derive(Default)]
+struct LayerProbe {
+    layer_at_new: Option<wlr::Layer>,
+    anchor: Option<wlr::Anchor>,
+    exclusive_zone: Option<i32>,
+    desired_size: Option<(u32, u32)>,
+    keyboard_interactive: Option<bool>,
+    exclusive_edge_called: bool,
+    exclusive_edge: Option<wlr::Edges>,
+    popup_surfaces: Option<usize>,
+    surface_at_missed: bool,
+    popup_surface_at_missed: bool,
+    as_layer_surface_resolved: bool,
+    destroyed: Option<wlr::LayerSurfaceId>,
+    destroy_called: bool,
+}
+
+struct LayerApp {
+    runtime: wlr::Runtime,
+    id: Option<wlr::LayerSurfaceId>,
+    probe: LayerProbe,
+    client: Option<std::thread::JoinHandle<common::client::ClientEvents>>,
+    output: Option<wlr::OutputId>,
+}
+
+impl LayerApp {
+    fn new(runtime: &wlr::Runtime) -> LayerApp {
+        LayerApp {
+            runtime: runtime.clone(),
+            id: None,
+            probe: LayerProbe {
+                surface_at_missed: true,
+                popup_surface_at_missed: true,
+                ..LayerProbe::default()
+            },
+            client: None,
+            output: None,
+        }
+    }
+}
+
+impl wlr::OutputHandler for LayerApp {
+    fn new_output(&mut self, output: &wlr::Output<'_>) {
+        let _ = output.enable_with_preferred_mode();
+        let _ = self.runtime.init_output(output);
+        self.output = Some(output.id());
+    }
+}
+
+impl wlr::ToplevelHandler for LayerApp {
+    fn new_layer_surface(&mut self, surface: &wlr::LayerSurface<'_>) {
+        self.id = Some(surface.id());
+        self.probe.layer_at_new = Some(surface.layer());
+        // Answering a new layer surface is mandatory and stage-then-flush: the
+        // surface is not initialized until its first commit, so this records
+        // the size and `on_layer_surface_commit` sends it for real.
+        let _ = self.runtime.configure_layer_surface(surface.id(), 64, 48);
+    }
+
+    fn layer_surface_commit(&mut self, surface: &wlr::LayerSurface<'_>) {
+        self.probe.anchor = Some(surface.anchor());
+        self.probe.exclusive_zone = Some(surface.exclusive_zone());
+        self.probe.desired_size = Some(surface.desired_size());
+        self.probe.keyboard_interactive = Some(surface.keyboard_interactive());
+        self.probe.exclusive_edge_called = true;
+        self.probe.exclusive_edge = surface.exclusive_edge();
+        let mut popups = 0usize;
+        surface.for_each_popup_surface(|_, _, _| popups += 1);
+        self.probe.popup_surfaces = Some(popups);
+        self.probe.surface_at_missed &= surface.surface_at(1.0, 1.0).is_none();
+        self.probe.popup_surface_at_missed &= surface.popup_surface_at(1.0, 1.0).is_none();
+    }
+
+    fn surface_committed(&mut self, surface: &wlr::Surface<'_>) {
+        if surface.as_layer_surface().is_some() {
+            self.probe.as_layer_surface_resolved = true;
+        }
+    }
+
+    fn layer_surface_destroyed(&mut self, id: wlr::LayerSurfaceId) {
+        self.probe.destroyed = Some(id);
+    }
+}
+
+impl wlr::SeatHandler for LayerApp {}
+impl wlr::FdHandler for LayerApp {}
+impl wlr::LoopHandler for LayerApp {
+    fn should_stop(&mut self) -> bool {
+        if self.client.as_ref().is_some_and(|h| h.is_finished()) {
+            return true;
+        }
+        // Destroy the layer surface from a turn outside any wlroots callback —
+        // the only point wlr_layer_surface_v1_destroy may be called from. The
+        // client keeps round-tripping so the server reaches this turn while
+        // the surface is alive, and observes the resulting `closed`.
+        if !self.probe.destroy_called
+            && let Some(id) = self.id
+        {
+            self.probe.destroy_called = self.runtime.destroy_layer_surface(id).is_some();
+        }
+        false
+    }
+}
+
+/// A real layer-shell client states its anchors, exclusive zone, size and
+/// keyboard mode, commits, and waits to be closed. The server must observe each
+/// through the `LayerSurface` accessors, hit-test empty popup trees without
+/// faulting, downcast the generic surface, and destroy the surface through
+/// `Runtime::destroy_layer_surface` — which the client sees as `closed`.
+#[test]
+fn a_real_layer_surface_answers_its_operations_and_destroys() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime
+        .create_layer_shell(&display, 4)
+        .expect("layer shell");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = LayerApp::new(&runtime);
+    app.client = Some(common::client::spawn_layer_surface(&socket));
+
+    backend
+        .run_all(&display, &mut app, &runtime, wlr::Until::Stop)
+        .expect("run_all");
+
+    let events = app
+        .client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+    let probe = &app.probe;
+
+    assert!(
+        events.configure_events >= 1 && events.acked_configures >= 1,
+        "the server's layer configure must reach the client and be acked"
+    );
+    assert_eq!(
+        probe.layer_at_new,
+        Some(wlr::Layer::Top),
+        "new_layer_surface sees the request's layer"
+    );
+    assert_eq!(
+        probe.anchor,
+        Some(wlr::Anchor {
+            top: true,
+            ..wlr::Anchor::default()
+        }),
+        "the committed anchor is read back"
+    );
+    assert_eq!(
+        probe.exclusive_zone,
+        Some(32),
+        "the committed exclusive zone is read back"
+    );
+    assert_eq!(
+        probe.desired_size,
+        Some((64, 48)),
+        "the committed desired size is read back"
+    );
+    assert_eq!(
+        probe.keyboard_interactive,
+        Some(true),
+        "exclusive keyboard interactivity reads as wanting focus"
+    );
+    assert!(probe.exclusive_edge_called, "exclusive_edge was exercised");
+    assert_eq!(
+        probe.exclusive_edge,
+        Some(wlr::Edges {
+            top: true,
+            ..wlr::Edges::default()
+        }),
+        "a top-anchored positive exclusive zone applies to the top edge"
+    );
+    assert_eq!(
+        probe.popup_surfaces,
+        Some(0),
+        "an empty popup tree iterates nothing"
+    );
+    assert!(
+        probe.surface_at_missed,
+        "an unmapped layer surface hit-tests to nothing"
+    );
+    assert!(
+        probe.popup_surface_at_missed,
+        "an empty popup tree hit-tests to nothing"
+    );
+    assert!(
+        probe.as_layer_surface_resolved,
+        "Surface::as_layer_surface resolves a live layer surface"
+    );
+    assert!(
+        probe.destroy_called,
+        "Runtime::destroy_layer_surface destroyed the live layer surface"
+    );
+    assert!(
+        probe.destroyed == app.id,
+        "the layer_surface_destroyed event names the destroyed surface"
+    );
+    assert!(
+        events.layer_closed,
+        "destroying the layer surface sends the client a closed event"
+    );
+}
+
+/// `Runtime::destroy_layer_surface` on an id nothing issued is a clean miss.
+#[test]
+fn destroy_layer_surface_on_a_dead_id_is_none() {
+    common::headless_env();
+    let runtime = wlr::Runtime::new().expect("runtime");
+    assert_eq!(
+        runtime.destroy_layer_surface(wlr::LayerSurfaceId::dangling_for_test()),
+        None
+    );
+}

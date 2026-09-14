@@ -3724,3 +3724,113 @@ item   = "LockSurface::state"
 symbol = "wlr_session_lock_surface_v1_try_from_wlr_surface"
 module = "session_lock"
 item   = "Surface::lock_surface"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_destroy"
+module = "runtime"
+item   = "Runtime::destroy_layer_surface"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_for_each_popup_surface"
+module = "layer"
+item   = "LayerSurface::for_each_popup_surface"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_get_exclusive_edge"
+module = "layer"
+item   = "LayerSurface::exclusive_edge"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_popup_surface_at"
+module = "layer"
+item   = "LayerSurface::popup_surface_at"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_surface_at"
+module = "layer"
+item   = "LayerSurface::surface_at"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_try_from_wlr_surface"
+module = "surface"
+item   = "Surface::as_layer_surface"
+
+[[wrapped]]
+symbol = "wlr_surface_accepts_touch"
+module = "surface"
+item   = "Surface::accepts_touch"
+
+[[wrapped]]
+symbol = "wlr_surface_get_buffer_source_box"
+module = "surface"
+item   = "Surface::buffer_source_box"
+
+[[wrapped]]
+symbol = "wlr_surface_get_effective_damage"
+module = "surface"
+item   = "Surface::effective_damage"
+
+[[wrapped]]
+symbol = "wlr_surface_get_extents"
+module = "surface"
+item   = "Surface::extents"
+
+[[wrapped]]
+symbol = "wlr_surface_get_root_surface"
+module = "surface"
+item   = "Surface::root_id"
+
+[[wrapped]]
+symbol = "wlr_surface_lock_pending"
+module = "surface"
+item   = "Surface::lock_pending"
+
+[[wrapped]]
+symbol = "wlr_surface_point_accepts_input"
+module = "surface"
+item   = "Surface::point_accepts_input"
+
+[[wrapped]]
+symbol = "wlr_surface_reject_pending"
+module = "surface"
+item   = "Surface::reject_pending"
+
+[[wrapped]]
+symbol = "wlr_surface_send_enter"
+module = "surface"
+item   = "Surface::send_enter"
+
+[[wrapped]]
+symbol = "wlr_surface_send_frame_done"
+module = "surface"
+item   = "Surface::send_frame_done"
+
+[[wrapped]]
+symbol = "wlr_surface_send_leave"
+module = "surface"
+item   = "Surface::send_leave"
+
+[[wrapped]]
+symbol = "wlr_surface_set_preferred_buffer_scale"
+module = "surface"
+item   = "Surface::set_preferred_buffer_scale"
+
+[[wrapped]]
+symbol = "wlr_surface_set_preferred_buffer_transform"
+module = "surface"
+item   = "Surface::set_preferred_buffer_transform"
+
+[[wrapped]]
+symbol = "wlr_surface_surface_at"
+module = "surface"
+item   = "Surface::surface_at"
+
+[[wrapped]]
+symbol = "wlr_surface_unlock_cached"
+module = "surface"
+item   = "Surface::unlock_cached"
+
+[[wrapped]]
+symbol = "wlr_surface_unmap"
+module = "surface"
+item   = "Surface::unmap"

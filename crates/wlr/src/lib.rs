@@ -181,7 +181,7 @@ pub use seat::{
 pub use security_context::{SecurityContext, SecurityContextState};
 pub use session_lock::{LockSurface, LockSurfaceState};
 pub use subsurface::SubsurfaceParentState;
-pub use surface::{Surface, SurfaceId, SurfaceRole};
+pub use surface::{PendingLock, Surface, SurfaceId, SurfaceRole};
 pub use tearing::{TearingControl, TearingHint};
 pub use toplevel::{Edges, Toplevel, ToplevelId, ToplevelRequested, ToplevelState, WmCapabilities};
 pub use xdg_activation::ActivationTokenHandle;

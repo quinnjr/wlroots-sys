@@ -43,6 +43,7 @@ use wayland_protocols::xdg::toplevel_tag::v1::client::xdg_toplevel_tag_manager_v
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1, zwlr_foreign_toplevel_manager_v1,
 };
+use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
 /// What the client observed while it ran, handed back by [`spawn`].
 ///
@@ -62,6 +63,9 @@ pub struct ClientEvents {
     pub activation_token_received: bool,
     /// Whether the activation client then redeemed that token with `activate`.
     pub activation_sent: bool,
+    /// Whether a layer-shell client observed the server's `closed` event after
+    /// the compositor destroyed its layer surface.
+    pub layer_closed: bool,
 }
 
 /// What a `zwlr_foreign_toplevel_manager_v1` client observed, returned by
@@ -679,6 +683,89 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
             shm,
             presentation,
             file,
+        ));
+        state.events
+    })
+}
+
+/// Drive a `zwlr_layer_shell_v1` client through a layer surface's whole
+/// client-observable life.
+///
+/// Phase one creates the layer surface, states its anchors/zone/size/keyboard
+/// mode, and commits bufferless; a round trip lets the server's initial
+/// configure arrive and be acked. Phase two round-trips twice more, giving the
+/// server turns in which to destroy the surface through
+/// `Runtime::destroy_layer_surface`; the client records the `closed` event and
+/// then disconnects. Returns the observed [`ClientEvents`] via the
+/// `JoinHandle`.
+pub fn spawn_layer_surface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            seat: None,
+            activation_token: None,
+            events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
+            ..ClientState::default()
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let layer_shell: zwlr_layer_shell_v1::ZwlrLayerShellV1 = globals
+            .bind(&qh, 1..=4, ())
+            .expect("bind zwlr_layer_shell_v1");
+        state.compositor = Some(compositor.clone());
+
+        let surface = compositor.create_surface(&qh, ());
+        let layer_surface = layer_shell.get_layer_surface(
+            &surface,
+            None,
+            zwlr_layer_shell_v1::Layer::Top,
+            "wlr-rs-layer-test".to_owned(),
+            &qh,
+            (),
+        );
+        layer_surface.set_size(64, 48);
+        layer_surface.set_anchor(zwlr_layer_surface_v1::Anchor::Top);
+        layer_surface.set_exclusive_zone(32);
+        layer_surface
+            .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
+        surface.commit();
+
+        // Round trip one: the server announces and configures the surface, and
+        // the `Dispatch` impl below acks that configure.
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server announces and configures the layer surface");
+        // Two more round trips: each wakes the server for a turn in which its
+        // `LoopHandler::should_stop` destroys the layer surface. The `closed`
+        // event arrives on one of these.
+        for _ in 0..3 {
+            queue
+                .roundtrip(&mut state)
+                .expect("roundtrip so the server can destroy the layer surface");
+        }
+
+        drop((
+            layer_surface,
+            surface,
+            layer_shell,
+            compositor,
+            state.compositor.take(),
         ));
         state.events
     })
@@ -1631,5 +1718,45 @@ impl Dispatch<wp_security_context_v1::WpSecurityContextV1, ()> for ClientState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for ClientState {
+    /// `zwlr_layer_shell_v1` carries no events; the Dispatch impl exists only
+    /// so [`spawn_layer_surface`] can bind the global.
+    fn event(
+        _state: &mut Self,
+        _proxy: &zwlr_layer_shell_v1::ZwlrLayerShellV1,
+        _event: zwlr_layer_shell_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for ClientState {
+    /// Records and acks the initial `configure`, and records `closed`. The
+    /// configure/ack counters reuse [`ClientEvents`]' existing fields so a
+    /// caller asserts the same wire facts a toplevel client does.
+    fn event(
+        state: &mut Self,
+        proxy: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+        event: zwlr_layer_surface_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_layer_surface_v1::Event::Configure { serial, .. } => {
+                state.events.configure_events += 1;
+                proxy.ack_configure(serial);
+                state.events.acked_configures += 1;
+            }
+            zwlr_layer_surface_v1::Event::Closed => {
+                state.events.layer_closed = true;
+            }
+            _ => {}
+        }
     }
 }

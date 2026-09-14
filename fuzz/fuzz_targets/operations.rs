@@ -343,6 +343,28 @@ enum Operation {
     /// direction. Exercises both destroy paths under ASan, including wlroots'
     /// group-rewrite of the workspace's group pointer.
     ExtWorkspaceHandles { group_first: bool },
+
+    // --- wlr_surface operations (M9b): `surface.rs` by-id reads and mutators.
+    // A live `wlr_surface` needs a connected client, so these stay on the
+    // surface lookup's miss path; the wrappers are covered positively by the
+    // client-driven `tests/surfaces.rs`.
+    /// `Surface::{extents,effective_damage,buffer_source_box,point_accepts_input}`.
+    SurfaceProbe { nth: u64, x: f64, y: f64 },
+    /// `Surface::root_id`.
+    SurfaceRoot { nth: u64 },
+    /// `Surface::accepts_touch`.
+    SurfaceAcceptsTouch { nth: u64 },
+    /// `Surface::{lock_pending,unlock_cached}`.
+    SurfaceLockPending { nth: u64 },
+    /// `Surface::reject_pending`.
+    SurfaceRejectPending { nth: u64 },
+    /// `Surface::unmap`.
+    SurfaceUnmap { nth: u64 },
+
+    // --- layer-shell remainder (M9b): `runtime.rs` by-id destroy. A live
+    // layer surface needs a connected client, so this stays on the miss path.
+    /// `Runtime::destroy_layer_surface`.
+    DestroyLayerSurface,
 }
 
 /// The one handler this target installs.
@@ -889,6 +911,49 @@ fn apply(
                 drop(b);
                 drop(group);
             }
+        }
+
+        Operation::SurfaceProbe { nth, x, y } => {
+            let _ = runtime
+                .surface(SurfaceId::dangling_nth_for_test(*nth))
+                .map(|surface| {
+                    let _ = surface.extents();
+                    let _ = surface.effective_damage();
+                    let _ = surface.buffer_source_box();
+                    let _ = surface.point_accepts_input(*x, *y);
+                    let _ = surface.surface_at(*x, *y);
+                });
+        }
+        Operation::SurfaceRoot { nth } => {
+            let _ = runtime
+                .surface(SurfaceId::dangling_nth_for_test(*nth))
+                .map(|surface| surface.root_id());
+        }
+        Operation::SurfaceAcceptsTouch { nth } => {
+            let _ = runtime
+                .surface(SurfaceId::dangling_nth_for_test(*nth))
+                .map(|surface| surface.accepts_touch());
+        }
+        Operation::SurfaceLockPending { nth } => {
+            let _ = runtime
+                .surface(SurfaceId::dangling_nth_for_test(*nth))
+                .map(|surface| {
+                    let lock = surface.lock_pending();
+                    surface.unlock_cached(lock);
+                });
+        }
+        Operation::SurfaceRejectPending { nth } => {
+            let _ = runtime
+                .surface(SurfaceId::dangling_nth_for_test(*nth))
+                .map(|surface| surface.reject_pending(1, "fuzz"));
+        }
+        Operation::SurfaceUnmap { nth } => {
+            let _ = runtime
+                .surface(SurfaceId::dangling_nth_for_test(*nth))
+                .map(|surface| surface.unmap());
+        }
+        Operation::DestroyLayerSurface => {
+            let _ = runtime.destroy_layer_surface(LayerSurfaceId::dangling_for_test());
         }
     }
 }

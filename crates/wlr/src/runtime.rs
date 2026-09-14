@@ -11054,9 +11054,11 @@ impl Runtime {
         // (not borrowed across the return) so the handle's tearing accessors
         // can use it without re-borrowing while a handler runs.
         let tearing_manager = self.tearing_control_manager();
+        let seat = *self.inner.seat.borrow();
         Some(
             unsafe { Surface::from_raw_with_id(raw.as_ptr(), id) }
-                .with_tearing_manager(tearing_manager),
+                .with_tearing_manager(tearing_manager)
+                .with_seat(seat),
         )
     }
 
@@ -12357,6 +12359,31 @@ impl Runtime {
         } else {
             self.stage_layer_configure(id, width, height);
         }
+        Some(())
+    }
+
+    /// Destroy a layer surface, telling the client it has been closed.
+    ///
+    /// wlr-layer-shell's own doc: the client is notified the surface has been
+    /// closed and the `wlr_layer_surface_v1` is freed, rendering its resource
+    /// inert. wlroots runs this crate's destroy callback before the free, so
+    /// the id stops resolving immediately afterwards and the generic surface
+    /// event stream reports the surface destroyed as on any other path.
+    ///
+    /// `None` for an unknown or stale id, the by-id miss every mutator in this
+    /// crate keeps — and, deliberately, no way to call it from inside a
+    /// wlroots callback is offered: freeing an object wlroots is still walking
+    /// is a use-after-free, so call it from between turns (a
+    /// [`LoopHandler::should_stop`](crate::LoopHandler::should_stop), say), the
+    /// same way this crate's own layer test does.
+    pub fn destroy_layer_surface(&self, id: LayerSurfaceId) -> Option<()> {
+        let raw = self.layer_surface_ptr(id)?;
+        // SAFETY: a present `layer_surfaces` entry names a live layer surface
+        // (its destroy callback removes the entry before wlroots frees it), and
+        // no borrow of the table is held across this call. wlroots emits the
+        // layer destroy signal synchronously, which removes the entry, so the
+        // copy of `raw` is never dereferenced after the free.
+        unsafe { sys::wlr_layer_surface_v1_destroy(raw.as_ptr()) };
         Some(())
     }
 
