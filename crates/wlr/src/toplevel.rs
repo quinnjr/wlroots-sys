@@ -129,6 +129,11 @@ impl<'h> Toplevel<'h> {
         self.id
     }
 
+    /// The raw toplevel, for the in-crate callers that pass it to wlroots.
+    pub(crate) fn as_ptr(&self) -> *mut sys::wlr_xdg_toplevel {
+        self.raw.as_ptr()
+    }
+
     /// The client's `xdg_toplevel.set_title`, if it has sent one.
     pub fn title(&self) -> Option<String> {
         // SAFETY: the handle's lifetime guarantees the toplevel is live;

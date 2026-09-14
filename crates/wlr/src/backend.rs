@@ -559,6 +559,29 @@ impl Registration {
         }
     }
 
+    /// Link a listener into an external object's `destroy` signal, clearing
+    /// `alive` when it fires.
+    ///
+    /// For an *owned* handle whose object wlroots may free on its own — an
+    /// activation token expiring or being redeemed, say — where the handle must
+    /// learn that its pointer has gone stale before it dereferences or frees it
+    /// again. The handle stores the [`Cell<bool>`] and checks it in its own
+    /// accessors and [`Drop`]; this registration is the only writer of `false`
+    /// besides the handle's own destroy call.
+    ///
+    /// # Safety
+    ///
+    /// `signal` must point at an initialised `wl_signal`, and `alive` must
+    /// outlive the returned `Registration` (and be on the event loop's thread).
+    pub(crate) unsafe fn link_owner_destroy(
+        signal: *mut sys::wl_signal,
+        alive: *const Cell<bool>,
+    ) -> Self {
+        // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
+        // `on_owned_object_destroy` reads only `Bound::alive`.
+        unsafe { Self::link_bare(signal, on_owned_object_destroy, std::ptr::null(), alive) }
+    }
+
     /// Link a listener that does nothing but set `flag` when the signal fires.
     ///
     /// The shape [`crate::Renderer`] needs for `events.lost`: the renderer stays
@@ -2982,6 +3005,22 @@ impl<'d> Backend<'d> {
             });
         }
 
+        if let Some(manager) = runtime.xdg_system_bell_ptr() {
+            // SAFETY: `create_xdg_system_bell` returned a non-null manager
+            // owned by the display, which this call requires to outlive it —
+            // null liveness is correct. This is the `ring` signal a client
+            // raises via `xdg_system_bell_v1.ring`; `on_system_bell_ring` fans
+            // it out to the handler, which decides whether to make a sound.
+            regs.push(unsafe {
+                Registration::link_bare(
+                    &raw mut (*manager.as_ptr()).events.ring,
+                    on_system_bell_ring::<S>,
+                    (session as *const Session<'_, S>).cast::<()>(),
+                    std::ptr::null(),
+                )
+            });
+        }
+
         if let Some(manager) = runtime.gamma_control_manager_ptr() {
             // SAFETY: `create_gamma_control_manager` returned a non-null
             // manager owned by the display, which this call requires to
@@ -3518,6 +3557,7 @@ fn deliver_all<S: Handlers>(session: &Session<'_, S>, state: &mut S, ev: Event) 
             state.request_set_shape(device, serial, shape)
         }
         Event::RequestActivate(target, token) => state.request_activate(target, token),
+        Event::SystemBellRing(surface) => state.system_bell_ring(surface),
         Event::GammaControlChanged(id) => state.gamma_control_changed(id),
         Event::OutputPowerModeRequested(id, mode) => state.output_power_mode_requested(id, mode),
         Event::InputMethodPopupCreated(popup) => state.new_popup_surface(popup),
@@ -4513,6 +4553,30 @@ unsafe extern "C" fn on_backend_destroy(l: *mut sys::wl_listener, _data: *mut st
     unsafe {
         let bound = bound_of(l);
         (*(*bound).alive).set(false);
+    }
+}
+
+/// The object owning a signal linked with [`Registration::link_owner_destroy`]
+/// is about to free itself.
+unsafe extern "C" fn on_owned_object_destroy(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for a listener `link_owner_destroy`
+    // created, which is the `listener` field of a live `Bound` whose `alive`
+    // flag the caller guaranteed outlives the registration. Only a
+    // `Cell<bool>` write and an intrusive-list unlink, neither of which can
+    // unwind out of this `extern "C"` frame.
+    //
+    // The unlink is load-bearing: wlroots' own destroy paths assert the signal
+    // is empty afterwards (`wlr_xdg_activation_token_v1_destroy` does), and
+    // this callback runs from inside that destroy's own emission, so the
+    // listener must remove itself before returning. `Registration::drop` later
+    // reads the flag set here and skips its own unlink, so this happens once.
+    unsafe {
+        let bound = bound_of(l);
+        (*(*bound).alive).set(false);
+        remove_listener(l);
     }
 }
 
@@ -7133,6 +7197,37 @@ unsafe extern "C" fn on_request_activate<S: Handlers>(
         (*session)
             .dispatcher
             .emit(&*session, Event::RequestActivate(target, token), deliver);
+    }
+}
+
+/// A client asked, via `xdg_system_bell_v1.ring`, that the compositor ring the
+/// system bell.
+unsafe extern "C" fn on_system_bell_ring<S: Handlers>(
+    l: *mut sys::wl_listener,
+    data: *mut std::ffi::c_void,
+) {
+    // SAFETY: wlroots invokes this only for the listener linked into
+    // `wlr_xdg_system_bell_v1.events.ring`, whose `session` is the
+    // `*const Session<'_, S>` paired with this instantiation. The signal
+    // carries a live `*mut wlr_xdg_system_bell_v1_ring_event` valid only for
+    // this call; its `surface` may be null (the header documents it as
+    // optional) and is resolved to an id before the pointer goes stale.
+    unsafe {
+        let bound = bound_of(l);
+        let session = (*bound).session.cast::<Session<'_, S>>();
+        let event = data.cast::<sys::wlr_xdg_system_bell_v1_ring_event>();
+
+        let surface = (*event).surface;
+        let surface = if surface.is_null() {
+            None
+        } else {
+            crate::id::find_surface_id(&raw const (*surface).addons).map(crate::SurfaceId)
+        };
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::SystemBellRing(surface), deliver);
     }
 }
 
@@ -12174,6 +12269,7 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
         // session lock manager above — so none of these can fire on this path.
         | Event::RequestSetShape(..)
         | Event::RequestActivate(..)
+        | Event::SystemBellRing(..)
         | Event::GammaControlChanged(..)
         | Event::OutputPowerModeRequested(..)
         // Unreachable: `run` never registers an input-method manager either

@@ -335,6 +335,14 @@ pub(crate) enum Event {
     /// (`xdg_activation_token_v1.destroy`) before a deferred delivery runs.
     RequestActivate(Option<ToplevelId>, ActivationToken),
 
+    /// A client asked, via `xdg_system_bell_v1.ring`, that the compositor ring
+    /// the system bell. Carries the surface the client associated with the
+    /// request, resolved to this crate's own id at emission time — or `None`
+    /// when the client named no surface, or named one this crate does not
+    /// track. Nothing is re-read at delivery: the event's fields are pointers
+    /// that do not outlive the callback.
+    SystemBellRing(Option<SurfaceId>),
+
     /// A `zwlr_gamma_control_manager_v1` client set a gamma ramp for an
     /// output. Notification only — wlroots' own scene integration (wired in
     /// [`crate::Runtime::create_gamma_control_manager`]) has already applied

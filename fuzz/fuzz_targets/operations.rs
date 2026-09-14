@@ -263,6 +263,32 @@ enum Operation {
     ToplevelOf { nth: u64 },
     /// `Runtime::popup_of` against a dangling surface id.
     PopupOf { nth: u64 },
+
+    // --- xdg dialog / system bell / foreign (M9): manager create guards and
+    // the client-free ownership paths ---
+    /// `Runtime::create_xdg_dialog_manager`; double-create guard included.
+    CreateXdgDialogManager,
+    /// `Runtime::create_xdg_system_bell`; double-create guard included.
+    CreateXdgSystemBell,
+    /// `Runtime::create_xdg_foreign_registry`; double-create guard included.
+    CreateForeignRegistry,
+    /// `Runtime::create_xdg_foreign_v1`; misses until a registry exists, and
+    /// exercises the double-create guard afterwards.
+    CreateForeignV1,
+    /// `Runtime::create_xdg_foreign_v2`; as `CreateForeignV1`.
+    CreateForeignV2,
+    /// `Runtime::add_activation_token` then drop. Mints and releases a token
+    /// without a client, exercising the owned handle's destroy path; a miss
+    /// when no activation manager exists.
+    AddActivationToken,
+    /// `Runtime::find_activation_token` for a name nothing registered.
+    FindActivationToken,
+    /// `Runtime::find_foreign_exported` for a handle nothing registered.
+    FindForeignExported,
+    /// `Runtime::export_foreign` with no toplevel, then drop. Exercises the
+    /// allocate/init/finish/dealloc cycle the same way a compositor export
+    /// does.
+    ExportForeign,
 }
 
 /// The one handler this target installs.
@@ -341,15 +367,14 @@ fn compositor() -> Option<&'static Compositor> {
             std::env::set_var("WLR_RENDERER", "pixman");
 
             let display: &'static wlr::Display = Box::leak(Box::new(
-                wlr::Display::new()
-                    .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}")),
+                wlr::Display::new().unwrap_or_else(|e| panic!("fuzz harness could not start: {e}")),
             ));
             let event_loop: &'static wlr::EventLoop<'static> =
                 Box::leak(Box::new(display.event_loop()));
             let backend = wlr::Backend::autocreate(event_loop)
                 .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}"));
-            let runtime = wlr::Runtime::new()
-                .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}"));
+            let runtime =
+                wlr::Runtime::new().unwrap_or_else(|e| panic!("fuzz harness could not start: {e}"));
             runtime
                 .init_graphics(display, &backend)
                 .unwrap_or_else(|e| panic!("fuzz harness could not start: {e}"));
@@ -379,8 +404,8 @@ fn compositor() -> Option<&'static Compositor> {
 }
 
 fuzz_target!(|ops: Vec<Operation>| {
-    let compositor = compositor()
-        .expect("fuzz harness could not start: compositor setup returned None");
+    let compositor =
+        compositor().expect("fuzz harness could not start: compositor setup returned None");
     for op in &ops {
         apply(
             &compositor.runtime,
@@ -657,6 +682,36 @@ fn apply(
         }
         Operation::PopupOf { nth } => {
             let _ = runtime.popup_of(SurfaceId::dangling_nth_for_test(*nth));
+        }
+
+        Operation::CreateXdgDialogManager => {
+            let _ = runtime.create_xdg_dialog_manager(display, 1);
+        }
+        Operation::CreateXdgSystemBell => {
+            let _ = runtime.create_xdg_system_bell(display, 1);
+        }
+        Operation::CreateForeignRegistry => {
+            let _ = runtime.create_xdg_foreign_registry(display);
+        }
+        Operation::CreateForeignV1 => {
+            let _ = runtime.create_xdg_foreign_v1(display);
+        }
+        Operation::CreateForeignV2 => {
+            let _ = runtime.create_xdg_foreign_v2(display);
+        }
+        Operation::AddActivationToken => {
+            // The handle is dropped here, running its `Drop` immediately; a
+            // miss (no manager) is discarded like every other result.
+            let _ = runtime.add_activation_token("fuzz-token");
+        }
+        Operation::FindActivationToken => {
+            let _ = runtime.find_activation_token("fuzz-token");
+        }
+        Operation::FindForeignExported => {
+            let _ = runtime.find_foreign_exported("fuzz-handle");
+        }
+        Operation::ExportForeign => {
+            let _ = runtime.export_foreign(None);
         }
     }
 }

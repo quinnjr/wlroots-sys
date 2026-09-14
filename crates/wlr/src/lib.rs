@@ -102,6 +102,10 @@ mod tearing;
 #[cfg(test)]
 mod test_support;
 mod toplevel;
+mod xdg_activation;
+mod xdg_dialog;
+mod xdg_foreign;
+mod xdg_system_bell;
 #[cfg(wlr_has_xwayland)]
 mod xwayland;
 
@@ -164,6 +168,9 @@ pub use subsurface::SubsurfaceParentState;
 pub use surface::{Surface, SurfaceId, SurfaceRole};
 pub use tearing::{TearingControl, TearingHint};
 pub use toplevel::{Edges, Toplevel, ToplevelId, ToplevelRequested, ToplevelState, WmCapabilities};
+pub use xdg_activation::ActivationTokenHandle;
+pub use xdg_dialog::Dialog;
+pub use xdg_foreign::{ForeignExportInfo, ForeignExported};
 #[cfg(wlr_has_xwayland)]
 pub use xwayland::{XwaylandSurface, XwaylandSurfaceId, XwaylandWindowType};
 

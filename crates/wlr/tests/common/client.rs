@@ -25,6 +25,7 @@ use wayland_client::protocol::{
 };
 use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
+use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 
 /// What the client observed while it ran, handed back by [`spawn`].
@@ -40,6 +41,11 @@ pub struct ClientEvents {
     pub configure_events: u32,
     /// `xdg_surface.ack_configure` requests sent in response to those.
     pub acked_configures: u32,
+    /// Whether the activation client received the `done` event carrying its
+    /// token string — the server-side half of the xdg-activation round trip.
+    pub activation_token_received: bool,
+    /// Whether the activation client then redeemed that token with `activate`.
+    pub activation_sent: bool,
 }
 
 /// The globals a driven client has bound.
@@ -55,6 +61,10 @@ pub struct ClientState {
     /// [`spawn`] so a driven client can send seat-parameterised requests such
     /// as `xdg_toplevel.show_window_menu`; `None` when no seat global exists.
     pub seat: Option<wl_seat::WlSeat>,
+    /// The token string the activation round trip received from the server's
+    /// `xdg_activation_token_v1.done` event, held between the round trip that
+    /// answers `commit` and the one that sends `activate`.
+    pub activation_token: Option<String>,
     /// Populated by the `Dispatch` impls; copied into [`ClientEvents`] and
     /// returned by [`spawn`].
     pub events: ClientEvents,
@@ -107,6 +117,7 @@ pub fn spawn_show_window_menu(
             compositor: None,
             wm_base: None,
             seat: None,
+            activation_token: None,
             events: ClientEvents::default(),
         };
         let compositor: wl_compositor::WlCompositor =
@@ -195,6 +206,7 @@ pub fn spawn(
             compositor: None,
             wm_base: None,
             seat: None,
+            activation_token: None,
             events: ClientEvents::default(),
         };
         // `registry_queue_init` buffers the initial globals rather than
@@ -277,6 +289,7 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
             compositor: None,
             wm_base: None,
             seat: None,
+            activation_token: None,
             events: ClientEvents::default(),
         };
         let compositor: wl_compositor::WlCompositor =
@@ -389,6 +402,7 @@ pub fn spawn_subsurface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
             compositor: None,
             wm_base: None,
             seat: None,
+            activation_token: None,
             events: ClientEvents::default(),
         };
         let compositor: wl_compositor::WlCompositor =
@@ -473,6 +487,7 @@ pub fn spawn_subsurface_mapped(socket: &str) -> std::thread::JoinHandle<ClientEv
             compositor: None,
             wm_base: None,
             seat: None,
+            activation_token: None,
             events: ClientEvents::default(),
         };
         let compositor: wl_compositor::WlCompositor =
@@ -581,6 +596,7 @@ pub fn spawn_subsurface_then_destroy_parent(socket: &str) -> std::thread::JoinHa
             compositor: None,
             wm_base: None,
             seat: None,
+            activation_token: None,
             events: ClientEvents::default(),
         };
         let compositor: wl_compositor::WlCompositor =
@@ -624,6 +640,78 @@ pub fn spawn_subsurface_then_destroy_parent(socket: &str) -> std::thread::JoinHa
             .expect("roundtrip so the server sees the post-destroy child commit");
 
         drop((child, subsurface, subcompositor));
+        state.events
+    })
+}
+
+/// Drive the xdg-activation round trip: mint a token, commit it, read the
+/// server-generated name out of the `done` event, then redeem it with
+/// `activate`.
+///
+/// xdg-activation lets a client hand another client permission to request
+/// focus. The token is minted here, committed bufferlessly (no seat or surface
+/// attached, so wlroots generates the name without an input-serial check),
+/// named back by the server's `done`, and immediately redeemed by the same
+/// connection with `activate`. The server's `request_activate` handler firing
+/// is the proof the round trip completed; [`ClientEvents`] records both client
+/// halves.
+pub fn spawn_activation_round_trip(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            seat: None,
+            activation_token: None,
+            events: ClientEvents::default(),
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let activation: xdg_activation_v1::XdgActivationV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind xdg_activation_v1");
+        state.compositor = Some(compositor.clone());
+
+        // A plain surface to activate. It need not be a mapped toplevel: the
+        // protocol lets a client name any surface, and the server resolves it
+        // to `None` when it is not a tracked toplevel.
+        let surface = compositor.create_surface(&qh, ());
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server tracks the surface");
+
+        // Mint, then commit, then round-trip so the `done` event carrying the
+        // token string is dispatched before it is redeemed.
+        let token = activation.get_activation_token(&qh, ());
+        token.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sends the token `done`");
+
+        let name = state
+            .activation_token
+            .take()
+            .expect("the server sent a token name");
+        activation.activate(name, &surface);
+        state.events.activation_sent = true;
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the activate request");
+
+        drop((surface, token, activation, compositor));
         state.events
     })
 }
@@ -792,6 +880,38 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for ClientState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<xdg_activation_v1::XdgActivationV1, ()> for ClientState {
+    /// Carries no events; bound only so `get_activation_token`/`activate` can
+    /// be sent.
+    fn event(
+        _state: &mut Self,
+        _proxy: &xdg_activation_v1::XdgActivationV1,
+        _event: xdg_activation_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for ClientState {
+    /// `done` carries the token string the server generated; the round trip
+    /// stores it so it can be redeemed.
+    fn event(
+        state: &mut Self,
+        _proxy: &xdg_activation_token_v1::XdgActivationTokenV1,
+        event: xdg_activation_token_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_activation_token_v1::Event::Done { token } = event {
+            state.events.activation_token_received = true;
+            state.activation_token = Some(token);
+        }
     }
 }
 

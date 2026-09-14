@@ -3188,153 +3188,39 @@ reason    = "internal"
 note      = "Theme-to-image resolution happens inside wlr_cursor_set_xcursor; the crate never looks a cursor up itself."
 
 [[waived]]
-symbol    = "wlr_xdg_activation_token_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_activation_token_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_activation_token_v1_destroy"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_activation_token_v1_get_name"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_activation_v1_add_token"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_activation_v1_find_token"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_xdg_client"
 reason    = "internal"
 note      = "wlroots-internal per-client bookkeeping object; the crate never names or hands one to a consumer and reaches every client-scoped fact through the id tables instead."
 
 [[waived]]
-symbol    = "wlr_xdg_dialog_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_dialog_v1_try_from_wlr_xdg_toplevel"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_xdg_exported_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots-owned protocol object created and freed inside the client-driven xdg-exporter path; a compositor never names or holds one. Its effect reaches consumers through Runtime::create_xdg_foreign_v1 and Runtime::find_foreign_exported."
 
 [[waived]]
 symbol    = "wlr_xdg_exported_v2"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_exported"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_exported_finish"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_exported_init"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_registry"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_registry_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_registry_find_by_handle"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_v2"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_v2_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots-owned protocol object created and freed inside the client-driven xdg-exporter path; a compositor never names or holds one. Its effect reaches consumers through Runtime::create_xdg_foreign_v2 and Runtime::find_foreign_exported."
 
 [[waived]]
 symbol    = "wlr_xdg_imported_child_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots-owned child record of a v1 import, created and freed from the imported object's own request handlers; no compositor-facing API touches it."
 
 [[waived]]
 symbol    = "wlr_xdg_imported_child_v2"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots-owned child record of a v2 import, created and freed from the imported object's own request handlers; no compositor-facing API touches it."
 
 [[waived]]
 symbol    = "wlr_xdg_imported_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots-owned protocol object created and freed inside the client-driven xdg-importer path; a compositor never names or holds one. Imports resolve through Runtime::find_foreign_exported."
 
 [[waived]]
 symbol    = "wlr_xdg_imported_v2"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots-owned protocol object created and freed inside the client-driven xdg-importer path; a compositor never names or holds one. Imports resolve through Runtime::find_foreign_exported."
 
 [[waived]]
 symbol    = "wlr_xdg_output_v1"
@@ -3388,24 +3274,6 @@ note      = "wlroots' per-xdg-surface committed/pending record; the crate reads 
 symbol    = "wlr_xdg_surface_state_field"
 reason    = "internal"
 note      = "the single bitmask value tagging that record; unused because the record itself is not read."
-
-[[waived]]
-symbol    = "wlr_xdg_system_bell_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_system_bell_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_system_bell_v1_ring_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_xdg_toplevel_configure_field"
@@ -3491,18 +3359,6 @@ milestone = "M9"
 
 [[waived]]
 symbol    = "wlr_xdg_toplevel_tag_manager_v1_set_tag_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_wm_dialog_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_wm_dialog_v1_create"
 reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
 milestone = "M9"
