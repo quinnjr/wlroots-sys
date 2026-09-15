@@ -11,9 +11,9 @@
 //! run wiring reads live here; the `set_icon` signal itself is fanned out to
 //! [`crate::ToplevelHandler::toplevel_icon_changed`] by `backend.rs`.
 
-use std::ffi::CStr;
 use std::ptr::NonNull;
 
+use crate::runtime::copy_nullable_string;
 use crate::{Buffer, Display, Error, Result, Runtime, sys};
 
 /// An owned reference to a `wlr_xdg_toplevel_icon_v1`.
@@ -98,7 +98,7 @@ impl ToplevelIcon {
     pub fn name(&self) -> Option<String> {
         // SAFETY: the handle's lifetime guarantees the icon is live; wlroots
         // leaves `name` null until the client sets one.
-        unsafe { cstr_field((*self.raw.as_ptr()).name) }
+        unsafe { copy_nullable_string((*self.raw.as_ptr()).name as *const _) }
     }
 
     /// The first pixel buffer the client supplied, if any.
@@ -189,20 +189,6 @@ impl Runtime {
     ) -> Option<NonNull<sys::wlr_xdg_toplevel_icon_manager_v1>> {
         *self.inner.xdg_toplevel_icon_manager.borrow()
     }
-}
-
-/// Copy a wlroots-owned C string field out, or `None` if it is null.
-///
-/// # Safety
-///
-/// `p` must be null or a live, NUL-terminated C string owned by wlroots.
-unsafe fn cstr_field(p: *mut std::os::raw::c_char) -> Option<String> {
-    if p.is_null() {
-        return None;
-    }
-    // SAFETY: the caller guarantees `p` is a live NUL-terminated string; this
-    // copies it out and never frees it.
-    Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

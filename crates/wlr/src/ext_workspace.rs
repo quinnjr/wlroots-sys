@@ -27,11 +27,11 @@
 //! batch out of wlroots' list, and destroying a workspace or group touches only
 //! the manager's object lists, never the `commit` signal wlroots is emitting.
 
-use std::cell::{Cell, RefCell};
-use std::ffi::{CString, c_void};
+use std::ffi::CString;
 use std::ptr::NonNull;
 
-use crate::backend::{Registration, bound_session, remove_listener};
+use crate::backend::Registration;
+use crate::owned_handle::{OwnedHandle, dangling_usize_test_id, on_watched_destroy};
 use crate::runtime::copy_nullable_string;
 use crate::{Display, Error, Output, Result, Runtime, sys};
 
@@ -58,9 +58,14 @@ impl std::fmt::Debug for WorkspaceId {
 
 impl WorkspaceId {
     /// An id that names no workspace, for negative tests.
+    ///
+    /// The shared address-space policy
+    /// ([`dangling_usize_test_id`](crate::owned_handle::dangling_usize_test_id)):
+    /// live values are heap addresses, which never sit at the top of the
+    /// address space, so `usize::MAX - n` can never collide with one.
     #[doc(hidden)]
     pub fn dangling_nth_for_test(n: usize) -> Self {
-        Self(usize::MAX - n)
+        Self(dangling_usize_test_id(n))
     }
 }
 
@@ -78,9 +83,14 @@ impl std::fmt::Debug for WorkspaceGroupId {
 
 impl WorkspaceGroupId {
     /// An id that names no group, for negative tests.
+    ///
+    /// The shared address-space policy
+    /// ([`dangling_usize_test_id`](crate::owned_handle::dangling_usize_test_id)):
+    /// live values are heap addresses, which never sit at the top of the
+    /// address space, so `usize::MAX - n` can never collide with one.
     #[doc(hidden)]
     pub fn dangling_nth_for_test(n: usize) -> Self {
-        Self(usize::MAX - n)
+        Self(dangling_usize_test_id(n))
     }
 }
 
@@ -183,13 +193,18 @@ impl std::ops::BitOrAssign for WorkspaceCapabilities {
 ///
 /// Copied out of wlroots' request list at emission time — the list and its
 /// entries are freed when the commit emission returns, so nothing may be held
-/// past the callback. A request that names only a destroyed workspace (that is,
-/// `Activate`/`Deactivate`/`Assign`/`Remove`) is dropped at collection: there is
-/// nothing left to act on, and wlroots NULLs the pointer anyway. A
-/// [`CreateWorkspace`](WorkspaceRequest::CreateWorkspace) is different — it names
-/// a group, not a workspace, and a `None` group there means the group was
-/// destroyed, not that the request was dropped.
+/// past the callback. A [`CreateWorkspace`](WorkspaceRequest::CreateWorkspace)
+/// names a group, not a workspace, and a `None` group there means the group
+/// was destroyed, not that the request was dropped. Every other variant names
+/// a workspace; when wlroots NULLed that pointer because the workspace was
+/// destroyed before the commit drained, the request is preserved as
+/// [`Stale`](WorkspaceRequest::Stale) rather than dropped, so an all-stale
+/// batch is distinguishable from an empty commit.
+///
+/// New-in-milestone and unreleased: marked [`#[non_exhaustive]`] so future
+/// request kinds can be added without breaking downstream matches.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WorkspaceRequest {
     /// A client asked a group to create a workspace. `name` is the requested
     /// name, `None` only if wlroots reported no string; `group` is the group the
@@ -219,30 +234,54 @@ pub enum WorkspaceRequest {
     },
     /// A client asked that a workspace be removed.
     Remove(WorkspaceId),
+    /// A request that named a workspace destroyed before the commit drained
+    /// (wlroots NULLed the pointer), or whose type discriminant is unknown to
+    /// this crate. Preserves the request kind plus whatever ids were still
+    /// known, so no batch entry is silently lost.
+    Stale {
+        /// What the dropped entry was asking for.
+        kind: StaleRequestKind,
+        /// The named workspace, when its pointer was still live. Always `None`
+        /// for the NULLed-workspace case that produces this variant today;
+        /// `Some` is reserved for future shapes that name more than one object.
+        workspace: Option<WorkspaceId>,
+        /// The named group, when the request carried one and its pointer was
+        /// still live (notably an `Assign` whose workspace died but whose
+        /// group survived).
+        group: Option<WorkspaceGroupId>,
+    },
+}
+
+/// Which batch entry a [`WorkspaceRequest::Stale`] preserves.
+///
+/// The `Unknown` discriminant is the raw `type_` wlroots reported, for request
+/// kinds this crate does not know yet.
+///
+/// New-in-milestone and unreleased: marked [`#[non_exhaustive]`] so future
+/// kinds can be added without breaking downstream matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StaleRequestKind {
+    /// A NULLed-workspace `activate`.
+    Activate,
+    /// A NULLed-workspace `deactivate`.
+    Deactivate,
+    /// A NULLed-workspace `assign` (any surviving group is in `Stale::group`).
+    Assign,
+    /// A NULLed-workspace `remove`.
+    Remove,
+    /// A request discriminant this crate does not recognise.
+    Unknown(u32),
 }
 
 /// The manager-death watch shared by an owned workspace or group handle and its
 /// callback.
 ///
-/// Generic over the wlroots object so both handle kinds share one
-/// implementation. Heap-stable: the handle boxes it and never moves the box's
-/// contents, so the listener may name its address for the registration's whole
-/// life.
-struct HandleListeners<T> {
-    /// The runtime the handle was created against, read once at creation to
-    /// look up the display-owned manager and link the watch. Holding this clone
-    /// does not keep the manager (or any object) alive; it is a handle to the
-    /// runtime, not the object being watched.
-    runtime: Runtime,
-    /// The live object, until `alive` is cleared.
-    raw: NonNull<T>,
-    /// False once the manager has been destroyed (display teardown) or the
-    /// handle's own `Drop` has run.
-    alive: Cell<bool>,
-    /// The manager's `destroy` watch, unlinked by its own callback or by the
-    /// handle's `Drop`.
-    manager_destroy: RefCell<Option<Registration>>,
-}
+/// [`OwnedHandle`](crate::owned_handle::OwnedHandle) specialised to this
+/// module's object: heap-stable, so the listener may name its address for the
+/// registration's whole life. See that module for the unlink ordering both
+/// paths below preserve.
+type HandleListeners<T> = OwnedHandle<T>;
 
 /// A workspace group, owned by the compositor.
 ///
@@ -288,15 +327,19 @@ impl WorkspaceGroupHandle {
 
     /// Whether the group is still live.
     pub fn is_alive(&self) -> bool {
-        self.listeners.alive.get()
+        self.listeners.is_alive()
     }
 
     fn raw(&self) -> Option<NonNull<sys::wlr_ext_workspace_group_handle_v1>> {
-        self.is_alive().then_some(self.listeners.raw)
+        self.listeners.live_raw()
     }
 
-    /// The capabilities the compositor advertised for this group
-    /// ([`WorkspaceGroupCapabilities::NONE`] for an inert handle).
+    /// The capabilities the compositor advertised for this group.
+    ///
+    /// [`WorkspaceGroupCapabilities::NONE`] both when nothing was advertised
+    /// and when this handle is inert — check [`is_alive`](Self::is_alive) to
+    /// tell the two apart.
+    #[must_use]
     pub fn capabilities(&self) -> WorkspaceGroupCapabilities {
         let Some(raw) = self.raw() else {
             return WorkspaceGroupCapabilities::NONE;
@@ -331,15 +374,12 @@ impl WorkspaceGroupHandle {
 
 impl Drop for WorkspaceGroupHandle {
     fn drop(&mut self) {
-        if !self.listeners.alive.get() {
+        let Some(raw) = self.listeners.take_live_raw() else {
             return;
-        }
-        let watch = self.listeners.manager_destroy.borrow_mut().take();
-        drop(watch);
-        self.listeners.alive.set(false);
-        // SAFETY: `alive` was true, so the caller's sole-owner contract holds
-        // and wlroots frees the group exactly once.
-        unsafe { sys::wlr_ext_workspace_group_handle_v1_destroy(self.listeners.raw.as_ptr()) };
+        };
+        // SAFETY: `take_live_raw` returned `Some`, so the caller's sole-owner
+        // contract holds and wlroots frees the group exactly once.
+        unsafe { sys::wlr_ext_workspace_group_handle_v1_destroy(raw.as_ptr()) };
     }
 }
 
@@ -388,11 +428,11 @@ impl WorkspaceHandle {
 
     /// Whether the workspace is still live.
     pub fn is_alive(&self) -> bool {
-        self.listeners.alive.get()
+        self.listeners.is_alive()
     }
 
     fn raw(&self) -> Option<NonNull<sys::wlr_ext_workspace_handle_v1>> {
-        self.is_alive().then_some(self.listeners.raw)
+        self.listeners.live_raw()
     }
 
     /// The workspace's protocol id string, as the compositor set it at
@@ -412,7 +452,11 @@ impl WorkspaceHandle {
         unsafe { copy_nullable_string((*raw.as_ptr()).name) }
     }
 
-    /// The workspace's grid coordinates, empty until the compositor sets any.
+    /// The workspace's grid coordinates.
+    ///
+    /// Empty both until the compositor sets any and when this handle is inert —
+    /// check [`is_alive`](Self::is_alive) to tell the two apart.
+    #[must_use]
     pub fn coordinates(&self) -> Vec<u32> {
         let Some(raw) = self.raw() else {
             return Vec::new();
@@ -428,8 +472,12 @@ impl WorkspaceHandle {
         }
     }
 
-    /// The capabilities the compositor advertised for this workspace
-    /// ([`WorkspaceCapabilities::NONE`] for an inert handle).
+    /// The capabilities the compositor advertised for this workspace.
+    ///
+    /// [`WorkspaceCapabilities::NONE`] both when nothing was advertised and
+    /// when this handle is inert — check [`is_alive`](Self::is_alive) to tell
+    /// the two apart.
+    #[must_use]
     pub fn capabilities(&self) -> WorkspaceCapabilities {
         let Some(raw) = self.raw() else {
             return WorkspaceCapabilities::NONE;
@@ -445,19 +493,41 @@ impl WorkspaceHandle {
         Some(unsafe { (*raw.as_ptr()).state })
     }
 
+    /// `state` mask bit: the compositor reports the workspace active.
+    const ACTIVE: u32 = 1;
+    /// `state` mask bit: the compositor reports the workspace urgent.
+    const URGENT: u32 = 1 << 1;
+    /// `state` mask bit: the compositor reports the workspace hidden.
+    const HIDDEN: u32 = 1 << 2;
+
     /// Whether the compositor reports the workspace active.
+    ///
+    /// `false` both when the bit is clear and when this handle is inert —
+    /// check [`is_alive`](Self::is_alive) to tell the two apart.
+    #[must_use]
     pub fn active(&self) -> bool {
-        self.state_bits().is_some_and(|state| state & 1 != 0)
+        self.state_bits()
+            .is_some_and(|state| state & Self::ACTIVE != 0)
     }
 
     /// Whether the compositor reports the workspace urgent.
+    ///
+    /// `false` both when the bit is clear and when this handle is inert —
+    /// check [`is_alive`](Self::is_alive) to tell the two apart.
+    #[must_use]
     pub fn urgent(&self) -> bool {
-        self.state_bits().is_some_and(|state| state & 2 != 0)
+        self.state_bits()
+            .is_some_and(|state| state & Self::URGENT != 0)
     }
 
     /// Whether the compositor reports the workspace hidden.
+    ///
+    /// `false` both when the bit is clear and when this handle is inert —
+    /// check [`is_alive`](Self::is_alive) to tell the two apart.
+    #[must_use]
     pub fn hidden(&self) -> bool {
-        self.state_bits().is_some_and(|state| state & 4 != 0)
+        self.state_bits()
+            .is_some_and(|state| state & Self::HIDDEN != 0)
     }
 
     /// The group this workspace belongs to, if any.
@@ -542,15 +612,12 @@ impl WorkspaceHandle {
 
 impl Drop for WorkspaceHandle {
     fn drop(&mut self) {
-        if !self.listeners.alive.get() {
+        let Some(raw) = self.listeners.take_live_raw() else {
             return;
-        }
-        let watch = self.listeners.manager_destroy.borrow_mut().take();
-        drop(watch);
-        self.listeners.alive.set(false);
-        // SAFETY: `alive` was true, so the caller's sole-owner contract holds
-        // and wlroots frees the workspace exactly once.
-        unsafe { sys::wlr_ext_workspace_handle_v1_destroy(self.listeners.raw.as_ptr()) };
+        };
+        // SAFETY: `take_live_raw` returned `Some`, so the caller's sole-owner
+        // contract holds and wlroots frees the workspace exactly once.
+        unsafe { sys::wlr_ext_workspace_handle_v1_destroy(raw.as_ptr()) };
     }
 }
 
@@ -561,14 +628,9 @@ impl Drop for WorkspaceHandle {
 /// `raw` must be a live object whose manager is alive and whose signals are
 /// initialised, and the returned listeners must be its only owner watch.
 unsafe fn link_manager_watch<T>(runtime: Runtime, raw: NonNull<T>) -> Box<HandleListeners<T>> {
-    let listeners = Box::new(HandleListeners {
-        runtime,
-        raw,
-        alive: Cell::new(true),
-        manager_destroy: RefCell::new(None),
-    });
+    let listeners: Box<HandleListeners<T>> = OwnedHandle::boxed(runtime, raw);
     // The box address is stable from here on, so the watch may name it.
-    let session: *const () = (&*listeners as *const HandleListeners<T>).cast();
+    let session: *const () = OwnedHandle::session(&listeners);
 
     let manager = listeners
         .runtime
@@ -580,12 +642,12 @@ unsafe fn link_manager_watch<T>(runtime: Runtime, raw: NonNull<T>) -> Box<Handle
         let watch = unsafe {
             Registration::link_watched(
                 &raw mut (*manager).events.destroy,
-                on_manager_destroy::<T>,
+                on_watched_destroy::<T>,
                 session,
                 &listeners.alive,
             )
         };
-        *listeners.manager_destroy.borrow_mut() = Some(watch);
+        *listeners.watched_destroy.borrow_mut() = Some(watch);
     }
     listeners
 }
@@ -669,6 +731,11 @@ impl Runtime {
 
 /// Copy a client's batched request list into owned [`WorkspaceRequest`]s.
 ///
+/// A request whose workspace pointer wlroots NULLed (the workspace was
+/// destroyed before the commit drained) is preserved as
+/// [`WorkspaceRequest::Stale`], as is any unknown request discriminant, so an
+/// all-stale batch never collapses into an empty commit.
+///
 /// # Safety
 ///
 /// `head` must be null or an initialised `wl_list` sentinel whose entries are
@@ -683,43 +750,72 @@ pub(crate) unsafe fn collect_requests(head: *mut sys::wl_list) -> Vec<WorkspaceR
     // entries are live requests linked through `link`; the walk finishes inside
     // the emission, before wlroots frees them.
     unsafe {
+        use sys::wlr_ext_workspace_v1_request_type as RequestType;
         for request in sys::wl_list_for_each!(head, sys::wlr_ext_workspace_v1_request, link) {
             let request = &*request;
-            let type_ = request.type_;
-            if type_ == sys::wlr_ext_workspace_v1_request_type::WLR_EXT_WORKSPACE_V1_REQUEST_CREATE_WORKSPACE
-            {
-                let fields = request.__bindgen_anon_1.create_workspace;
-                requests.push(WorkspaceRequest::CreateWorkspace {
-                    name: copy_nullable_string(fields.name),
-                    group: NonNull::new(fields.group)
-                        .map(|group| WorkspaceGroupId(group.as_ptr() as usize)),
-                });
-            } else if type_
-                == sys::wlr_ext_workspace_v1_request_type::WLR_EXT_WORKSPACE_V1_REQUEST_ACTIVATE
-                && let Some(id) = workspace_id_of(request.__bindgen_anon_1.activate.workspace)
-            {
-                requests.push(WorkspaceRequest::Activate(id));
-            } else if type_
-                == sys::wlr_ext_workspace_v1_request_type::WLR_EXT_WORKSPACE_V1_REQUEST_DEACTIVATE
-                && let Some(id) = workspace_id_of(request.__bindgen_anon_1.deactivate.workspace)
-            {
-                requests.push(WorkspaceRequest::Deactivate(id));
-            } else if type_
-                == sys::wlr_ext_workspace_v1_request_type::WLR_EXT_WORKSPACE_V1_REQUEST_ASSIGN
-            {
-                let fields = request.__bindgen_anon_1.assign;
-                if let Some(workspace) = workspace_id_of(fields.workspace) {
-                    requests.push(WorkspaceRequest::Assign {
-                        workspace,
+            match request.type_ {
+                RequestType::WLR_EXT_WORKSPACE_V1_REQUEST_CREATE_WORKSPACE => {
+                    let fields = request.__bindgen_anon_1.create_workspace;
+                    requests.push(WorkspaceRequest::CreateWorkspace {
+                        name: copy_nullable_string(fields.name),
                         group: NonNull::new(fields.group)
                             .map(|group| WorkspaceGroupId(group.as_ptr() as usize)),
                     });
                 }
-            } else if type_
-                == sys::wlr_ext_workspace_v1_request_type::WLR_EXT_WORKSPACE_V1_REQUEST_REMOVE
-                && let Some(id) = workspace_id_of(request.__bindgen_anon_1.remove.workspace)
-            {
-                requests.push(WorkspaceRequest::Remove(id));
+                RequestType::WLR_EXT_WORKSPACE_V1_REQUEST_ACTIVATE => {
+                    let raw = request.__bindgen_anon_1.activate.workspace;
+                    match workspace_id_of(raw) {
+                        Some(id) => requests.push(WorkspaceRequest::Activate(id)),
+                        None => requests.push(WorkspaceRequest::Stale {
+                            kind: StaleRequestKind::Activate,
+                            workspace: None,
+                            group: None,
+                        }),
+                    }
+                }
+                RequestType::WLR_EXT_WORKSPACE_V1_REQUEST_DEACTIVATE => {
+                    let raw = request.__bindgen_anon_1.deactivate.workspace;
+                    match workspace_id_of(raw) {
+                        Some(id) => requests.push(WorkspaceRequest::Deactivate(id)),
+                        None => requests.push(WorkspaceRequest::Stale {
+                            kind: StaleRequestKind::Deactivate,
+                            workspace: None,
+                            group: None,
+                        }),
+                    }
+                }
+                RequestType::WLR_EXT_WORKSPACE_V1_REQUEST_ASSIGN => {
+                    let fields = request.__bindgen_anon_1.assign;
+                    match workspace_id_of(fields.workspace) {
+                        Some(workspace) => requests.push(WorkspaceRequest::Assign {
+                            workspace,
+                            group: NonNull::new(fields.group)
+                                .map(|group| WorkspaceGroupId(group.as_ptr() as usize)),
+                        }),
+                        None => requests.push(WorkspaceRequest::Stale {
+                            kind: StaleRequestKind::Assign,
+                            workspace: None,
+                            group: NonNull::new(fields.group)
+                                .map(|group| WorkspaceGroupId(group.as_ptr() as usize)),
+                        }),
+                    }
+                }
+                RequestType::WLR_EXT_WORKSPACE_V1_REQUEST_REMOVE => {
+                    let raw = request.__bindgen_anon_1.remove.workspace;
+                    match workspace_id_of(raw) {
+                        Some(id) => requests.push(WorkspaceRequest::Remove(id)),
+                        None => requests.push(WorkspaceRequest::Stale {
+                            kind: StaleRequestKind::Remove,
+                            workspace: None,
+                            group: None,
+                        }),
+                    }
+                }
+                unknown => requests.push(WorkspaceRequest::Stale {
+                    kind: StaleRequestKind::Unknown(unknown.0),
+                    workspace: None,
+                    group: None,
+                }),
             }
         }
     }
@@ -730,39 +826,4 @@ pub(crate) unsafe fn collect_requests(head: *mut sys::wl_list) -> Vec<WorkspaceR
 /// workspace was destroyed before the commit drained.
 fn workspace_id_of(raw: *mut sys::wlr_ext_workspace_handle_v1) -> Option<WorkspaceId> {
     NonNull::new(raw).map(|raw| WorkspaceId(raw.as_ptr() as usize))
-}
-
-/// Recover the [`HandleListeners`] a watch was linked with.
-///
-/// # Safety
-///
-/// `l` must be a listener linked with a `HandleListeners<T>` address as its
-/// session, and that box must still be alive.
-unsafe fn ctx_of<'a, T>(l: *mut sys::wl_listener) -> Option<&'a HandleListeners<T>> {
-    // SAFETY: the caller guarantees `l` is a `Registration` listener, so
-    // `bound_session` recovers its live `session`.
-    let session = unsafe { bound_session(l) };
-    if session.is_null() {
-        return None;
-    }
-    // SAFETY: the caller guarantees the session names a live `HandleListeners`.
-    Some(unsafe { &*session.cast::<HandleListeners<T>>() })
-}
-
-/// The manager is being destroyed (display teardown, before the objects
-/// themselves are freed).
-///
-/// Marks the owned handle inert and unlinks the watch while the handle memory is
-/// still valid, so a later `Drop` never touches the freed manager.
-unsafe extern "C" fn on_manager_destroy<T>(l: *mut sys::wl_listener, _data: *mut c_void) {
-    // SAFETY: linked with a `HandleListeners<T>` session and its `alive` cell;
-    // the registration below is dropped from inside this emission, while the
-    // manager's own signal is still alive.
-    unsafe {
-        let Some(ctx) = ctx_of::<T>(l) else { return };
-        ctx.alive.set(false);
-        remove_listener(l);
-        let registration = ctx.manager_destroy.borrow_mut().take();
-        drop(registration);
-    }
 }

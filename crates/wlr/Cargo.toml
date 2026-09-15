@@ -96,7 +96,10 @@ rustix = { version = "1", features = ["pipe", "std"] }
 # A real client for the client-driven harness: the six-leg standard had no
 # way to connect a Wayland client to the display, so commit/ack sequencing
 # could not be reached. Dev-dependency only; the crate wraps the server.
-wayland-client = "0.31"
+# `=`-pinned: the workspace is a library set with no committed root
+# `Cargo.lock` (see root `.gitignore`), so a caret range would float across
+# unreviewed patch releases in CI. Re-pin deliberately when bumping.
+wayland-client = "=0.31.15"
 # xdg-shell client bindings for the seed toplevel test. `client` selects the
 # client-side generated code; xdg-shell itself is stable, so it comes from the
 # ungated `xdg` module and needs no `unstable` feature (which would only add
@@ -105,15 +108,16 @@ wayland-client = "0.31"
 # xdg-activation-v1 (Task 5) plus xdg-toplevel-icon-v1 and
 # xdg-toplevel-tag-v1 (Task 6). 0.32 is the first line that carries the
 # icon/tag bindings; its own MSRV is 1.86, inside the workspace's 1.88 floor.
-# Dev-dependency only, like the rest.
-wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+# Dev-dependency only, like the rest. `=`-pinned for the same reason as
+# `wayland-client` above (no committed lockfile): re-pin deliberately.
+wayland-protocols = { version = "=0.32.13", features = ["client", "staging"] }
 # wlr-protocols client bindings (foreign-toplevel-management) for the
 # client-driven export/request tests. `wlr-protocols` is not part of
 # wayland-protocols; this companion crate carries the wlroots extensions.
 # Its own MSRV is 1.71, inside the workspace's 1.88 floor, and it resolves
 # against the same wayland-protocols 0.32 / wayland-client 0.31 already in the
-# graph. Dev-dependency only, like the rest.
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# graph. Dev-dependency only, like the rest. `=`-pinned (see above).
+wayland-protocols-wlr = { version = "=0.3.12", features = ["client"] }
 
 # The dispatch bench compares each safe call with the raw `wlr_sys` call it
 # wraps. `harness = false` hands `main` to criterion instead of libtest.

@@ -106,6 +106,20 @@ fn a_client_commits_a_security_context() {
     assert_eq!(state.app_id(), Some("org.wlr.test.app"));
     assert_eq!(state.instance_id(), Some("instance-1"));
 
+    // A live `wl_client` lookup (`Some`) is infeasible here without new
+    // plumbing: `spawn_security_context` returns only `JoinHandle<()>` and the
+    // server never exposes the sandbox connection's `wl_client` to the test,
+    // and `lookup_security_context`'s contract requires a null-or-live
+    // pointer (a disconnected/dangling pointer would be dereferenced by
+    // wlroots, so it cannot be passed safely). The safe post-run check is
+    // that a null lookup still misses with the manager alive after the
+    // sandbox client has disconnected.
+    assert!(
+        // SAFETY: null is the documented always-safe miss.
+        unsafe { runtime.lookup_security_context(std::ptr::null()) }.is_none(),
+        "after the sandbox client disconnects, a null client still names no live context"
+    );
+
     // The recorded context owns its strings: it stays readable after the client
     // is gone and the compositor is torn down. Drop in declaration order's
     // reverse — runtime (which unlinks its backend listeners), then the

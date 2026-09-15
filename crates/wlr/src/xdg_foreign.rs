@@ -30,11 +30,12 @@
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::cell::Cell;
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::ptr::NonNull;
 
 use crate::backend::{Registration, bound_session, remove_listener};
 use crate::id::find_id;
+use crate::runtime::copy_nullable_string;
 use crate::{Display, Error, Result, Runtime, ToplevelId, sys};
 
 /// The state a [`ForeignExported`]'s toplevel-destroy watch shares with the
@@ -80,8 +81,10 @@ pub struct ForeignExported {
 
 impl std::fmt::Debug for ForeignExported {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The registry handle is a bearer secret: anyone holding it can import
+        // the toplevel. Never print it; the explicit `handle()` hand-off path
+        // stays available for the out-of-band exchange.
         f.debug_struct("ForeignExported")
-            .field("handle", &self.handle())
             .field("toplevel", &self.toplevel)
             .field("alive", &self.is_alive())
             .finish_non_exhaustive()
@@ -99,14 +102,11 @@ impl ForeignExported {
     pub fn handle(&self) -> Option<String> {
         // SAFETY: the entry allocation lives until `Drop`, which runs after
         // every accessor; `handle` is a fixed NUL-terminated `char[37]` wlroots
-        // wrote at init.
+        // wrote at init. Single policy with every other copy in this crate
+        // (`crate::runtime::copy_nullable_string`).
         unsafe {
             let bytes = &(*self.watch.entry.as_ptr()).handle;
-            Some(
-                CStr::from_ptr(bytes.as_ptr())
-                    .to_string_lossy()
-                    .into_owned(),
-            )
+            copy_nullable_string(bytes.as_ptr())
         }
     }
 
@@ -177,7 +177,12 @@ impl Drop for ForeignExported {
 /// than a handle because a client-driven entry is owned by wlroots: it may be
 /// finished by the client, by the exporting toplevel's destruction, or by the
 /// display teardown, none of which this crate controls.
+///
+/// New-in-milestone and unreleased: marked [`#[non_exhaustive]`] so future
+/// registry fields can be added without breaking downstream construction.
+/// Exhaustiveness was never promised for this snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ForeignExportInfo {
     /// The handle string, copied out.
     pub handle: String,
@@ -339,9 +344,7 @@ impl Runtime {
         // installs, both before the toplevel is freed.
         unsafe {
             let entry = raw.as_ptr();
-            let name = CStr::from_ptr((*entry).handle.as_ptr())
-                .to_string_lossy()
-                .into_owned();
+            let name = copy_nullable_string((*entry).handle.as_ptr()).unwrap_or_default();
             let toplevel = (*entry).toplevel;
             let toplevel = if toplevel.is_null() {
                 None

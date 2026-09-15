@@ -39,6 +39,15 @@ struct App {
     /// Whether the parent toplevel surface's destroy was observed, so the
     /// destroy-order test can prove the child commit came after it.
     parent_destroyed: bool,
+    /// `runtime.toplevel_of(child)` on the live child: must miss, since the
+    /// child carries the sub-surface role rather than the toplevel one.
+    toplevel_of_child_missed: Vec<bool>,
+    /// `runtime.popup_of(parent)` on the live toplevel parent: must miss,
+    /// since the parent is a toplevel rather than a popup.
+    popup_of_parent_missed: Vec<bool>,
+    /// `child.as_toplevel()` on the live child surface: must miss for the
+    /// same role reason as `toplevel_of`.
+    child_as_toplevel_missed: Vec<bool>,
     /// The client thread, owned here so [`LoopHandler::should_stop`] can end the
     /// single `Until::Stop` run once the client is done.
     client: Option<JoinHandle<common::client::ClientEvents>>,
@@ -66,6 +75,15 @@ impl wlr::ToplevelHandler for App {
         };
         self.parent_ids.push(surface.subsurface_parent_id());
         self.parent_states.push(surface.subsurface_parent_state());
+        // Wrong-role downcasts against live tracked surfaces: the child is a
+        // sub-surface, not a toplevel, and the parent is a toplevel, not a
+        // popup — both must miss rather than dereference the wrong role.
+        self.toplevel_of_child_missed
+            .push(runtime.toplevel_of(child).is_none());
+        self.popup_of_parent_missed
+            .push(runtime.popup_of(parent).is_none());
+        self.child_as_toplevel_missed
+            .push(surface.as_toplevel().is_none());
     }
 
     fn surface_committed(&mut self, surface: &wlr::Surface<'_>) {
@@ -157,6 +175,21 @@ fn a_real_client_subsurface_is_observed_and_reads_its_parent() {
         app.parent_states[0].as_ref().map(position),
         Some((10, 20)),
         "the position the client set is what the parent committed"
+    );
+    assert_eq!(
+        app.toplevel_of_child_missed,
+        vec![true],
+        "toplevel_of on the live sub-surface child must miss (wrong role)"
+    );
+    assert_eq!(
+        app.popup_of_parent_missed,
+        vec![true],
+        "popup_of on the live toplevel parent must miss (wrong role)"
+    );
+    assert_eq!(
+        app.child_as_toplevel_missed,
+        vec![true],
+        "Surface::as_toplevel on the live sub-surface child must miss"
     );
     let _ = child;
 }

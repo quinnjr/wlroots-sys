@@ -17,6 +17,7 @@
 //! thread entirely.
 
 use std::os::fd::AsFd;
+use std::os::unix::fs::OpenOptionsExt;
 
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
@@ -181,13 +182,7 @@ pub fn spawn_show_window_menu(
     y: i32,
 ) -> std::thread::JoinHandle<ClientEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
+    let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
         let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
@@ -246,13 +241,7 @@ pub fn spawn_show_window_menu(
 /// the thread returns. Returns the observed [`ForeignToplevelEvents`].
 pub fn spawn_foreign_toplevel(socket: &str) -> std::thread::JoinHandle<ForeignToplevelEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
+    let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
         let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
@@ -319,13 +308,7 @@ pub fn spawn_ext_foreign_toplevel(
     socket: &str,
 ) -> std::thread::JoinHandle<ExtForeignToplevelEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
+    let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
         let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
@@ -359,13 +342,7 @@ pub fn spawn_ext_foreign_toplevel(
 /// final `commit`'s round-trip. Returns the observed [`ExtWorkspaceEvents`].
 pub fn spawn_ext_workspace(socket: &str) -> std::thread::JoinHandle<ExtWorkspaceEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
+    let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
         let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
@@ -424,13 +401,7 @@ pub fn spawn_ext_workspace(socket: &str) -> std::thread::JoinHandle<ExtWorkspace
 /// close fd for hangup.
 pub fn spawn_security_context(socket: &str) -> std::thread::JoinHandle<()> {
     let path = crate::common::isolated_runtime_dir().join(socket);
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
+    let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
         let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
@@ -445,11 +416,14 @@ pub fn spawn_security_context(socket: &str) -> std::thread::JoinHandle<()> {
             .expect("bind wp_security_context_manager_v1");
 
         // A listening socket for the sandbox connection the compositor would
-        // accept, and a pipe whose read end is the hangup signal.
-        let listener = std::os::unix::net::UnixListener::bind(
-            crate::common::isolated_runtime_dir().join("security-context-listen"),
-        )
-        .expect("bind the security-context listen socket");
+        // accept, and a pipe whose read end is the hangup signal. The path is
+        // unique per thread; any stale file is unlinked before binding (a
+        // crashed run leaves the socket file behind) and removed again when
+        // the thread exits. Contained by the `0700` runtime directory.
+        let listen_path = crate::common::shm_path_for("security-context-listen");
+        let _ = std::fs::remove_file(&listen_path);
+        let listener = std::os::unix::net::UnixListener::bind(&listen_path)
+            .expect("bind the security-context listen socket");
         let (close_read, close_write) = rustix::pipe::pipe().expect("security-context close pipe");
 
         let context = manager.create_listener(listener.as_fd(), close_read.as_fd(), &qh, ());
@@ -462,6 +436,8 @@ pub fn spawn_security_context(socket: &str) -> std::thread::JoinHandle<()> {
             .expect("roundtrip so the server sees the committed context");
 
         drop((context, listener, close_write, manager));
+        // Best-effort: unlink the listen socket now that it is closed.
+        let _ = std::fs::remove_file(&listen_path);
     })
 }
 
@@ -578,23 +554,14 @@ pub fn spawn(
 /// The proxy handles are held until the second round-trip has been answered,
 /// so neither the buffer nor the surface is torn down before the server has
 /// seen the map. Returns the observed [`ClientEvents`] via the `JoinHandle`.
+// Shared harness: not every test binary maps a toplevel, so binaries that never call this would warn without the allow.
 #[allow(dead_code)]
 pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
     // Built before the thread starts: `socket` is a borrow that cannot cross
     // into the `'static` thread, and the closure needs an owned path anyway.
-    let shm_path = crate::common::isolated_runtime_dir().join(format!(
-        "wlr-rs-shm-{}-{}",
-        std::process::id(),
-        socket
-    ));
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
+    let shm_path = crate::common::shm_path_for(&format!("{socket}-mapped"));
+    let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
         let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
@@ -652,13 +619,15 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
         const STRIDE: i32 = W * 4;
         let size = STRIDE * H;
         // Read-write, not `File::create`'s write-only: the server mmaps the fd
-        // with `PROT_READ`, and mapping a write-only fd fails `EACCES`. libwayland
-        // then rejects the pool with "Failed to create memory mapping".
+        // with `PROT_READ`, and mapping a write-only fd fails `EACCES`.
+        // libwayland then rejects the pool with "Failed to create memory
+        // mapping". `create_new` so a stale path fails instead of being
+        // adopted, with mode `0o600` so no other user can read the pixels.
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
+            .mode(0o600)
             .open(&shm_path)
             .expect("create shm backing file");
         file.set_len(size as u64).expect("size shm backing file");
@@ -684,6 +653,9 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
             presentation,
             file,
         ));
+        // Best-effort: the backing file is unlinked now that every handle is
+        // closed, so a crashed run cannot leave a stale file behind.
+        let _ = std::fs::remove_file(&shm_path);
         state.events
     })
 }
@@ -700,13 +672,7 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
 /// `JoinHandle`.
 pub fn spawn_layer_surface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
+    let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
         let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
@@ -787,13 +753,7 @@ pub fn spawn_layer_surface(socket: &str) -> std::thread::JoinHandle<ClientEvents
 /// Returns the observed [`ClientEvents`] via the `JoinHandle`.
 pub fn spawn_subsurface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
+    let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
         let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
@@ -870,18 +830,8 @@ pub fn spawn_subsurface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
 /// non-root surface the walk actually yields.
 pub fn spawn_subsurface_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
-    let shm_path = crate::common::isolated_runtime_dir().join(format!(
-        "wlr-rs-shm-{}-{}-child",
-        std::process::id(),
-        socket
-    ));
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
+    let shm_path = crate::common::shm_path_for(&format!("{socket}-child"));
+    let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
         let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
@@ -925,11 +875,14 @@ pub fn spawn_subsurface_mapped(socket: &str) -> std::thread::JoinHandle<ClientEv
         const H: i32 = 64;
         const STRIDE: i32 = W * 4;
         let size = STRIDE * H;
+        // `create_new` so a stale path fails instead of being adopted, with mode
+        // `0o600` so no other user can read the pixels; read-write so the
+        // server can mmap the fd with `PROT_READ`.
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
+            .mode(0o600)
             .open(&shm_path)
             .expect("create shm backing file");
         file.set_len((2 * size) as u64)
@@ -971,6 +924,9 @@ pub fn spawn_subsurface_mapped(socket: &str) -> std::thread::JoinHandle<ClientEv
             subcompositor,
             file,
         ));
+        // Best-effort: the backing file is unlinked now that every handle is
+        // closed, so a crashed run cannot leave a stale file behind.
+        let _ = std::fs::remove_file(&shm_path);
         state.events
     })
 }
@@ -987,13 +943,7 @@ pub fn spawn_subsurface_mapped(socket: &str) -> std::thread::JoinHandle<ClientEv
 /// than dereference freed memory.
 pub fn spawn_subsurface_then_destroy_parent(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
+    let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
         let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
@@ -1068,13 +1018,7 @@ pub fn spawn_subsurface_then_destroy_parent(socket: &str) -> std::thread::JoinHa
 /// halves.
 pub fn spawn_activation_round_trip(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
+    let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
         let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
@@ -1133,24 +1077,19 @@ pub fn spawn_activation_round_trip(socket: &str) -> std::thread::JoinHandle<Clie
 /// Drive the xdg-toplevel-icon and xdg-toplevel-tag state machines together.
 ///
 /// Creates a mapped toplevel, attaches an icon carrying both a stock name and
-/// a 64x64 shm pixel buffer, sets it with `xdg_toplevel_icon_manager_v1`, then
-/// sets a tag and description with `xdg_toplevel_tag_manager_v1`. The icon is
-/// double-buffered, so its `set_icon` is applied by the surface commit that
-/// follows; the tag and description are applied when their requests arrive.
-/// Each phase is round-tripped so the server has observed it before the client
-/// returns. No [`ClientEvents`] field records the exchange — the server-side
-/// handler assertions are the proof.
+/// a 64x64 shm pixel buffer, sets it with `xdg_toplevel_icon_manager_v1`,
+/// then resets it with `set_icon(None)` and a second commit, then sets a tag
+/// and description with `xdg_toplevel_tag_manager_v1` followed by an empty tag
+/// and an empty description. The icon is double-buffered, so both the set and
+/// the reset are applied by the surface commit that follows each; the tag and
+/// description (including the empty ones) are applied when their requests
+/// arrive. Each phase is round-tripped so the server has observed it before
+/// the client returns. No [`ClientEvents`] field records the exchange — the
+/// server-side handler assertions are the proof.
 pub fn spawn_toplevel_meta(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
-    let shm_path = crate::common::isolated_runtime_dir()
-        .join(format!("wlr-rs-shm-{}-meta", std::process::id()));
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
+    let shm_path = crate::common::shm_path_for(&format!("{socket}-meta"));
+    let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
         let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
@@ -1198,11 +1137,14 @@ pub fn spawn_toplevel_meta(socket: &str) -> std::thread::JoinHandle<ClientEvents
         const H: i32 = 64;
         const STRIDE: i32 = W * 4;
         let size = STRIDE * H;
+        // `create_new` so a stale path fails instead of being adopted, with mode
+        // `0o600` so no other user can read the pixels; read-write so the
+        // server can mmap the fd with `PROT_READ`.
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
+            .mode(0o600)
             .open(&shm_path)
             .expect("create shm backing file");
         file.set_len(size as u64).expect("size shm backing file");
@@ -1219,6 +1161,14 @@ pub fn spawn_toplevel_meta(socket: &str) -> std::thread::JoinHandle<ClientEvents
             .roundtrip(&mut state)
             .expect("roundtrip so the server applies the icon");
 
+        // Phase 2b: the reset. A null icon, applied by the commit that
+        // follows, which wlroots forwards as `set_icon` with a null icon.
+        icon_manager.set_icon(&toplevel, None);
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server applies the icon reset");
+
         // Phase 3: the tag and its translated description. wlroots forwards
         // each request immediately rather than at commit.
         tag_manager.set_toplevel_tag(&toplevel, "wlr-test-tag".to_owned());
@@ -1226,6 +1176,15 @@ pub fn spawn_toplevel_meta(socket: &str) -> std::thread::JoinHandle<ClientEvents
         queue
             .roundtrip(&mut state)
             .expect("roundtrip so the server sees the tag and description");
+
+        // Phase 3b: the empty tag and description. Empty strings are legal
+        // protocol values, forwarded like any other; the handler must observe
+        // them after the non-empty ones.
+        tag_manager.set_toplevel_tag(&toplevel, String::new());
+        tag_manager.set_toplevel_description(&toplevel, String::new());
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the empty tag and description");
 
         drop((
             icon,
@@ -1241,6 +1200,9 @@ pub fn spawn_toplevel_meta(socket: &str) -> std::thread::JoinHandle<ClientEvents
             wm_base,
             compositor,
         ));
+        // Best-effort: the backing file is unlinked now that every handle is
+        // closed, so a crashed run cannot leave a stale file behind.
+        let _ = std::fs::remove_file(&shm_path);
         state.events
     })
 }

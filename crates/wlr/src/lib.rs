@@ -93,6 +93,7 @@ mod interest;
 mod layer;
 mod log;
 mod output;
+mod owned_handle;
 mod popup;
 mod presentation;
 mod region;
@@ -124,8 +125,8 @@ pub use display::{Display, EventLoop};
 pub use error::{Error, Result};
 pub use ext_foreign_toplevel::{ExtForeignToplevelHandle, ExtForeignToplevelState};
 pub use ext_workspace::{
-    WorkspaceCapabilities, WorkspaceGroupCapabilities, WorkspaceGroupHandle, WorkspaceGroupId,
-    WorkspaceHandle, WorkspaceId, WorkspaceRequest,
+    StaleRequestKind, WorkspaceCapabilities, WorkspaceGroupCapabilities, WorkspaceGroupHandle,
+    WorkspaceGroupId, WorkspaceHandle, WorkspaceId, WorkspaceRequest,
 };
 pub use foreign_toplevel::{ForeignToplevelHandle, ForeignToplevelId, ForeignToplevelState};
 pub use geom::{Box2D, FBox, Subpixel, Transform};

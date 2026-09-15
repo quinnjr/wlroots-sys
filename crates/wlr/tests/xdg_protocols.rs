@@ -14,6 +14,12 @@ mod common;
 
 use std::thread::JoinHandle;
 
+use wayland_client::globals::{GlobalListContents, registry_queue_init};
+use wayland_client::protocol::{wl_compositor, wl_registry, wl_surface};
+use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_protocols::xdg::dialog::v1::client::{xdg_dialog_v1, xdg_wm_dialog_v1};
+use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::system_bell::v1::client::xdg_system_bell_v1;
 use wlr::{Backend, Display, Runtime, ToplevelId, Until};
 
 // ---------------------------------------------------------------------------
@@ -25,6 +31,7 @@ use wlr::{Backend, Display, Runtime, ToplevelId, Until};
 /// handle withdraws it.
 #[test]
 fn activation_tokens_are_owned_and_looked_up_by_name() {
+    let _serial = common::headless_guard();
     common::headless_env();
     let display = Display::new().expect("display");
     let runtime = Runtime::new().expect("runtime");
@@ -81,6 +88,7 @@ fn activation_tokens_are_owned_and_looked_up_by_name() {
 /// by-id downcast misses on an unknown toplevel without dereferencing.
 #[test]
 fn dialog_manager_creates_once_and_downcast_misses_cleanly() {
+    let _serial = common::headless_guard();
     common::headless_env();
     let display = Display::new().expect("display");
     let runtime = Runtime::new().expect("runtime");
@@ -108,6 +116,7 @@ fn dialog_manager_creates_once_and_downcast_misses_cleanly() {
 /// so ring delivery is not driven here.
 #[test]
 fn system_bell_manager_creates_once() {
+    let _serial = common::headless_guard();
     common::headless_env();
     let display = Display::new().expect("display");
     let runtime = Runtime::new().expect("runtime");
@@ -130,6 +139,7 @@ fn system_bell_manager_creates_once() {
 /// entry can ever reach the registry and later be imported).
 #[test]
 fn foreign_registry_and_managers_are_created_once() {
+    let _serial = common::headless_guard();
     common::headless_env();
     let display = Display::new().expect("display");
     let runtime = Runtime::new().expect("runtime");
@@ -172,6 +182,12 @@ fn foreign_registry_and_managers_are_created_once() {
         "an unknown toplevel id yields no export"
     );
     assert!(runtime.find_foreign_exported("anything").is_none());
+    // An interior NUL cannot reach wlroots: the lookup is refused, not
+    // truncated, and still misses.
+    assert!(
+        runtime.find_foreign_exported("a\0b").is_none(),
+        "a handle with an interior NUL is refused"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -498,4 +514,414 @@ fn dialog_downcast_misses_on_a_live_toplevel() {
         "the toplevel carries no dialog role"
     );
     assert_eq!(app.dialog_of, Some(true), "and the by-id path misses too");
+}
+
+// ---------------------------------------------------------------------------
+// Live legs: a client marks a dialog modal; a client rings the system bell
+// ---------------------------------------------------------------------------
+
+/// Test-local client state shared by the dialog and bell legs.
+/// `common::client::ClientState` cannot grow these bindings from here (its
+/// `Dispatch` impls live in `common/`), so this file owns the small state its
+/// own drivers need. wayland-protocols 0.32 *does* ship the staging dialog
+/// and system-bell bindings, so the generated types are used here with these
+/// local impls — no raw-opcode dispatch was needed.
+struct LiveState;
+
+macro_rules! live_empty_dispatch {
+    ($($t:ty),+) => {$(
+        impl Dispatch<$t, ()> for LiveState {
+            fn event(
+                _state: &mut Self,
+                _proxy: &$t,
+                _event: <$t as wayland_client::Proxy>::Event,
+                _data: &(),
+                _conn: &Connection,
+                _qh: &QueueHandle<Self>,
+            ) {
+            }
+        }
+    )+};
+}
+
+live_empty_dispatch!(
+    wl_compositor::WlCompositor,
+    wl_surface::WlSurface,
+    xdg_toplevel::XdgToplevel,
+    xdg_dialog_v1::XdgDialogV1,
+    xdg_wm_dialog_v1::XdgWmDialogV1,
+    xdg_system_bell_v1::XdgSystemBellV1
+);
+
+impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for LiveState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_registry::WlRegistry,
+        _event: wl_registry::Event,
+        _data: &GlobalListContents,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<xdg_wm_base::XdgWmBase, ()> for LiveState {
+    fn event(
+        _state: &mut Self,
+        proxy: &xdg_wm_base::XdgWmBase,
+        event: xdg_wm_base::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_wm_base::Event::Ping { serial } = event {
+            proxy.pong(serial);
+        }
+    }
+}
+
+impl Dispatch<xdg_surface::XdgSurface, ()> for LiveState {
+    fn event(
+        _state: &mut Self,
+        proxy: &xdg_surface::XdgSurface,
+        event: xdg_surface::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_surface::Event::Configure { serial } = event {
+            proxy.ack_configure(serial);
+        }
+    }
+}
+
+/// Spawn the dialog driver: bind `xdg_wm_dialog_v1`, mark the new toplevel
+/// modal *before* its first commit (the role exists from `get_xdg_dialog`
+/// on), commit, then clear the flag with `unset_modal` and commit again so
+/// the server observes both edges.
+fn spawn_dialog_client(socket: &str) -> JoinHandle<()> {
+    let path = common::isolated_runtime_dir().join(socket);
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<LiveState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+        let mut state = LiveState;
+
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let dialog_manager: xdg_wm_dialog_v1::XdgWmDialogV1 =
+            globals.bind(&qh, 1..=1, ()).expect("bind xdg_wm_dialog_v1");
+
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let toplevel = xdg_surface.get_toplevel(&qh, ());
+        let dialog = dialog_manager.get_xdg_dialog(&toplevel, &qh, ());
+        dialog.set_modal();
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the modal dialog");
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the configure is dispatched and acked");
+
+        dialog.unset_modal();
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees unset_modal");
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server drains");
+
+        drop((
+            dialog,
+            surface,
+            xdg_surface,
+            toplevel,
+            dialog_manager,
+            wm_base,
+            compositor,
+        ));
+    })
+}
+
+/// Spawn the bell driver: commit a tracked toplevel surface, then ring once
+/// naming it and once naming nothing. A hand-rolled `Dispatch` for
+/// `xdg_system_bell_v1` (the `LiveState` impl above) is all the binding the
+/// generated `XdgSystemBellV1` type needs — no harness change.
+fn spawn_bell_client(socket: &str) -> JoinHandle<()> {
+    let path = common::isolated_runtime_dir().join(socket);
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<LiveState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+        let mut state = LiveState;
+
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let bell: xdg_system_bell_v1::XdgSystemBellV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind xdg_system_bell_v1");
+
+        // A tracked surface to name: the bufferless toplevel commit is what
+        // the server's surface table records.
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let _toplevel = xdg_surface.get_toplevel(&qh, ());
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server tracks the surface");
+
+        bell.ring(Some(&surface));
+        bell.ring(None);
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees both rings");
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server drains");
+
+        drop((surface, xdg_surface, _toplevel, bell, wm_base, compositor));
+    })
+}
+
+struct DialogLiveApp {
+    runtime: Runtime,
+    client: Option<JoinHandle<()>>,
+    id: Option<ToplevelId>,
+    surface_id: Option<wlr::SurfaceId>,
+    /// `toplevel.dialog()` on the live toplevel at `initial_commit`.
+    initial_dialog: Option<bool>,
+    /// Its `modal()` then: the client marked it before the first commit.
+    initial_modal: Option<bool>,
+    /// Its `toplevel_id() == id` then.
+    initial_toplevel_match: Option<bool>,
+    /// Whether any server turn resolved `runtime.dialog(id)`.
+    saw_runtime_dialog: bool,
+    /// Whether any server turn resolved `runtime.dialog_of(surface)`.
+    saw_dialog_of: bool,
+    /// Whether `modal()` ever read true on the live dialog.
+    saw_modal_true: bool,
+    /// The last `modal()` reading: `Some(false)` once `unset_modal` landed.
+    last_modal: Option<bool>,
+}
+
+impl wlr::OutputHandler for DialogLiveApp {}
+impl wlr::FdHandler for DialogLiveApp {}
+impl wlr::SeatHandler for DialogLiveApp {}
+
+impl wlr::LoopHandler for DialogLiveApp {
+    fn should_stop(&mut self) -> bool {
+        // Sample every turn: the modal flag is set before the first commit
+        // and cleared before the last, and no handler callback fires for
+        // either edge, so polling the live role is the observation path.
+        if let Some(id) = self.id {
+            if let Some(dialog) = self.runtime.dialog(id) {
+                self.saw_runtime_dialog = true;
+                if dialog.modal() {
+                    self.saw_modal_true = true;
+                }
+                self.last_modal = Some(dialog.modal());
+            }
+            if let Some(sid) = self.surface_id
+                && self.runtime.dialog_of(sid).is_some()
+            {
+                self.saw_dialog_of = true;
+            }
+        }
+        self.client.as_ref().is_some_and(|h| h.is_finished())
+    }
+}
+
+impl wlr::ToplevelHandler for DialogLiveApp {
+    fn initial_commit(&mut self, toplevel: &wlr::Toplevel<'_>) {
+        let id = toplevel.id();
+        self.id = Some(id);
+        if let Some(dialog) = toplevel.dialog() {
+            self.initial_dialog = Some(true);
+            self.initial_modal = Some(dialog.modal());
+            self.initial_toplevel_match = Some(dialog.toplevel_id() == id);
+        } else {
+            self.initial_dialog = Some(false);
+        }
+    }
+
+    fn surface_committed(&mut self, surface: &wlr::Surface<'_>) {
+        if self.surface_id.is_none() && wlr::Toplevel::from_surface(surface).is_some() {
+            self.surface_id = Some(surface.id());
+        }
+    }
+}
+
+/// A real client binds `xdg_wm_dialog_v1` and marks its toplevel modal; every
+/// by-handle and by-id downcast resolves it, `toplevel_id()` names the
+/// toplevel, and `modal()` reads true then false across `unset_modal`.
+#[test]
+fn dialog_round_trips_on_a_live_dialog() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime
+        .create_xdg_dialog_manager(&display, 1)
+        .expect("dialog manager");
+    runtime.create_xdg_shell(&display, 7).expect("xdg-shell");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = DialogLiveApp {
+        runtime: runtime.clone(),
+        client: Some(spawn_dialog_client(&socket)),
+        id: None,
+        surface_id: None,
+        initial_dialog: None,
+        initial_modal: None,
+        initial_toplevel_match: None,
+        saw_runtime_dialog: false,
+        saw_dialog_of: false,
+        saw_modal_true: false,
+        last_modal: None,
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Stop)
+        .expect("run_all");
+    app.client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+
+    assert!(app.id.is_some(), "a real toplevel committed");
+    assert_eq!(
+        app.initial_dialog,
+        Some(true),
+        "toplevel.dialog() resolves the live dialog"
+    );
+    assert_eq!(
+        app.initial_modal,
+        Some(true),
+        "the dialog is modal at the first commit"
+    );
+    assert_eq!(
+        app.initial_toplevel_match,
+        Some(true),
+        "dialog.toplevel_id() names the live toplevel"
+    );
+    assert!(
+        app.saw_runtime_dialog,
+        "runtime.dialog(id) resolves the live dialog"
+    );
+    assert!(
+        app.saw_dialog_of,
+        "runtime.dialog_of(surface) resolves the live dialog"
+    );
+    assert!(
+        app.saw_modal_true,
+        "modal() read true while the client had it set"
+    );
+    assert_eq!(
+        app.last_modal,
+        Some(false),
+        "modal() reads false after unset_modal"
+    );
+}
+
+struct BellApp {
+    runtime: Runtime,
+    client: Option<JoinHandle<()>>,
+    rings: Vec<Option<wlr::SurfaceId>>,
+    /// Whether the surface the first ring named resolved through
+    /// `Runtime::surface` while live (sampled in the handler: the surface is
+    /// gone by the time the run returns).
+    first_ring_resolved: Option<bool>,
+}
+
+impl wlr::OutputHandler for BellApp {}
+impl wlr::FdHandler for BellApp {}
+impl wlr::SeatHandler for BellApp {}
+
+impl wlr::LoopHandler for BellApp {
+    fn should_stop(&mut self) -> bool {
+        self.client.as_ref().is_some_and(|h| h.is_finished())
+    }
+}
+
+impl wlr::ToplevelHandler for BellApp {
+    fn system_bell_ring(&mut self, surface: Option<wlr::SurfaceId>) {
+        if self.rings.is_empty() {
+            self.first_ring_resolved =
+                Some(surface.is_some_and(|id| self.runtime.surface(id).is_some()));
+        }
+        self.rings.push(surface);
+    }
+}
+
+/// A real client rings the system bell naming its surface and then naming
+/// nothing; both deliveries reach `system_bell_ring`, and the named surface
+/// resolves while live.
+#[test]
+fn a_client_ring_reaches_the_handler() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime
+        .create_xdg_system_bell(&display, 1)
+        .expect("system bell manager");
+    runtime.create_xdg_shell(&display, 7).expect("xdg-shell");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = BellApp {
+        runtime: runtime.clone(),
+        client: Some(spawn_bell_client(&socket)),
+        rings: Vec::new(),
+        first_ring_resolved: None,
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Stop)
+        .expect("run_all");
+    app.client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+
+    assert_eq!(app.rings.len(), 2, "both rings reached the handler");
+    assert!(
+        app.rings[0].is_some(),
+        "the first ring named the client's surface"
+    );
+    assert_eq!(app.rings[1], None, "the second ring named no surface");
+    assert_eq!(
+        app.first_ring_resolved,
+        Some(true),
+        "the named surface resolved through Runtime::surface while live"
+    );
 }

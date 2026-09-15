@@ -18,7 +18,8 @@
 
 use std::ptr::NonNull;
 
-use crate::runtime::copy_nullable_string;
+use crate::backend::{Registration, bound_session, remove_listener};
+use crate::runtime::{RuntimeInner, copy_nullable_string};
 use crate::{Display, Error, Result, Runtime, sys};
 
 /// The metadata a committed `wp_security_context_v1` carried.
@@ -129,6 +130,27 @@ impl Runtime {
         let raw =
             NonNull::new(raw).ok_or(Error::Create("wlr_security_context_manager_v1_create"))?;
         *self.inner.security_context_manager.borrow_mut() = Some(raw);
+        // Link the teardown watch before returning: the manager dies with the
+        // display, and without this the stored pointer would dangle across
+        // display teardown. The watch clears the pointer and the liveness
+        // flag from inside the manager's own `destroy` emission, while the
+        // manager memory is still valid.
+        self.inner.security_context_manager_alive.set(true);
+        // SAFETY: `raw` is a live manager with initialised signals, and
+        // `self.inner` (the session pointer and the `alive` cell) outlives
+        // the registration: both live in the same `Rc`-allocated
+        // `RuntimeInner`, whose heap address never moves, and the callback
+        // unlinks itself before either can go stale. `link_watched`'s
+        // contract otherwise forwarded verbatim.
+        let watch = unsafe {
+            Registration::link_watched(
+                &raw mut (*raw.as_ptr()).events.destroy,
+                on_security_context_manager_destroy,
+                std::rc::Rc::as_ptr(&self.inner).cast::<()>(),
+                &self.inner.security_context_manager_alive as *const _,
+            )
+        };
+        *self.inner.security_context_manager_destroy.borrow_mut() = Some(watch);
         Ok(())
     }
 
@@ -146,22 +168,38 @@ impl Runtime {
     /// This is what a compositor calls from its own Wayland global filter: the
     /// filter receives the client of a connection the sandbox accepted, and
     /// this answers whether that connection carries a security context and, if
-    /// so, what metadata. `None` when no manager was created, or when `client`
-    /// has no attached context.
+    /// so, what metadata. `None` when no manager was created, when the manager
+    /// died with its display, or when `client` has no attached context.
     ///
     /// # Safety
     ///
     /// `client` must be null or a live `wl_client`. wlroots keys the lookup on
     /// the client with `wl_client_get_destroy_listener`, so a dangling pointer
     /// would be dereferenced; null is refused here before that call.
+    ///
+    /// Additionally, the `Display` passed to
+    /// [`Runtime::create_security_context_manager`] must still be alive. The
+    /// manager is display-owned and wlroots frees it with the display; this
+    /// crate links a `destroy` watch at creation that clears the stored
+    /// manager pointer, so a call after display teardown returns `None`
+    /// instead of dereferencing freed memory (e.g. from a global-filter
+    /// teardown that outlives the display). Upholding display liveness is
+    /// nevertheless part of this function's contract regardless: the flag
+    /// covers manager teardown through display destroy, and callers must not
+    /// treat the structural `None` as permission to order teardown the other
+    /// way around.
     pub unsafe fn lookup_security_context(
         &self,
         client: *const sys::wl_client,
     ) -> Option<SecurityContext> {
+        if !self.inner.security_context_manager_alive.get() {
+            return None;
+        }
         let manager = self.security_context_manager_ptr()?;
         let client = NonNull::new(client.cast_mut())?;
-        // SAFETY: `manager` is live (display-owned, and the runtime keeps the
-        // display alive), and `client` is live per the caller's contract. The
+        // SAFETY: the liveness flag above is true, so the manager's `destroy`
+        // has not fired and the display-owned `manager` is still live; `client`
+        // is live per the caller's contract. The
         // returned state pointer is owned by the context object and valid until
         // its client is destroyed; the snapshot copies every field out before
         // returning.
@@ -173,5 +211,36 @@ impl Runtime {
         }
         // SAFETY: the lookup returned a non-null live state pointer.
         Some(unsafe { snapshot(state) })
+    }
+}
+
+/// The security-context manager is being destroyed (display teardown, before
+/// the manager itself is freed).
+///
+/// Clears the stored manager pointer and the liveness flag while the manager
+/// memory is still valid, so a later [`Runtime::lookup_security_context`]
+/// returns `None` instead of dereferencing freed memory, and unlinks this
+/// listener so wlroots' post-destroy empty-signal assertion holds. A later
+/// `RuntimeInner` drop then finds the flag false and the registration gone,
+/// and never touches the freed signal list.
+unsafe extern "C" fn on_security_context_manager_destroy(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `create_security_context_manager` into a live
+    // manager's `events.destroy` with a `session` pointing at the owning
+    // `RuntimeInner`, which outlives the registration. Every call below is
+    // infallible and cannot unwind out of this `extern "C"` frame.
+    unsafe {
+        let session = bound_session(l);
+        if session.is_null() {
+            return;
+        }
+        let inner = &*session.cast::<RuntimeInner>();
+        inner.security_context_manager_alive.set(false);
+        *inner.security_context_manager.borrow_mut() = None;
+        remove_listener(l);
+        let registration = inner.security_context_manager_destroy.borrow_mut().take();
+        drop(registration);
     }
 }

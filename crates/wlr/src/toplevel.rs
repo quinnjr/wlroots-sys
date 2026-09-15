@@ -15,7 +15,7 @@ use std::ffi::CStr;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-use crate::id::{find_id, find_surface_id};
+use crate::id::find_id;
 use crate::{Surface, sys};
 
 /// Identifies a toplevel for as long as the consumer chooses to remember it.
@@ -358,7 +358,9 @@ impl<'h> Toplevel<'h> {
     }
 
     /// Shared body of the two hit-tests, which differ only in which wlroots
-    /// walk they call.
+    /// walk they call. The null-check/id/handle tail lives in
+    /// [`crate::Surface::finish_surface_at`](crate::Surface::finish_surface_at),
+    /// shared with every other `surface_at_impl` in the crate.
     fn surface_at_impl(
         &self,
         walk: unsafe extern "C" fn(
@@ -375,16 +377,13 @@ impl<'h> Toplevel<'h> {
         let mut sub_y = 0.0;
         // SAFETY: the handle's lifetime guarantees the toplevel is live, so
         // `base` is live; both out-parameters are live locals that outlive the
-        // call, and wlroots only reads the coordinates.
+        // call, and wlroots only reads the coordinates. The walk returns null
+        // or a live surface of this same tree, which is what
+        // `finish_surface_at` takes.
         unsafe {
             let base = (*self.raw.as_ptr()).base;
             let raw = walk(base, sx, sy, &raw mut sub_x, &raw mut sub_y);
-            if raw.is_null() {
-                return None;
-            }
-            let id = find_surface_id(&raw const (*raw).addons).map(crate::SurfaceId)?;
-            let surface = crate::Surface::from_raw_opt(raw, id)?;
-            Some((surface, sub_x, sub_y))
+            crate::Surface::finish_surface_at(raw, sub_x, sub_y)
         }
     }
 }
@@ -444,65 +443,94 @@ impl Edges {
     }
 }
 
-/// The window-manager capabilities a compositor advertises to a toplevel.
+/// A `u32`-backed capability bitmask: named constants plus
+/// `contains`/`bits`/`from_raw` and `BitOr`/`BitOrAssign`.
 ///
-/// A bitmask of `enum wlr_xdg_toplevel_wm_capabilities`, hand-rolled rather
-/// than a `bitflags` dependency following
-/// [`ConstraintAdjustment`](crate::ConstraintAdjustment): the four bits are
-/// the whole domain and are pinned against the generated constants by this
-/// module's own tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct WmCapabilities(u32);
+/// Local to this module: no crate-wide `bitmask!` exists (a parallel review
+/// asked for one in `ext_workspace.rs`, but that module still hand-rolls its
+/// own masks), so the macro lives here, next to its single use. A second
+/// bitmask type should move this into a shared spot (e.g. `surface.rs`,
+/// which `layer.rs` and this module already both reach through
+/// `crate::surface::`) rather than growing a second copy.
+macro_rules! bitmask {
+    (
+        $(#[$ty_attr:meta])*
+        $name:ident {
+            $(
+                $(#[$c_attr:meta])*
+                $const:ident = $val:expr
+            ),* $(,)?
+        }
+    ) => {
+        $(#[$ty_attr])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+        pub struct $name(u32);
 
-impl WmCapabilities {
-    /// No capabilities advertised; the protocol's initial value, and
-    /// [`Default`].
-    pub const NONE: WmCapabilities = WmCapabilities(0);
-    /// The compositor can show a client window menu.
-    pub const WINDOW_MENU: WmCapabilities = WmCapabilities(1);
-    /// The compositor can maximize.
-    pub const MAXIMIZE: WmCapabilities = WmCapabilities(2);
-    /// The compositor can fullscreen.
-    pub const FULLSCREEN: WmCapabilities = WmCapabilities(4);
-    /// The compositor can minimize.
-    pub const MINIMIZE: WmCapabilities = WmCapabilities(8);
+        impl $name {
+            $(
+                $(#[$c_attr])*
+                pub const $const: $name = $name($val);
+            )*
 
-    /// Whether **every** bit of `other` is advertised here — the semantics of
-    /// [`ConstraintAdjustment::contains`](crate::ConstraintAdjustment::contains),
-    /// for the same reason it is not "any".
-    #[must_use]
-    pub fn contains(self, other: WmCapabilities) -> bool {
-        self.0 & other.0 == other.0
-    }
+            /// Whether **every** bit of `other` is set here — not "any".
+            #[must_use]
+            pub fn contains(self, other: $name) -> bool {
+                self.0 & other.0 == other.0
+            }
 
-    /// The raw mask, as the protocol numbers it.
-    #[must_use]
-    pub fn bits(self) -> u32 {
-        self.0
-    }
+            /// The raw mask, as the protocol numbers it.
+            #[must_use]
+            pub fn bits(self) -> u32 {
+                self.0
+            }
 
-    /// Build from the raw `enum wlr_xdg_toplevel_wm_capabilities` value.
+            /// Build from the raw protocol value.
+            ///
+            /// Unknown bits are kept, not dropped: the mask is handed straight
+            /// back to wlroots by the setter that interprets it, so silently
+            /// clearing a bit would change the caller's request rather than
+            /// merely fail to describe it.
+            pub(crate) fn from_raw(raw: u32) -> $name {
+                $name(raw)
+            }
+        }
+
+        impl std::ops::BitOr for $name {
+            type Output = $name;
+
+            fn bitor(self, rhs: $name) -> $name {
+                $name(self.0 | rhs.0)
+            }
+        }
+
+        impl std::ops::BitOrAssign for $name {
+            fn bitor_assign(&mut self, rhs: $name) {
+                self.0 |= rhs.0;
+            }
+        }
+    };
+}
+
+bitmask! {
+    /// The window-manager capabilities a compositor advertises to a toplevel.
     ///
-    /// Unknown bits are kept, not dropped: the mask is handed straight back to
-    /// wlroots by [`Runtime::set_toplevel_wm_capabilities`](crate::Runtime),
-    /// which is the code that interprets it, so silently clearing a bit would
-    /// change the caller's request rather than merely fail to describe it.
-    pub(crate) fn from_raw(raw: u32) -> WmCapabilities {
-        WmCapabilities(raw)
-    }
-}
-
-impl std::ops::BitOr for WmCapabilities {
-    type Output = WmCapabilities;
-
-    fn bitor(self, rhs: WmCapabilities) -> WmCapabilities {
-        WmCapabilities(self.0 | rhs.0)
-    }
-}
-
-impl std::ops::BitOrAssign for WmCapabilities {
-    fn bitor_assign(&mut self, rhs: WmCapabilities) {
-        self.0 |= rhs.0;
+    /// A bitmask of `enum wlr_xdg_toplevel_wm_capabilities`, built with the
+    /// `bitmask!` macro above rather than a `bitflags` dependency following
+    /// [`ConstraintAdjustment`](crate::ConstraintAdjustment): the four bits are
+    /// the whole domain and are pinned against the generated constants by this
+    /// module's own tests.
+    WmCapabilities {
+        /// No capabilities advertised; the protocol's initial value, and
+        /// [`Default`].
+        NONE = 0,
+        /// The compositor can show a client window menu.
+        WINDOW_MENU = 1,
+        /// The compositor can maximize.
+        MAXIMIZE = 2,
+        /// The compositor can fullscreen.
+        FULLSCREEN = 4,
+        /// The compositor can minimize.
+        MINIMIZE = 8,
     }
 }
 

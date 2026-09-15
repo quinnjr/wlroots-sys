@@ -12,6 +12,7 @@
 //! rather than module-wide — a module-wide `#![allow(dead_code)]` would also
 //! hide genuinely dead helpers from every binary at once.
 
+use std::cell::Cell;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, Once, OnceLock};
@@ -21,16 +22,19 @@ pub mod client;
 
 /// Ensures `WLR_BACKENDS`/`WLR_HEADLESS_OUTPUTS`/`WLR_RENDERER` are set exactly
 /// once, before any test in this binary calls `Backend::autocreate`.
+///
+/// Does NOT acquire [`headless_guard`]: client threads call the `spawn_*`
+/// helpers while the test thread holds the guard, so locking here would
+/// deadlock. Callers that mutate the environment must already hold the guard
+/// (every display-creating test does).
 #[allow(dead_code)]
 pub fn headless_env() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        // SAFETY: `Once::call_once` means the writes below run at most once,
-        // and in practice they run before any `Display::new` in this binary
-        // creates the backend that reads them. It does *not* make
-        // `set_var`/`getenv` racing impossible: tests may call `headless_env`
-        // without holding `headless_guard`, so a `getenv` on another thread
-        // is not excluded by this `Once` alone.
+        // SAFETY: `Once::call_once` runs these writes at most once, before any
+        // `Display::new` in this binary creates the backend that reads them.
+        // Every display-creating test holds `headless_guard` across its whole
+        // body, so no libwayland `getenv` in this process races these writes.
         unsafe {
             std::env::set_var("WLR_BACKENDS", "headless");
             std::env::set_var("WLR_HEADLESS_OUTPUTS", "1");
@@ -39,45 +43,74 @@ pub fn headless_env() {
     });
 }
 
-static HEADLESS_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+static HEADLESS_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+thread_local! {
+    /// How many times this thread has acquired [`headless_guard`] without
+    /// dropping. Nonzero means the thread already owns the process-wide mutex,
+    /// so a nested [`headless_guard`] must not lock it again.
+    static HOLD_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Holds the process-wide environment/display serialisation lock.
+///
+/// Reentrant per thread: the outermost acquisition locks the mutex, nested
+/// ones (e.g. [`headless_env`] called while the test already holds the guard)
+/// only bump the hold count. Dropping the outermost guard unlocks.
+#[allow(dead_code)]
+pub struct HeadlessGuard {
+    _inner: Option<MutexGuard<'static, ()>>,
+}
+
+impl Drop for HeadlessGuard {
+    fn drop(&mut self) {
+        HOLD_COUNT.with(|c| c.set(c.get().saturating_sub(1)));
+        // `_inner` drops after this, releasing the mutex only when the
+        // outermost guard goes away; nested guards hold `None`.
+    }
+}
 
 /// Serializes display/backend bring-up across the tests in one binary.
 /// libwayland-server holds process-global state, so two `Display::new()`
 /// calls racing on different test threads abort with `data is non-NULL
 /// with zero alloc`. Hold this for the whole test body.
 ///
+/// Reentrant per thread (nested holds only bump the count), but it must
+/// never be acquired on a spawned client thread while a test thread may
+/// hold it — so the `spawn_*` helpers and everything they call stay
+/// lock-free.
+///
 /// Must stay in lockstep with `crates/wlr/src/test_support.rs`'s
 /// `test_display_guard` (the `--lib` counterpart): the two cannot share an
 /// implementation across the `cfg(test)` lib / integration-crate boundary,
 /// so both copies are poison-tolerant for the same reason.
 #[allow(dead_code)]
-pub fn headless_guard() -> MutexGuard<'static, ()> {
-    HEADLESS_GUARD
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+pub fn headless_guard() -> HeadlessGuard {
+    let depth = HOLD_COUNT.with(|c| {
+        let depth = c.get();
+        c.set(depth + 1);
+        depth
+    });
+    if depth == 0 {
+        let inner = HEADLESS_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        HeadlessGuard {
+            _inner: Some(inner),
+        }
+    } else {
+        HeadlessGuard { _inner: None }
+    }
 }
 
 /// Points `XDG_RUNTIME_DIR` at a fresh per-process temp directory and returns
 /// it.
 ///
-/// libwayland binds `Display::add_socket_auto`'s `wayland-N` socket *under*
-/// `XDG_RUNTIME_DIR`, so it must be set before [`Display::new`] runs, not merely
-/// before the client connects: the server binds the socket as soon as
-/// `add_socket_auto` returns, and [`client::spawn`] resolves the same
-/// directory when it turns that name into the socket path it hands to
-/// `wayland_client::Connection::from_socket`.
-///
-/// Idempotent per process — the first caller sets it, every later one gets the
-/// same directory — because the value is process-global and two tests racing to
-/// repoint it would each strand the other's client. The tests that create a
-/// display are serialized by [`headless_guard`], so the first call wins before
-/// any server binds.
-///
-/// The directory is private (mode `0700`) with a non-predictable suffix and is
-/// removed best-effort when the process exits. `create_dir` rather than
-/// `create_dir_all` so a pre-existing path fails instead of being adopted, and
-/// no parent is traversed.
+/// Does NOT acquire [`headless_guard`]: spawned client threads call this via
+/// the `spawn_*` helpers while the test thread holds the guard, so locking
+/// here would deadlock. The test must already hold the guard (every
+/// display-creating test does) before the first call.
 #[allow(dead_code)]
 pub fn isolated_runtime_dir() -> PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -88,13 +121,10 @@ pub fn isolated_runtime_dir() -> PathBuf {
             .mode(0o700)
             .create(&path)
             .expect("create isolated XDG_RUNTIME_DIR");
-        // SAFETY: `OnceLock::get_or_init` runs this at most once and blocks
-        // every other caller on the same cell until it returns, so `set_var`
-        // itself is not reentered. It does *not* exclude a concurrent `getenv`
-        // on a thread that is not waiting on this cell; in practice it runs
-        // before any libwayland call in this process binds or resolves a
-        // socket. The cleanup below is registered once, after the directory
-        // exists.
+        // SAFETY: `OnceLock::get_or_init` runs this at most once, before any
+        // `Display::new` binds a socket under it, and every display-creating
+        // test holds `headless_guard` across its whole body, so no libwayland
+        // `getenv` in this process races this write.
         DIR_PATH.set(path.clone()).ok();
         unsafe {
             std::env::set_var("XDG_RUNTIME_DIR", &path);
@@ -103,6 +133,61 @@ pub fn isolated_runtime_dir() -> PathBuf {
         path
     })
     .clone()
+}
+
+/// Bound for blocking socket I/O inside the spawned client threads.
+///
+/// Without it a stuck hop leaves `roundtrip` blocked forever, the thread never
+/// finishes, and CI hangs where it should fail: the read call returns
+/// `TimedOut`/`WouldBlock` after ten seconds, `roundtrip` surfaces the `Err`,
+/// and the thread panics with the round-trip's message.
+// Shared harness: not every test binary drives a client, so binaries that
+// never connect would warn without the allow (see module docs).
+#[allow(dead_code)]
+pub const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Connect to the Wayland socket at `path` with [`IO_TIMEOUT`] read/write
+/// bounds, for handing to `Connection::from_socket` on a spawned thread.
+// Shared harness: see `IO_TIMEOUT` above.
+#[allow(dead_code)]
+pub fn connect_socket(path: &std::path::Path) -> std::os::unix::net::UnixStream {
+    let stream = std::os::unix::net::UnixStream::connect(path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(IO_TIMEOUT))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(IO_TIMEOUT))
+        .expect("set write timeout on wayland socket");
+    stream
+}
+
+/// Unique backing path for a per-test shm file or listen socket, under
+/// [`isolated_runtime_dir`].
+///
+/// The pid alone is predictable on a shared `/tmp` and a fixed stem collides
+/// when one binary maps twice, so the name mixes in per-process entropy from
+/// `nonce()` alongside the pid. `tag` only names the kind (e.g. the socket
+/// name plus a role suffix); characters outside `[A-Za-z0-9-_.]` are replaced
+/// so a socket name can never escape the directory. Callers create with
+/// `create_new(true)` and mode `0o600`, unlink any stale path before binding,
+/// and remove the file when the client thread exits. Signature-stable on
+/// purpose: [`isolated_runtime_dir`] keeps returning the directory itself.
+// Shared harness: see `IO_TIMEOUT` above.
+#[allow(dead_code)]
+pub fn shm_path_for(tag: &str) -> PathBuf {
+    let mut safe = String::with_capacity(tag.len());
+    for c in tag.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+            safe.push(c);
+        } else {
+            safe.push('_');
+        }
+    }
+    isolated_runtime_dir().join(format!(
+        "wlr-rs-shm-{}-{}-{safe}",
+        std::process::id(),
+        nonce()
+    ))
 }
 
 /// Per-process entropy for the runtime-dir name: pid is not enough on a shared

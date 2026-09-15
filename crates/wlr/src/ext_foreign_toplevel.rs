@@ -27,11 +27,11 @@
 //! list's `destroy` signal and becomes inert once it fires, so a late `Drop` is
 //! a no-op rather than a use-after-free.
 
-use std::cell::{Cell, RefCell};
-use std::ffi::{CString, c_void};
+use std::ffi::CString;
 use std::ptr::NonNull;
 
-use crate::backend::{Registration, bound_session, remove_listener};
+use crate::backend::Registration;
+use crate::owned_handle::{OwnedHandle, on_watched_destroy};
 use crate::runtime::copy_nullable_string;
 use crate::{Display, Error, Result, Runtime, sys};
 
@@ -41,7 +41,12 @@ use crate::{Display, Error, Result, Runtime, sys};
 /// [`ExtForeignToplevelHandle::update_state`]. Every field is owned, so the
 /// snapshot outlives the call and no wlroots pointer escapes. `None` on a field
 /// means wlroots stores no value for it (an empty string is a real value).
+///
+/// New-in-milestone and unreleased: marked [`#[non_exhaustive]`] so future
+/// protocol fields can be added without breaking downstream construction.
+/// Exhaustiveness was never promised for this snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct ExtForeignToplevelState {
     /// The window title the compositor last set.
     pub title: Option<String>,
@@ -52,24 +57,11 @@ pub struct ExtForeignToplevelState {
 /// The list-death watch shared by an owned [`ExtForeignToplevelHandle`] and its
 /// callback.
 ///
-/// Heap-stable: the handle boxes it and never moves the box's contents, so the
-/// listener may name its address for the registration's whole life.
-struct HandleListeners {
-    /// The runtime the handle was created against, read once at creation to
-    /// look up the display-owned list and link the watch. Holding this clone
-    /// does not keep the list (or any object) alive; it is a handle to the
-    /// runtime, not the object being watched.
-    runtime: Runtime,
-    /// The live handle, until `alive` is cleared.
-    raw: NonNull<sys::wlr_ext_foreign_toplevel_handle_v1>,
-    /// False once the list has been destroyed (display teardown) or the handle's
-    /// own `Drop` has run. Every accessor and mutator is a miss while it is
-    /// false.
-    alive: Cell<bool>,
-    /// The list's `destroy` watch, unlinked by its own callback or by the
-    /// handle's `Drop`.
-    list_destroy: RefCell<Option<Registration>>,
-}
+/// [`OwnedHandle`](crate::owned_handle::OwnedHandle) specialised to this
+/// module's object: heap-stable, so the listener may name its address for the
+/// registration's whole life. See that module for the unlink ordering both
+/// paths below preserve.
+type HandleListeners = OwnedHandle<sys::wlr_ext_foreign_toplevel_handle_v1>;
 
 /// An exported toplevel, owned by the compositor.
 ///
@@ -101,14 +93,9 @@ impl ExtForeignToplevelHandle {
         runtime: Runtime,
         raw: NonNull<sys::wlr_ext_foreign_toplevel_handle_v1>,
     ) -> ExtForeignToplevelHandle {
-        let listeners = Box::new(HandleListeners {
-            runtime,
-            raw,
-            alive: Cell::new(true),
-            list_destroy: RefCell::new(None),
-        });
+        let listeners: Box<HandleListeners> = OwnedHandle::boxed(runtime, raw);
         // The box address is stable from here on, so the watch may name it.
-        let session: *const () = (&*listeners as *const HandleListeners).cast();
+        let session: *const () = OwnedHandle::session(&listeners);
 
         let list = listeners.runtime.ext_foreign_toplevel_list_ptr();
         if let Some(list) = list {
@@ -118,12 +105,12 @@ impl ExtForeignToplevelHandle {
             let watch = unsafe {
                 Registration::link_watched(
                     &raw mut (*list.as_ptr()).events.destroy,
-                    on_list_destroy,
+                    on_watched_destroy::<sys::wlr_ext_foreign_toplevel_handle_v1>,
                     session,
                     &listeners.alive,
                 )
             };
-            *listeners.list_destroy.borrow_mut() = Some(watch);
+            *listeners.watched_destroy.borrow_mut() = Some(watch);
         }
 
         ExtForeignToplevelHandle { listeners }
@@ -157,7 +144,10 @@ impl ExtForeignToplevelHandle {
 
     /// The toplevel's mutable state, copied out.
     ///
-    /// An inert handle reports [`ExtForeignToplevelState::default`].
+    /// An inert handle reports [`ExtForeignToplevelState::default`], which is
+    /// also a legitimate empty state — check [`is_alive`](Self::is_alive) to
+    /// tell the two apart.
+    #[must_use]
     pub fn state(&self) -> ExtForeignToplevelState {
         let Some(raw) = self.raw() else {
             return ExtForeignToplevelState::default();
@@ -190,18 +180,15 @@ impl ExtForeignToplevelHandle {
 
 impl Drop for ExtForeignToplevelHandle {
     fn drop(&mut self) {
-        if !self.listeners.alive.get() {
+        let Some(raw) = self.listeners.take_live_raw() else {
             // The list died first and its callback already unlinked the watch;
             // the wlroots handle must not be touched.
             return;
-        }
-        let watch = self.listeners.list_destroy.borrow_mut().take();
-        drop(watch);
-        self.listeners.alive.set(false);
+        };
 
-        // SAFETY: `alive` was true, so the caller's sole-owner contract holds
-        // and wlroots frees the handle exactly once.
-        unsafe { sys::wlr_ext_foreign_toplevel_handle_v1_destroy(self.listeners.raw.as_ptr()) };
+        // SAFETY: `take_live_raw` returned `Some`, so the caller's sole-owner
+        // contract holds and wlroots frees the handle exactly once.
+        unsafe { sys::wlr_ext_foreign_toplevel_handle_v1_destroy(raw.as_ptr()) };
     }
 }
 
@@ -277,39 +264,4 @@ fn with_raw_state<R>(
         app_id: app_id.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
     };
     Some(f(&raw))
-}
-
-/// Recover the [`HandleListeners`] a watch was linked with.
-///
-/// # Safety
-///
-/// `l` must be a listener linked with a `HandleListeners` address as its
-/// session, and that box must still be alive.
-unsafe fn ctx_of<'a>(l: *mut sys::wl_listener) -> Option<&'a HandleListeners> {
-    // SAFETY: the caller guarantees `l` is a `Registration` listener, so
-    // `bound_session` recovers its live `session`.
-    let session = unsafe { bound_session(l) };
-    if session.is_null() {
-        return None;
-    }
-    // SAFETY: the caller guarantees the session names a live `HandleListeners`.
-    Some(unsafe { &*session.cast::<HandleListeners>() })
-}
-
-/// The list is being destroyed (display teardown, before the list itself is
-/// freed).
-///
-/// Marks the owned handle inert and unlinks the watch while the handle memory is
-/// still valid, so a later `Drop` never touches the freed list.
-unsafe extern "C" fn on_list_destroy(l: *mut sys::wl_listener, _data: *mut c_void) {
-    // SAFETY: linked with a `HandleListeners` session and its `alive` cell; the
-    // registration below is dropped from inside this emission, while its own
-    // list's signal is still alive.
-    unsafe {
-        let Some(ctx) = ctx_of(l) else { return };
-        ctx.alive.set(false);
-        remove_listener(l);
-        let registration = ctx.list_destroy.borrow_mut().take();
-        drop(registration);
-    }
 }

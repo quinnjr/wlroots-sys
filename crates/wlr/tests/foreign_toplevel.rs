@@ -333,6 +333,12 @@ fn dropping_the_display_makes_a_handle_inert() {
     assert!(handle.is_alive());
     assert_eq!(handle.title().as_deref(), Some("live"));
 
+    // A second handle parented to the first, so the inert-parent refusal has
+    // something to refuse with after the display dies.
+    let child = runtime.create_foreign_toplevel().expect("child");
+    child.set_parent(Some(&handle)).expect("set parent");
+    assert_eq!(child.state().parent, Some(handle.id()));
+
     // Destroy the display out from under the handle. wlroots emits the
     // manager's `destroy` while its memory is still valid, and the handle's
     // watch runs there.
@@ -345,6 +351,21 @@ fn dropping_the_display_makes_a_handle_inert() {
     );
     assert_eq!(handle.state(), ForeignToplevelState::default());
     assert_eq!(handle.set_title("late"), None, "no mutator writes either");
+    assert!(
+        !child.is_alive(),
+        "the child observed the manager's death too"
+    );
+    assert_eq!(
+        child.set_parent(Some(&handle)),
+        None,
+        "set_parent against an inert parent must refuse rather than touch the freed manager"
+    );
+    assert_eq!(
+        child.set_parent(None),
+        None,
+        "even clearing the parent is refused once the handle is inert"
+    );
     // Drop is a no-op now instead of a double free against the freed manager.
+    drop(child);
     drop(handle);
 }

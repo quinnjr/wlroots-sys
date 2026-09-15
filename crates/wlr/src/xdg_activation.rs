@@ -24,11 +24,12 @@
 //!   display teardown, none of which this crate controls.
 
 use std::cell::Cell;
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::ptr::NonNull;
 
 use crate::backend::Registration;
 use crate::id::find_id;
+use crate::runtime::copy_nullable_string;
 use crate::{ActivationToken, Runtime, ToplevelId, sys};
 
 /// An owned `wlr_xdg_activation_token_v1`.
@@ -63,9 +64,11 @@ pub struct ActivationTokenHandle {
 
 impl std::fmt::Debug for ActivationTokenHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The token name is a bearer secret: anyone holding it can redeem the
+        // activation. Never print it; the explicit `name()` hand-off path stays
+        // available for the compositor that mints and distributes it.
         f.debug_struct("ActivationTokenHandle")
             .field("alive", &self.is_alive())
-            .field("name", &self.name())
             .finish_non_exhaustive()
     }
 }
@@ -122,12 +125,10 @@ impl ActivationTokenHandle {
         }
         // SAFETY: `alive` is true, so the handle's pointer is still a live token.
         let raw = unsafe { sys::wlr_xdg_activation_token_v1_get_name(self.raw.as_ptr()) };
-        if raw.is_null() {
-            return None;
-        }
-        // SAFETY: `raw` is a non-null, NUL-terminated string wlroots owns; it is
-        // copied out here and never freed.
-        Some(unsafe { CStr::from_ptr(raw).to_string_lossy().into_owned() })
+        // Null or a NUL-terminated string wlroots owns, copied out and never
+        // freed. Single policy with every other nullable copy in this crate
+        // (`crate::runtime::copy_nullable_string`).
+        copy_nullable_string(raw as *const _)
     }
 
     /// What the token currently carries, as the same snapshot

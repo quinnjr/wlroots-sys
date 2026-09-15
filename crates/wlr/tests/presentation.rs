@@ -17,6 +17,13 @@
 
 use std::thread::JoinHandle;
 
+use wayland_client::globals::{GlobalListContents, registry_queue_init};
+use wayland_client::protocol::{wl_compositor, wl_registry, wl_surface};
+use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_protocols::wp::tearing_control::v1::client::{
+    wp_tearing_control_manager_v1, wp_tearing_control_v1,
+};
+use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wlr::{Backend, Display, Output, OutputId, Runtime, Surface, SurfaceId, TearingHint, Until};
 
 mod common;
@@ -34,6 +41,9 @@ struct App {
     committed: usize,
     /// Commits where `sampled()` returned a feedback (the client asked).
     sampled_some: usize,
+    /// Commits where `sampled()` returned nothing: the client's single
+    /// feedback request is take-once, so later commits miss.
+    sampled_none: usize,
     /// Commits where `tearing_hint()` reported the vsync default.
     hinted_vsync: usize,
     /// Commits where `tearing_control()` correctly missed.
@@ -41,6 +51,9 @@ struct App {
     /// Commits where the textured/scanned wrappers ran with a live output.
     textured: usize,
     scanned: usize,
+    /// Commits where a client-created tearing control resolved and named
+    /// this very surface through `surface_id()`.
+    control_surface_matched: usize,
     client: Option<JoinHandle<common::client::ClientEvents>>,
 }
 
@@ -57,8 +70,11 @@ impl wlr::ToplevelHandler for App {
         // Runs the sampled FFI against the real surface. With the client's
         // `wp_presentation.feedback` request applied, the first commit returns
         // `Some`; the wrapper detaches it and dropping it sends `discarded`.
+        // Later commits miss: the single client request is take-once.
         if surface.sampled().is_some() {
             self.sampled_some += 1;
+        } else {
+            self.sampled_none += 1;
         }
 
         // The tearing manager was cached onto this handle by `with_surface`; a
@@ -68,6 +84,14 @@ impl wlr::ToplevelHandler for App {
         }
         if surface.tearing_control().is_none() {
             self.control_missing += 1;
+        }
+        // A client-created control names the surface it was created for: the
+        // id-addon lookup must resolve to this very surface's id.
+        if surface
+            .tearing_control()
+            .is_some_and(|control| control.surface_id() == Some(surface.id()))
+        {
+            self.control_surface_matched += 1;
         }
 
         // Resolve the announced output to a live handle and run both
@@ -180,10 +204,12 @@ fn a_real_surface_runs_the_presentation_and_tearing_wrappers() {
         output: None,
         committed: 0,
         sampled_some: 0,
+        sampled_none: 0,
         hinted_vsync: 0,
         control_missing: 0,
         textured: 0,
         scanned: 0,
+        control_surface_matched: 0,
         client: Some(common::client::spawn_mapped(&socket)),
     };
 
@@ -222,11 +248,197 @@ fn a_real_surface_runs_the_presentation_and_tearing_wrappers() {
         "the client's wp_presentation.feedback request must reach Surface::sampled"
     );
     assert!(
+        app.sampled_none >= 1,
+        "sampled() is take-once: commits after the single client request is consumed must return None"
+    );
+    assert!(
         app.hinted_vsync >= 1,
         "the tearing manager cached by with_surface must make tearing_hint report the default"
     );
     assert!(
         app.control_missing >= 1,
         "no client created a tearing control, so the object lookup must miss"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Tearing-control positive: a client-created control names its surface
+// ---------------------------------------------------------------------------
+
+/// Test-local client state for the tearing-control leg: the shared
+/// `spawn_mapped` driver never creates a control object, so this file owns
+/// the variant that does.
+struct TearingState;
+
+macro_rules! tearing_empty_dispatch {
+    ($($t:ty),+) => {$(
+        impl Dispatch<$t, ()> for TearingState {
+            fn event(
+                _state: &mut Self,
+                _proxy: &$t,
+                _event: <$t as wayland_client::Proxy>::Event,
+                _data: &(),
+                _conn: &Connection,
+                _qh: &QueueHandle<Self>,
+            ) {
+            }
+        }
+    )+};
+}
+
+tearing_empty_dispatch!(
+    wl_compositor::WlCompositor,
+    wl_surface::WlSurface,
+    xdg_toplevel::XdgToplevel,
+    wp_tearing_control_manager_v1::WpTearingControlManagerV1,
+    wp_tearing_control_v1::WpTearingControlV1
+);
+
+impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for TearingState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_registry::WlRegistry,
+        _event: wl_registry::Event,
+        _data: &GlobalListContents,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<xdg_wm_base::XdgWmBase, ()> for TearingState {
+    fn event(
+        _state: &mut Self,
+        proxy: &xdg_wm_base::XdgWmBase,
+        event: xdg_wm_base::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_wm_base::Event::Ping { serial } = event {
+            proxy.pong(serial);
+        }
+    }
+}
+
+impl Dispatch<xdg_surface::XdgSurface, ()> for TearingState {
+    fn event(
+        _state: &mut Self,
+        proxy: &xdg_surface::XdgSurface,
+        event: xdg_surface::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_surface::Event::Configure { serial } = event {
+            proxy.ack_configure(serial);
+        }
+    }
+}
+
+/// Like the shared mapped driver, but creates a tearing-control object for
+/// the toplevel surface before its first commit, so the server observes at
+/// least one commit where `tearing_control()` resolves and `surface_id()`
+/// names the committing surface.
+fn spawn_mapped_with_tearing_control(socket: &str) -> JoinHandle<common::client::ClientEvents> {
+    let path = common::isolated_runtime_dir().join(socket);
+    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set read timeout on wayland socket");
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("set write timeout on wayland socket");
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<TearingState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+        let mut state = TearingState;
+        let events = common::client::ClientEvents::default();
+
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let tearing_manager: wp_tearing_control_manager_v1::WpTearingControlManagerV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind wp_tearing_control_manager_v1");
+
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let _toplevel = xdg_surface.get_toplevel(&qh, ());
+        // The control object exists from this request on; creating it before
+        // the first commit means the server's commit handler observes it.
+        let _control = tearing_manager.get_tearing_control(&surface, &qh, ());
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server tracks the surface and its control");
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server drains");
+
+        drop((
+            _control,
+            surface,
+            xdg_surface,
+            _toplevel,
+            tearing_manager,
+            wm_base,
+            compositor,
+        ));
+        events
+    })
+}
+
+/// A client creates a tearing-control object for its toplevel surface; the
+/// server must resolve it through `Surface::tearing_control`, and its
+/// `surface_id()` must name the committing surface — the id-addon positive
+/// that the miss-only tests cannot cover.
+#[test]
+fn a_client_created_tearing_control_names_its_surface() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime.create_xdg_shell(&display, 6).expect("xdg-shell");
+    runtime
+        .create_tearing_control_manager(&display, 1)
+        .expect("tearing control");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = App {
+        runtime: runtime.clone(),
+        output: None,
+        committed: 0,
+        sampled_some: 0,
+        sampled_none: 0,
+        hinted_vsync: 0,
+        control_missing: 0,
+        textured: 0,
+        scanned: 0,
+        control_surface_matched: 0,
+        client: Some(spawn_mapped_with_tearing_control(&socket)),
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Stop)
+        .expect("run_all");
+    app.client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+
+    assert!(
+        app.committed >= 1,
+        "the client commits at least once and commits reach surface_committed"
+    );
+    assert!(
+        app.control_surface_matched >= 1,
+        "tearing_control() resolved on a commit and surface_id() named that surface"
     );
 }

@@ -26,7 +26,12 @@ use crate::surface::{Surface, SurfaceId};
 use crate::{Runtime, sys};
 
 /// The presentation hint a client set on its surface.
+///
+/// Marked [`#[non_exhaustive]`] so a future protocol hint can be added without
+/// breaking downstream matches. Exhaustiveness was never promised for this
+/// value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum TearingHint {
     /// Present in step with the display's vertical blank. The default when no
     /// client has asked for anything.
@@ -204,95 +209,70 @@ mod tests {
     use super::{TearingControl, TearingHint};
     use crate::surface::{Surface, SurfaceId};
     use crate::sys;
-    use crate::test_support::ScratchSurface;
-    use std::alloc::{Layout, alloc_zeroed, dealloc};
+    use crate::test_support::{Scratch, ScratchSurface};
     use std::ptr::NonNull;
 
+    /// A no-op fini for scratch objects nothing needs to undo.
+    fn noop_fini<T>(_: *mut T) {}
+
+    /// Initialise a zeroed tearing manager's list to empty.
+    fn init_manager(ptr: *mut sys::wlr_tearing_control_manager_v1) {
+        // SAFETY: `ptr` is a live, exclusively-owned, zeroed manager; an
+        // empty list points at itself.
+        unsafe {
+            (*ptr).surface_hints.prev = &raw mut (*ptr).surface_hints;
+            (*ptr).surface_hints.next = &raw mut (*ptr).surface_hints;
+        }
+    }
+
     /// A zeroed manager whose `surface_hints` list is initialised to empty.
-    struct ScratchManager(*mut sys::wlr_tearing_control_manager_v1);
+    fn new_manager() -> Scratch<sys::wlr_tearing_control_manager_v1> {
+        Scratch::new(init_manager, noop_fini)
+    }
 
-    impl ScratchManager {
-        fn new() -> Self {
-            let layout = Layout::new::<sys::wlr_tearing_control_manager_v1>();
-            // SAFETY: the manager is non-zero-sized.
-            let ptr = unsafe { alloc_zeroed(layout) }.cast::<sys::wlr_tearing_control_manager_v1>();
-            assert!(!ptr.is_null(), "allocation failed");
-            // SAFETY: `ptr` is sized for the list it embeds; an empty list
-            // points at itself.
-            unsafe {
-                (*ptr).surface_hints.prev = &raw mut (*ptr).surface_hints;
-                (*ptr).surface_hints.next = &raw mut (*ptr).surface_hints;
-            }
-            Self(ptr)
-        }
-
-        /// Link `control` at the head of the list. No unlink on drop: these
-        /// scratch objects are freed wholesale and nothing reads the list after.
-        ///
-        /// # Safety
-        ///
-        /// `control` must be a live control whose `link` is not already linked.
-        unsafe fn link(&mut self, control: *mut sys::wlr_tearing_control_v1) {
-            // SAFETY: `self.0` is live and its list initialised; `control` is
-            // live per the caller.
-            unsafe {
-                (*control).link.prev = &raw mut (*self.0).surface_hints;
-                (*control).link.next = (*self.0).surface_hints.next;
-                (*(*self.0).surface_hints.next).prev = &raw mut (*control).link;
-                (*self.0).surface_hints.next = &raw mut (*control).link;
-            }
+    /// Link `control` at the head of `manager`'s list. No unlink on drop: these
+    /// scratch objects are freed wholesale and nothing reads the list after.
+    ///
+    /// # Safety
+    ///
+    /// `control` must be a live control whose `link` is not already linked,
+    /// and `manager` a live manager with an initialised list.
+    unsafe fn link_control(
+        manager: &Scratch<sys::wlr_tearing_control_manager_v1>,
+        control: *mut sys::wlr_tearing_control_v1,
+    ) {
+        // SAFETY: `manager` is live and its list initialised; `control` is
+        // live per the caller.
+        unsafe {
+            (*control).link.prev = &raw mut (*manager.ptr).surface_hints;
+            (*control).link.next = (*manager.ptr).surface_hints.next;
+            (*(*manager.ptr).surface_hints.next).prev = &raw mut (*control).link;
+            (*manager.ptr).surface_hints.next = &raw mut (*control).link;
         }
     }
 
-    impl Drop for ScratchManager {
-        fn drop(&mut self) {
-            // SAFETY: allocated with this layout in `new`.
-            unsafe {
-                dealloc(
-                    self.0.cast::<u8>(),
-                    Layout::new::<sys::wlr_tearing_control_manager_v1>(),
-                )
-            };
-        }
-    }
-
-    /// A zeroed control on the heap.
-    struct ScratchControl(*mut sys::wlr_tearing_control_v1);
-
-    impl ScratchControl {
-        fn new(
-            surface: *mut sys::wlr_surface,
-            current: TearingHint,
-            pending: TearingHint,
-            previous: TearingHint,
-        ) -> Self {
-            let layout = Layout::new::<sys::wlr_tearing_control_v1>();
-            // SAFETY: the control is non-zero-sized.
-            let ptr = unsafe { alloc_zeroed(layout) }.cast::<sys::wlr_tearing_control_v1>();
-            assert!(!ptr.is_null(), "allocation failed");
-            // SAFETY: `ptr` is a live, exclusively-owned, zeroed control; every
-            // field written is in bounds. The hints are converted to the C
-            // constants by hand so the test does not depend on `from_raw`.
-            unsafe {
-                (*ptr).surface = surface;
-                (*ptr).current = hint_to_raw(current);
-                (*ptr).pending = hint_to_raw(pending);
-                (*ptr).WLR_PRIVATE.previous = hint_to_raw(previous);
-            }
-            Self(ptr)
-        }
-    }
-
-    impl Drop for ScratchControl {
-        fn drop(&mut self) {
-            // SAFETY: allocated with this layout in `new`.
-            unsafe {
-                dealloc(
-                    self.0.cast::<u8>(),
-                    Layout::new::<sys::wlr_tearing_control_v1>(),
-                )
-            };
-        }
+    /// A zeroed control for `surface`, with the given hints.
+    fn new_control(
+        surface: *mut sys::wlr_surface,
+        current: TearingHint,
+        pending: TearingHint,
+        previous: TearingHint,
+    ) -> Scratch<sys::wlr_tearing_control_v1> {
+        Scratch::new(
+            |ptr| {
+                // SAFETY: `ptr` is a live, exclusively-owned, zeroed control;
+                // every field written is in bounds. The hints are converted
+                // to the C constants by hand so the test does not depend on
+                // `from_raw`.
+                unsafe {
+                    (*ptr).surface = surface;
+                    (*ptr).current = hint_to_raw(current);
+                    (*ptr).pending = hint_to_raw(pending);
+                    (*ptr).WLR_PRIVATE.previous = hint_to_raw(previous);
+                }
+            },
+            noop_fini,
+        )
     }
 
     fn hint_to_raw(hint: TearingHint) -> sys::wp_tearing_control_v1_presentation_hint {
@@ -306,14 +286,26 @@ mod tests {
         }
     }
 
+    /// The decode runs on wlroots' commit path, where a panic would abort the
+    /// compositor, so a value outside the protocol's two hints must fall back
+    /// rather than hit an unmatched arm. No wlroots 0.20 build produces one;
+    /// a future header addition would.
+    #[test]
+    fn an_unknown_hint_wire_value_falls_back_to_vsync() {
+        assert_eq!(
+            TearingHint::from_raw(sys::wp_tearing_control_v1_presentation_hint(99)),
+            TearingHint::Vsync
+        );
+    }
+
     #[test]
     fn hint_lookup_defaults_to_vsync_without_a_control_object() {
         let surface_scratch = ScratchSurface::new();
-        let manager = ScratchManager::new();
+        let manager = new_manager();
         // SAFETY: both scratch objects outlive the handle.
         let surface = unsafe { Surface::from_raw_with_id(surface_scratch.raw, SurfaceId(1)) }
             .with_tearing_manager(Some(
-                NonNull::new(manager.0).expect("scratch manager is non-null"),
+                NonNull::new(manager.ptr).expect("scratch manager is non-null"),
             ));
 
         assert_eq!(
@@ -340,14 +332,14 @@ mod tests {
     fn control_walk_finds_the_object_for_this_surface() {
         let surface_scratch = ScratchSurface::new();
         let other_scratch = ScratchSurface::new();
-        let mut manager = ScratchManager::new();
-        let control = ScratchControl::new(
+        let manager = new_manager();
+        let control = new_control(
             surface_scratch.raw,
             TearingHint::Async,
             TearingHint::Vsync,
             TearingHint::Vsync,
         );
-        let other = ScratchControl::new(
+        let other = new_control(
             other_scratch.raw,
             TearingHint::Vsync,
             TearingHint::Async,
@@ -356,14 +348,14 @@ mod tests {
         // SAFETY: both controls are live and their links unlinked; the manager
         // outlives the walk.
         unsafe {
-            manager.link(other.0);
-            manager.link(control.0);
+            link_control(&manager, other.ptr);
+            link_control(&manager, control.ptr);
         }
 
         // SAFETY: the scratch objects outlive the handle.
         let surface = unsafe { Surface::from_raw_with_id(surface_scratch.raw, SurfaceId(1)) }
             .with_tearing_manager(Some(
-                NonNull::new(manager.0).expect("scratch manager is non-null"),
+                NonNull::new(manager.ptr).expect("scratch manager is non-null"),
             ));
         let found = surface
             .tearing_control()
@@ -381,7 +373,7 @@ mod tests {
         // surface in the same manager resolves to its own (vsync) control.
         let other_surface = unsafe { Surface::from_raw_with_id(other_scratch.raw, SurfaceId(2)) }
             .with_tearing_manager(Some(
-                NonNull::new(manager.0).expect("scratch manager is non-null"),
+                NonNull::new(manager.ptr).expect("scratch manager is non-null"),
             ));
         let other_found = other_surface
             .tearing_control()
@@ -397,7 +389,7 @@ mod tests {
     #[test]
     fn control_accessors_read_the_current_pending_and_previous_hints() {
         let surface_scratch = ScratchSurface::new();
-        let control = ScratchControl::new(
+        let control = new_control(
             surface_scratch.raw,
             TearingHint::Vsync,
             TearingHint::Async,
@@ -405,7 +397,7 @@ mod tests {
         );
         // SAFETY: `control` is live and this is its only handle.
         let handle = TearingControl::from_non_null(
-            NonNull::new(control.0).expect("scratch control is non-null"),
+            NonNull::new(control.ptr).expect("scratch control is non-null"),
         );
         assert_eq!(handle.current_hint(), TearingHint::Vsync);
         assert_eq!(handle.pending_hint(), TearingHint::Async);

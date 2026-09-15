@@ -1065,6 +1065,20 @@ pub trait ToplevelHandler {
     /// all — is entirely its own policy), so a compositor that wants the global
     /// to do anything overrides this.
     ///
+    /// Privileged: this carries no client identity, so per-client allow/deny
+    /// is impossible here. Gate the `xdg_system_bell_v1` global
+    /// ([`Runtime::create_xdg_system_bell`](crate::Runtime::create_xdg_system_bell))
+    /// at bind time with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny — allow only clients whose context you trust:
+    ///
+    /// ```ignore
+    /// // Allow only a known panel to ring the bell; deny everyone else.
+    /// let allowed = unsafe { runtime.lookup_security_context(client) }
+    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.panel"));
+    /// // return `allowed` from the display's global filter.
+    /// ```
+    ///
     /// Added additively on the same terms as the other defaulted methods here:
     /// an `impl ToplevelHandler for MyState {}` written against any earlier
     /// 0.20.x still compiles unchanged.
@@ -1136,6 +1150,23 @@ pub trait ToplevelHandler {
     /// [`SeatHandler::request_activate`](crate::SeatHandler::request_activate)
     /// has.
     ///
+    /// Privileged: this carries no client identity, so per-client allow/deny
+    /// is impossible here. Gate the `zwlr_foreign_toplevel_manager_v1` global
+    /// ([`Runtime::create_foreign_toplevel_manager`](crate::Runtime::create_foreign_toplevel_manager))
+    /// at bind time with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny — allow only clients whose context you trust,
+    /// deny the rest:
+    ///
+    /// ```ignore
+    /// // Allow only a known taskbar to drive foreign toplevels.
+    /// let allowed = unsafe { runtime.lookup_security_context(client) }
+    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.taskbar"));
+    /// // return `allowed` from the display's global filter.
+    /// ```
+    /// The same gate covers `close`, `maximize`, `minimize`, `fullscreen`
+    /// and `set_rectangle` below.
+    ///
     /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
     /// written against any earlier 0.20.x still compiles unchanged.
     fn foreign_toplevel_activate(&mut self, id: ForeignToplevelId) {
@@ -1144,6 +1175,12 @@ pub trait ToplevelHandler {
 
     /// A client asked, through `zwlr_foreign_toplevel_management_v1`, that an
     /// exported toplevel be closed. Closing the window is the compositor's call.
+    ///
+    /// Privileged: see
+    /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
+    /// gate the `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny.
     ///
     /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
     /// written against any earlier 0.20.x still compiles unchanged.
@@ -1157,6 +1194,12 @@ pub trait ToplevelHandler {
     /// [`ForeignToplevelHandle::set_maximized`](crate::ForeignToplevelHandle::set_maximized)
     /// if it honors the request.
     ///
+    /// Privileged: see
+    /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
+    /// gate the `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny.
+    ///
     /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
     /// written against any earlier 0.20.x still compiles unchanged.
     fn foreign_toplevel_maximize(&mut self, id: ForeignToplevelId, maximized: bool) {
@@ -1167,6 +1210,12 @@ pub trait ToplevelHandler {
     /// toggle contract as
     /// [`foreign_toplevel_maximize`](ToplevelHandler::foreign_toplevel_maximize).
     ///
+    /// Privileged: see
+    /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
+    /// gate the `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny.
+    ///
     /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
     /// written against any earlier 0.20.x still compiles unchanged.
     fn foreign_toplevel_minimize(&mut self, id: ForeignToplevelId, minimized: bool) {
@@ -1176,6 +1225,12 @@ pub trait ToplevelHandler {
     /// A client asked to (un)fullscreen an exported toplevel. Same
     /// target-not-toggle contract as
     /// [`foreign_toplevel_maximize`](ToplevelHandler::foreign_toplevel_maximize).
+    ///
+    /// Privileged: see
+    /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
+    /// gate the `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny.
     ///
     /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
     /// written against any earlier 0.20.x still compiles unchanged.
@@ -1189,6 +1244,12 @@ pub trait ToplevelHandler {
     /// client-named surface resolved to this crate's own id — `None` when the
     /// surface is not one this crate tracks. `x`/`y`/`width`/`height` are that
     /// surface's surface-local rectangle.
+    ///
+    /// Privileged: see
+    /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
+    /// gate the `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny.
     ///
     /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
     /// written against any earlier 0.20.x still compiles unchanged.
@@ -1215,8 +1276,27 @@ pub trait ToplevelHandler {
     /// wlroots applies none of them; the compositor answers each with the
     /// matching `WorkspaceHandle`/`WorkspaceGroupHandle` mutator.
     ///
+    /// A request that named a workspace destroyed before the commit drained
+    /// arrives as [`WorkspaceRequest::Stale`] rather than being dropped — as
+    /// does any unknown request discriminant — so an all-stale batch is
+    /// distinguishable from an empty commit. The workspace such an entry
+    /// names is already gone, so there is nothing to answer for it.
+    ///
     /// Requires
     /// [`Runtime::create_ext_workspace_manager`](crate::Runtime::create_ext_workspace_manager).
+    ///
+    /// Privileged: this carries no client identity, so per-client allow/deny
+    /// is impossible here. Gate the `ext_workspace_manager_v1` global at bind
+    /// time with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny — allow only clients whose context you trust:
+    ///
+    /// ```ignore
+    /// // Allow only a known pager to drive workspaces; deny everyone else.
+    /// let allowed = unsafe { runtime.lookup_security_context(client) }
+    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.pager"));
+    /// // return `allowed` from the display's global filter.
+    /// ```
     ///
     /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
     /// written against any earlier 0.20.x still compiles unchanged.

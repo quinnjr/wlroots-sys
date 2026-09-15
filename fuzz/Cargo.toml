@@ -17,6 +17,16 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 wlr = { path = "../crates/wlr" }
+# Real client for the client-driven operations: a genuine `wayland-client`
+# connection mints live toplevels against the headless compositor on the same
+# thread (interleaved flush / `run_all` / `dispatch_pending`, never a blocking
+# round-trip). `=`-pinned to the exact revisions the workspace's `wlr`
+# dev-dependencies already use (`wayland-protocols 0.32`, `wayland-client`
+# 0.31); re-pin deliberately. Nightly-only crate, so MSRV does not apply.
+wayland-client = "=0.31.15"
+# `client` selects the client-side generated code; xdg-shell itself is stable
+# so no `staging` gate is needed for the toplevel lifecycle.
+wayland-protocols = { version = "=0.32.13", features = ["client"] }
 
 [[bin]]
 name = "operations"

@@ -65,6 +65,30 @@ impl ScratchSurface {
         Self { raw }
     }
 
+    /// As [`new`](Self::new), plus initialised `events` signals.
+    ///
+    /// For the tests that link listeners and emit signals on the scratch
+    /// surface (`backend.rs`'s generic-surface tests): without initialised
+    /// heads `wl_signal_add` would corrupt the heap through the zeroed list
+    /// pointers. Tests that only read plain fields or the addon set use
+    /// `new` and pay for nothing they don't touch.
+    pub(crate) fn new_with_signals() -> Self {
+        let this = Self::new();
+        // SAFETY: `this.raw` is a fresh, exclusively-owned allocation sized
+        // for a whole `wlr_surface`, so every signal written below is in
+        // bounds; each initialiser writes only the `wl_list` head it owns.
+        // The allocation does not move again, which matters because
+        // `wl_signal_init` makes each head point at itself.
+        unsafe {
+            sys::wl_signal_init(&raw mut (*this.raw).events.commit);
+            sys::wl_signal_init(&raw mut (*this.raw).events.map);
+            sys::wl_signal_init(&raw mut (*this.raw).events.unmap);
+            sys::wl_signal_init(&raw mut (*this.raw).events.destroy);
+            sys::wl_signal_init(&raw mut (*this.raw).events.new_subsurface);
+        }
+        this
+    }
+
     /// # Safety
     ///
     /// The returned handle borrows this `ScratchSurface`'s allocation and must
@@ -85,5 +109,46 @@ impl Drop for ScratchSurface {
             sys::wlr_addon_set_finish(&raw mut (*self.raw).addons);
             dealloc(self.raw.cast::<u8>(), Layout::new::<sys::wlr_surface>());
         }
+    }
+}
+
+/// A zeroed heap allocation of one `T`, with caller-supplied init and fini.
+///
+/// The alloc-zero-drop trio the `tearing.rs` manager/control scratch objects
+/// share: `alloc_zeroed` rather than `std::mem::zeroed` for the reason
+/// [`ScratchSurface`] documents, `init` runs while the allocation is
+/// exclusively owned, and `Drop` runs `fini` before freeing. Helpers with
+/// bespoke ownership — a `calloc` wlroots frees itself, an addon set to
+/// finish — keep their own type instead of bending this one around them.
+pub(crate) struct Scratch<T> {
+    /// The allocation. Public within the crate so a test can hand the raw
+    /// pointer to code under test or read plain fields through it.
+    pub(crate) ptr: *mut T,
+    fini: fn(*mut T),
+}
+
+impl<T> Scratch<T> {
+    /// Allocate, zero, and initialise one.
+    ///
+    /// `init` sees the allocation exclusively owned and zeroed; `fini` must
+    /// undo exactly what `init` did and touch nothing else.
+    pub(crate) fn new(init: impl FnOnce(*mut T), fini: fn(*mut T)) -> Self {
+        let layout = Layout::new::<T>();
+        // SAFETY: `T` is a non-zero-sized C struct in every use, so
+        // `alloc_zeroed` returns either null (checked below) or a suitably
+        // aligned, zeroed allocation of exactly that size.
+        let ptr = unsafe { alloc_zeroed(layout) }.cast::<T>();
+        assert!(!ptr.is_null(), "allocation failed");
+        init(ptr);
+        Self { ptr, fini }
+    }
+}
+
+impl<T> Drop for Scratch<T> {
+    fn drop(&mut self) {
+        (self.fini)(self.ptr);
+        // SAFETY: `ptr` was allocated by `alloc_zeroed` with the matching
+        // layout, is still exclusively owned, and nothing else frees it.
+        unsafe { dealloc(self.ptr.cast::<u8>(), Layout::new::<T>()) };
     }
 }

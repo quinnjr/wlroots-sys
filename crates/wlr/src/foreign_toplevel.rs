@@ -38,11 +38,12 @@
 //! mistake, just a survivable one.
 
 use std::cell::{Cell, RefCell};
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{CString, c_void};
 use std::ptr::NonNull;
 
 use crate::backend::{Registration, bound_session, remove_listener};
 use crate::id::find_surface_id;
+use crate::runtime::copy_nullable_string;
 use crate::{Display, Error, Output, Result, Runtime, SurfaceId, sys};
 
 /// Identifies one exported toplevel while the compositor holds its handle.
@@ -75,7 +76,12 @@ impl std::fmt::Debug for ForeignToplevelId {
 ///
 /// Returned by [`ForeignToplevelHandle::state`]. Every field is owned, so the
 /// snapshot outlives the call and no wlroots pointer escapes.
+///
+/// New-in-milestone and unreleased: marked [`#[non_exhaustive]`] so future
+/// protocol fields can be added without breaking downstream construction.
+/// Exhaustiveness was never promised for this snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct ForeignToplevelState {
     /// The window title the compositor last set, `None` until it sets one.
     pub title: Option<String>,
@@ -267,20 +273,23 @@ impl ForeignToplevelHandle {
         let raw = self.raw()?;
         // SAFETY: `raw` is live; `title` is null or a NUL-terminated string
         // wlroots owns, copied out here.
-        unsafe { copy_cstr((*raw.as_ptr()).title) }
+        unsafe { copy_nullable_string((*raw.as_ptr()).title as *const _) }
     }
 
     /// The application id the compositor last set, if any.
     pub fn app_id(&self) -> Option<String> {
         let raw = self.raw()?;
         // SAFETY: as for `title`.
-        unsafe { copy_cstr((*raw.as_ptr()).app_id) }
+        unsafe { copy_nullable_string((*raw.as_ptr()).app_id as *const _) }
     }
 
     /// The handle's full state, copied out.
     ///
     /// Every field is owned, so the snapshot outlives the call and no wlroots
-    /// pointer escapes. An inert handle reports [`ForeignToplevelState::default`].
+    /// pointer escapes. An inert handle reports [`ForeignToplevelState::default`],
+    /// which is also a legitimate empty state — check [`is_alive`](Self::is_alive)
+    /// to tell the two apart.
+    #[must_use]
     pub fn state(&self) -> ForeignToplevelState {
         let Some(raw) = self.raw() else {
             return ForeignToplevelState::default();
@@ -291,8 +300,8 @@ impl ForeignToplevelHandle {
             let handle = raw.as_ptr();
             let parent = (*handle).parent;
             ForeignToplevelState {
-                title: copy_cstr((*handle).title),
-                app_id: copy_cstr((*handle).app_id),
+                title: copy_nullable_string((*handle).title as *const _),
+                app_id: copy_nullable_string((*handle).app_id as *const _),
                 maximized: (*handle).state
                     & sys::wlr_foreign_toplevel_handle_v1_state::WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MAXIMIZED.0
                     != 0,
@@ -697,18 +706,4 @@ unsafe extern "C" fn on_manager_destroy(l: *mut sys::wl_listener, _data: *mut c_
 /// The id of the handle a recovered [`HandleListeners`] owns.
 fn ctx_id(ctx: &HandleListeners) -> ForeignToplevelId {
     ForeignToplevelId(ctx.raw.as_ptr() as usize)
-}
-
-/// Copy a wlroots-owned C string out, or `None` if it is null.
-///
-/// # Safety
-///
-/// `p` must be null or a live, NUL-terminated C string owned by wlroots.
-unsafe fn copy_cstr(p: *mut c_char) -> Option<String> {
-    if p.is_null() {
-        return None;
-    }
-    // SAFETY: the caller guarantees `p` is a live NUL-terminated string; this
-    // copies it out and never frees it.
-    Some(unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned())
 }

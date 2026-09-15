@@ -356,6 +356,20 @@ pub(crate) enum Event {
     /// when the client named no surface, or named one this crate does not
     /// track. Nothing is re-read at delivery: the event's fields are pointers
     /// that do not outlive the callback.
+    ///
+    /// Privileged: this carries no client identity, so per-client allow/deny
+    /// is impossible here. Gate the `xdg_system_bell_v1` global
+    /// ([`crate::Runtime::create_xdg_system_bell`]) at bind time with a
+    /// [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny — allow only clients whose context you trust, deny the
+    /// rest:
+    ///
+    /// ```ignore
+    /// // Allow only a known panel to ring the bell; deny everyone else.
+    /// let allowed = unsafe { runtime.lookup_security_context(client) }
+    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.panel"));
+    /// // return `allowed` from the display's global filter.
+    /// ```
     SystemBellRing(Option<SurfaceId>),
 
     /// A client asked, through `zwlr_foreign_toplevel_management_v1`, to
@@ -363,21 +377,53 @@ pub(crate) enum Event {
     /// [`ForeignToplevelId`] handle for the export the compositor owns. The
     /// client's seat is deliberately not carried — this crate has no seat id,
     /// and focus policy is the compositor's.
+    ///
+    /// Privileged: like [`Event::SystemBellRing`], this carries no client
+    /// identity. Gate the `zwlr_foreign_toplevel_manager_v1` global
+    /// ([`crate::Runtime::create_foreign_toplevel_manager`]) at bind time
+    /// with a [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny; the same rule covers `Close`, `Maximize`, `Minimize`,
+    /// `Fullscreen` and `SetRectangle` below.
     ForeignToplevelActivate(ForeignToplevelId),
     /// A client asked that an exported toplevel be closed.
+    ///
+    /// Privileged: see [`Event::ForeignToplevelActivate`] — gate the
+    /// `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny.
     ForeignToplevelClose(ForeignToplevelId),
     /// A client asked to (un)maximize an exported toplevel; the bool is the
     /// requested target, read at emission time.
+    ///
+    /// Privileged: see [`Event::ForeignToplevelActivate`] — gate the
+    /// `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny.
     ForeignToplevelMaximize(ForeignToplevelId, bool),
     /// A client asked to (un)minimize an exported toplevel; as
     /// [`Event::ForeignToplevelMaximize`].
+    ///
+    /// Privileged: see [`Event::ForeignToplevelActivate`] — gate the
+    /// `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny.
     ForeignToplevelMinimize(ForeignToplevelId, bool),
     /// A client asked to (un)fullscreen an exported toplevel; as
     /// [`Event::ForeignToplevelMaximize`].
+    ///
+    /// Privileged: see [`Event::ForeignToplevelActivate`] — gate the
+    /// `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny.
     ForeignToplevelFullscreen(ForeignToplevelId, bool),
     /// A client set a rectangle on one of an exported toplevel's surfaces. The
     /// surface is resolved to this crate's own id at emission time (`None` when
     /// untracked); the rectangle is copied.
+    ///
+    /// Privileged: see [`Event::ForeignToplevelActivate`] — gate the
+    /// `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny.
     ForeignToplevelSetRectangle(ForeignToplevelId, Option<SurfaceId>, i32, i32, i32, i32),
 
     /// A client committed a batch of `ext_workspace_v1` requests. The batch is
@@ -385,6 +431,25 @@ pub(crate) enum Event {
     /// wlroots request list is freed the instant the commit emission returns;
     /// it may therefore be delivered later (a deferred delivery still carries
     /// what the client asked for) and holds no wlroots pointer.
+    ///
+    /// Entries that named a workspace destroyed before the commit drained
+    /// arrive as [`WorkspaceRequest::Stale`](crate::WorkspaceRequest::Stale)
+    /// rather than being dropped — as does any unknown request discriminant —
+    /// so an all-stale batch is distinguishable from an empty commit.
+    ///
+    /// Privileged: this carries no client identity, so per-client allow/deny
+    /// is impossible here. Gate the `ext_workspace_manager_v1` global
+    /// ([`crate::Runtime::create_ext_workspace_manager`]) at bind time with a
+    /// [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny — allow only clients whose context you trust, deny the
+    /// rest:
+    ///
+    /// ```ignore
+    /// // Allow only a known pager to drive workspaces; deny everyone else.
+    /// let allowed = unsafe { runtime.lookup_security_context(client) }
+    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.pager"));
+    /// // return `allowed` from the display's global filter.
+    /// ```
     WorkspaceCommit(Vec<WorkspaceRequest>),
 
     /// A sandbox client committed a `wp_security_context_v1`. The metadata is

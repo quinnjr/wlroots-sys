@@ -43,6 +43,16 @@ struct Probe {
     as_layer_always_none: bool,
     locked_once: bool,
     unmapped_once: bool,
+    /// Whether the same-surface `unlock_cached` succeeded. Recorded rather
+    /// than asserted in the handler (a panic there would abort through C).
+    unlock_ok: Option<bool>,
+    /// Far-outside hit-test: `surface_at` at a point no surface covers.
+    miss_at: Option<bool>,
+    /// Far-outside input check at the same point.
+    miss_accepts_input: Option<bool>,
+    /// `Surface::as_toplevel` on the live toplevel surface: every commit must
+    /// resolve, and the resolved id must name the same surface.
+    as_toplevel_matched: Vec<bool>,
 }
 
 impl Probe {
@@ -100,6 +110,15 @@ impl wlr::ToplevelHandler for App {
             .push(surface.surface_at(1.0, 1.0).map(|(leaf, _, _)| leaf.id()));
         self.probe.accepts_touch = Some(surface.accepts_touch());
         self.probe.as_layer_always_none &= surface.as_layer_surface().is_none();
+        // The thin toplevel downcast: this surface is a live xdg-toplevel, so
+        // both the handle downcast and the by-id downcast must resolve.
+        self.probe
+            .as_toplevel_matched
+            .push(surface.as_toplevel().is_some() && self.runtime.toplevel_of(id).is_some());
+        // A point far outside any surface misses cleanly rather than
+        // hit-testing to something or claiming input.
+        self.probe.miss_at = Some(surface.surface_at(1e6, 1e6).is_none());
+        self.probe.miss_accepts_input = Some(surface.point_accepts_input(1e6, 1e6));
 
         // Mutators that send the client nothing observable (or, for the
         // preferred scale/transform, an event the client ignores here).
@@ -117,7 +136,7 @@ impl wlr::ToplevelHandler for App {
         if !self.probe.locked_once {
             self.probe.locked_once = true;
             let lock = surface.lock_pending();
-            let _ = surface.unlock_cached(lock);
+            self.probe.unlock_ok = Some(surface.unlock_cached(lock).is_ok());
         }
 
         // Unmap once, after the surface is mapped. The queued
@@ -292,5 +311,31 @@ fn a_real_client_surface_is_committed_mapped_and_destroyed() {
     assert!(
         probe.unmapped.contains(&mapped),
         "wlr_surface_unmap must unmap the mapped surface and deliver surface_unmapped"
+    );
+
+    // The same-surface lock/unlock pair must succeed; the cross-surface `Err`
+    // refusal (unlocking with another surface's token hands it back) stays
+    // covered by the `surface.rs` unit test, not this single-surface run.
+    assert_eq!(
+        probe.unlock_ok,
+        Some(true),
+        "unlock_cached must succeed for the lock the same surface minted"
+    );
+
+    // Far-outside hit-testing misses cleanly.
+    assert_eq!(
+        probe.miss_at,
+        Some(true),
+        "surface_at at a far-outside point must miss rather than hit-test to a surface"
+    );
+    assert_eq!(
+        probe.miss_accepts_input,
+        Some(false),
+        "point_accepts_input at a far-outside point must be false"
+    );
+    assert!(
+        !probe.as_toplevel_matched.is_empty() && probe.as_toplevel_matched.iter().all(|m| *m),
+        "Surface::as_toplevel (and Runtime::toplevel_of) must resolve every \
+         commit of the live toplevel surface"
     );
 }

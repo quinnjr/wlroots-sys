@@ -102,7 +102,7 @@
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 
-use crate::id::{find_id, find_surface_id};
+use crate::id::find_id;
 use crate::{OutputId, sys};
 
 /// Identifies a layer surface for as long as the consumer chooses to
@@ -528,7 +528,9 @@ impl<'h> LayerSurface<'h> {
     }
 
     /// Shared body of the two hit-tests, which differ only in which wlroots
-    /// walk they call.
+    /// walk they call. The null-check/id/handle tail lives in
+    /// [`crate::Surface::finish_surface_at`](crate::Surface::finish_surface_at),
+    /// shared with every other `surface_at_impl` in the crate.
     fn surface_at_impl(
         &self,
         walk: unsafe extern "C" fn(
@@ -545,15 +547,11 @@ impl<'h> LayerSurface<'h> {
         let mut sub_y = 0.0;
         // SAFETY: the handle's lifetime guarantees the layer surface is live;
         // both out-parameters are live locals that outlive the call, and
-        // wlroots only reads the coordinates.
+        // wlroots only reads the coordinates. The walk returns null or a live
+        // surface of this same tree, which is what `finish_surface_at` takes.
         unsafe {
             let raw = walk(self.raw.as_ptr(), sx, sy, &raw mut sub_x, &raw mut sub_y);
-            if raw.is_null() {
-                return None;
-            }
-            let id = find_surface_id(&raw const (*raw).addons).map(crate::SurfaceId)?;
-            let surface = crate::Surface::from_raw_opt(raw, id)?;
-            Some((surface, sub_x, sub_y))
+            crate::Surface::finish_surface_at(raw, sub_x, sub_y)
         }
     }
 
