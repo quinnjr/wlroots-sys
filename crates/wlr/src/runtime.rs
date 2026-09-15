@@ -37,7 +37,7 @@ use std::rc::Rc;
 use crate::XwaylandSurfaceId;
 use crate::buffer::create_pixel_buffer;
 use crate::decoration::{DecorationEntry, DecorationMode};
-use crate::id::{SourceId, next_id};
+use crate::id::{SourceId, find_id, next_id};
 use crate::layer::Layer;
 use crate::scene::output::SceneOutputEntry;
 use crate::scene::{
@@ -46,9 +46,9 @@ use crate::scene::{
     find_node_id, timespec_of,
 };
 use crate::{
-    AllocatorRef, Backend, Box2D, Buffer, BufferId, CursorShape, Display, Error, FBox, Interest,
-    LayerSurfaceId, Output, OutputId, Popup, PopupId, PopupParent, RectId, Region, RendererRef,
-    Result, ToplevelId, Transform, sys,
+    AllocatorRef, Backend, Box2D, Buffer, BufferId, CursorShape, Display, Edges, Error, FBox,
+    Interest, LayerSurfaceId, Output, OutputId, Popup, PopupId, PopupParent, RectId, Region,
+    RendererRef, Result, Surface, SurfaceId, Toplevel, ToplevelId, Transform, WmCapabilities, sys,
 };
 use crate::{ColorEncoding, ColorRange, FilterMode, NamedPrimaries, TransferFunction};
 
@@ -267,11 +267,11 @@ impl ImePreedit {
 }
 
 /// Copy a wlroots-owned nullable C string into an owned `String`, `None` for
-/// null. The single site encoding the null-guarded copy every snapshot field
-/// of this shape shares. Non-UTF-8 bytes are replaced per `to_string_lossy` —
-/// spec-violating input only, since the Wayland protocol requires strings to
-/// be valid UTF-8.
-fn copy_nullable_string(text: *const std::ffi::c_char) -> Option<String> {
+/// null. The null-guarded copy every snapshot field of this shape shares,
+/// including the `ext` protocol modules' handle accessors. Non-UTF-8 bytes are
+/// replaced per `to_string_lossy` — spec-violating input only, since the Wayland
+/// protocol requires strings to be valid UTF-8.
+pub(crate) fn copy_nullable_string(text: *const std::ffi::c_char) -> Option<String> {
     if text.is_null() {
         return None;
     }
@@ -2348,6 +2348,17 @@ pub(crate) struct RuntimeInner {
     /// fail on a borrow.
     pub(crate) scene_observer: std::cell::Cell<Option<SceneObserver>>,
 
+    /// The live run's ability to deliver a foreign-toplevel request to its
+    /// handler, or `None` when no run is on the stack.
+    ///
+    /// Installed and cleared alongside [`scene_observer`](Self::scene_observer)
+    /// by `run_inner`'s guard, for the same reason: the request listeners belong
+    /// to the owned [`ForeignToplevelHandle`](crate::ForeignToplevelHandle),
+    /// which outlives any one run, while delivery needs a run's session. A
+    /// request arriving with no run installed is dropped.
+    pub(crate) foreign_toplevel_observer:
+        std::cell::Cell<Option<crate::foreign_toplevel::ForeignToplevelObserver>>,
+
     /// The scene outputs each observed buffer node was last reported to be
     /// displayed on.
     ///
@@ -2400,10 +2411,41 @@ pub(crate) struct RuntimeInner {
     /// safe. See [`Runtime::remove_fd`]'s own doc for the full argument.
     pub(crate) pending_close: RefCell<Vec<OwnedFd>>,
 
+    /// Foreign-toplevel handles dropped from inside a handler delivery, whose
+    /// wlroots destroy is deferred to the turn's drain.
+    ///
+    /// A client request reaches `ToplevelHandler` from inside wlroots'
+    /// `wlr_signal_emit_safe` on the handle's own request signal. Freeing the
+    /// handle there would free that signal mid-emission, which wlroots' safe
+    /// emitter cannot survive (its cursor/end markers still point into the
+    /// freed list). So `ForeignToplevelHandle`'s `Drop` unlinks its listeners
+    /// at once — safe, they still live — but queues the handle pointer here for
+    /// [`Runtime::drain_pending_foreign_toplevel_destroys`], which runs at the
+    /// same per-turn point as `pending_close`: after every callback of the turn
+    /// has returned.
+    ///
+    /// Deliberately **not** released when this runtime drops. A queued handle
+    /// belongs to a manager that may already be freed (display teardown), so
+    /// calling destroy from `RuntimeInner`'s own drop would be the very
+    /// use-after-free this queue exists to avoid; leaking the one handle is the
+    /// safe answer.
+    pub(crate) pending_foreign_toplevel_destroys:
+        RefCell<Vec<NonNull<sys::wlr_foreign_toplevel_handle_v1>>>,
+
     /// The xdg shell, once created. `Option` because a consumer that only
     /// wants a scene never makes one, and because a second one would
     /// advertise a second `xdg_wm_base` global.
     pub(crate) xdg_shell: RefCell<Option<NonNull<sys::wlr_xdg_shell>>>,
+
+    /// The version passed to [`Runtime::create_xdg_shell`], or `None` before
+    /// the shell exists. Kept so the toplevel setters whose wlroots calls
+    /// assert a minimum xdg-shell version can refuse a call that would trip the
+    /// assert instead of aborting the compositor: `wlr_xdg_toplevel_set_tiled`
+    /// requires >= 2, `set_bounds` >= 4, `set_wm_capabilities` >= 5,
+    /// `set_suspended` >= 6 and `set_constrained` >= 7. The assert is on
+    /// `shell->version`, which is exactly the value stored here; the client's
+    /// own bound version does not enter into it.
+    pub(crate) xdg_shell_version: std::cell::Cell<Option<u32>>,
 
     /// The xdg-decoration manager, once created. `Option` for the same
     /// reason `xdg_shell` is: a consumer that never negotiates decorations
@@ -2526,6 +2568,62 @@ pub(crate) struct RuntimeInner {
     /// rationale as the other manager globals.
     pub(crate) xdg_activation_manager: RefCell<Option<NonNull<sys::wlr_xdg_activation_v1>>>,
 
+    /// The xdg-dialog (`xdg_wm_dialog_v1`) manager, once created — lets a
+    /// client mark a toplevel as a modal dialog. `Option`, same rationale as
+    /// the other manager globals.
+    pub(crate) xdg_dialog_manager: RefCell<Option<NonNull<sys::wlr_xdg_wm_dialog_v1>>>,
+
+    /// The xdg-system-bell (`xdg_system_bell_v1`) manager, once created — lets
+    /// a client ask the compositor to ring the system bell. `Option`, same
+    /// rationale as the other manager globals.
+    pub(crate) xdg_system_bell: RefCell<Option<NonNull<sys::wlr_xdg_system_bell_v1>>>,
+
+    /// The xdg-toplevel-icon (`xdg_toplevel_icon_manager_v1`) manager, once
+    /// created — lets a client assign a per-toplevel icon. Display-owned;
+    /// `Option`, same rationale as the other manager globals.
+    pub(crate) xdg_toplevel_icon_manager:
+        RefCell<Option<NonNull<sys::wlr_xdg_toplevel_icon_manager_v1>>>,
+
+    /// The xdg-toplevel-tag (`xdg_toplevel_tag_manager_v1`) manager, once
+    /// created — lets a client tag a toplevel for persistence. Display-owned;
+    /// `Option`, same rationale as the other manager globals.
+    pub(crate) xdg_toplevel_tag_manager:
+        RefCell<Option<NonNull<sys::wlr_xdg_toplevel_tag_manager_v1>>>,
+
+    /// The xdg-foreign registry, once created — the shared table the v1 and v2
+    /// managers export into and import from. Display-owned, so this crate only
+    /// borrows it. `Option`, same rationale as the other manager globals.
+    pub(crate) xdg_foreign_registry: RefCell<Option<NonNull<sys::wlr_xdg_foreign_registry>>>,
+
+    /// The xdg-foreign v1 (`zxdg_exporter_v1`/`zxdg_importer_v1`) manager, once
+    /// created against the registry. Display-owned; `Option`, same rationale as
+    /// the other manager globals.
+    pub(crate) xdg_foreign_v1: RefCell<Option<NonNull<sys::wlr_xdg_foreign_v1>>>,
+
+    /// The xdg-foreign v2 (`zxdg_exporter_v2`/`zxdg_importer_v2`) manager, once
+    /// created against the registry. Display-owned; `Option`, same rationale as
+    /// the other manager globals.
+    pub(crate) xdg_foreign_v2: RefCell<Option<NonNull<sys::wlr_xdg_foreign_v2>>>,
+
+    /// The foreign-toplevel-management (`zwlr_foreign_toplevel_manager_v1`)
+    /// manager, once created — lets a taskbar or dock observe and drive the
+    /// toplevels this compositor exports. Display-owned; `Option`, same
+    /// rationale as the other manager globals.
+    pub(crate) foreign_toplevel_manager:
+        RefCell<Option<NonNull<sys::wlr_foreign_toplevel_manager_v1>>>,
+
+    /// The `ext_foreign_toplevel_list_v1` list, once created — lets a client
+    /// observe the toplevels this compositor exports through the standardized
+    /// `ext` protocol. Display-owned; `Option`, same rationale as the other
+    /// manager globals.
+    pub(crate) ext_foreign_toplevel_list:
+        RefCell<Option<NonNull<sys::wlr_ext_foreign_toplevel_list_v1>>>,
+
+    /// The `ext_workspace_manager_v1` manager, once created — lets a taskbar or
+    /// dock list and drive the compositor's workspaces. Display-owned; `Option`,
+    /// same rationale as the other manager globals.
+    pub(crate) ext_workspace_manager: RefCell<Option<NonNull<sys::wlr_ext_workspace_manager_v1>>>,
+
     /// The gamma-control (`zwlr_gamma_control_manager_v1`) manager, once
     /// created — lets a client (a night-light tool such as `wlsunset` or
     /// `gammastep`) set a per-output gamma ramp. `Option`, same rationale as
@@ -2541,8 +2639,9 @@ pub(crate) struct RuntimeInner {
 
     /// The `wp_tearing_control_manager_v1` global, once created — lets
     /// clients hint at tearing presentation per surface. `Option`, same
-    /// rationale as the other manager globals. Reading a surface's hint
-    /// needs the surface handle model (M9).
+    /// rationale as the other manager globals. `Runtime::surface` and
+    /// `backend::with_surface` cache it onto each [`Surface`] handle so the
+    /// tearing accessors can read a hint.
     pub(crate) tearing_control_manager:
         RefCell<Option<NonNull<sys::wlr_tearing_control_manager_v1>>>,
 
@@ -2601,6 +2700,51 @@ pub(crate) struct RuntimeInner {
     /// second one.
     pub(crate) session_lock_manager: RefCell<Option<NonNull<sys::wlr_session_lock_manager_v1>>>,
 
+    /// The `wp_security_context_v1` manager, once created — lets a sandbox
+    /// engine attach security metadata to the connections it spawns. `Option`,
+    /// same rationale as the other manager globals: a consumer that never calls
+    /// [`create_security_context_manager`](Runtime::create_security_context_manager)
+    /// never advertises the global, and a second call would advertise a second
+    /// one.
+    ///
+    /// Cleared by the manager's `destroy` watch (see
+    /// `security_context_manager_alive`): after display teardown this is
+    /// `None`, so [`Runtime::lookup_security_context`] misses instead of
+    /// dereferencing freed memory.
+    pub(crate) security_context_manager:
+        RefCell<Option<NonNull<sys::wlr_security_context_manager_v1>>>,
+
+    /// Whether the security-context manager is still alive.
+    ///
+    /// Set true by
+    /// [`create_security_context_manager`](Runtime::create_security_context_manager)
+    /// once the teardown watch is linked, and set false by that watch when the
+    /// manager's `events.destroy` fires (display teardown). The flag is what
+    /// [`Runtime::lookup_security_context`] consults before touching the
+    /// stored pointer, and what the watch's own [`Registration`](crate::backend::Registration)
+    /// consults in its `Drop` to skip unlinking from the freed signal list.
+    /// The cell lives in this `Rc`-allocated struct, whose heap address never
+    /// moves, so the raw pointer handed to the watch stays valid for the
+    /// registration's whole life. Init `false` (no manager yet).
+    pub(crate) security_context_manager_alive: std::cell::Cell<bool>,
+
+    /// The security-context manager's `destroy` watch, linked at creation into
+    /// the manager's `events.destroy`.
+    ///
+    /// Unlinked by its own callback (display teardown, while the manager
+    /// memory is still valid) or by this runtime's drop while the manager
+    /// still stands — never from freed memory, because the callback clears the
+    /// liveness flag first and `Drop` skips the unlink once it reads false.
+    /// `None` until
+    /// [`create_security_context_manager`](Runtime::create_security_context_manager)
+    /// runs, and again after the watch has fired.
+    pub(crate) security_context_manager_destroy: RefCell<Option<crate::backend::Registration>>,
+
+    /// The `wlr_fixes` global, once created — wlroots' core `wl_fixes`
+    /// implementation (global/registry lifetime). `Option`, same rationale as
+    /// the other manager globals.
+    pub(crate) fixes: RefCell<Option<NonNull<sys::wlr_fixes>>>,
+
     /// The `zwlr_output_manager_v1` global, once created — lets a client
     /// (e.g. a display-settings app) enumerate output heads and request an
     /// atomic reconfiguration. `Option`, same rationale as the other manager
@@ -2648,6 +2792,13 @@ pub(crate) struct RuntimeInner {
     /// presentation feedback (when its buffer was actually presented, and at
     /// what refresh). `Option`, same rationale as the other manager globals.
     pub(crate) presentation: RefCell<Option<NonNull<sys::wlr_presentation>>>,
+
+    /// The `wlr_subcompositor` global this runtime created in
+    /// [`Runtime::init_graphics`]. Display-owned like the compositor, so there
+    /// is nothing this crate destroys — stored so the `wlr_subcompositor`
+    /// type stays referenced by the safe crate (see `coverage/wrapped.toml`).
+    /// `None` until graphics is initialised.
+    pub(crate) subcompositor: RefCell<Option<NonNull<sys::wlr_subcompositor>>>,
 
     /// The `wlr_compositor` this runtime created in
     /// [`Runtime::init_graphics`]. Stored — unlike the renderer/allocator, kept
@@ -2742,6 +2893,15 @@ pub(crate) struct RuntimeInner {
     /// Every live toplevel: the role object, its scene tree, and the surface
     /// its id addon lives on.
     pub(crate) toplevels: RefCell<HashMap<ToplevelId, ToplevelEntry>>,
+
+    /// Every live generic `wlr_surface` this crate has minted a [`SurfaceId`]
+    /// for. Written by `backend.rs`'s `install_surface_listeners` at each
+    /// announce site, purged synchronously by `on_surface_destroy_generic`
+    /// (and by the xwayland dissociate path) before wlroots frees the surface,
+    /// and cleared wholesale by [`Runtime::clear_surfaces`] when the `run_all`
+    /// call that populated it returns — the identical two-level discipline
+    /// `toplevels`/`popups` follow, and for the identical reason.
+    pub(crate) surfaces: RefCell<HashMap<SurfaceId, SurfaceEntry>>,
 
     /// Every live popup: the role object, its scene subtree, and the parent it
     /// was announced under.
@@ -3066,6 +3226,18 @@ pub(crate) struct RuntimeInner {
 pub(crate) struct ToplevelEntry {
     pub(crate) raw: NonNull<sys::wlr_xdg_toplevel>,
     pub(crate) tree: NonNull<sys::wlr_scene_tree>,
+}
+
+/// One live generic `wlr_surface` as this crate tracks it: the raw pointer its
+/// [`SurfaceId`] resolves to.
+///
+/// Deliberately minimal. Unlike [`ToplevelEntry`] it owns no scene tree and
+/// carries no role: a surface's role object (if any) is tracked by its own
+/// table, and this is the fallback identity for every surface — a plain
+/// subsurface, or a role surface viewed through the generic API.
+#[derive(Clone, Copy)]
+pub(crate) struct SurfaceEntry {
+    pub(crate) raw: NonNull<sys::wlr_surface>,
 }
 
 /// One live Xwayland surface (X11 window) as this crate tracks it.
@@ -3539,11 +3711,14 @@ impl Runtime {
                 node_borrows: std::cell::Cell::new(0),
                 buffers: RefCell::new(HashMap::new()),
                 scene_observer: std::cell::Cell::new(None),
+                foreign_toplevel_observer: std::cell::Cell::new(None),
                 scene_buffer_outputs: RefCell::new(HashMap::new()),
                 scene_outputs: RefCell::new(HashMap::new()),
                 live_sources: RefCell::new(HashMap::new()),
                 pending_close: RefCell::new(Vec::new()),
+                pending_foreign_toplevel_destroys: RefCell::new(Vec::new()),
                 xdg_shell: RefCell::new(None),
+                xdg_shell_version: std::cell::Cell::new(None),
                 xdg_decoration_manager: RefCell::new(None),
                 primary_selection_manager: RefCell::new(None),
                 data_control_manager: RefCell::new(None),
@@ -3560,6 +3735,16 @@ impl Runtime {
                 pointer_gestures_manager: RefCell::new(None),
                 cursor_shape_manager: RefCell::new(None),
                 xdg_activation_manager: RefCell::new(None),
+                xdg_dialog_manager: RefCell::new(None),
+                xdg_system_bell: RefCell::new(None),
+                xdg_toplevel_icon_manager: RefCell::new(None),
+                xdg_toplevel_tag_manager: RefCell::new(None),
+                xdg_foreign_registry: RefCell::new(None),
+                xdg_foreign_v1: RefCell::new(None),
+                xdg_foreign_v2: RefCell::new(None),
+                foreign_toplevel_manager: RefCell::new(None),
+                ext_foreign_toplevel_list: RefCell::new(None),
+                ext_workspace_manager: RefCell::new(None),
                 gamma_control_manager: RefCell::new(None),
                 text_input_manager: RefCell::new(None),
                 tearing_control_manager: RefCell::new(None),
@@ -3573,6 +3758,10 @@ impl Runtime {
                 idle_inhibit_manager: RefCell::new(None),
                 idle_inhibitors: std::cell::Cell::new(0),
                 session_lock_manager: RefCell::new(None),
+                security_context_manager: RefCell::new(None),
+                security_context_manager_alive: std::cell::Cell::new(false),
+                security_context_manager_destroy: RefCell::new(None),
+                fixes: RefCell::new(None),
                 output_manager: RefCell::new(None),
                 power_manager: RefCell::new(None),
                 viewporter: RefCell::new(None),
@@ -3581,6 +3770,7 @@ impl Runtime {
                 xdg_output_manager: RefCell::new(None),
                 fractional_scale_manager: RefCell::new(None),
                 presentation: RefCell::new(None),
+                subcompositor: RefCell::new(None),
                 #[cfg(wlr_has_xwayland)]
                 compositor: RefCell::new(None),
                 #[cfg(wlr_has_xwayland)]
@@ -3594,6 +3784,7 @@ impl Runtime {
                 lock_surface_trees: RefCell::new(HashMap::new()),
                 session_lock_fill: std::cell::Cell::new(None),
                 toplevels: RefCell::new(HashMap::new()),
+                surfaces: RefCell::new(HashMap::new()),
                 popups: RefCell::new(HashMap::new()),
                 decorations: RefCell::new(HashMap::new()),
                 layer_shell: RefCell::new(None),
@@ -3784,6 +3975,45 @@ impl Runtime {
     /// remove nothing) drops nothing and costs one empty `Vec::clear`.
     pub(crate) fn drain_pending_closes(&self) {
         self.inner.pending_close.borrow_mut().clear();
+    }
+
+    /// Queue a foreign-toplevel handle's wlroots destroy until the turn ends.
+    ///
+    /// Called by [`ForeignToplevelHandle`](crate::ForeignToplevelHandle)'s
+    /// `Drop` when it runs inside a handler delivery; see the field's own doc
+    /// for why the destroy cannot happen there.
+    pub(crate) fn defer_foreign_toplevel_destroy(
+        &self,
+        raw: NonNull<sys::wlr_foreign_toplevel_handle_v1>,
+    ) {
+        self.inner
+            .pending_foreign_toplevel_destroys
+            .borrow_mut()
+            .push(raw);
+    }
+
+    /// Release every handle whose destroy was deferred this turn.
+    ///
+    /// Runs at the same point as [`drain_pending_closes`](Self::drain_pending_closes):
+    /// after `wl_event_loop_dispatch` returns, so the request signal that
+    /// produced the drop is no longer being emitted and the handle memory can
+    /// be freed. An empty list is the ordinary case.
+    pub(crate) fn drain_pending_foreign_toplevel_destroys(&self) {
+        let pending: Vec<NonNull<sys::wlr_foreign_toplevel_handle_v1>> = self
+            .inner
+            .pending_foreign_toplevel_destroys
+            .borrow_mut()
+            .drain(..)
+            .collect();
+        for raw in pending {
+            // SAFETY: each pointer was a live handle whose owner dropped it
+            // during this turn's dispatch and deferred the release; the manager
+            // that owns it is alive because the run driving the dispatch is on
+            // the stack. `wlr_foreign_toplevel_handle_v1_destroy` is
+            // idempotent-free: it removes the handle from the manager and frees
+            // it exactly once.
+            unsafe { sys::wlr_foreign_toplevel_handle_v1_destroy(raw.as_ptr()) };
+        }
     }
 
     /// The descriptor `id` names, borrowed for the callback that resolves it.
@@ -3981,9 +4211,14 @@ impl Runtime {
             {
                 *self.inner.compositor.borrow_mut() = NonNull::new(compositor);
             }
-            if sys::wlr_subcompositor_create(display.as_ptr()).is_null() {
-                return Err(Error::Create("wlr_subcompositor_create"));
-            }
+            // Display-owned like the compositor and `wlr_data_device_manager`,
+            // so there is nothing this crate destroys; the pointer is kept
+            // so the `wlr_subcompositor` type stays referenced by the safe
+            // crate (see `coverage/wrapped.toml`).
+            let subcompositor = sys::wlr_subcompositor_create(display.as_ptr());
+            let subcompositor =
+                NonNull::new(subcompositor).ok_or(Error::Create("wlr_subcompositor_create"))?;
+            *self.inner.subcompositor.borrow_mut() = Some(subcompositor);
             if sys::wlr_data_device_manager_create(display.as_ptr()).is_null() {
                 return Err(Error::Create("wlr_data_device_manager_create"));
             }
@@ -6630,11 +6865,31 @@ impl Runtime {
     /// Clear it again, which `run_inner`'s guard does on every exit path.
     pub(crate) fn clear_scene_observer(&self) {
         self.inner.scene_observer.set(None);
+        // The foreign-toplevel hook goes with it: its session pointer names this
+        // same run, so leaving it installed would dangle.
+        self.clear_foreign_toplevel_observer();
         // The snapshots go with it: they name scene outputs by id, which stay
         // valid, but nothing can refresh them once the listeners are gone, and
         // a stale set answered after the run had ended would be worse than a
         // miss.
         self.inner.scene_buffer_outputs.borrow_mut().clear();
+    }
+
+    /// Install the live run's foreign-toplevel delivery hook.
+    ///
+    /// Called by the same run-inner hook that installs the scene observer; no
+    /// run on the stack means no `ToplevelHandler` to deliver to, so a request
+    /// arriving then is dropped.
+    pub(crate) fn set_foreign_toplevel_observer(
+        &self,
+        observer: crate::foreign_toplevel::ForeignToplevelObserver,
+    ) {
+        self.inner.foreign_toplevel_observer.set(Some(observer));
+    }
+
+    /// Clear it again, which `run_inner`'s guard does on every exit path.
+    pub(crate) fn clear_foreign_toplevel_observer(&self) {
+        self.inner.foreign_toplevel_observer.set(None);
     }
 
     /// `id`'s node as a buffer node, if changing how it *looks* is allowed.
@@ -7396,11 +7651,89 @@ impl Runtime {
         // apart by display, which is why the guard above rejects it
         // outright rather than refreshing.
         *self.inner.xdg_shell.borrow_mut() = Some(raw);
+        self.inner.xdg_shell_version.set(Some(version));
         Ok(())
     }
 
     pub(crate) fn xdg_shell_ptr(&self) -> Option<NonNull<sys::wlr_xdg_shell>> {
         *self.inner.xdg_shell.borrow()
+    }
+
+    /// The version passed to [`create_xdg_shell`](Runtime::create_xdg_shell),
+    /// or `None` before the shell exists. `pub(crate)` rather than public:
+    /// it exists only so the toplevel setters can enforce wlroots' own
+    /// version asserts, and a consumer that wants to know the version already
+    /// has the value it passed in.
+    pub(crate) fn xdg_shell_version(&self) -> Option<u32> {
+        self.inner.xdg_shell_version.get()
+    }
+
+    /// Whether this runtime's xdg shell was created at version `min` or newer.
+    ///
+    /// `false` when no shell exists, which is the right answer for a version
+    /// question and also cannot be reached with a live toplevel.
+    fn xdg_shell_at_least(&self, min: u32) -> bool {
+        self.xdg_shell_version().is_some_and(|v| v >= min)
+    }
+
+    /// The extent guard shared by the toplevel setters whose wlroots call
+    /// asserts `width >= 0 && height >= 0` — `set_size` and `set_bounds`.
+    /// Refusing here is what keeps that assert (live, because this
+    /// distribution ships wlroots without `NDEBUG`) from aborting the
+    /// compositor on a bad extent.
+    fn non_negative_extent(width: i32, height: i32) -> bool {
+        width >= 0 && height >= 0
+    }
+
+    /// The version gate + entry lookup every toplevel staging setter shares.
+    ///
+    /// Version table (each the `*_SINCE_VERSION` of the state the setter
+    /// stages, matching wlroots' own asserts): tiled 2, bounds 4,
+    /// wm_capabilities 5, suspended 6, constrained 7. Setters for older
+    /// states pass `min_version: None`.
+    ///
+    /// Checks run in wlroots order — version, then extent, then liveness —
+    /// so the `None` conditions match the previous per-setter guards
+    /// exactly: an old shell reports `None` without touching the extent,
+    /// a bad extent without touching the table.
+    fn with_live_toplevel(
+        &self,
+        id: ToplevelId,
+        min_version: Option<u32>,
+        check_extent: Option<(i32, i32)>,
+        f: impl FnOnce(NonNull<sys::wlr_xdg_toplevel>),
+    ) -> Option<()> {
+        if let Some(min) = min_version
+            && !self.xdg_shell_at_least(min)
+        {
+            return None;
+        }
+        if let Some((width, height)) = check_extent
+            && !Self::non_negative_extent(width, height)
+        {
+            return None;
+        }
+        let entry = self.toplevel_entry(id)?;
+        // Debug-only tripwires naming the three distinct `None` causes (old
+        // shell / bad extent / unknown-or-stale id). Release behavior stays
+        // bare `None` — there is no logging facade in this crate — while
+        // each assert pins which guard discharged wlroots' own assert on
+        // this path. They cannot fire: the early returns above already
+        // refused every case they deny.
+        debug_assert!(
+            min_version.is_none_or(|min| self.xdg_shell_at_least(min)),
+            "with_live_toplevel: version guard discharged before live entry use"
+        );
+        debug_assert!(
+            check_extent.is_none_or(|(width, height)| Self::non_negative_extent(width, height)),
+            "with_live_toplevel: extent guard discharged before live entry use"
+        );
+        debug_assert!(
+            self.inner.toplevels.borrow().contains_key(&id),
+            "with_live_toplevel: entry present between lookup and use"
+        );
+        f(entry.raw);
+        Some(())
     }
 
     /// Advertise `zxdg_decoration_manager_v1`.
@@ -7617,7 +7950,8 @@ impl Runtime {
     /// hint at tearing presentation. `version` is the protocol version to
     /// advertise (1 is current). Errors if called twice.
     ///
-    /// Reading a surface's hint needs the surface handle model (M9).
+    /// Once created, a surface's effective hint is readable through
+    /// [`Surface::tearing_hint`] (and its by-id form [`Runtime::tearing_hint`]).
     pub fn create_tearing_control_manager(&self, display: &Display, version: u32) -> Result<()> {
         if self.inner.tearing_control_manager.borrow().is_some() {
             return Err(Error::Operation(
@@ -7632,6 +7966,20 @@ impl Runtime {
             NonNull::new(raw).ok_or(Error::Create("wlr_tearing_control_manager_v1_create"))?;
         *self.inner.tearing_control_manager.borrow_mut() = Some(raw);
         Ok(())
+    }
+
+    /// The `wp_tearing_control_manager_v1` global, once created via
+    /// [`Runtime::create_tearing_control_manager`], or `None`.
+    ///
+    /// Read by [`Runtime::surface`] and `backend.rs`'s `with_surface` to cache
+    /// the manager on every [`Surface`] handle, so the tearing accessors can
+    /// read a surface's hint. Copied out with the `RefCell` borrow released
+    /// before returning, so a caller that then re-enters wlroots cannot
+    /// double-borrow it.
+    pub(crate) fn tearing_control_manager(
+        &self,
+    ) -> Option<NonNull<sys::wlr_tearing_control_manager_v1>> {
+        *self.inner.tearing_control_manager.borrow()
     }
 
     /// The `zwp_text_input_manager_v3` manager, once created via
@@ -10734,6 +11082,84 @@ impl Runtime {
         self.inner.decorations.borrow_mut().clear();
     }
 
+    /// Record a newly-announced surface under `id`.
+    ///
+    /// Called from `backend.rs`'s `install_surface_listeners`, before the
+    /// announcement reaches a handler, mirroring
+    /// [`record_toplevel`](Runtime::record_toplevel).
+    pub(crate) fn record_surface(&self, id: SurfaceId, raw: NonNull<sys::wlr_surface>) {
+        self.inner
+            .surfaces
+            .borrow_mut()
+            .insert(id, SurfaceEntry { raw });
+    }
+
+    /// Remove `id`'s entry. Called from `backend.rs`'s
+    /// `on_surface_destroy_generic` (and its xwayland dissociate path) before
+    /// wlroots frees the surface, mirroring
+    /// [`forget_toplevel`](Runtime::forget_toplevel).
+    pub(crate) fn forget_surface(&self, id: SurfaceId) {
+        self.inner.surfaces.borrow_mut().remove(&id);
+    }
+
+    /// This id's recorded raw surface, with the borrow released before
+    /// returning — the caller then re-enters wlroots, which can emit a signal,
+    /// which can take this same `RefCell` mutably. See
+    /// [`toplevel_entry`](Runtime::toplevel_entry)'s own doc for why that
+    /// matters.
+    pub(crate) fn surface_ptr(&self, id: SurfaceId) -> Option<NonNull<sys::wlr_surface>> {
+        self.inner.surfaces.borrow().get(&id).map(|e| e.raw)
+    }
+
+    /// Drop every surface this runtime knows of, without touching wlroots.
+    ///
+    /// Called once by `backend.rs`'s `run_inner` when the `run_all` call that
+    /// populated the table returns, on every exit path — mirroring
+    /// [`clear_toplevels`](Runtime::clear_toplevels) exactly, and for the
+    /// identical reason: a `SurfaceId` is only meaningful for the call that
+    /// announced it, because the per-surface destroy listener that would
+    /// remove a stale row is itself torn down with that call's `Session`.
+    /// Without this, a consumer who kept a `Runtime` clone could resolve a
+    /// stale id and hand wlroots memory it had already freed.
+    pub(crate) fn clear_surfaces(&self) {
+        self.inner.surfaces.borrow_mut().clear();
+    }
+
+    /// The generic handle for `id`, or `None` if no live surface has it.
+    ///
+    /// The by-id miss every id type in this crate promises: an id held past
+    /// its surface's destruction resolves to nothing rather than to a
+    /// use-after-free.
+    pub fn surface(&self, id: SurfaceId) -> Option<Surface<'_>> {
+        let raw = self.surface_ptr(id)?;
+        // SAFETY: an entry is removed before wlroots frees the surface, so a
+        // present entry names a live one; the borrow above is released before
+        // the handle is built. The tearing manager is copied out of its cell
+        // (not borrowed across the return) so the handle's tearing accessors
+        // can use it without re-borrowing while a handler runs.
+        let tearing_manager = self.tearing_control_manager();
+        let seat = *self.inner.seat.borrow();
+        Some(
+            unsafe { Surface::from_raw_with_id(raw.as_ptr(), id) }
+                .with_tearing_manager(tearing_manager)
+                .with_seat(seat),
+        )
+    }
+
+    /// The borrowed handle for `id`, or `None` if no live output has it.
+    ///
+    /// The by-id miss, matching [`surface`](Runtime::surface): an id held past
+    /// its output's destruction resolves to nothing. The handle borrows the
+    /// runtime for its lifetime and is only meaningful while the run that
+    /// announced the output is on the stack.
+    pub fn output(&self, id: OutputId) -> Option<Output<'_>> {
+        let raw = self.output_ptr(id)?;
+        // SAFETY: an entry is removed before wlroots frees the output, so a
+        // present entry names a live one; the borrow above is released before
+        // the handle is built.
+        Some(unsafe { Output::from_raw_with_id(raw.as_ptr(), id) })
+    }
+
     /// The maximum popup nesting this crate will walk.
     ///
     /// wlroots cannot produce a cycle — a popup's parent is fixed when the role
@@ -11155,6 +11581,51 @@ impl Runtime {
         self.inner.decorations.borrow().get(&id).map(|e| e.raw)
     }
 
+    /// The decoration mode currently **applied** to this toplevel's
+    /// decoration — `wlr_xdg_toplevel_decoration_v1_state.mode`, copied out.
+    ///
+    /// This is the mode the client has acked, not the one last configured; for
+    /// the in-flight answer use
+    /// [`decoration_configure`](Runtime::decoration_configure). `None` when
+    /// the id is unknown or stale, or names a toplevel with no decoration.
+    #[must_use]
+    pub fn decoration_state(&self, id: ToplevelId) -> Option<DecorationMode> {
+        let raw = self.decoration_ptr(id)?;
+        // SAFETY: a present entry names a live decoration — it is removed
+        // before wlroots frees it — and `current` is a plain embedded
+        // `wlr_xdg_toplevel_decoration_v1_state`.
+        let state: &sys::wlr_xdg_toplevel_decoration_v1_state = unsafe { &(*raw.as_ptr()).current };
+        DecorationMode::from_raw(state.mode.0)
+    }
+
+    /// The decoration mode queued in the **next** configure for this
+    /// toplevel's decoration, read from the head of wlroots' configure list.
+    ///
+    /// `None` when nothing is queued (the common case between configures) or
+    /// when the id names no decoration. The record's `link` is its first
+    /// field, so the list node *is* the record pointer; see
+    /// [`DecorationMode`] for the wire values.
+    #[must_use]
+    pub fn decoration_configure(&self, id: ToplevelId) -> Option<DecorationMode> {
+        let raw = self.decoration_ptr(id)?;
+        // SAFETY: a present entry names a live decoration; its `configure_list`
+        // is a wlroots-initialised circular `wl_list`, and any queued
+        // `configure` node is a live `wlr_xdg_toplevel_decoration_v1_configure`
+        // whose `link` field is at offset 0, so the node pointer and the
+        // record pointer coincide.
+        unsafe {
+            let list = &(*raw.as_ptr()).configure_list;
+            let head = list as *const sys::wl_list as *mut sys::wl_list;
+            if list.next == head {
+                return None;
+            }
+            let record = list
+                .next
+                .cast::<sys::wlr_xdg_toplevel_decoration_v1_configure>();
+            DecorationMode::from_raw((*record).mode.0)
+        }
+    }
+
     /// Clear the "a mode was set for the request currently in flight" flag
     /// on `id`'s decoration, if it has one. Called right before this
     /// toplevel's `request_mode` event is delivered — see
@@ -11254,41 +11725,245 @@ impl Runtime {
     /// so an id kept past that point — even one whose client is still
     /// connected — reports `None` here rather than resolving to a stale
     /// pointer.
+    ///
+    /// A negative `width` or `height` returns `None` without calling into
+    /// wlroots: `wlr_xdg_toplevel_set_size` asserts
+    /// `width >= 0 && height >= 0`, and this distribution ships wlroots
+    /// **without `NDEBUG`**, so the assert is a process abort rather than a
+    /// no-op. [`set_toplevel_bounds`](Runtime::set_toplevel_bounds) uses the
+    /// same shared extent guard.
+    ///
+    /// `None` causes, in check order: (1) a negative `width` or `height`
+    /// (bad extent); (2) an unknown or stale id. No shell-version guard
+    /// applies to sizing — every xdg-shell version carries it.
     pub fn set_toplevel_size(&self, id: ToplevelId, width: i32, height: i32) -> Option<()> {
-        let entry = self.toplevel_entry(id)?;
-        // SAFETY: an entry is removed by the destroy callback, which wlroots
-        // runs before it frees the toplevel, so a present entry names a live
-        // one. `wlr_xdg_toplevel_set_size` only writes pending state.
-        unsafe { sys::wlr_xdg_toplevel_set_size(entry.raw.as_ptr(), width, height) };
-        Some(())
+        self.with_live_toplevel(id, None, Some((width, height)), |raw| {
+            // SAFETY: an entry is removed by the destroy callback, which wlroots
+            // runs before it frees the toplevel, so a present entry names a live
+            // one. `wlr_xdg_toplevel_set_size` only writes pending state.
+            unsafe { sys::wlr_xdg_toplevel_set_size(raw.as_ptr(), width, height) };
+        })
     }
 
     /// Stage the `activated` state — the one a client renders its own title
     /// bar and focus ring from. `None` for an unknown id — including a stale
-    /// one; see `set_toplevel_size`'s doc.
+    /// one; see `set_toplevel_size`'s doc. That is the only `None` cause
+    /// here: no shell-version or extent guard applies to this state.
     pub fn set_toplevel_activated(&self, id: ToplevelId, activated: bool) -> Option<()> {
-        let entry = self.toplevel_entry(id)?;
-        // SAFETY: as for `set_toplevel_size`.
-        unsafe { sys::wlr_xdg_toplevel_set_activated(entry.raw.as_ptr(), activated) };
-        Some(())
+        self.with_live_toplevel(id, None, None, |raw| {
+            // SAFETY: as for `set_toplevel_size`.
+            unsafe { sys::wlr_xdg_toplevel_set_activated(raw.as_ptr(), activated) };
+        })
     }
 
     /// Stage the `maximized` state. `None` for an unknown or stale id; see
-    /// `set_toplevel_size`'s doc.
+    /// `set_toplevel_size`'s doc. That is the only `None` cause here: no
+    /// shell-version or extent guard applies to this state.
     pub fn set_toplevel_maximized(&self, id: ToplevelId, maximized: bool) -> Option<()> {
-        let entry = self.toplevel_entry(id)?;
-        // SAFETY: as above.
-        unsafe { sys::wlr_xdg_toplevel_set_maximized(entry.raw.as_ptr(), maximized) };
-        Some(())
+        self.with_live_toplevel(id, None, None, |raw| {
+            // SAFETY: as above.
+            unsafe { sys::wlr_xdg_toplevel_set_maximized(raw.as_ptr(), maximized) };
+        })
     }
 
     /// Stage the `fullscreen` state. `None` for an unknown or stale id; see
-    /// `set_toplevel_size`'s doc.
+    /// `set_toplevel_size`'s doc. That is the only `None` cause here: no
+    /// shell-version or extent guard applies to this state.
     pub fn set_toplevel_fullscreen(&self, id: ToplevelId, fullscreen: bool) -> Option<()> {
+        self.with_live_toplevel(id, None, None, |raw| {
+            // SAFETY: as above.
+            unsafe { sys::wlr_xdg_toplevel_set_fullscreen(raw.as_ptr(), fullscreen) };
+        })
+    }
+
+    /// Stage a recommended **bounds** for the client's window geometry.
+    ///
+    /// A hint, not a size: the client is free to exceed it, and the compositor
+    /// reads the client's own size back through
+    /// [`Toplevel::current_size`](crate::Toplevel::current_size). `(0, 0)`
+    /// clears the bounds.
+    ///
+    /// Requires xdg-shell version >= 4
+    /// (`XDG_TOPLEVEL_CONFIGURE_BOUNDS_SINCE_VERSION`); `None` if the shell
+    /// was created older. A negative extent also returns `None` — wlroots
+    /// asserts `width >= 0 && height >= 0` here too. `None` for an unknown or
+    /// stale id as well; see `set_toplevel_size`'s doc.
+    ///
+    /// `None` causes, in check order: (1) a shell older than version 4
+    /// (old shell); (2) a negative extent; (3) an unknown or stale id.
+    pub fn set_toplevel_bounds(&self, id: ToplevelId, width: i32, height: i32) -> Option<()> {
+        self.with_live_toplevel(id, Some(4), Some((width, height)), |raw| {
+            // SAFETY: as for `set_toplevel_size`; this only writes pending state.
+            unsafe { sys::wlr_xdg_toplevel_set_bounds(raw.as_ptr(), width, height) };
+        })
+    }
+
+    /// Stage which edges the client should treat as **constrained** — not
+    /// resizable from. `constrained_edges` is encoded through
+    /// [`Edges`](crate::Edges), whose four booleans map to wlroots'
+    /// `wlr_edges` bits.
+    ///
+    /// Requires xdg-shell version >= 7
+    /// (`XDG_TOPLEVEL_STATE_CONSTRAINED_LEFT_SINCE_VERSION`); `None` if the
+    /// shell was created older, rather than reaching wlroots' own assert and
+    /// aborting. `None` for an unknown or stale id as well; see
+    /// `set_toplevel_size`'s doc.
+    ///
+    /// `None` causes, in check order: (1) a shell older than version 7
+    /// (old shell); (2) an unknown or stale id. No extent guard applies
+    /// to this state.
+    pub fn set_toplevel_constrained(&self, id: ToplevelId, constrained_edges: Edges) -> Option<()> {
+        self.with_live_toplevel(id, Some(7), None, |raw| {
+            // SAFETY: as for `set_toplevel_size`; this only writes pending state,
+            // and the version guard above discharged wlroots' own assert.
+            unsafe {
+                sys::wlr_xdg_toplevel_set_constrained(raw.as_ptr(), constrained_edges.to_xdg())
+            };
+        })
+    }
+
+    /// Stage which edges of the client sit in a tiled layout. Same
+    /// [`Edges`] encoding and `None` contract as
+    /// [`set_toplevel_constrained`](Runtime::set_toplevel_constrained).
+    ///
+    /// Requires xdg-shell version >= 2
+    /// (`XDG_TOPLEVEL_STATE_TILED_LEFT_SINCE_VERSION`); `None` if the shell
+    /// was created older. (Verified against the shipped wlroots binary, whose
+    /// `wlr_xdg_toplevel_set_tiled` compares `shell->version` against 2 — not
+    /// the 6 that the sibling suspended state needs.)
+    ///
+    /// `None` causes, in check order: (1) a shell older than version 2
+    /// (old shell); (2) an unknown or stale id. No extent guard applies
+    /// to this state.
+    pub fn set_toplevel_tiled(&self, id: ToplevelId, tiled_edges: Edges) -> Option<()> {
+        self.with_live_toplevel(id, Some(2), None, |raw| {
+            // SAFETY: as for `set_toplevel_size`; this only writes pending state,
+            // and the version guard above discharged wlroots' own assert.
+            unsafe { sys::wlr_xdg_toplevel_set_tiled(raw.as_ptr(), tiled_edges.to_xdg()) };
+        })
+    }
+
+    /// Stage whether the client is being interactively resized. `None` for an
+    /// unknown or stale id; see `set_toplevel_size`'s doc. That is the only
+    /// `None` cause here: no shell-version or extent guard applies to this
+    /// state.
+    pub fn set_toplevel_resizing(&self, id: ToplevelId, resizing: bool) -> Option<()> {
+        self.with_live_toplevel(id, None, None, |raw| {
+            // SAFETY: as for `set_toplevel_size`; this only writes pending state.
+            unsafe { sys::wlr_xdg_toplevel_set_resizing(raw.as_ptr(), resizing) };
+        })
+    }
+
+    /// Stage whether the client is suspended (kept out of view).
+    ///
+    /// Requires xdg-shell version >= 6
+    /// (`XDG_TOPLEVEL_STATE_SUSPENDED_SINCE_VERSION`); `None` if the shell was
+    /// created older, rather than reaching wlroots' own assert and aborting.
+    /// `None` for an unknown or stale id as well; see `set_toplevel_size`'s
+    /// doc.
+    ///
+    /// `None` causes, in check order: (1) a shell older than version 6
+    /// (old shell); (2) an unknown or stale id. No extent guard applies
+    /// to this state.
+    pub fn set_toplevel_suspended(&self, id: ToplevelId, suspended: bool) -> Option<()> {
+        self.with_live_toplevel(id, Some(6), None, |raw| {
+            // SAFETY: as for `set_toplevel_size`; this only writes pending state,
+            // and the version guard above discharged wlroots' own assert.
+            unsafe { sys::wlr_xdg_toplevel_set_suspended(raw.as_ptr(), suspended) };
+        })
+    }
+
+    /// Stage the window-manager capabilities the compositor advertises to the
+    /// client — whether it can show a window menu, maximize, fullscreen or
+    /// minimize.
+    ///
+    /// Requires xdg-shell version >= 5
+    /// (`XDG_TOPLEVEL_WM_CAPABILITIES_SINCE_VERSION`); `None` if the shell was
+    /// created older, rather than reaching wlroots' own assert and aborting.
+    /// `None` for an unknown or stale id as well; see `set_toplevel_size`'s
+    /// doc.
+    ///
+    /// `None` causes, in check order: (1) a shell older than version 5
+    /// (old shell); (2) an unknown or stale id. No extent guard applies
+    /// to this state.
+    pub fn set_toplevel_wm_capabilities(&self, id: ToplevelId, caps: WmCapabilities) -> Option<()> {
+        self.with_live_toplevel(id, Some(5), None, |raw| {
+            // SAFETY: as for `set_toplevel_size`; this only writes pending state,
+            // and the version guard above discharged wlroots' own assert.
+            unsafe { sys::wlr_xdg_toplevel_set_wm_capabilities(raw.as_ptr(), caps.bits()) };
+        })
+    }
+
+    /// Set (or clear) this toplevel's parent toplevel.
+    ///
+    /// `parent: None` clears it. Returns `Some(false)` when wlroots refuses the
+    /// assignment because it would create a parent loop, `Some(true)` on
+    /// success, and `None` when either the toplevel or a named parent is
+    /// unknown or stale — the same by-id miss contract every setter shares.
+    /// See `set_toplevel_size`'s doc for what "stale" means.
+    pub fn set_toplevel_parent(&self, id: ToplevelId, parent: Option<ToplevelId>) -> Option<bool> {
         let entry = self.toplevel_entry(id)?;
-        // SAFETY: as above.
-        unsafe { sys::wlr_xdg_toplevel_set_fullscreen(entry.raw.as_ptr(), fullscreen) };
-        Some(())
+        let parent_raw = match parent {
+            Some(parent) => self.toplevel_entry(parent)?.raw.as_ptr(),
+            None => std::ptr::null_mut(),
+        };
+        // SAFETY: a present entry names a live toplevel, and a named parent's
+        // present entry names a live one too; wlroots only reads both and
+        // writes parent bookkeeping.
+        let ok = unsafe { sys::wlr_xdg_toplevel_set_parent(entry.raw.as_ptr(), parent_raw) };
+        Some(ok)
+    }
+
+    /// Resolve a generic [`SurfaceId`] to its [`Toplevel`] role, if it has one.
+    ///
+    /// The downcast counterpart of [`Runtime::surface`], wrapping
+    /// `wlr_xdg_toplevel_try_from_wlr_surface`. `None` for a surface that is
+    /// not a toplevel, for an unknown or stale surface id, or — defensively —
+    /// for a surface this crate never attached a toplevel id to.
+    #[must_use]
+    pub fn toplevel_of(&self, id: SurfaceId) -> Option<Toplevel<'_>> {
+        // Single downcast site: the try_from + null check + id lookup live in
+        // `Toplevel::from_surface`, probed here through a by-id `Surface`
+        // handle. The probe cannot be returned directly — its handle borrows
+        // a temporary, while this return borrows `self` — so the verified
+        // raw/id pair is re-wrapped below, which is exactly what the
+        // previous inline downcast constructed.
+        let surface = self.surface(id)?;
+        let probe = Toplevel::from_surface(&surface)?;
+        let (raw, toplevel_id) = (probe.as_ptr(), probe.id());
+        // SAFETY: the probe just verified `raw` is a live toplevel whose
+        // surface carries the addon that produced `toplevel_id` (see
+        // `Toplevel::from_surface`); re-wrapping names the same live pair
+        // with this method's own borrow instead of the temporary's.
+        Some(unsafe { Toplevel::from_raw_with_id(raw, toplevel_id) })
+    }
+
+    /// Resolve a generic [`SurfaceId`] to its [`Popup`] role, if it has one.
+    ///
+    /// The popup counterpart of [`toplevel_of`](Runtime::toplevel_of). Unlike
+    /// that downcast this one **is** runtime-bound: a layer-shell popup is
+    /// created with a NULL xdg parent and reparented afterwards, so the
+    /// popup's own struct cannot answer "what does this hang off?" — only the
+    /// parent recorded at announcement time can, and that lives in this
+    /// runtime's table (see [`PopupParent`]).
+    #[must_use]
+    pub fn popup_of(&self, id: SurfaceId) -> Option<Popup<'_>> {
+        let raw = self.surface_ptr(id)?;
+        // SAFETY: `surface_ptr` only returns a live surface; the `try_from`
+        // and the addon read are reads.
+        let popup_id = unsafe {
+            let popup = sys::wlr_xdg_popup_try_from_wlr_surface(raw.as_ptr());
+            if popup.is_null() {
+                return None;
+            }
+            PopupId(find_id(&raw const (*raw.as_ptr()).addons)?)
+        };
+        // Copied out before the handle is built, because the borrow must be
+        // released before the caller re-enters wlroots.
+        let parent = self.inner.popups.borrow().get(&popup_id)?.parent;
+        let raw = self.popup_raw(popup_id)?;
+        // SAFETY: a present table entry names a live popup; see `popup`.
+        Some(unsafe { Popup::from_raw_with_id(raw.as_ptr(), popup_id, parent) })
     }
 
     /// Move the toplevel's scene node. Coordinates are the scene's, which for
@@ -11781,6 +12456,32 @@ impl Runtime {
         } else {
             self.stage_layer_configure(id, width, height);
         }
+        Some(())
+    }
+
+    /// Destroy a layer surface, telling the client it has been closed.
+    ///
+    /// wlr-layer-shell's own doc: the client is notified the surface has been
+    /// closed and the `wlr_layer_surface_v1` is freed, rendering its resource
+    /// inert. wlroots runs this crate's destroy callback before the free, so
+    /// the id stops resolving immediately afterwards and the generic surface
+    /// event stream reports the surface destroyed as on any other path.
+    ///
+    /// `None` for an unknown or stale id, the by-id miss every mutator in this
+    /// crate keeps. **Do not call it from inside a wlroots callback**: it frees
+    /// the layer surface wlroots may still be walking, which is a
+    /// use-after-free. Call it from between turns instead — a
+    /// [`LoopHandler::should_stop`](crate::LoopHandler::should_stop), say, the
+    /// same way this crate's own layer test does; the method is `&self` and
+    /// cannot forbid the unsafe call, so the precondition is on the caller.
+    pub fn destroy_layer_surface(&self, id: LayerSurfaceId) -> Option<()> {
+        let raw = self.layer_surface_ptr(id)?;
+        // SAFETY: a present `layer_surfaces` entry names a live layer surface
+        // (its destroy callback removes the entry before wlroots frees it), and
+        // no borrow of the table is held across this call. wlroots emits the
+        // layer destroy signal synchronously, which removes the entry, so the
+        // copy of `raw` is never dereferenced after the free.
+        unsafe { sys::wlr_layer_surface_v1_destroy(raw.as_ptr()) };
         Some(())
     }
 

@@ -1159,7 +1159,14 @@ pub struct PresentEvent {
 }
 
 impl PresentEvent {
-    fn as_c(&self, output: *mut sys::wlr_output) -> sys::wlr_output_event_present {
+    /// The C present-event, with `output` filled in by the caller.
+    ///
+    /// `pub(crate)` because [`PresentationEvent::from_output`] is the one other
+    /// caller: it builds the C struct only to hand it to wlroots'
+    /// `wlr_presentation_event_from_output`.
+    ///
+    /// [`PresentationEvent::from_output`]: crate::PresentationEvent::from_output
+    pub(crate) fn as_c(&self, output: *mut sys::wlr_output) -> sys::wlr_output_event_present {
         sys::wlr_output_event_present {
             output,
             commit_seq: self.commit_seq,

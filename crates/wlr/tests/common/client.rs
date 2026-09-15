@@ -16,10 +16,35 @@
 //! [`Connection::from_socket`], keeping `setenv`/`getenv` out of the spawned
 //! thread entirely.
 
+use std::os::fd::AsFd;
+use std::os::unix::fs::OpenOptionsExt;
+
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
-use wayland_client::protocol::{wl_compositor, wl_registry, wl_surface};
+use wayland_client::protocol::{
+    wl_buffer, wl_compositor, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_subcompositor,
+    wl_subsurface, wl_surface,
+};
 use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
+    ext_foreign_toplevel_handle_v1, ext_foreign_toplevel_list_v1,
+};
+use wayland_protocols::ext::workspace::v1::client::{
+    ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
+};
+use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_presentation_feedback};
+use wayland_protocols::wp::security_context::v1::client::{
+    wp_security_context_manager_v1, wp_security_context_v1,
+};
+use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::toplevel_icon::v1::client::{
+    xdg_toplevel_icon_manager_v1, xdg_toplevel_icon_v1,
+};
+use wayland_protocols::xdg::toplevel_tag::v1::client::xdg_toplevel_tag_manager_v1;
+use wayland_protocols_wlr::foreign_toplevel::v1::client::{
+    zwlr_foreign_toplevel_handle_v1, zwlr_foreign_toplevel_manager_v1,
+};
+use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
 
 /// What the client observed while it ran, handed back by [`spawn`].
 ///
@@ -34,6 +59,58 @@ pub struct ClientEvents {
     pub configure_events: u32,
     /// `xdg_surface.ack_configure` requests sent in response to those.
     pub acked_configures: u32,
+    /// Whether the activation client received the `done` event carrying its
+    /// token string — the server-side half of the xdg-activation round trip.
+    pub activation_token_received: bool,
+    /// Whether the activation client then redeemed that token with `activate`.
+    pub activation_sent: bool,
+    /// Whether a layer-shell client observed the server's `closed` event after
+    /// the compositor destroyed its layer surface.
+    pub layer_closed: bool,
+}
+
+/// What a `zwlr_foreign_toplevel_manager_v1` client observed, returned by
+/// [`spawn_foreign_toplevel`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ForeignToplevelEvents {
+    /// How many `toplevel` events the manager delivered.
+    pub toplevels_seen: u32,
+    /// The last `title` event's string.
+    pub title: Option<String>,
+    /// The last `app_id` event's string.
+    pub app_id: Option<String>,
+    /// Whether at least one `state` array arrived.
+    pub state_events: u32,
+    /// Whether the initial `done` arrived.
+    pub saw_done: bool,
+}
+
+/// What an `ext_foreign_toplevel_list_v1` client observed, returned by
+/// [`spawn_ext_foreign_toplevel`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExtForeignToplevelEvents {
+    /// How many `toplevel` events the list delivered.
+    pub toplevels_seen: u32,
+    /// The last `title` event's string.
+    pub title: Option<String>,
+    /// The last `app_id` event's string.
+    pub app_id: Option<String>,
+    /// The last `identifier` event's string — wlroots generates a stable token.
+    pub identifier: Option<String>,
+    /// Whether the initial `done` arrived.
+    pub saw_done: bool,
+}
+
+/// What an `ext_workspace_manager_v1` client observed, returned by
+/// [`spawn_ext_workspace`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExtWorkspaceEvents {
+    /// How many `workspace_group` events the manager delivered.
+    pub groups_seen: u32,
+    /// How many `workspace` events the manager delivered.
+    pub workspaces_seen: u32,
+    /// Whether the initial `done` arrived.
+    pub saw_done: bool,
 }
 
 /// The globals a driven client has bound.
@@ -42,12 +119,37 @@ pub struct ClientEvents {
 /// a closure can rely on both being `Some` and calling e.g.
 /// [`create_toplevel`](ClientState::create_toplevel) directly. They are public
 /// so a future leg can bind additional globals the same way.
+#[derive(Default)]
 pub struct ClientState {
     pub compositor: Option<wl_compositor::WlCompositor>,
     pub wm_base: Option<xdg_wm_base::XdgWmBase>,
+    /// The seat, when the server advertised one. Bound opportunistically by
+    /// [`spawn`] so a driven client can send seat-parameterised requests such
+    /// as `xdg_toplevel.show_window_menu`; `None` when no seat global exists.
+    pub seat: Option<wl_seat::WlSeat>,
+    /// The token string the activation round trip received from the server's
+    /// `xdg_activation_token_v1.done` event, held between the round trip that
+    /// answers `commit` and the one that sends `activate`.
+    pub activation_token: Option<String>,
     /// Populated by the `Dispatch` impls; copied into [`ClientEvents`] and
     /// returned by [`spawn`].
     pub events: ClientEvents,
+    /// What a foreign-toplevel-management client observed; returned by
+    /// [`spawn_foreign_toplevel`].
+    pub foreign: ForeignToplevelEvents,
+    /// The exported foreign-toplevel handle the server replayed on bind, kept
+    /// alive so the driven client can drive its requests.
+    pub foreign_handle: Option<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1>,
+    /// What an `ext-foreign-toplevel-list` client observed.
+    pub ext_foreign: ExtForeignToplevelEvents,
+    /// The ext-foreign-toplevel handle the list replayed on bind.
+    pub ext_foreign_handle: Option<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1>,
+    /// What an `ext-workspace` client observed.
+    pub ext_workspace: ExtWorkspaceEvents,
+    /// The workspace group the manager replayed on bind.
+    pub ext_workspace_group: Option<ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1>,
+    /// The workspace the manager replayed on bind.
+    pub ext_workspace_handle: Option<ext_workspace_handle_v1::ExtWorkspaceHandleV1>,
 }
 
 impl ClientState {
@@ -65,6 +167,278 @@ impl ClientState {
         let _toplevel = xdg_surface.get_toplevel(qh, ());
         surface.commit();
     }
+}
+
+/// Drive a client that asks for a window menu after its toplevel is configured.
+///
+/// `xdg_toplevel.show_window_menu` is refused with "surface has not been
+/// configured yet" until the initial configure has been acked, so this is the
+/// two-phase shape [`spawn_mapped`] uses — create, bufferless commit,
+/// round-trip so the configure is acked — with the menu request in phase two
+/// instead of a buffer. Returns the observed [`ClientEvents`].
+pub fn spawn_show_window_menu(
+    socket: &str,
+    x: i32,
+    y: i32,
+) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            seat: None,
+            activation_token: None,
+            events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
+            ..ClientState::default()
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=1, ()).expect("bind wl_seat");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+        state.seat = Some(seat.clone());
+
+        // Phase 1: role + bufferless commit, then a round-trip so the initial
+        // configure is dispatched and acked.
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let toplevel = xdg_surface.get_toplevel(&qh, ());
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the initial configure is dispatched and acked");
+
+        // Phase 2: the menu request, then a round-trip so the server has
+        // observed it.
+        let seat = state.seat.clone().expect("wl_seat");
+        toplevel.show_window_menu(&seat, 0, x, y);
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the show-window-menu request");
+
+        drop((surface, xdg_surface, toplevel, seat, wm_base, compositor));
+        state.events
+    })
+}
+
+/// Drive a `zwlr_foreign_toplevel_manager_v1` client against a handle the
+/// compositor exported before the connection.
+///
+/// Binds the manager and round-trips so the server's bind-time replay of the
+/// exported handle — its `toplevel` event plus title, app id, state and `done`
+/// — is dispatched, then drives every handle request the protocol offers except
+/// `destroy`. The requests are round-tripped so the server observes them before
+/// the thread returns. Returns the observed [`ForeignToplevelEvents`].
+pub fn spawn_foreign_toplevel(socket: &str) -> std::thread::JoinHandle<ForeignToplevelEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            seat: None,
+            activation_token: None,
+            events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
+            ..ClientState::default()
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=1, ()).expect("bind wl_seat");
+        let manager: zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1 = globals
+            .bind(&qh, 1..=3, ())
+            .expect("bind zwlr_foreign_toplevel_manager_v1");
+        state.compositor = Some(compositor.clone());
+        state.seat = Some(seat.clone());
+
+        // The manager replays every toplevel that already exists when a client
+        // binds, then its details, then `done`.
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the replayed handle is dispatched");
+
+        let surface = compositor.create_surface(&qh, ());
+        let handle = state
+            .foreign_handle
+            .as_ref()
+            .expect("the manager replayed a handle")
+            .clone();
+        handle.set_maximized();
+        handle.set_minimized();
+        handle.unset_minimized();
+        handle.set_fullscreen(None);
+        handle.activate(&seat);
+        handle.set_rectangle(&surface, 5, 6, 7, 8);
+        handle.close();
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the requests");
+
+        drop((surface, handle, manager, seat, compositor));
+        state.foreign
+    })
+}
+
+/// Drive an `ext_foreign_toplevel_list_v1` client against a handle the
+/// compositor exported before the connection.
+///
+/// Binds the list and round-trips so the server's bind-time replay — the
+/// `toplevel` event and the handle's title, app id, identifier and `done` — is
+/// dispatched. The list has no client requests (the protocol is observation
+/// only), so nothing is driven. Returns the observed
+/// [`ExtForeignToplevelEvents`].
+pub fn spawn_ext_foreign_toplevel(
+    socket: &str,
+) -> std::thread::JoinHandle<ExtForeignToplevelEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            ..ClientState::default()
+        };
+        let list: ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind ext_foreign_toplevel_list_v1");
+
+        // The list replays every exported toplevel on bind, then its details,
+        // then `done`.
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the replayed handle is dispatched");
+
+        drop((list,));
+        state.ext_foreign
+    })
+}
+
+/// Drive an `ext_workspace_manager_v1` client that observes the workspace
+/// objects the compositor created and then commits a batch of requests.
+///
+/// Binds the manager and round-trips so the bind-time replay of the group and
+/// workspace is dispatched, then sends every workspace request the protocol
+/// offers and one `commit`. Each request is round-tripped to the server by the
+/// final `commit`'s round-trip. Returns the observed [`ExtWorkspaceEvents`].
+pub fn spawn_ext_workspace(socket: &str) -> std::thread::JoinHandle<ExtWorkspaceEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            ..ClientState::default()
+        };
+        let manager: ext_workspace_manager_v1::ExtWorkspaceManagerV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind ext_workspace_manager_v1");
+
+        // The manager replays every group and workspace that already exists on
+        // bind, then `done`.
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the replayed objects are dispatched");
+
+        let group = state
+            .ext_workspace_group
+            .as_ref()
+            .expect("the manager replayed a group")
+            .clone();
+        let workspace = state
+            .ext_workspace_handle
+            .as_ref()
+            .expect("the manager replayed a workspace")
+            .clone();
+
+        // One atomic batch: the compositor sees all five requests when the
+        // commit drains them.
+        workspace.activate();
+        workspace.deactivate();
+        workspace.assign(&group);
+        group.create_workspace("wlr-new".to_owned());
+        workspace.remove();
+        manager.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the committed requests");
+
+        drop((workspace, group, manager));
+        state.ext_workspace
+    })
+}
+
+/// Drive a `wp_security_context_manager_v1` client that creates a security
+/// context with a real listening socket, attaches its metadata and commits it.
+///
+/// The commit is the only thing the server observes: `wp_security_context_v1`
+/// carries no events, so the thread returns nothing. A round-trip after the
+/// commit makes `join` wait until the server has dispatched it. The listening
+/// socket and the pipe end kept alive until after the round-trip are what make
+/// the context valid — the compositor accepts on the listen fd and watches the
+/// close fd for hangup.
+pub fn spawn_security_context(socket: &str) -> std::thread::JoinHandle<()> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            ..ClientState::default()
+        };
+        let manager: wp_security_context_manager_v1::WpSecurityContextManagerV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind wp_security_context_manager_v1");
+
+        // A listening socket for the sandbox connection the compositor would
+        // accept, and a pipe whose read end is the hangup signal. The path is
+        // unique per thread; any stale file is unlinked before binding (a
+        // crashed run leaves the socket file behind) and removed again when
+        // the thread exits. Contained by the `0700` runtime directory.
+        let listen_path = crate::common::shm_path_for("security-context-listen");
+        let _ = std::fs::remove_file(&listen_path);
+        let listener = std::os::unix::net::UnixListener::bind(&listen_path)
+            .expect("bind the security-context listen socket");
+        let (close_read, close_write) = rustix::pipe::pipe().expect("security-context close pipe");
+
+        let context = manager.create_listener(listener.as_fd(), close_read.as_fd(), &qh, ());
+        context.set_sandbox_engine("org.wlr.test".to_owned());
+        context.set_app_id("org.wlr.test.app".to_owned());
+        context.set_instance_id("instance-1".to_owned());
+        context.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the committed context");
+
+        drop((context, listener, close_write, manager));
+        // Best-effort: unlink the listen socket now that it is closed.
+        let _ = std::fs::remove_file(&listen_path);
+    })
 }
 
 /// Connect a client on its own thread, run `drive`, then round-trip.
@@ -120,7 +494,12 @@ pub fn spawn(
         let mut state = ClientState {
             compositor: None,
             wm_base: None,
+            seat: None,
+            activation_token: None,
             events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
+            ..ClientState::default()
         };
         // `registry_queue_init` buffers the initial globals rather than
         // forwarding them to a handler, so the standard `GlobalList::bind` is
@@ -128,6 +507,10 @@ pub fn spawn(
         // before `drive` runs.
         state.compositor = Some(globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor"));
         state.wm_base = Some(globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base"));
+        // Opportunistic: a seat exists only when the server called
+        // `Runtime::create_seat`. A test that needs one creates it; the rest
+        // leave this `None` and never ask for it.
+        state.seat = globals.bind(&qh, 1..=1, ()).ok();
 
         drive(&mut state, &qh);
 
@@ -153,6 +536,673 @@ pub fn spawn(
             .roundtrip(&mut state)
             .expect("roundtrip so the server's configure is dispatched");
 
+        state.events
+    })
+}
+
+/// Like [`spawn`], but drives a toplevel all the way to **mapped**.
+///
+/// xdg-shell requires the role's first commit be bufferless, so the flow is
+/// two-phase and needs a round-trip *between* the commits — which the
+/// single-shot `drive` closure of [`spawn`] cannot do, since it is handed no
+/// event queue. Phase one creates the role, commits bufferless, and
+/// round-trips so the server's initial configure arrives and is acked (the
+/// `Dispatch<xdg_surface>` impl acks it). Phase two creates an shm pool and
+/// buffer, attaches and commits, then round-trips so the server has observed
+/// the buffered commit and mapped the surface.
+///
+/// The proxy handles are held until the second round-trip has been answered,
+/// so neither the buffer nor the surface is torn down before the server has
+/// seen the map. Returns the observed [`ClientEvents`] via the `JoinHandle`.
+// Shared harness: not every test binary maps a toplevel, so binaries that never call this would warn without the allow.
+#[allow(dead_code)]
+pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    // Built before the thread starts: `socket` is a borrow that cannot cross
+    // into the `'static` thread, and the closure needs an owned path anyway.
+    let shm_path = crate::common::shm_path_for(&format!("{socket}-mapped"));
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            seat: None,
+            activation_token: None,
+            events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
+            ..ClientState::default()
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("bind wl_shm");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+
+        // Opportunistic: the global exists only when the server called
+        // `Runtime::create_presentation`. Tests that never do are unchanged —
+        // `bind` returns `Err(Missing)` and the client drives its surface
+        // without asking for feedback. Version 1 is the client bindings'
+        // maximum even though the server advertises 2.
+        let presentation: Option<wp_presentation::WpPresentation> =
+            globals.bind(&qh, 1..=1, ()).ok();
+
+        // Phase 1: role + bufferless commit, then a round-trip so the server's
+        // initial configure arrives and is acked.
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let _toplevel = xdg_surface.get_toplevel(&qh, ());
+        // Ask for presentation feedback before the first commit: wlroots moves
+        // a requested feedback from the surface's pending to its current state
+        // during that commit's apply, so the server's commit handler observes
+        // it. The proxy is held until after the second round-trip.
+        let feedback = presentation
+            .as_ref()
+            .map(|presentation| presentation.feedback(&surface, &qh, ()));
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the initial configure is dispatched and acked");
+
+        // Phase 2: an shm buffer, attached and committed. 64x64 ARGB8888 needs
+        // a 16 KiB backing file; a regular file is a valid shm backing on Linux
+        // (the server mmaps it from the fd the pool carries).
+        const W: i32 = 64;
+        const H: i32 = 64;
+        const STRIDE: i32 = W * 4;
+        let size = STRIDE * H;
+        // Read-write, not `File::create`'s write-only: the server mmaps the fd
+        // with `PROT_READ`, and mapping a write-only fd fails `EACCES`.
+        // libwayland then rejects the pool with "Failed to create memory
+        // mapping". `create_new` so a stale path fails instead of being
+        // adopted, with mode `0o600` so no other user can read the pixels.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&shm_path)
+            .expect("create shm backing file");
+        file.set_len(size as u64).expect("size shm backing file");
+        let pool = shm.create_pool(file.as_fd(), size, &qh, ());
+        let buffer = pool.create_buffer(0, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
+        surface.attach(Some(&buffer), 0, 0);
+        surface.damage(0, 0, W, H);
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the buffered commit and maps");
+
+        // Keep every handle alive until the round-trip above has been answered,
+        // then drop them here — after the map, not before it.
+        drop((
+            surface,
+            xdg_surface,
+            _toplevel,
+            feedback,
+            buffer,
+            pool,
+            shm,
+            presentation,
+            file,
+        ));
+        // Best-effort: the backing file is unlinked now that every handle is
+        // closed, so a crashed run cannot leave a stale file behind.
+        let _ = std::fs::remove_file(&shm_path);
+        state.events
+    })
+}
+
+/// Drive a `zwlr_layer_shell_v1` client through a layer surface's whole
+/// client-observable life.
+///
+/// Phase one creates the layer surface, states its anchors/zone/size/keyboard
+/// mode, and commits bufferless; a round trip lets the server's initial
+/// configure arrive and be acked. Phase two round-trips twice more, giving the
+/// server turns in which to destroy the surface through
+/// `Runtime::destroy_layer_surface`; the client records the `closed` event and
+/// then disconnects. Returns the observed [`ClientEvents`] via the
+/// `JoinHandle`.
+pub fn spawn_layer_surface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            seat: None,
+            activation_token: None,
+            events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
+            ..ClientState::default()
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let layer_shell: zwlr_layer_shell_v1::ZwlrLayerShellV1 = globals
+            .bind(&qh, 1..=4, ())
+            .expect("bind zwlr_layer_shell_v1");
+        state.compositor = Some(compositor.clone());
+
+        let surface = compositor.create_surface(&qh, ());
+        let layer_surface = layer_shell.get_layer_surface(
+            &surface,
+            None,
+            zwlr_layer_shell_v1::Layer::Top,
+            "wlr-rs-layer-test".to_owned(),
+            &qh,
+            (),
+        );
+        layer_surface.set_size(64, 48);
+        layer_surface.set_anchor(zwlr_layer_surface_v1::Anchor::Top);
+        layer_surface.set_exclusive_zone(32);
+        layer_surface
+            .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
+        surface.commit();
+
+        // Round trip one: the server announces and configures the surface, and
+        // the `Dispatch` impl below acks that configure.
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server announces and configures the layer surface");
+        // Two more round trips: each wakes the server for a turn in which its
+        // `LoopHandler::should_stop` destroys the layer surface. The `closed`
+        // event arrives on one of these.
+        for _ in 0..3 {
+            queue
+                .roundtrip(&mut state)
+                .expect("roundtrip so the server can destroy the layer surface");
+        }
+
+        drop((
+            layer_surface,
+            surface,
+            layer_shell,
+            compositor,
+            state.compositor.take(),
+        ));
+        state.events
+    })
+}
+
+/// Drive a client that creates a sub-surface.
+///
+/// Phase one creates an `xdg_toplevel` parent and commits it bufferless so the
+/// server announces and tracks it — a tracked parent is what lets the server's
+/// [`Surface::subsurface_parent_id`](wlr::Surface::subsurface_parent_id)
+/// resolve. Phase two creates a child surface and a `wl_subsurface` on that
+/// parent, commits the child bufferless, then round-trips so the server has
+/// observed the child's `new_subsurface`. No buffer is attached: the role's
+/// creation is the event under test, and mapping the child would add noise the
+/// caller did not ask for.
+///
+/// The proxy handles are held until after the second round-trip, then dropped;
+/// the connection closing on the thread's return destroys both surfaces.
+/// Returns the observed [`ClientEvents`] via the `JoinHandle`.
+pub fn spawn_subsurface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            seat: None,
+            activation_token: None,
+            events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
+            ..ClientState::default()
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        // `init_graphics` always creates the subcompositor, so the global is
+        // present before any client connects.
+        let subcompositor: wl_subcompositor::WlSubcompositor =
+            globals.bind(&qh, 1..=1, ()).expect("bind wl_subcompositor");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+
+        // Phase 1: an xdg-toplevel parent, committed bufferless and
+        // round-tripped, so the server has announced and tracked its surface.
+        let parent = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&parent, &qh, ());
+        let _toplevel = xdg_surface.get_toplevel(&qh, ());
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server announces the parent toplevel");
+
+        // Phase 2: the child surface and its sub-surface role. wlroots adds a
+        // sub-surface to the parent's *current* state on the parent's next
+        // commit — not when the object is created — and emits `new_subsurface`
+        // from that apply, so the parent is committed again here. The child's
+        // own bufferless commit is included because it is the real client
+        // sequence, and the round-trip drains both. `set_position` is applied
+        // from the sub-surface's pending state by that same parent commit, so
+        // the server reads a non-default `(10, 20)` through the role.
+        let child = compositor.create_surface(&qh, ());
+        let subsurface = subcompositor.get_subsurface(&child, &parent, &qh, ());
+        subsurface.set_position(10, 20);
+        child.commit();
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the child subsurface");
+
+        drop((
+            child,
+            subsurface,
+            parent,
+            xdg_surface,
+            _toplevel,
+            subcompositor,
+        ));
+        state.events
+    })
+}
+
+/// Like [`spawn_subsurface`], but **maps** the child sub-surface with a small
+/// shm buffer.
+///
+/// `wlr_surface_for_each_surface` only recurses into a sub-surface once it is
+/// `mapped` (wlroots `types/wlr_compositor.c` skips an unmapped child), so the
+/// bufferless child `spawn_subsurface` creates is never visited by the tree
+/// walk. This helper exists for the traversal regression that needs a
+/// non-root surface the walk actually yields.
+pub fn spawn_subsurface_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let shm_path = crate::common::shm_path_for(&format!("{socket}-child"));
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            seat: None,
+            activation_token: None,
+            events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
+            ..ClientState::default()
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let subcompositor: wl_subcompositor::WlSubcompositor =
+            globals.bind(&qh, 1..=1, ()).expect("bind wl_subcompositor");
+        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("bind wl_shm");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+
+        // Phase 1: a parent toplevel, committed bufferless so the server
+        // announces and tracks it.
+        let parent = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&parent, &qh, ());
+        let _toplevel = xdg_surface.get_toplevel(&qh, ());
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server announces the parent toplevel");
+
+        // Phase 2: map the **parent** with an shm buffer. A sub-surface only
+        // maps once its parent is mapped (`subsurface_consider_map` checks
+        // `parent->mapped`), so this must happen before the child.
+        const W: i32 = 64;
+        const H: i32 = 64;
+        const STRIDE: i32 = W * 4;
+        let size = STRIDE * H;
+        // `create_new` so a stale path fails instead of being adopted, with mode
+        // `0o600` so no other user can read the pixels; read-write so the
+        // server can mmap the fd with `PROT_READ`.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&shm_path)
+            .expect("create shm backing file");
+        file.set_len((2 * size) as u64)
+            .expect("size shm backing file");
+        let pool = shm.create_pool(file.as_fd(), 2 * size, &qh, ());
+        let parent_buffer = pool.create_buffer(0, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
+        let child_buffer =
+            pool.create_buffer(size, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
+        parent.attach(Some(&parent_buffer), 0, 0);
+        parent.damage(0, 0, W, H);
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the parent maps");
+
+        // Phase 3: the child sub-surface, mapped with its own buffer, then the
+        // parent commit that folds it into the parent's current state.
+        let child = compositor.create_surface(&qh, ());
+        let subsurface = subcompositor.get_subsurface(&child, &parent, &qh, ());
+        subsurface.set_position(10, 20);
+        child.attach(Some(&child_buffer), 0, 0);
+        child.damage(0, 0, W, H);
+        child.commit();
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the mapped child subsurface");
+
+        drop((
+            child,
+            subsurface,
+            parent,
+            xdg_surface,
+            _toplevel,
+            parent_buffer,
+            child_buffer,
+            pool,
+            shm,
+            subcompositor,
+            file,
+        ));
+        // Best-effort: the backing file is unlinked now that every handle is
+        // closed, so a crashed run cannot leave a stale file behind.
+        let _ = std::fs::remove_file(&shm_path);
+        state.events
+    })
+}
+
+/// Like [`spawn_subsurface`], but destroys the **parent** surface while keeping
+/// the child alive, then commits the child once more.
+///
+/// This is the destroy-order witness for the sub-surface role: wlroots frees the
+/// `wlr_subsurface` from the parent surface's own `destroy` signal
+/// (`subsurface_handle_parent_destroy`), while the child `wlr_surface` survives.
+/// The extra child commit after the parent is gone gives the server a handler
+/// that runs *after* the role object has been freed, so a trailing
+/// `subsurface_parent_id`/`subsurface_parent_state` call there must miss rather
+/// than dereference freed memory.
+pub fn spawn_subsurface_then_destroy_parent(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            seat: None,
+            activation_token: None,
+            events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
+            ..ClientState::default()
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let subcompositor: wl_subcompositor::WlSubcompositor =
+            globals.bind(&qh, 1..=1, ()).expect("bind wl_subcompositor");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+
+        // Parent toplevel, committed bufferless so the server tracks it.
+        let parent = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&parent, &qh, ());
+        let _toplevel = xdg_surface.get_toplevel(&qh, ());
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server announces the parent toplevel");
+
+        // Child sub-surface, committed so the server observes `new_subsurface`.
+        let child = compositor.create_surface(&qh, ());
+        let subsurface = subcompositor.get_subsurface(&child, &parent, &qh, ());
+        child.commit();
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the child subsurface");
+
+        // xdg-shell requires a surface's role objects be destroyed before the
+        // surface itself, so tear the toplevel and its xdg_surface down first,
+        // then destroy the now-roleless parent surface while keeping the child.
+        // The extra child commit gives the server a handler that runs after
+        // wlroots has freed the role object.
+        _toplevel.destroy();
+        xdg_surface.destroy();
+        parent.destroy();
+        child.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the post-destroy child commit");
+
+        drop((child, subsurface, subcompositor));
+        state.events
+    })
+}
+
+/// Drive the xdg-activation round trip: mint a token, commit it, read the
+/// server-generated name out of the `done` event, then redeem it with
+/// `activate`.
+///
+/// xdg-activation lets a client hand another client permission to request
+/// focus. The token is minted here, committed bufferlessly (no seat or surface
+/// attached, so wlroots generates the name without an input-serial check),
+/// named back by the server's `done`, and immediately redeemed by the same
+/// connection with `activate`. The server's `request_activate` handler firing
+/// is the proof the round trip completed; [`ClientEvents`] records both client
+/// halves.
+pub fn spawn_activation_round_trip(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            seat: None,
+            activation_token: None,
+            events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
+            ..ClientState::default()
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let activation: xdg_activation_v1::XdgActivationV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind xdg_activation_v1");
+        state.compositor = Some(compositor.clone());
+
+        // A plain surface to activate. It need not be a mapped toplevel: the
+        // protocol lets a client name any surface, and the server resolves it
+        // to `None` when it is not a tracked toplevel.
+        let surface = compositor.create_surface(&qh, ());
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server tracks the surface");
+
+        // Mint, then commit, then round-trip so the `done` event carrying the
+        // token string is dispatched before it is redeemed.
+        let token = activation.get_activation_token(&qh, ());
+        token.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sends the token `done`");
+
+        let name = state
+            .activation_token
+            .take()
+            .expect("the server sent a token name");
+        activation.activate(name, &surface);
+        state.events.activation_sent = true;
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the activate request");
+
+        drop((surface, token, activation, compositor));
+        state.events
+    })
+}
+
+/// Drive the xdg-toplevel-icon and xdg-toplevel-tag state machines together.
+///
+/// Creates a mapped toplevel, attaches an icon carrying both a stock name and
+/// a 64x64 shm pixel buffer, sets it with `xdg_toplevel_icon_manager_v1`,
+/// then resets it with `set_icon(None)` and a second commit, then sets a tag
+/// and description with `xdg_toplevel_tag_manager_v1` followed by an empty tag
+/// and an empty description. The icon is double-buffered, so both the set and
+/// the reset are applied by the surface commit that follows each; the tag and
+/// description (including the empty ones) are applied when their requests
+/// arrive. Each phase is round-tripped so the server has observed it before
+/// the client returns. No [`ClientEvents`] field records the exchange — the
+/// server-side handler assertions are the proof.
+pub fn spawn_toplevel_meta(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let shm_path = crate::common::shm_path_for(&format!("{socket}-meta"));
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+
+        let mut state = ClientState {
+            compositor: None,
+            wm_base: None,
+            seat: None,
+            activation_token: None,
+            events: ClientEvents::default(),
+            foreign: ForeignToplevelEvents::default(),
+            foreign_handle: None,
+            ..ClientState::default()
+        };
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("bind wl_shm");
+        let icon_manager: xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind xdg_toplevel_icon_manager_v1");
+        let tag_manager: xdg_toplevel_tag_manager_v1::XdgToplevelTagManagerV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind xdg_toplevel_tag_manager_v1");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+
+        // Phase 1: an xdg-toplevel parent, committed bufferless and
+        // round-tripped, so the server has announced and tracked it.
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let toplevel = xdg_surface.get_toplevel(&qh, ());
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server announces the toplevel");
+
+        // Phase 2: a square shm buffer for the icon, then an icon carrying both
+        // a name and that buffer, assigned to the toplevel. 64x64 ARGB8888
+        // needs a 16 KiB backing file.
+        const W: i32 = 64;
+        const H: i32 = 64;
+        const STRIDE: i32 = W * 4;
+        let size = STRIDE * H;
+        // `create_new` so a stale path fails instead of being adopted, with mode
+        // `0o600` so no other user can read the pixels; read-write so the
+        // server can mmap the fd with `PROT_READ`.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&shm_path)
+            .expect("create shm backing file");
+        file.set_len(size as u64).expect("size shm backing file");
+        let pool = shm.create_pool(file.as_fd(), size, &qh, ());
+        let buffer = pool.create_buffer(0, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
+        let icon = icon_manager.create_icon(&qh, ());
+        icon.set_name("wlr-test-icon".to_owned());
+        icon.add_buffer(&buffer, 1);
+        icon_manager.set_icon(&toplevel, Some(&icon));
+        // The icon is double-buffered: the commit applies it and wlroots emits
+        // its `set_icon` during that apply.
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server applies the icon");
+
+        // Phase 2b: the reset. A null icon, applied by the commit that
+        // follows, which wlroots forwards as `set_icon` with a null icon.
+        icon_manager.set_icon(&toplevel, None);
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server applies the icon reset");
+
+        // Phase 3: the tag and its translated description. wlroots forwards
+        // each request immediately rather than at commit.
+        tag_manager.set_toplevel_tag(&toplevel, "wlr-test-tag".to_owned());
+        tag_manager.set_toplevel_description(&toplevel, "WlR test description".to_owned());
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the tag and description");
+
+        // Phase 3b: the empty tag and description. Empty strings are legal
+        // protocol values, forwarded like any other; the handler must observe
+        // them after the non-empty ones.
+        tag_manager.set_toplevel_tag(&toplevel, String::new());
+        tag_manager.set_toplevel_description(&toplevel, String::new());
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the empty tag and description");
+
+        drop((
+            icon,
+            tag_manager,
+            icon_manager,
+            buffer,
+            pool,
+            file,
+            surface,
+            xdg_surface,
+            toplevel,
+            shm,
+            wm_base,
+            compositor,
+        ));
+        // Best-effort: the backing file is unlinked now that every handle is
+        // closed, so a crashed run cannot leave a stale file behind.
+        let _ = std::fs::remove_file(&shm_path);
         state.events
     })
 }
@@ -190,6 +1240,46 @@ impl Dispatch<wl_surface::WlSurface, ()> for ClientState {
         _state: &mut Self,
         _proxy: &wl_surface::WlSurface,
         _event: wl_surface::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_seat::WlSeat, ()> for ClientState {
+    /// Carries `capabilities`/`name`; the harness sends `show_window_menu`
+    /// without waiting on them, so nothing is recorded.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_seat::WlSeat,
+        _event: wl_seat::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_subcompositor::WlSubcompositor, ()> for ClientState {
+    /// Carries no events; bound only so `get_subsurface` can be called.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_subcompositor::WlSubcompositor,
+        _event: wl_subcompositor::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_subsurface::WlSubsurface, ()> for ClientState {
+    /// Carries no events in this flow; the role is created and committed only.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_subsurface::WlSubsurface,
+        _event: wl_subsurface::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
@@ -245,5 +1335,390 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for ClientState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<wl_shm::WlShm, ()> for ClientState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_shm::WlShm,
+        _event: wl_shm::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_shm_pool::WlShmPool, ()> for ClientState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_shm_pool::WlShmPool,
+        _event: wl_shm_pool::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_buffer::WlBuffer, ()> for ClientState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_buffer::WlBuffer,
+        _event: wl_buffer::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<xdg_activation_v1::XdgActivationV1, ()> for ClientState {
+    /// Carries no events; bound only so `get_activation_token`/`activate` can
+    /// be sent.
+    fn event(
+        _state: &mut Self,
+        _proxy: &xdg_activation_v1::XdgActivationV1,
+        _event: xdg_activation_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for ClientState {
+    /// `done` carries the token string the server generated; the round trip
+    /// stores it so it can be redeemed.
+    fn event(
+        state: &mut Self,
+        _proxy: &xdg_activation_token_v1::XdgActivationTokenV1,
+        event: xdg_activation_token_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_activation_token_v1::Event::Done { token } = event {
+            state.events.activation_token_received = true;
+            state.activation_token = Some(token);
+        }
+    }
+}
+
+impl Dispatch<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1, ()> for ClientState {
+    /// The `icon_size`/`done` preference events are advisory; the client
+    /// ignores them and sets its own icon size.
+    fn event(
+        _state: &mut Self,
+        _proxy: &xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1,
+        _event: xdg_toplevel_icon_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<xdg_toplevel_icon_v1::XdgToplevelIconV1, ()> for ClientState {
+    /// `xdg_toplevel_icon_v1` carries no events.
+    fn event(
+        _state: &mut Self,
+        _proxy: &xdg_toplevel_icon_v1::XdgToplevelIconV1,
+        _event: xdg_toplevel_icon_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<xdg_toplevel_tag_manager_v1::XdgToplevelTagManagerV1, ()> for ClientState {
+    /// `xdg_toplevel_tag_manager_v1` carries no events.
+    fn event(
+        _state: &mut Self,
+        _proxy: &xdg_toplevel_tag_manager_v1::XdgToplevelTagManagerV1,
+        _event: xdg_toplevel_tag_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wp_presentation::WpPresentation, ()> for ClientState {
+    /// Fires the `clock_id` event once on bind; nothing to record.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wp_presentation::WpPresentation,
+        _event: wp_presentation::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for ClientState {
+    /// `presented`/`discarded`/`sync_output`. The server may destroy the
+    /// feedback (sending `discarded`) once the commit handler samples it; the
+    /// events are drained by the round-trips and need no action here.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wp_presentation_feedback::WpPresentationFeedback,
+        _event: wp_presentation_feedback::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, ()> for ClientState {
+    /// The `toplevel` event hands the client its handle for an exported
+    /// toplevel; the manager replays every live one on bind.
+    fn event(
+        state: &mut Self,
+        _proxy: &zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1,
+        event: zwlr_foreign_toplevel_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let zwlr_foreign_toplevel_manager_v1::Event::Toplevel { toplevel } = event {
+            state.foreign.toplevels_seen += 1;
+            state.foreign_handle = Some(toplevel);
+        }
+    }
+
+    // The `toplevel` event creates the handle object; its user data is `()`,
+    // the `U` of the handle's own `Dispatch` impl below.
+    wayland_client::event_created_child!(ClientState, zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, [
+        zwlr_foreign_toplevel_manager_v1::EVT_TOPLEVEL_OPCODE => (
+            zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+            ()
+        ),
+    ]);
+}
+
+impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ()> for ClientState {
+    /// Records the title/app-id/state the server replayed. `closed` and
+    /// `parent` need no action for this flow; the client's requests are driven
+    /// by [`spawn_foreign_toplevel`].
+    fn event(
+        state: &mut Self,
+        _proxy: &zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
+        event: zwlr_foreign_toplevel_handle_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_foreign_toplevel_handle_v1::Event::Title { title } => {
+                state.foreign.title = Some(title);
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
+                state.foreign.app_id = Some(app_id);
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::State { state: _ } => {
+                state.foreign.state_events += 1;
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::Done => {
+                state.foreign.saw_done = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, ()> for ClientState {
+    /// The `toplevel` event hands the client its handle for an exported
+    /// toplevel; the list replays every live one on bind.
+    fn event(
+        state: &mut Self,
+        _proxy: &ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1,
+        event: ext_foreign_toplevel_list_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let ext_foreign_toplevel_list_v1::Event::Toplevel { toplevel } = event {
+            state.ext_foreign.toplevels_seen += 1;
+            state.ext_foreign_handle = Some(toplevel);
+        }
+    }
+
+    wayland_client::event_created_child!(ClientState, ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, [
+        ext_foreign_toplevel_list_v1::EVT_TOPLEVEL_OPCODE => (
+            ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+            ()
+        ),
+    ]);
+}
+
+impl Dispatch<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()> for ClientState {
+    /// Records the title/app-id/identifier the list replayed; `closed` and the
+    /// list's `finished` need no action for this flow.
+    fn event(
+        state: &mut Self,
+        _proxy: &ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+        event: ext_foreign_toplevel_handle_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_foreign_toplevel_handle_v1::Event::Title { title } => {
+                state.ext_foreign.title = Some(title);
+            }
+            ext_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
+                state.ext_foreign.app_id = Some(app_id);
+            }
+            ext_foreign_toplevel_handle_v1::Event::Identifier { identifier } => {
+                state.ext_foreign.identifier = Some(identifier);
+            }
+            ext_foreign_toplevel_handle_v1::Event::Done => {
+                state.ext_foreign.saw_done = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, ()> for ClientState {
+    /// `workspace_group` and `workspace` hand the client handles for the
+    /// objects the compositor created; the manager replays each live one on
+    /// bind, then `done`. Requests are driven by [`spawn_ext_workspace`].
+    fn event(
+        state: &mut Self,
+        _proxy: &ext_workspace_manager_v1::ExtWorkspaceManagerV1,
+        event: ext_workspace_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_workspace_manager_v1::Event::WorkspaceGroup { workspace_group } => {
+                state.ext_workspace.groups_seen += 1;
+                state.ext_workspace_group = Some(workspace_group);
+            }
+            ext_workspace_manager_v1::Event::Workspace { workspace } => {
+                state.ext_workspace.workspaces_seen += 1;
+                state.ext_workspace_handle = Some(workspace);
+            }
+            ext_workspace_manager_v1::Event::Done => {
+                state.ext_workspace.saw_done = true;
+            }
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(ClientState, ext_workspace_manager_v1::ExtWorkspaceManagerV1, [
+        ext_workspace_manager_v1::EVT_WORKSPACE_GROUP_OPCODE => (
+            ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
+            ()
+        ),
+        ext_workspace_manager_v1::EVT_WORKSPACE_OPCODE => (
+            ext_workspace_handle_v1::ExtWorkspaceHandleV1,
+            ()
+        ),
+    ]);
+}
+
+impl Dispatch<ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1, ()> for ClientState {
+    /// `capabilities`/`output_enter`/`output_leave`/`workspace_enter`/
+    /// `workspace_leave`/`removed` are advisory for this flow; the group is
+    /// bound only so [`spawn_ext_workspace`] can call `create_workspace`.
+    fn event(
+        _state: &mut Self,
+        _proxy: &ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
+        _event: ext_workspace_group_handle_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for ClientState {
+    /// `id`/`name`/`coordinates`/`state`/`capabilities`/`removed` are advisory
+    /// for this flow; the workspace is bound only so [`spawn_ext_workspace`]
+    /// can send its requests.
+    fn event(
+        _state: &mut Self,
+        _proxy: &ext_workspace_handle_v1::ExtWorkspaceHandleV1,
+        _event: ext_workspace_handle_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wp_security_context_manager_v1::WpSecurityContextManagerV1, ()> for ClientState {
+    /// `wp_security_context_manager_v1` carries no events; the Dispatch impl
+    /// exists only so [`spawn_security_context`] can bind the global.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wp_security_context_manager_v1::WpSecurityContextManagerV1,
+        _event: wp_security_context_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wp_security_context_v1::WpSecurityContextV1, ()> for ClientState {
+    /// `wp_security_context_v1` carries no events; the Dispatch impl exists
+    /// only so [`spawn_security_context`] can create and commit the context.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wp_security_context_v1::WpSecurityContextV1,
+        _event: wp_security_context_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<zwlr_layer_shell_v1::ZwlrLayerShellV1, ()> for ClientState {
+    /// `zwlr_layer_shell_v1` carries no events; the Dispatch impl exists only
+    /// so [`spawn_layer_surface`] can bind the global.
+    fn event(
+        _state: &mut Self,
+        _proxy: &zwlr_layer_shell_v1::ZwlrLayerShellV1,
+        _event: zwlr_layer_shell_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for ClientState {
+    /// Records and acks the initial `configure`, and records `closed`. The
+    /// configure/ack counters reuse [`ClientEvents`]' existing fields so a
+    /// caller asserts the same wire facts a toplevel client does.
+    fn event(
+        state: &mut Self,
+        proxy: &zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+        event: zwlr_layer_surface_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_layer_surface_v1::Event::Configure { serial, .. } => {
+                state.events.configure_events += 1;
+                proxy.ack_configure(serial);
+                state.events.acked_configures += 1;
+            }
+            zwlr_layer_surface_v1::Event::Closed => {
+                state.events.layer_closed = true;
+            }
+            _ => {}
+        }
     }
 }

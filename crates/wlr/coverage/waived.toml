@@ -339,8 +339,8 @@ milestone = "M12"
 [[waived]]
 symbol    = "wlr_compositor_set_renderer"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+note      = "Tied to renderer-ownership design — which component owns and may re-point the compositor's renderer — the same bucket as begin_render_pass; re-homed to M13."
+milestone = "M13"
 
 
 [[waived]]
@@ -750,76 +750,34 @@ note      = "Selection, drag-and-drop and the small standalone protocols."
 milestone = "M11"
 
 [[waived]]
-symbol    = "wlr_ext_foreign_toplevel_handle_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_foreign_toplevel_handle_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_foreign_toplevel_handle_v1_destroy"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_ext_foreign_toplevel_handle_v1_from_resource"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_foreign_toplevel_handle_v1_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_foreign_toplevel_handle_v1_update_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+note      = "Re-homed to M13: exists for custom protocol impls; the crate gets identity from callbacks, not resources."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_ext_foreign_toplevel_image_capture_source_manager_v1"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+note      = "Re-homed to M10: depends on ext-image-capture."
+milestone = "M10"
 
 [[waived]]
 symbol    = "wlr_ext_foreign_toplevel_image_capture_source_manager_v1_create"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+note      = "Re-homed to M10: depends on ext-image-capture."
+milestone = "M10"
 
 [[waived]]
 symbol    = "wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+note      = "Re-homed to M10: depends on ext-image-capture."
+milestone = "M10"
 
 [[waived]]
 symbol    = "wlr_ext_foreign_toplevel_image_capture_source_manager_v1_request_accept"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_foreign_toplevel_list_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_foreign_toplevel_list_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+note      = "Re-homed to M10: depends on ext-image-capture."
+milestone = "M10"
 
 [[waived]]
 symbol    = "wlr_ext_image_capture_source_v1"
@@ -948,257 +906,9 @@ note      = "Buffer-sharing, screen capture and DRM lease protocols."
 milestone = "M10"
 
 [[waived]]
-symbol    = "wlr_ext_workspace_group_handle_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_group_handle_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_group_handle_v1_destroy"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_group_handle_v1_output_enter"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_group_handle_v1_output_leave"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_handle_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_handle_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_handle_v1_destroy"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_handle_v1_set_active"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_handle_v1_set_coordinates"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_handle_v1_set_group"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_handle_v1_set_hidden"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_handle_v1_set_name"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_handle_v1_set_urgent"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_manager_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_manager_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_v1_commit_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_v1_request"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_ext_workspace_v1_request_type"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_fixes"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_fixes_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_activated_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_destroy"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_fullscreen_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_maximized_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_minimized_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_output"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_output_enter"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_output_leave"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_set_activated"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_set_app_id"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_set_fullscreen"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_set_maximized"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_set_minimized"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_set_parent"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_set_rectangle_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_set_title"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_handle_v1_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_manager_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_foreign_toplevel_manager_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
+symbol = "wlr_foreign_toplevel_handle_v1_output"
+reason = "internal"
+note   = "wlroots' per-output bookkeeping node for a toplevel. The crate names an output through Output and only calls output_enter/output_leave, so this struct is never addressed."
 [[waived]]
 symbol    = "wlr_gamma_control_manager_v1_get_control"
 reason    = "internal"
@@ -1355,64 +1065,20 @@ milestone = "M8"
 
 
 [[waived]]
-symbol    = "wlr_layer_surface_v1_destroy"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_layer_surface_v1_for_each_popup_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_layer_surface_v1_for_each_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_layer_surface_v1_from_resource"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_layer_surface_v1_get_exclusive_edge"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_layer_surface_v1_popup_surface_at"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+note      = "Client-driven identity; custom protocol implementations belong to the interfaces milestone."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_layer_surface_v1_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "The layer surface's state struct, read field by field through LayerSurface accessors."
 
 [[waived]]
 symbol    = "wlr_layer_surface_v1_state_field"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_layer_surface_v1_surface_at"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_layer_surface_v1_try_from_wlr_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "Bitmask naming which layer fields a commit changed; never inspected."
 
 [[waived]]
 symbol    = "wlr_libinput_backend_create"
@@ -1831,54 +1497,6 @@ reason    = "internal"
 note      = "Hardware-side event synthesis; real devices emit themselves and test paths inject at seat level, so device notifies are never issued."
 
 [[waived]]
-symbol    = "wlr_presentation_event"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_presentation_event_from_output"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_presentation_feedback"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_presentation_feedback_destroy"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_presentation_feedback_send_presented"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_presentation_surface_sampled"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_presentation_surface_scanned_out_on_output"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_presentation_surface_textured_on_output"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_primary_selection_source"
 reason    = "not-yet"
 note      = "Selection, drag-and-drop and the small standalone protocols."
@@ -1922,8 +1540,8 @@ note      = "data-backed buffer impl detail never named by the safe API."
 [[waived]]
 symbol    = "wlr_region_from_resource"
 reason    = "not-yet"
-note      = "Takes a wl_resource; belongs with compositor/surface depth, not util."
-milestone = "M9"
+note      = "Takes a wl_resource; exists to serve custom protocol impls, which this crate does not re-wrap. Re-homed to M13 with the other *_from_resource symbols."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_relative_pointer_v1"
@@ -2257,36 +1875,6 @@ reason    = "internal"
 note      = "Read field-wise (touch_points walk plus has_grab) through Runtime::touch_state; the struct type itself is never named."
 
 [[waived]]
-symbol    = "wlr_security_context_manager_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_security_context_manager_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_security_context_manager_v1_lookup_client"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_security_context_v1_commit_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_security_context_v1_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_send_tablet_v2_tablet_pad_button"
 reason    = "not-yet"
 note      = "Keyboard depth, tablet, and the input-method/text-input pair."
@@ -2477,18 +2065,6 @@ note      = "Backend-specific construction and the interfaces milestone."
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_session_lock_surface_v1_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_session_lock_surface_v1_try_from_wlr_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_session_open_file"
 reason    = "not-yet"
 note      = "Backend-specific construction and the interfaces milestone."
@@ -2525,124 +2101,43 @@ note      = "Buffer-sharing, screen capture and DRM lease protocols."
 milestone = "M10"
 
 [[waived]]
-symbol    = "wlr_subcompositor"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_subsurface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_subsurface_parent_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_subsurface_try_from_wlr_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_surface_accepts_tablet_v2"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_accepts_touch"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_for_each_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "The per-tablet tablet object is wlroots-internal; this crate exposes no handle for it."
 
 [[waived]]
 symbol    = "wlr_surface_from_resource"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_get_buffer_source_box"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+note      = "Client-driven identity; custom protocol implementations belong to the interfaces milestone."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_get_content_type_v1"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_get_effective_damage"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_get_extents"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+note      = "content-type-v1 belongs to the buffer/protocol milestone."
+milestone = "M11"
 
 [[waived]]
 symbol    = "wlr_surface_get_image_description_v1_data"
 reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_get_root_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+note      = "The image-description and color-management milestone."
+milestone = "M12"
 
 [[waived]]
 symbol    = "wlr_surface_get_texture"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_iterator_func_t"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_lock_pending"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "Returns a surface-owned texture the surface frees on its next commit; this crate's Texture owns and destroys, so wrapping it would double-free."
 
 [[waived]]
 symbol    = "wlr_surface_output"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_point_accepts_input"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "Bookkeeping node for a surface's per-output enter list; a struct, not a call."
 
 [[waived]]
 symbol    = "wlr_surface_reject_pending"
-reason    = "not-yet"
-note      = "Shell completion. The one bound C variadic: Rust cannot forward into a va_list, so the wrapper must format first and pass a lone %s."
-milestone = "M9"
+reason    = "interface-impl-only"
+note      = "Only valid inside a client-commit hook (wlroots asserts handling_commit), which the crate does not link; a Rust role impl in M13 is the first caller that can hold that window."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_role"
@@ -2651,88 +2146,49 @@ note      = "Reachable only by implementing a wlroots vtable from Rust; see M13.
 milestone = "M13"
 
 [[waived]]
-symbol    = "wlr_surface_send_enter"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_send_frame_done"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_send_leave"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_set_preferred_buffer_scale"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_set_preferred_buffer_transform"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_surface_set_role"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "interface-impl-only"
+note      = "Implements wlr_surface_role; a caller must supply the vtable and the error resource, so it belongs with the M13 role impl."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_set_role_object"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "interface-impl-only"
+note      = "Implements wlr_surface_role; the role object is the client's own resource, so it belongs with the M13 role impl."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "The committed-state struct, read field by field through Surface accessors."
 
 [[waived]]
 symbol    = "wlr_surface_state_field"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "Bitmask naming which state fields a commit changed; the crate never inspects it."
 
 [[waived]]
 symbol    = "wlr_surface_state_has_buffer"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_surface_at"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "The state-struct form of the buffer test; Surface::has_buffer reports the same fact."
 
 [[waived]]
 symbol    = "wlr_surface_synced"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "interface-impl-only"
+note      = "The synced-state object whose lifecycle wlr_surface_synced_impl drives; belongs with the M13 vtable impl."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_synced_finish"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "interface-impl-only"
+note      = "Part of the wlr_surface_synced_impl lifecycle; belongs with the M13 vtable impl."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_synced_get_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "interface-impl-only"
+note      = "Part of the wlr_surface_synced_impl lifecycle; belongs with the M13 vtable impl."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_synced_impl"
@@ -2742,22 +2198,9 @@ milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_surface_synced_init"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_unlock_cached"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_surface_unmap"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
+reason    = "interface-impl-only"
+note      = "Part of the wlr_surface_synced_impl lifecycle; belongs with the M13 vtable impl."
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_switch_finish"
@@ -3101,18 +2544,6 @@ milestone = "M8"
 
 
 [[waived]]
-symbol    = "wlr_tearing_control_manager_v1_surface_hint_from_surface"
-reason    = "not-yet"
-note      = "Needs the surface handle model (M9): no public Surface wrapper exists for the wlr_surface these take."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_tearing_control_v1"
-reason    = "not-yet"
-note      = "Per-surface control object with set_hint signal; readable only via a surface handle (M9)."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_texture_impl"
 reason    = "interface-impl-only"
 note      = "Reachable only by implementing a wlroots vtable from Rust; see M13."
@@ -3290,154 +2721,39 @@ reason    = "internal"
 note      = "Theme-to-image resolution happens inside wlr_cursor_set_xcursor; the crate never looks a cursor up itself."
 
 [[waived]]
-symbol    = "wlr_xdg_activation_token_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_activation_token_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_activation_token_v1_destroy"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_activation_token_v1_get_name"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_activation_v1_add_token"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_activation_v1_find_token"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
 symbol    = "wlr_xdg_client"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_dialog_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_dialog_v1_try_from_wlr_xdg_toplevel"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots-internal per-client bookkeeping object; the crate never names or hands one to a consumer and reaches every client-scoped fact through the id tables instead."
 
 [[waived]]
 symbol    = "wlr_xdg_exported_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots-owned protocol object created and freed inside the client-driven xdg-exporter path; a compositor never names or holds one. Its effect reaches consumers through Runtime::create_xdg_foreign_v1 and Runtime::find_foreign_exported."
 
 [[waived]]
 symbol    = "wlr_xdg_exported_v2"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_exported"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_exported_finish"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_exported_init"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_registry"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_registry_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_registry_find_by_handle"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_v2"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_foreign_v2_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots-owned protocol object created and freed inside the client-driven xdg-exporter path; a compositor never names or holds one. Its effect reaches consumers through Runtime::create_xdg_foreign_v2 and Runtime::find_foreign_exported."
 
 [[waived]]
 symbol    = "wlr_xdg_imported_child_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots-owned child record of a v1 import, created and freed from the imported object's own request handlers; no compositor-facing API touches it."
 
 [[waived]]
 symbol    = "wlr_xdg_imported_child_v2"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots-owned child record of a v2 import, created and freed from the imported object's own request handlers; no compositor-facing API touches it."
 
 [[waived]]
 symbol    = "wlr_xdg_imported_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots-owned protocol object created and freed inside the client-driven xdg-importer path; a compositor never names or holds one. The registry lookup an import performs is the one Runtime::find_foreign_exported exposes."
 
 [[waived]]
 symbol    = "wlr_xdg_imported_v2"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots-owned protocol object created and freed inside the client-driven xdg-importer path; a compositor never names or holds one. The registry lookup an import performs is the one Runtime::find_foreign_exported exposes."
 
 [[waived]]
 symbol    = "wlr_xdg_output_v1"
@@ -3448,7 +2764,7 @@ note      = "wlroots-managed per-output object; compositors address xdg-output t
 symbol    = "wlr_xdg_popup_from_resource"
 reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_xdg_popup_grab"
@@ -3457,297 +2773,56 @@ note      = "wlroots constructs and destroys this itself on xdg_popup.grab and i
 
 [[waived]]
 symbol    = "wlr_xdg_positioner"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots consumes the positioner inside `xdg_popup` creation and hands the compositor only a copied `wlr_xdg_positioner_rules` (wrapped as `PositionerRules`); the live object is unreachable without `wlr_xdg_positioner_from_resource` (deferred to M13)."
 
 [[waived]]
 symbol    = "wlr_xdg_positioner_from_resource"
 reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_xdg_positioner_is_complete"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "takes a live positioner, which (per `wlr_xdg_positioner`) this crate never holds; wlroots validates completeness itself at popup creation."
 
 [[waived]]
 symbol    = "wlr_xdg_surface_configure"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_surface_for_each_popup_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_surface_for_each_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots' private per-configure list record; the crate schedules configures through `wlr_xdg_surface_schedule_configure` and never builds or holds one."
 
 [[waived]]
 symbol    = "wlr_xdg_surface_from_resource"
 reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_surface_ping"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_surface_popup_surface_at"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_surface_role"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_xdg_surface_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "wlroots' per-xdg-surface committed/pending record; the crate reads committed size from `wlr_surface.current` and the initialized flags directly, and never touches this record."
 
 [[waived]]
 symbol    = "wlr_xdg_surface_state_field"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_surface_surface_at"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_surface_try_from_wlr_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_system_bell_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_system_bell_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_system_bell_v1_ring_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_configure"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "the single bitmask value tagging that record; unused because the record itself is not read."
 
 [[waived]]
 symbol    = "wlr_xdg_toplevel_configure_field"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_decoration_v1_configure"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_decoration_v1_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "the `bounds`/`wm_capabilities` sub-field bitmask; the crate stages through the granular `wlr_xdg_toplevel_set_*` calls, which set those bits internally, and never reads it."
 
 [[waived]]
 symbol    = "wlr_xdg_toplevel_from_resource"
 reason    = "not-yet"
 note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_icon_manager_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_icon_manager_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_icon_manager_v1_set_icon_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_icon_manager_v1_set_sizes"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_icon_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_icon_v1_buffer"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_icon_v1_ref"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_icon_v1_unref"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+milestone = "M13"
 
 [[waived]]
 symbol    = "wlr_xdg_toplevel_move_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_requested"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_set_bounds"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_set_constrained"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_set_parent"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_set_resizing"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_set_suspended"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_set_tiled"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_set_wm_capabilities"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_show_window_menu_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_state"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_tag_manager_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_tag_manager_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_tag_manager_v1_set_description_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_tag_manager_v1_set_tag_event"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_try_from_wlr_surface"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_toplevel_wm_capabilities"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_wm_dialog_v1"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
-
-[[waived]]
-symbol    = "wlr_xdg_wm_dialog_v1_create"
-reason    = "not-yet"
-note      = "Shell completion: xdg-shell remainder, foreign toplevels, compositor depth."
-milestone = "M9"
+reason    = "internal"
+note      = "the payload struct wlroots hands `request_move`, whose seat and serial this crate deliberately drops; only the id of `ToplevelHandler::request_move` is exposed, so the type is never named."
 
 [[waived]]
 symbol    = "wlr_xwayland_create_with_server"

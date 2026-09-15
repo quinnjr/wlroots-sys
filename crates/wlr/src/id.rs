@@ -45,6 +45,23 @@ pub(crate) fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// The reserved band at the top of the id space that test-only "dangling" ids
+/// are drawn from, shared by every id type that offers one.
+///
+/// Ids issued to real objects come from [`next_id`], a single process-wide
+/// counter shared by every id type in this crate that starts at 1, only
+/// increments and never reuses a value — so no process reaches the top of the
+/// range, and a band parked there can never collide with a live object. `n` is
+/// folded into a fixed 2^32-wide band immediately below `u64::MAX`
+/// (`n % 2^32`) rather than subtracted unclamped, so even a very large `n`
+/// (the suites probe `n = u64::MAX`) still lands inside the reserved range.
+/// The band is 2^32 ids wide, far more than any test needs. `n = 0` aliases
+/// `u64::MAX` itself, so callers wanting an id distinct from every other test
+/// id (including `dangling_for_test`'s) must pass `n >= 1`.
+pub(crate) fn dangling_test_id(n: u64) -> u64 {
+    u64::MAX - (n % (1u64 << 32))
+}
+
 addon_kind!(
     /// The id payload's addon kind: a `u64` attached under the name wlroots
     /// prints when it walks a set.
@@ -55,6 +72,107 @@ addon_kind!(
     /// an addon attached by an earlier run of the same process.
     ID_ADDON_IMPL: u64 = c"wlr-rs-object-id"
 );
+
+addon_kind!(
+    /// The generic surface-id payload's addon kind. A distinct kind from
+    /// `ID_ADDON_IMPL` so a `wlr_surface` can carry both its role id and a
+    /// [`SurfaceId`](crate::SurfaceId): `wlr_addon` keys on `(owner, impl)`, so
+    /// two statics coexist on one set with no ordering or role check.
+    ///
+    /// A distinct name as well as a distinct static, for the reason
+    /// `ID_ADDON_IMPL`'s own doc gives: the name is what a debugger — and
+    /// `wlr_addon_find`'s `(owner, impl)` pair — uses to tell the two apart.
+    SURFACE_ID_ADDON_IMPL: u64 = c"wlr-rs-surface-id"
+);
+
+/// Attach a fresh surface id to `set` and return it, or `None` if the set
+/// already carries one.
+///
+/// The duplicate is reported rather than asserted: this runs on the announce
+/// path (via [`ensure_surface_id_raw`]), where aborting the compositor over an
+/// id-bookkeeping surprise is never the right answer. The caller keeps the
+/// no-duplicate invariant by treating `None` as "return the id that is
+/// there".
+///
+/// # Safety
+///
+/// `set` must point at an initialised `wlr_addon_set` belonging to a live
+/// object.
+pub(crate) unsafe fn attach_surface_id(set: *mut sys::wlr_addon_set) -> Option<u64> {
+    // SAFETY: caller guarantees `set` is live and initialised. Reading it
+    // through a shared alias here is fine for the identical reason
+    // `attach_id`'s own comment gives: `find_surface_id` only calls
+    // `wlr_addon_find`, which does not mutate the set, and the read completes
+    // before this function's own `wlr_addon_init` call performs any mutation.
+    unsafe {
+        if find_surface_id(set.cast_const()).is_some() {
+            return None;
+        }
+
+        let id = next_id();
+        Addon::attach(
+            set,
+            SURFACE_ID_ADDON_IMPL.owner(),
+            &SURFACE_ID_ADDON_IMPL,
+            id,
+        );
+        Some(id)
+    }
+}
+
+/// Retrieve the surface id attached to `set`, if any.
+///
+/// # Safety
+///
+/// `set` must point at an initialised `wlr_addon_set` belonging to a live object.
+pub(crate) unsafe fn find_surface_id(set: *const sys::wlr_addon_set) -> Option<u64> {
+    // SAFETY: caller guarantees `set` is live and initialised. `wlr_addon_find`
+    // only reads the set; see `find_id`'s own comment for why the `*mut` cast
+    // its C signature takes is not a soundness hazard.
+    unsafe {
+        let payload =
+            Addon::<u64>::find(set, SURFACE_ID_ADDON_IMPL.owner(), &SURFACE_ID_ADDON_IMPL);
+        if payload.is_null() {
+            return None;
+        }
+        Some(*Addon::data(payload))
+    }
+}
+
+/// The surface id attached to `set`, attaching a fresh one if absent.
+///
+/// The public entry point for keeping `wlr_surface` identity stable while
+/// wlroots may announce one surface through more than one role/announce path:
+/// the caller gets the same id back every time.
+///
+/// # Safety
+///
+/// `set` must point at an initialised `wlr_addon_set` belonging to a live
+/// object.
+pub(crate) unsafe fn ensure_surface_id_raw(set: *mut sys::wlr_addon_set) -> u64 {
+    // SAFETY: the caller's guarantee is exactly what every call below
+    // requires. Nothing can attach between the `find_surface_id` check and the
+    // `attach_surface_id` call: the wlroots event loop, and therefore every
+    // caller, is single-threaded — the same argument `backend.rs`'s
+    // `ensure_id_raw` makes — so the loop always terminates on its first two
+    // iterations, and no path aborts: a duplicate that somehow appeared
+    // between the two lookups is re-read as the id that is already there
+    // rather than tripping an `assert!` on the announce path.
+    unsafe {
+        loop {
+            if let Some(id) = find_surface_id(set.cast_const()) {
+                return id;
+            }
+            if let Some(id) = attach_surface_id(set) {
+                return id;
+            }
+            debug_assert!(
+                false,
+                "a surface id addon appeared between a find and an attach on the same thread"
+            );
+        }
+    }
+}
 
 /// Serialises every test that attaches or destroys *any* addon this crate
 /// declares, not only an id one.
@@ -179,6 +297,50 @@ mod tests {
                 2,
                 "the destroy hook ran, and freed the Box, for both addons"
             );
+        }
+    }
+
+    /// A `wlr_surface` carries its role id and its `SurfaceId` as two separate
+    /// addons on one set. `wlr_addon` keys on `(owner, impl)`, so the two kinds
+    /// must resolve independently — `attach_surface_id` is not allowed to
+    /// shadow or disturb a role id already present, and `ensure_surface_id_raw`
+    /// must hand back the same value on every call.
+    #[test]
+    fn surface_and_role_ids_coexist_on_one_set() {
+        let _serialised = id_test_lock();
+
+        // SAFETY: `set` is a live, exclusively-owned value for this scope, and
+        // is finished before it drops.
+        unsafe {
+            let mut set = std::mem::zeroed::<sys::wlr_addon_set>();
+            sys::wlr_addon_set_init(&raw mut set);
+
+            assert_eq!(find_surface_id(&raw const set), None, "empty set has none");
+
+            let role = attach_id(&raw mut set);
+            let surface = attach_surface_id(&raw mut set).expect("first attach succeeds");
+
+            assert_eq!(find_id(&raw const set), Some(role), "the role id survives");
+            assert_eq!(
+                find_surface_id(&raw const set),
+                Some(surface),
+                "the surface id resolves alongside it"
+            );
+            assert_ne!(role, surface, "the two kinds never share a value");
+            assert_eq!(
+                attach_surface_id(&raw mut set),
+                None,
+                "a second attach reports the duplicate instead of aborting"
+            );
+            assert_eq!(
+                ensure_surface_id_raw(&raw mut set),
+                surface,
+                "ensure is idempotent rather than attaching a second addon"
+            );
+
+            sys::wlr_addon_set_finish(&raw mut set);
+            assert_eq!(find_surface_id(&raw const set), None);
+            assert_eq!(find_id(&raw const set), None);
         }
     }
 }

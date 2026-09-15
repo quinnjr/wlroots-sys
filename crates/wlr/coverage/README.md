@@ -32,9 +32,11 @@ to. The audit's pattern is the lowercase `wlr_` prefix, which excludes them.
 
 One symbol is a C variadic — `wlr_surface_reject_pending`. bindgen does bind
 variadics (`pub fn f(a: T, ...)` is legal in an `extern "C"` block), but Rust
-cannot forward arguments into a `va_list`, so wrapping it means a call site that
-formats the message first and passes a lone `%s`. The gate pins the variadic set
-by name so a second one cannot arrive unnoticed.
+cannot forward arguments into a `va_list`, and wlroots only accepts the call
+inside a client-commit hook the crate does not link. It is waived
+`interface-impl-only` for M13, where a Rust role implementation becomes the
+first caller that can hold that window. The gate pins the variadic set by name
+so a second one cannot arrive unnoticed.
 
 ## When does a symbol count as wrapped?
 

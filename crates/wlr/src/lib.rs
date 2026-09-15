@@ -82,6 +82,10 @@ mod decoration;
 mod dispatch;
 mod display;
 mod error;
+mod ext_foreign_toplevel;
+mod ext_workspace;
+mod fixes;
+mod foreign_toplevel;
 mod geom;
 mod handler;
 mod id;
@@ -89,15 +93,28 @@ mod interest;
 mod layer;
 mod log;
 mod output;
+mod owned_handle;
 mod popup;
+mod presentation;
 mod region;
 mod render;
 mod runtime;
 mod scene;
 mod seat;
+mod security_context;
+mod session_lock;
+mod subsurface;
+mod surface;
+mod tearing;
 #[cfg(test)]
 mod test_support;
 mod toplevel;
+mod xdg_activation;
+mod xdg_dialog;
+mod xdg_foreign;
+mod xdg_system_bell;
+mod xdg_toplevel_icon;
+mod xdg_toplevel_tag;
 #[cfg(wlr_has_xwayland)]
 mod xwayland;
 
@@ -106,6 +123,12 @@ pub use buffer::{Buffer, BufferDataAccess, BufferId, DataPtrAccess};
 pub use decoration::DecorationMode;
 pub use display::{Display, EventLoop};
 pub use error::{Error, Result};
+pub use ext_foreign_toplevel::{ExtForeignToplevelHandle, ExtForeignToplevelState};
+pub use ext_workspace::{
+    StaleRequestKind, WorkspaceCapabilities, WorkspaceGroupCapabilities, WorkspaceGroupHandle,
+    WorkspaceGroupId, WorkspaceHandle, WorkspaceId, WorkspaceRequest,
+};
+pub use foreign_toplevel::{ForeignToplevelHandle, ForeignToplevelId, ForeignToplevelState};
 pub use geom::{Box2D, FBox, Subpixel, Transform};
 pub use handler::{
     AppliedHead, FdHandler, Handlers, LoopHandler, OutputHandler, SeatHandler, ToplevelHandler,
@@ -122,6 +145,7 @@ pub use popup::{
     ConstraintAdjustment, Popup, PopupId, PopupParent, PositionerAnchor, PositionerGravity,
     PositionerRules,
 };
+pub use presentation::{PresentationEvent, PresentationFeedback};
 pub use region::{Region, RegionRef};
 pub use render::{
     Allocator, AllocatorRef, AlphaMode, BlendMode, BufferCaps, BufferPassOptions, ChromaLocation,
@@ -155,7 +179,16 @@ pub use seat::{
     ActivationToken, AxisRelativeDirection, AxisSource, CursorShape, CursorShapeDevice, KeyEvent,
     Modifiers, PointerAxis, SwitchType,
 };
-pub use toplevel::{Edges, Toplevel, ToplevelId};
+pub use security_context::{SecurityContext, SecurityContextState};
+pub use session_lock::{LockSurface, LockSurfaceState};
+pub use subsurface::SubsurfaceParentState;
+pub use surface::{PendingLock, Surface, SurfaceId, SurfaceRole};
+pub use tearing::{TearingControl, TearingHint};
+pub use toplevel::{Edges, Toplevel, ToplevelId, ToplevelRequested, ToplevelState, WmCapabilities};
+pub use xdg_activation::ActivationTokenHandle;
+pub use xdg_dialog::Dialog;
+pub use xdg_foreign::{ForeignExportInfo, ForeignExported};
+pub use xdg_toplevel_icon::ToplevelIcon;
 #[cfg(wlr_has_xwayland)]
 pub use xwayland::{XwaylandSurface, XwaylandSurfaceId, XwaylandWindowType};
 

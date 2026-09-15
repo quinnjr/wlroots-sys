@@ -1704,6 +1704,11 @@ module = "runtime"
 item   = "Runtime::create_single_pixel_buffer_manager"
 
 [[wrapped]]
+symbol = "wlr_subcompositor"
+module = "runtime"
+item   = "Runtime::init_graphics"
+
+[[wrapped]]
 symbol = "wlr_subcompositor_create"
 module = "runtime"
 item   = "Runtime::init_graphics"
@@ -2207,6 +2212,21 @@ item   = "ToplevelHandler::xwayland_surface_mapped"
 symbol = "wlr_surface_map"
 module = "backend"
 item   = "ToplevelHandler::xwayland_surface_mapped"
+
+[[wrapped]]
+symbol = "wlr_subsurface"
+module = "backend"
+item   = "ToplevelHandler::new_subsurface"
+
+[[wrapped]]
+symbol = "wlr_subsurface_parent_state"
+module = "subsurface"
+item   = "Surface::subsurface_parent_state"
+
+[[wrapped]]
+symbol = "wlr_subsurface_try_from_wlr_surface"
+module = "subsurface"
+item   = "Surface::subsurface_parent_id"
 
 [[wrapped]]
 symbol = "wlr_xwayland_surface"
@@ -3079,3 +3099,733 @@ item   = "Runtime::seat_client_next_serial"
 symbol = "wlr_seat_client_validate_event_serial"
 module = "runtime"
 item   = "Runtime::seat_client_validate_serial"
+
+[[wrapped]]
+symbol = "wlr_presentation_event"
+module = "presentation"
+item   = "PresentationEvent"
+
+[[wrapped]]
+symbol = "wlr_presentation_event_from_output"
+module = "presentation"
+item   = "PresentationEvent::from_output"
+
+[[wrapped]]
+symbol = "wlr_presentation_feedback"
+module = "presentation"
+item   = "PresentationFeedback"
+
+[[wrapped]]
+symbol = "wlr_presentation_feedback_destroy"
+module = "presentation"
+item   = "PresentationFeedback (Drop)"
+
+[[wrapped]]
+symbol = "wlr_presentation_feedback_send_presented"
+module = "presentation"
+item   = "PresentationFeedback::send_presented"
+
+[[wrapped]]
+symbol = "wlr_presentation_surface_sampled"
+module = "presentation"
+item   = "Surface::sampled"
+
+[[wrapped]]
+symbol = "wlr_presentation_surface_scanned_out_on_output"
+module = "presentation"
+item   = "Surface::scanned_out_on_output"
+
+[[wrapped]]
+symbol = "wlr_presentation_surface_textured_on_output"
+module = "presentation"
+item   = "Surface::textured_on_output"
+
+[[wrapped]]
+symbol = "wlr_tearing_control_v1"
+module = "tearing"
+item   = "TearingControl"
+
+[[wrapped]]
+symbol = "wlr_tearing_control_manager_v1_surface_hint_from_surface"
+module = "tearing"
+item   = "Surface::tearing_hint"
+
+[[wrapped]]
+symbol = "wlr_surface_for_each_surface"
+module = "surface"
+item   = "Surface::for_each_surface"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_for_each_surface"
+module = "toplevel"
+item   = "Toplevel::for_each_surface"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_for_each_popup_surface"
+module = "toplevel"
+item   = "Toplevel::for_each_popup_surface"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_for_each_surface"
+module = "layer"
+item   = "LayerSurface::for_each_surface"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_ping"
+module = "toplevel"
+item   = "Toplevel::ping"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_role"
+module = "surface"
+item   = "SurfaceRole"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_surface_at"
+module = "toplevel"
+item   = "Toplevel::surface_at"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_popup_surface_at"
+module = "toplevel"
+item   = "Toplevel::popup_surface_at"
+
+[[wrapped]]
+symbol = "wlr_xdg_surface_try_from_wlr_surface"
+module = "surface"
+item   = "Surface::role"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_configure"
+module = "toplevel"
+item   = "Toplevel::wm_capabilities"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_requested"
+module = "toplevel"
+item   = "Toplevel::requested"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_state"
+module = "toplevel"
+item   = "Toplevel::state"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_wm_capabilities"
+module = "toplevel"
+item   = "WmCapabilities"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_bounds"
+module = "runtime"
+item   = "Runtime::set_toplevel_bounds"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_constrained"
+module = "runtime"
+item   = "Runtime::set_toplevel_constrained"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_parent"
+module = "runtime"
+item   = "Runtime::set_toplevel_parent"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_resizing"
+module = "runtime"
+item   = "Runtime::set_toplevel_resizing"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_suspended"
+module = "runtime"
+item   = "Runtime::set_toplevel_suspended"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_tiled"
+module = "runtime"
+item   = "Runtime::set_toplevel_tiled"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_set_wm_capabilities"
+module = "runtime"
+item   = "Runtime::set_toplevel_wm_capabilities"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_try_from_wlr_surface"
+module = "toplevel"
+item   = "Toplevel::from_surface"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_show_window_menu_event"
+module = "backend"
+item   = "ToplevelHandler::request_show_window_menu"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_decoration_v1_configure"
+module = "runtime"
+item   = "Runtime::decoration_configure"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_decoration_v1_state"
+module = "runtime"
+item   = "Runtime::decoration_state"
+
+[[wrapped]]
+symbol = "wlr_surface_iterator_func_t"
+module = "surface"
+item   = "Surface::for_each_surface"
+
+[[wrapped]]
+symbol = "wlr_xdg_activation_token_v1"
+module = "xdg_activation"
+item   = "ActivationTokenHandle"
+
+[[wrapped]]
+symbol = "wlr_xdg_activation_token_v1_create"
+module = "xdg_activation"
+item   = "Runtime::create_activation_token"
+
+[[wrapped]]
+symbol = "wlr_xdg_activation_token_v1_destroy"
+module = "xdg_activation"
+item   = "ActivationTokenHandle (Drop)"
+
+[[wrapped]]
+symbol = "wlr_xdg_activation_token_v1_get_name"
+module = "xdg_activation"
+item   = "ActivationTokenHandle::name"
+
+[[wrapped]]
+symbol = "wlr_xdg_activation_v1_add_token"
+module = "xdg_activation"
+item   = "Runtime::add_activation_token"
+
+[[wrapped]]
+symbol = "wlr_xdg_activation_v1_find_token"
+module = "xdg_activation"
+item   = "Runtime::find_activation_token"
+
+[[wrapped]]
+symbol = "wlr_xdg_dialog_v1"
+module = "xdg_dialog"
+item   = "Dialog"
+
+[[wrapped]]
+symbol = "wlr_xdg_dialog_v1_try_from_wlr_xdg_toplevel"
+module = "xdg_dialog"
+item   = "Toplevel::dialog"
+
+[[wrapped]]
+symbol = "wlr_xdg_foreign_exported"
+module = "xdg_foreign"
+item   = "ForeignExported"
+
+[[wrapped]]
+symbol = "wlr_xdg_foreign_exported_finish"
+module = "xdg_foreign"
+item   = "ForeignExported (Drop)"
+
+[[wrapped]]
+symbol = "wlr_xdg_foreign_exported_init"
+module = "xdg_foreign"
+item   = "Runtime::export_foreign"
+
+[[wrapped]]
+symbol = "wlr_xdg_foreign_registry"
+module = "xdg_foreign"
+item   = "Runtime::create_xdg_foreign_registry"
+
+[[wrapped]]
+symbol = "wlr_xdg_foreign_registry_create"
+module = "xdg_foreign"
+item   = "Runtime::create_xdg_foreign_registry"
+
+[[wrapped]]
+symbol = "wlr_xdg_foreign_registry_find_by_handle"
+module = "xdg_foreign"
+item   = "Runtime::find_foreign_exported"
+
+[[wrapped]]
+symbol = "wlr_xdg_foreign_v1"
+module = "xdg_foreign"
+item   = "Runtime::create_xdg_foreign_v1"
+
+[[wrapped]]
+symbol = "wlr_xdg_foreign_v1_create"
+module = "xdg_foreign"
+item   = "Runtime::create_xdg_foreign_v1"
+
+[[wrapped]]
+symbol = "wlr_xdg_foreign_v2"
+module = "xdg_foreign"
+item   = "Runtime::create_xdg_foreign_v2"
+
+[[wrapped]]
+symbol = "wlr_xdg_foreign_v2_create"
+module = "xdg_foreign"
+item   = "Runtime::create_xdg_foreign_v2"
+
+[[wrapped]]
+symbol = "wlr_xdg_system_bell_v1"
+module = "xdg_system_bell"
+item   = "Runtime::create_xdg_system_bell"
+
+[[wrapped]]
+symbol = "wlr_xdg_system_bell_v1_create"
+module = "xdg_system_bell"
+item   = "Runtime::create_xdg_system_bell"
+
+[[wrapped]]
+symbol = "wlr_xdg_system_bell_v1_ring_event"
+module = "backend"
+item   = "ToplevelHandler::system_bell_ring"
+
+[[wrapped]]
+symbol = "wlr_xdg_wm_dialog_v1"
+module = "xdg_dialog"
+item   = "Runtime::create_xdg_dialog_manager"
+
+[[wrapped]]
+symbol = "wlr_xdg_wm_dialog_v1_create"
+module = "xdg_dialog"
+item   = "Runtime::create_xdg_dialog_manager"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_icon_manager_v1"
+module = "xdg_toplevel_icon"
+item   = "Runtime::create_xdg_toplevel_icon_manager"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_icon_manager_v1_create"
+module = "xdg_toplevel_icon"
+item   = "Runtime::create_xdg_toplevel_icon_manager"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_icon_manager_v1_set_icon_event"
+module = "xdg_toplevel_icon"
+item   = "ToplevelHandler::toplevel_icon_changed"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_icon_manager_v1_set_sizes"
+module = "xdg_toplevel_icon"
+item   = "Runtime::set_toplevel_icon_sizes"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_icon_v1"
+module = "xdg_toplevel_icon"
+item   = "ToplevelIcon"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_icon_v1_buffer"
+module = "xdg_toplevel_icon"
+item   = "ToplevelIcon::buffer"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_icon_v1_ref"
+module = "xdg_toplevel_icon"
+item   = "ToplevelIcon::clone"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_icon_v1_unref"
+module = "xdg_toplevel_icon"
+item   = "ToplevelIcon (Drop)"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_tag_manager_v1"
+module = "xdg_toplevel_tag"
+item   = "Runtime::create_xdg_toplevel_tag_manager"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_tag_manager_v1_create"
+module = "xdg_toplevel_tag"
+item   = "Runtime::create_xdg_toplevel_tag_manager"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_tag_manager_v1_set_description_event"
+module = "xdg_toplevel_tag"
+item   = "ToplevelHandler::toplevel_description_changed"
+
+[[wrapped]]
+symbol = "wlr_xdg_toplevel_tag_manager_v1_set_tag_event"
+module = "xdg_toplevel_tag"
+item   = "ToplevelHandler::toplevel_tag_changed"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_create"
+module = "foreign_toplevel"
+item   = "Runtime::create_foreign_toplevel"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_destroy"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle (Drop)"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_output_enter"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::output_enter"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_output_leave"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::output_leave"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_activated"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::set_activated"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_app_id"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::set_app_id"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_fullscreen"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::set_fullscreen"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_maximized"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::set_maximized"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_minimized"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::set_minimized"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_parent"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::set_parent"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_title"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::set_title"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_state"
+module = "foreign_toplevel"
+item   = "ForeignToplevelHandle::state"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_manager_v1"
+module = "foreign_toplevel"
+item   = "Runtime::create_foreign_toplevel_manager"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_manager_v1_create"
+module = "foreign_toplevel"
+item   = "Runtime::create_foreign_toplevel_manager"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_activated_event"
+module = "backend"
+item   = "ToplevelHandler::foreign_toplevel_activate"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_fullscreen_event"
+module = "backend"
+item   = "ToplevelHandler::foreign_toplevel_fullscreen"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_maximized_event"
+module = "backend"
+item   = "ToplevelHandler::foreign_toplevel_maximize"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_minimized_event"
+module = "backend"
+item   = "ToplevelHandler::foreign_toplevel_minimize"
+
+[[wrapped]]
+symbol = "wlr_foreign_toplevel_handle_v1_set_rectangle_event"
+module = "backend"
+item   = "ToplevelHandler::foreign_toplevel_set_rectangle"
+
+[[wrapped]]
+symbol = "wlr_ext_foreign_toplevel_list_v1"
+module = "ext_foreign_toplevel"
+item   = "Runtime::create_ext_foreign_toplevel_list"
+
+[[wrapped]]
+symbol = "wlr_ext_foreign_toplevel_list_v1_create"
+module = "ext_foreign_toplevel"
+item   = "Runtime::create_ext_foreign_toplevel_list"
+
+[[wrapped]]
+symbol = "wlr_ext_foreign_toplevel_handle_v1"
+module = "ext_foreign_toplevel"
+item   = "ExtForeignToplevelHandle"
+
+[[wrapped]]
+symbol = "wlr_ext_foreign_toplevel_handle_v1_create"
+module = "ext_foreign_toplevel"
+item   = "Runtime::create_ext_foreign_toplevel"
+
+[[wrapped]]
+symbol = "wlr_ext_foreign_toplevel_handle_v1_destroy"
+module = "ext_foreign_toplevel"
+item   = "ExtForeignToplevelHandle (Drop)"
+
+[[wrapped]]
+symbol = "wlr_ext_foreign_toplevel_handle_v1_state"
+module = "ext_foreign_toplevel"
+item   = "ExtForeignToplevelState"
+
+[[wrapped]]
+symbol = "wlr_ext_foreign_toplevel_handle_v1_update_state"
+module = "ext_foreign_toplevel"
+item   = "ExtForeignToplevelHandle::update_state"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_manager_v1"
+module = "ext_workspace"
+item   = "Runtime::create_ext_workspace_manager"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_manager_v1_create"
+module = "ext_workspace"
+item   = "Runtime::create_ext_workspace_manager"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_group_handle_v1"
+module = "ext_workspace"
+item   = "WorkspaceGroupHandle"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_group_handle_v1_create"
+module = "ext_workspace"
+item   = "Runtime::create_workspace_group"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_group_handle_v1_destroy"
+module = "ext_workspace"
+item   = "WorkspaceGroupHandle (Drop)"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_group_handle_v1_output_enter"
+module = "ext_workspace"
+item   = "WorkspaceGroupHandle::output_enter"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_group_handle_v1_output_leave"
+module = "ext_workspace"
+item   = "WorkspaceGroupHandle::output_leave"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1"
+module = "ext_workspace"
+item   = "WorkspaceHandle"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_create"
+module = "ext_workspace"
+item   = "Runtime::create_workspace"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_destroy"
+module = "ext_workspace"
+item   = "WorkspaceHandle (Drop)"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_set_active"
+module = "ext_workspace"
+item   = "WorkspaceHandle::set_active"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_set_coordinates"
+module = "ext_workspace"
+item   = "WorkspaceHandle::set_coordinates"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_set_group"
+module = "ext_workspace"
+item   = "WorkspaceHandle::set_group"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_set_hidden"
+module = "ext_workspace"
+item   = "WorkspaceHandle::set_hidden"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_set_name"
+module = "ext_workspace"
+item   = "WorkspaceHandle::set_name"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_handle_v1_set_urgent"
+module = "ext_workspace"
+item   = "WorkspaceHandle::set_urgent"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_v1_commit_event"
+module = "backend"
+item   = "ToplevelHandler::workspace_commit"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_v1_request"
+module = "ext_workspace"
+item   = "WorkspaceRequest"
+
+[[wrapped]]
+symbol = "wlr_ext_workspace_v1_request_type"
+module = "ext_workspace"
+item   = "WorkspaceRequest"
+
+[[wrapped]]
+symbol = "wlr_security_context_manager_v1"
+module = "security_context"
+item   = "Runtime::create_security_context_manager"
+
+[[wrapped]]
+symbol = "wlr_security_context_manager_v1_create"
+module = "security_context"
+item   = "Runtime::create_security_context_manager"
+
+[[wrapped]]
+symbol = "wlr_security_context_manager_v1_lookup_client"
+module = "security_context"
+item   = "Runtime::lookup_security_context"
+
+[[wrapped]]
+symbol = "wlr_security_context_v1_commit_event"
+module = "backend"
+item   = "ToplevelHandler::security_context_committed"
+
+[[wrapped]]
+symbol = "wlr_security_context_v1_state"
+module = "security_context"
+item   = "SecurityContext::state"
+
+[[wrapped]]
+symbol = "wlr_fixes"
+module = "fixes"
+item   = "Runtime::create_fixes"
+
+[[wrapped]]
+symbol = "wlr_fixes_create"
+module = "fixes"
+item   = "Runtime::create_fixes"
+
+[[wrapped]]
+symbol = "wlr_session_lock_surface_v1_state"
+module = "session_lock"
+item   = "LockSurface::state"
+
+[[wrapped]]
+symbol = "wlr_session_lock_surface_v1_try_from_wlr_surface"
+module = "session_lock"
+item   = "Surface::lock_surface"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_destroy"
+module = "runtime"
+item   = "Runtime::destroy_layer_surface"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_for_each_popup_surface"
+module = "layer"
+item   = "LayerSurface::for_each_popup_surface"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_get_exclusive_edge"
+module = "layer"
+item   = "LayerSurface::exclusive_edge"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_popup_surface_at"
+module = "layer"
+item   = "LayerSurface::popup_surface_at"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_surface_at"
+module = "layer"
+item   = "LayerSurface::surface_at"
+
+[[wrapped]]
+symbol = "wlr_layer_surface_v1_try_from_wlr_surface"
+module = "surface"
+item   = "Surface::as_layer_surface"
+
+[[wrapped]]
+symbol = "wlr_surface_accepts_touch"
+module = "surface"
+item   = "Surface::accepts_touch"
+
+[[wrapped]]
+symbol = "wlr_surface_get_buffer_source_box"
+module = "surface"
+item   = "Surface::buffer_source_box"
+
+[[wrapped]]
+symbol = "wlr_surface_get_effective_damage"
+module = "surface"
+item   = "Surface::effective_damage"
+
+[[wrapped]]
+symbol = "wlr_surface_get_extents"
+module = "surface"
+item   = "Surface::extents"
+
+[[wrapped]]
+symbol = "wlr_surface_get_root_surface"
+module = "surface"
+item   = "Surface::root_id"
+
+[[wrapped]]
+symbol = "wlr_surface_lock_pending"
+module = "surface"
+item   = "Surface::lock_pending"
+
+[[wrapped]]
+symbol = "wlr_surface_point_accepts_input"
+module = "surface"
+item   = "Surface::point_accepts_input"
+
+[[wrapped]]
+symbol = "wlr_surface_send_enter"
+module = "surface"
+item   = "Surface::send_enter"
+
+[[wrapped]]
+symbol = "wlr_surface_send_frame_done"
+module = "surface"
+item   = "Surface::send_frame_done"
+
+[[wrapped]]
+symbol = "wlr_surface_send_leave"
+module = "surface"
+item   = "Surface::send_leave"
+
+[[wrapped]]
+symbol = "wlr_surface_set_preferred_buffer_scale"
+module = "surface"
+item   = "Surface::set_preferred_buffer_scale"
+
+[[wrapped]]
+symbol = "wlr_surface_set_preferred_buffer_transform"
+module = "surface"
+item   = "Surface::set_preferred_buffer_transform"
+
+[[wrapped]]
+symbol = "wlr_surface_surface_at"
+module = "surface"
+item   = "Surface::surface_at"
+
+[[wrapped]]
+symbol = "wlr_surface_unlock_cached"
+module = "surface"
+item   = "Surface::unlock_cached"
+
+[[wrapped]]
+symbol = "wlr_surface_unmap"
+module = "surface"
+item   = "Surface::unmap"

@@ -70,6 +70,24 @@ fn toplevel_from_raw_with_id_is_not_reachable_outside_the_crate() {
     t.compile_fail("tests/ui/toplevel_from_raw_is_private.rs");
 }
 
+/// The `Surface` half of the pair above, and for the same reasons: this is the
+/// weaker, regression-only case, pinning the calling convention and the single
+/// lifetime parameter on the generic surface handle.
+#[test]
+fn surface_lifetime_parameter_and_calling_convention_are_pinned() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/surface_escapes_handler.rs");
+}
+
+/// The case that actually proves a consumer cannot mint a `Surface`. It would
+/// start compiling — and so fail as a test — the moment
+/// `Surface::from_raw_with_id` were ever widened to `pub`.
+#[test]
+fn surface_from_raw_with_id_is_not_reachable_outside_the_crate() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/surface_from_raw_is_private.rs");
+}
+
 /// `RegionRef` is a handle by the same argument as `Output` and `Toplevel`: it
 /// borrows a `pixman_region32` a wlroots object owns, and outliving that object
 /// is a use-after-free. The weaker, regression-only half of the pair.

@@ -46,10 +46,11 @@ use std::collections::VecDeque;
 
 use crate::{
     ActivationToken, AxisRelativeDirection, AxisSource, CommittedFields, ConstraintId, CursorShape,
-    CursorShapeDevice, DecorationMode, Edges, GestureId, InputPopupSurfaceId, LayerSurfaceId,
-    NodeId, OutputId, PointerAxis, PopupId, PowerMode, SceneOutputId, ShortcutsInhibitorId,
-    SwitchId, TabletPadId, TabletToolId, ToplevelId, TouchId, TransientSeatId, VirtualKeyboardId,
-    VirtualPointerId,
+    CursorShapeDevice, DecorationMode, Edges, ForeignToplevelId, GestureId, InputPopupSurfaceId,
+    LayerSurfaceId, NodeId, OutputId, PointerAxis, PopupId, PowerMode, SceneOutputId,
+    SecurityContext, ShortcutsInhibitorId, SurfaceId, SwitchId, TabletPadId, TabletToolId,
+    ToplevelIcon, ToplevelId, TouchId, TransientSeatId, VirtualKeyboardId, VirtualPointerId,
+    WorkspaceRequest,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurfaceId};
@@ -57,8 +58,12 @@ use crate::{Box2D, XwaylandSurfaceId};
 /// An event awaiting delivery.
 ///
 /// Carries ids rather than handles precisely because a deferred event may name
-/// an object that no longer exists by the time it is delivered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// an object that no longer exists by the time it is delivered. The one
+/// exception is an **owned, reference-counted** payload —
+/// [`ToplevelIcon`](crate::ToplevelIcon) — which keeps its own object alive
+/// across the deferral, so it is safe to carry even though it is not `Copy`;
+/// such a variant is moved through the queue, never duplicated.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Event {
     NewOutput(OutputId),
     OutputFrame(OutputId),
@@ -70,8 +75,8 @@ pub(crate) enum Event {
     OutputCommitted(OutputId, CommittedFields, std::time::Duration),
     /// An output was damaged. Carries no region — the damage accumulates in
     /// the output's registry slot (unioned, so coalesced deliveries repaint
-    /// everything) and is taken at delivery, because an owned `Region` is
-    /// not `Copy` and cannot ride this enum.
+    /// everything) and is taken at delivery; an owned `Region` is neither
+    /// `Clone` nor `Eq`, so it cannot ride this enum.
     OutputDamaged(OutputId),
     /// An output state is about to commit. Same snapshot rationale as
     /// [`Event::OutputCommitted`]; the state is staged, not yet applied.
@@ -92,8 +97,8 @@ pub(crate) enum Event {
     RendererLost,
 
     /// An fd source is ready. Carries the readiness mask rather than a
-    /// [`Readiness`](crate::Readiness) so the enum stays `Copy` and `Eq`
-    /// without exporting a public type into a private one.
+    /// [`Readiness`](crate::Readiness) to keep the public type out of this
+    /// private enum.
     FdReady(crate::SourceId, u32),
 
     NewToplevel(ToplevelId),
@@ -102,6 +107,18 @@ pub(crate) enum Event {
     ToplevelUnmapped(ToplevelId),
     ToplevelTitleChanged(ToplevelId),
     ToplevelDestroyed(ToplevelId),
+
+    /// A client assigned or cleared this toplevel's icon. Carries the owned,
+    /// reference-counted icon — see the enum's own doc for why this one variant
+    /// is not `Copy` — which stays alive across a deferred delivery.
+    ToplevelIconChanged(ToplevelId, Option<ToplevelIcon>),
+    /// A client set this toplevel's persistence tag. The string is copied at
+    /// emission time; wlroots does not store it, so it cannot be re-read at
+    /// delivery.
+    ToplevelTagChanged(ToplevelId, Option<String>),
+    /// A client set this toplevel's human-readable description. As
+    /// [`Event::ToplevelTagChanged`].
+    ToplevelDescriptionChanged(ToplevelId, Option<String>),
 
     /// A client requested (un)maximize. The bool is the requested state —
     /// read from `wlr_xdg_toplevel::requested.maximized` at emission time,
@@ -117,6 +134,13 @@ pub(crate) enum Event {
     /// reported dragging.
     RequestResize(ToplevelId, Edges),
 
+    /// The client asked for a window menu at a surface-local point
+    /// (`xdg_toplevel.show_window_menu`). `x`/`y` are read from the
+    /// show-window-menu event's payload at emission time, so a deferred event
+    /// still reports the point the client actually asked about. Seat and
+    /// serial are deliberately not carried, matching `RequestMove`.
+    RequestShowWindowMenu(ToplevelId, i32, i32),
+
     /// The client asked for a decoration mode on a toplevel's
     /// `zxdg_toplevel_decoration_v1`. The `Option<DecorationMode>` is read
     /// from `wlr_xdg_toplevel_decoration_v1::requested_mode` at emission
@@ -124,6 +148,24 @@ pub(crate) enum Event {
     /// at delivery, so a deferred event still reports what the client
     /// actually asked for.
     RequestDecorationMode(ToplevelId, Option<DecorationMode>),
+
+    /// A tracked `wlr_surface` committed. Carries only its id — the commit
+    /// state itself is read back through [`Surface`](crate::Surface) at
+    /// delivery, and a surface destroyed between queueing and delivery simply
+    /// misses rather than naming freed memory.
+    SurfaceCommitted(SurfaceId),
+    /// A tracked surface has a buffer and should be displayed.
+    SurfaceMapped(SurfaceId),
+    /// A tracked surface should no longer be displayed. Not destruction — a
+    /// surface can unmap and map again, keeping its id.
+    SurfaceUnmapped(SurfaceId),
+    /// A tracked surface is gone. Only the id, because there is no longer an
+    /// object to borrow.
+    SurfaceDestroyed(SurfaceId),
+    /// A new child sub-surface was added to `parent`'s current state, which
+    /// wlroots signals once per surface via `wlr_surface.events.new_subsurface`.
+    /// Carries both ids so a handler can tell which tree it belongs to.
+    SubsurfaceCreated(SurfaceId, SurfaceId),
 
     NewLayerSurface(LayerSurfaceId),
     /// Fires on **every** commit of a layer surface's underlying
@@ -157,10 +199,8 @@ pub(crate) enum Event {
     /// changed.
     ///
     /// Carries no payload beyond the node, deliberately. wlroots hands the
-    /// signal a C array that is valid only for the emission, and this enum is
-    /// `Copy + Eq` (this module's own reentrancy tests compare events with
-    /// `assert_eq!`), so a `Vec` cannot live here. The array is snapshotted at
-    /// emission time into the runtime instead, and
+    /// signal a C array that is valid only for the emission, so the set is
+    /// snapshotted at emission time into the runtime and
     /// [`Runtime::scene_buffer_active_outputs`](crate::Runtime::scene_buffer_active_outputs)
     /// reads it back at delivery — see that method's own doc for what a
     /// deferred delivery therefore reports.
@@ -229,7 +269,7 @@ pub(crate) enum Event {
     /// A pointer constraint committed — the client (re)set its region and the
     /// crate settled it. Carries the crate's own [`ConstraintId`] handle for
     /// it — an opaque, `Copy`/`Eq` id (its wrapped value is the constraint's
-    /// address), so it rides the `Copy`/`Eq` `Event` like every other id. A
+    /// address), so it rides the `Eq` `Event` like every other id. A
     /// deferred delivery may name a constraint destroyed in between; like
     /// `InputMethodPopupDestroyed`, the id then only tells the handler
     /// *which* constraint committed.
@@ -238,7 +278,7 @@ pub(crate) enum Event {
     /// A pointer gesture began — a swipe, pinch or hold the hardware pointer
     /// announced. Carries the crate's own [`GestureId`] handle — an opaque,
     /// `Copy`/`Eq` id (its wrapped value is the announcing pointer's
-    /// address), so it rides the `Copy`/`Eq` `Event` like every other id. The
+    /// address), so it rides the `Eq` `Event` like every other id. The
     /// begin forward to gesture clients has already gone out by the time this
     /// is emitted. A deferred delivery may name a pointer whose device went
     /// away in between; the id then only tells the handler *which* pointer
@@ -252,7 +292,7 @@ pub(crate) enum Event {
 
     /// A touch point went down — a finger landed. Carries the crate's own
     /// [`TouchId`] handle for it — the wire `touch_id`, so it rides the
-    /// `Copy`/`Eq` `Event` like every other id, and so a handler can match
+    /// `Eq` `Event` like every other id, and so a handler can match
     /// this down to its later up. The down forward to the touch client has
     /// already gone out by the time this is emitted. Emitted only when the
     /// down found a surface to land on; a touch over no surface creates no
@@ -310,6 +350,114 @@ pub(crate) enum Event {
     /// (`xdg_activation_token_v1.destroy`) before a deferred delivery runs.
     RequestActivate(Option<ToplevelId>, ActivationToken),
 
+    /// A client asked, via `xdg_system_bell_v1.ring`, that the compositor ring
+    /// the system bell. Carries the surface the client associated with the
+    /// request, resolved to this crate's own id at emission time — or `None`
+    /// when the client named no surface, or named one this crate does not
+    /// track. Nothing is re-read at delivery: the event's fields are pointers
+    /// that do not outlive the callback.
+    ///
+    /// Privileged: this carries no client identity, so per-client allow/deny
+    /// is impossible here. Gate the `xdg_system_bell_v1` global
+    /// ([`crate::Runtime::create_xdg_system_bell`]) at bind time with a
+    /// [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny — allow only clients whose context you trust, deny the
+    /// rest:
+    ///
+    /// ```ignore
+    /// // Allow only a known panel to ring the bell; deny everyone else.
+    /// let allowed = unsafe { runtime.lookup_security_context(client) }
+    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.panel"));
+    /// // return `allowed` from the display's global filter.
+    /// ```
+    SystemBellRing(Option<SurfaceId>),
+
+    /// A client asked, through `zwlr_foreign_toplevel_management_v1`, to
+    /// activate an exported toplevel. Carries the crate's own
+    /// [`ForeignToplevelId`] handle for the export the compositor owns. The
+    /// client's seat is deliberately not carried — this crate has no seat id,
+    /// and focus policy is the compositor's.
+    ///
+    /// Privileged: like [`Event::SystemBellRing`], this carries no client
+    /// identity. Gate the `zwlr_foreign_toplevel_manager_v1` global
+    /// ([`crate::Runtime::create_foreign_toplevel_manager`]) at bind time
+    /// with a [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny; the same rule covers `Close`, `Maximize`, `Minimize`,
+    /// `Fullscreen` and `SetRectangle` below.
+    ForeignToplevelActivate(ForeignToplevelId),
+    /// A client asked that an exported toplevel be closed.
+    ///
+    /// Privileged: see [`Event::ForeignToplevelActivate`] — gate the
+    /// `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny.
+    ForeignToplevelClose(ForeignToplevelId),
+    /// A client asked to (un)maximize an exported toplevel; the bool is the
+    /// requested target, read at emission time.
+    ///
+    /// Privileged: see [`Event::ForeignToplevelActivate`] — gate the
+    /// `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny.
+    ForeignToplevelMaximize(ForeignToplevelId, bool),
+    /// A client asked to (un)minimize an exported toplevel; as
+    /// [`Event::ForeignToplevelMaximize`].
+    ///
+    /// Privileged: see [`Event::ForeignToplevelActivate`] — gate the
+    /// `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny.
+    ForeignToplevelMinimize(ForeignToplevelId, bool),
+    /// A client asked to (un)fullscreen an exported toplevel; as
+    /// [`Event::ForeignToplevelMaximize`].
+    ///
+    /// Privileged: see [`Event::ForeignToplevelActivate`] — gate the
+    /// `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny.
+    ForeignToplevelFullscreen(ForeignToplevelId, bool),
+    /// A client set a rectangle on one of an exported toplevel's surfaces. The
+    /// surface is resolved to this crate's own id at emission time (`None` when
+    /// untracked); the rectangle is copied.
+    ///
+    /// Privileged: see [`Event::ForeignToplevelActivate`] — gate the
+    /// `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny.
+    ForeignToplevelSetRectangle(ForeignToplevelId, Option<SurfaceId>, i32, i32, i32, i32),
+
+    /// A client committed a batch of `ext_workspace_v1` requests. The batch is
+    /// copied into owned [`WorkspaceRequest`]s at emission time, because the
+    /// wlroots request list is freed the instant the commit emission returns;
+    /// it may therefore be delivered later (a deferred delivery still carries
+    /// what the client asked for) and holds no wlroots pointer.
+    ///
+    /// Entries that named a workspace destroyed before the commit drained
+    /// arrive as [`WorkspaceRequest::Stale`](crate::WorkspaceRequest::Stale)
+    /// rather than being dropped — as does any unknown request discriminant —
+    /// so an all-stale batch is distinguishable from an empty commit.
+    ///
+    /// Privileged: this carries no client identity, so per-client allow/deny
+    /// is impossible here. Gate the `ext_workspace_manager_v1` global
+    /// ([`crate::Runtime::create_ext_workspace_manager`]) at bind time with a
+    /// [`crate::Runtime::lookup_security_context`]-based filter and
+    /// default-deny — allow only clients whose context you trust, deny the
+    /// rest:
+    ///
+    /// ```ignore
+    /// // Allow only a known pager to drive workspaces; deny everyone else.
+    /// let allowed = unsafe { runtime.lookup_security_context(client) }
+    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.pager"));
+    /// // return `allowed` from the display's global filter.
+    /// ```
+    WorkspaceCommit(Vec<WorkspaceRequest>),
+
+    /// A sandbox client committed a `wp_security_context_v1`. The metadata is
+    /// copied out of wlroots' state at emission time, so the owned
+    /// [`SecurityContext`] may be delivered later and outlives the client that
+    /// produced it.
+    SecurityContextCommitted(SecurityContext),
+
     /// A `zwlr_gamma_control_manager_v1` client set a gamma ramp for an
     /// output. Notification only — wlroots' own scene integration (wired in
     /// [`crate::Runtime::create_gamma_control_manager`]) has already applied
@@ -327,7 +475,7 @@ pub(crate) enum Event {
     /// An input-method created a `zwp_input_method_v2` candidate popup surface.
     /// Carries the crate's own [`InputPopupSurfaceId`] handle for it — an
     /// opaque, `Copy`/`Eq` id (its wrapped value is the popup's destroy-listener
-    /// address), so it rides the `Copy`/`Eq` `Event` like every other id and a
+    /// address), so it rides the `Eq` `Event` like every other id and a
     /// deferred delivery names the same popup the creation announced. The entry
     /// is recorded in the runtime table before this is emitted, so the handle
     /// resolves at delivery unless the popup was destroyed in between.
@@ -350,8 +498,7 @@ pub(crate) enum Event {
     InputMethodPopupRepositioned(InputPopupSurfaceId),
 
     /// The bound input-method committed. Carries no data — the committed
-    /// generation is owned state (`String`s) that cannot ride in a `Copy`,
-    /// `Eq` enum, so the handler reads it back via
+    /// generation is read back from the live input-method via
     /// [`Runtime::committed_ime_state`](crate::Runtime::committed_ime_state)
     /// instead (the same "carry nothing, resolve at delivery" shape
     /// `OutputConfigurationApplied` uses). Emitted once per commit, after the
@@ -382,8 +529,8 @@ pub(crate) enum Event {
     /// A tablet tool did something — proximity, motion, tip or button. The
     /// id is the hardware tool's address (FIX-3): every tool signal carries
     /// its tool in the event, so identity never depends on a signal `data`.
-    /// Payloads the tool reports (pressure, tilt, position) cannot ride in a
-    /// `Copy`/`Eq` enum and are not snapshotted: this is the compositor's
+    /// Payloads the tool reports (pressure, tilt, position) cannot ride in an
+    /// `Eq` enum and are not snapshotted: this is the compositor's
     /// cue that traffic happened, and client-bound forwarding goes through
     /// the tool's `wlr_tablet_v2_tablet_tool`, driven separately.
     TabletToolUpdate(TabletToolId),
@@ -396,7 +543,7 @@ pub(crate) enum Event {
     /// A client injected a virtual keyboard. Carries the crate's own
     /// [`VirtualKeyboardId`] handle for it — minted from the `data` object
     /// the manager's `new_virtual_keyboard` signal carried, so it rides the
-    /// `Copy`/`Eq` `Event` like every other id. The entry is recorded in
+    /// `Eq` `Event` like every other id. The entry is recorded in
     /// the runtime table before this is emitted, so the handle resolves at
     /// delivery unless the device was destroyed in between; like
     /// `InputMethodPopupDestroyed`, the id then only tells the handler
@@ -422,8 +569,8 @@ pub(crate) enum Event {
     TransientSeatRequested(TransientSeatId),
 
     /// A client's `zwlr_output_manager_v1` configuration was applied. Carries
-    /// no data — the owned `Vec<AppliedHead>` payload cannot ride in a `Copy`,
-    /// `Eq` enum, so it is staged in
+    /// no data — the owned `Vec<AppliedHead>` payload cannot ride in an `Eq`
+    /// enum, so it is staged in
     /// [`Session::applied_heads`](crate::backend) instead and popped, FIFO,
     /// when this marker is delivered. One marker is emitted per pushed payload,
     /// in the same order, so the pairing holds even under deferral (which does
@@ -433,10 +580,9 @@ pub(crate) enum Event {
     OutputConfigurationApplied,
 
     /// Xwayland's X server came up and its `xwm` is running. Carries no
-    /// payload: the `DISPLAY` name is a `String` that cannot ride in a `Copy`,
-    /// `Eq` enum, so delivery reads it back from the live `wlr_xwayland` (the
-    /// same "carry nothing, resolve at delivery" shape `OutputConfigurationApplied`
-    /// and the scene-buffer-outputs events use).
+    /// payload: delivery reads the `DISPLAY` name back from the live
+    /// `wlr_xwayland` (the same "carry nothing, resolve at delivery" shape
+    /// `OutputConfigurationApplied` and the scene-buffer-outputs events use).
     #[cfg(wlr_has_xwayland)]
     XwaylandReady,
 
@@ -891,12 +1037,13 @@ mod tests {
     /// Records delivery order, and re-enters the dispatcher from inside a
     /// handler — exactly what wlroots does when a handler destroys an object.
     ///
-    /// `reenter_with` is a `Cell`, not a `RefCell`: `Event` is `Copy` and
-    /// `Option<Event>` is `Default`, so `Cell::take` is a drop-in replacement
-    /// that never holds a borrow guard live across the reentrant `emit` call
+    /// `reenter_with` is a `Cell`, not a `RefCell`: `Option<Event>` is
+    /// `Default`, so `Cell::take` moves the event out and leaves `None` behind
+    /// without holding a borrow guard live across the reentrant `emit` call
     /// below — a `RefCell`'s `RefMut` from `borrow_mut().take()` remains live
     /// through the `if let` body in edition 2024 (rescoping only moved it
     /// ahead of the `else` block), so the reentrant call would double-borrow.
+    /// `Cell::take` needs no `Copy`; the value is moved.
     struct Recorder {
         seen: Vec<Event>,
         reenter_with: Cell<Option<Event>>,
@@ -946,10 +1093,9 @@ mod tests {
     }
 
     /// A scroll deferred behind another handler must arrive with every one
-    /// of its eight fields intact. `Event` is `Copy` and queued by value, so
-    /// the only way this breaks is a variant that stopped being `Copy` — a
-    /// single `f64` field would do it — which is exactly why the delta is
-    /// carried as `delta_milli`.
+    /// of its eight fields intact. `Event` is queued by value, so the only way
+    /// this breaks is a variant that stopped being sound to move — the delta is
+    /// carried as `delta_milli` rather than an `f64` for exactly that reason.
     #[test]
     fn a_deferred_pointer_axis_survives_the_queue_unchanged() {
         let scroll = Event::PointerAxis {
@@ -965,7 +1111,7 @@ mod tests {
 
         let mut state = Recorder {
             seen: Vec::new(),
-            reenter_with: Cell::new(Some(scroll)),
+            reenter_with: Cell::new(Some(scroll.clone())),
             dispatcher: std::ptr::null(),
         };
         // One provenance throughout, as in the tests above.
@@ -1025,7 +1171,7 @@ mod tests {
     /// final *event* order at one level of reentrancy, but only naive
     /// recursion nests an `Enter` inside another handler's `Enter`/`Exit`
     /// pair.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     enum Trace {
         Enter(Event),
         Exit(Event),
@@ -1038,7 +1184,7 @@ mod tests {
     }
 
     fn tracing_deliver(_ctx: &(), state: &mut TracingRecorder, ev: Event) {
-        state.trace.push(Trace::Enter(ev));
+        state.trace.push(Trace::Enter(ev.clone()));
         if let Some(inner) = state.reenter_with.take() {
             // SAFETY: the dispatcher outlives the test body.
             unsafe { (*state.dispatcher).emit(&(), inner, tracing_deliver) };

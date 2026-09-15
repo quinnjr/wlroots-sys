@@ -101,6 +101,23 @@ impl DecorationMode {
             }
         }
     }
+
+    /// The inverse of [`to_raw`](Self::to_raw), for reading a wire value back.
+    ///
+    /// `None` (`WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_NONE`) means the client
+    /// has not stated a preference, and is not a kind of chrome, so it maps to
+    /// `None` rather than to either variant — exactly as
+    /// [`requested_preference`] reports it on the request side. Any value this
+    /// crate does not recognize maps to `None` for the same reason it does
+    /// there: reporting an uninterpretable mode as "no mode" leaves the
+    /// decision to the compositor rather than guessing.
+    pub(crate) fn from_raw(raw: u32) -> Option<DecorationMode> {
+        match raw {
+            1 => Some(DecorationMode::ClientSide),
+            2 => Some(DecorationMode::ServerSide),
+            _ => None,
+        }
+    }
 }
 
 /// A live decoration object: the pointer, whether

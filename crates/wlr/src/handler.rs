@@ -6,9 +6,10 @@
 
 use crate::{
     ActivationToken, AxisSource, CommittedFields, ConstraintId, CursorShape, CursorShapeDevice,
-    DecorationMode, Edges, GestureId, InputPopupSurfaceId, KeyEvent, LayerSurface, LayerSurfaceId,
-    NodeId, Output, OutputId, PointerAxis, Popup, PopupId, PowerMode, Region, SceneOutputId,
-    SwitchId, Toplevel, ToplevelId, TouchId, Transform,
+    DecorationMode, Edges, ForeignToplevelId, GestureId, InputPopupSurfaceId, KeyEvent,
+    LayerSurface, LayerSurfaceId, NodeId, Output, OutputId, PointerAxis, Popup, PopupId, PowerMode,
+    Region, SceneOutputId, Surface, SurfaceId, SwitchId, Toplevel, ToplevelIcon, ToplevelId,
+    TouchId, Transform, WorkspaceRequest,
 };
 #[cfg(wlr_has_xwayland)]
 use crate::{Box2D, XwaylandSurface, XwaylandSurfaceId};
@@ -466,6 +467,15 @@ pub trait LoopHandler {
 /// defaulted method costs an implementor nothing, and a second trait would
 /// cost every consumer a second (also-empty) `impl` block.
 ///
+/// `surface_committed`, `surface_mapped`, `surface_unmapped`,
+/// `surface_destroyed` and `new_subsurface` — the generic `wlr_surface`
+/// lifecycle, alongside the role-specific methods above — were added in
+/// 0.20.36, on the same additive terms: every one is defaulted, so an impl
+/// written against any earlier 0.20.x still compiles unchanged. They live
+/// here rather than on a new `SurfaceHandler` for the reason this trait's own
+/// doc gives, and because adding a trait to [`Handlers`]' supertrait list
+/// would be a source-breaking change to a frozen bound.
+///
 /// # Panics
 ///
 /// As for [`OutputHandler`]: every method runs underneath an `extern "C"`
@@ -606,6 +616,23 @@ pub trait ToplevelHandler {
         let _ = (id, edges);
     }
 
+    /// The client asked for its window menu to be shown at a surface-local
+    /// point (`xdg_toplevel.show_window_menu`).
+    ///
+    /// `x`/`y` are in the toplevel surface's own coordinates. Only the id, not
+    /// a [`Toplevel`] handle, for the same reason
+    /// [`request_move`](ToplevelHandler::request_move) passes one: showing a
+    /// menu needs the compositor's own placement policy and current input
+    /// state, none of which the handle carries, and the seat/serial the wire
+    /// event also carried are deliberately dropped.
+    ///
+    /// Added in 0.20.36, additively: defaulted, so an
+    /// `impl ToplevelHandler for MyState {}` written against any earlier
+    /// 0.20.x still compiles unchanged.
+    fn request_show_window_menu(&mut self, id: ToplevelId, x: i32, y: i32) {
+        let _ = (id, x, y);
+    }
+
     /// The client (un)stated a decoration-mode preference for this toplevel,
     /// via `zxdg_decoration_manager_v1`/`zxdg_toplevel_decoration_v1`.
     ///
@@ -695,6 +722,74 @@ pub trait ToplevelHandler {
     /// unknown id is harmless.
     fn layer_surface_destroyed(&mut self, id: LayerSurfaceId) {
         let _ = id;
+    }
+
+    /// A tracked `wlr_surface` committed, on **every** commit — the generic
+    /// counterpart of [`layer_surface_commit`](ToplevelHandler::layer_surface_commit),
+    /// which fires for the same reason and is not limited to the first commit.
+    ///
+    /// Added additively, on the same terms as the layer-surface methods above:
+    /// it is defaulted, so an `impl ToplevelHandler for MyState {}` written
+    /// against any earlier 0.20.x still compiles unchanged.
+    ///
+    /// Fires for every surface this run tracks — a toplevel, a layer surface,
+    /// a popup, an Xwayland content surface, a session-lock surface, and every
+    /// plain sub-surface beneath them. A `Surface` is handed over rather than
+    /// a bare id because a commit is exactly when the new size is worth
+    /// reading ([`Surface::current_size`]); unlike
+    /// [`surface_mapped`](ToplevelHandler::surface_mapped), the handle still
+    /// names a live object here.
+    fn surface_committed(&mut self, surface: &Surface<'_>) {
+        let _ = surface;
+    }
+
+    /// A tracked `wlr_surface` has a buffer and should be displayed.
+    ///
+    /// Only the id, mirroring
+    /// [`layer_surface_mapped`](ToplevelHandler::layer_surface_mapped) — the
+    /// crate has already inserted the surface (or its role object) into the
+    /// scene graph by this point, and the id is what a handler remembers.
+    ///
+    /// Added additively: defaulted, so an impl written against any earlier
+    /// 0.20.x still compiles.
+    fn surface_mapped(&mut self, id: SurfaceId) {
+        let _ = id;
+    }
+
+    /// A tracked `wlr_surface` should not be displayed any more. Not the same
+    /// as destruction — a surface can unmap and map again while keeping its
+    /// id. Mirrors [`layer_surface_unmapped`](ToplevelHandler::layer_surface_unmapped).
+    ///
+    /// Added additively: defaulted, so an impl written against any earlier
+    /// 0.20.x still compiles.
+    fn surface_unmapped(&mut self, id: SurfaceId) {
+        let _ = id;
+    }
+
+    /// A tracked `wlr_surface` is gone. Only the id, for the identical reason
+    /// [`toplevel_destroyed`](ToplevelHandler::toplevel_destroyed) documents —
+    /// including that **`id` may be one you were never told about**, on the
+    /// same "queued behind a running handler" grounds. Write this so an
+    /// unknown id is harmless.
+    ///
+    /// Added additively: defaulted, so an impl written against any earlier
+    /// 0.20.x still compiles.
+    fn surface_destroyed(&mut self, id: SurfaceId) {
+        let _ = id;
+    }
+
+    /// A new child sub-surface was added to `parent`'s committed state.
+    ///
+    /// `parent` is the surface the child was added to; `child` is the child's
+    /// own generic id, which is also its [`Surface::id`] once a handler is
+    /// given it. wlroots reports this once per child, from the parent's
+    /// `new_subsurface` signal, at the moment the child joins the parent's
+    /// current state — not when the role object is created.
+    ///
+    /// Added additively: defaulted, so an impl written against any earlier
+    /// 0.20.x still compiles.
+    fn new_subsurface(&mut self, parent: SurfaceId, child: SurfaceId) {
+        let _ = (parent, child);
     }
 
     /// A client created an `xdg_popup` — a menu, tooltip, dropdown or popover —
@@ -958,6 +1053,273 @@ pub trait ToplevelHandler {
     #[cfg(wlr_has_xwayland)]
     fn xwayland_override_redirect_changed(&mut self, surface: &XwaylandSurface<'_>) {
         let _ = surface;
+    }
+
+    /// A client asked, via `xdg-system-bell-v1`, that the compositor ring the
+    /// system bell. `surface` is the surface the client associated with the
+    /// request, mapped to this crate's own id — `None` when the client named no
+    /// surface, or named one this crate does not track.
+    ///
+    /// Defaulted to a no-op: wlroots does not make a sound itself (how a
+    /// compositor rings a bell — an audible beep, a visual flash, nothing at
+    /// all — is entirely its own policy), so a compositor that wants the global
+    /// to do anything overrides this.
+    ///
+    /// Privileged: this carries no client identity, so per-client allow/deny
+    /// is impossible here. Gate the `xdg_system_bell_v1` global
+    /// ([`Runtime::create_xdg_system_bell`](crate::Runtime::create_xdg_system_bell))
+    /// at bind time with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny — allow only clients whose context you trust:
+    ///
+    /// ```ignore
+    /// // Allow only a known panel to ring the bell; deny everyone else.
+    /// let allowed = unsafe { runtime.lookup_security_context(client) }
+    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.panel"));
+    /// // return `allowed` from the display's global filter.
+    /// ```
+    ///
+    /// Added additively on the same terms as the other defaulted methods here:
+    /// an `impl ToplevelHandler for MyState {}` written against any earlier
+    /// 0.20.x still compiles unchanged.
+    fn system_bell_ring(&mut self, surface: Option<SurfaceId>) {
+        let _ = surface;
+    }
+
+    /// A client assigned (or cleared) this toplevel's icon via
+    /// `xdg-toplevel-icon-v1`. `icon` owns the icon: keep it for as long as the
+    /// compositor wants to draw it, or drop it to release the reference at
+    /// once. `None` means the client reset the toplevel to its default icon.
+    ///
+    /// wlroots only keeps an icon alive while a reference is held, and the
+    /// client may destroy the resource that created it the instant this event
+    /// returns — so [`ToplevelIcon`] is a genuine owned handle, not a borrow.
+    /// Its [`Clone`] takes another reference and its `Drop` releases one; the
+    /// icon is freed when the last goes.
+    ///
+    /// A handler that ignores icons can leave this defaulted; the crate takes
+    /// the reference and, since nothing else keeps it, the icon is released
+    /// when this default's `icon` parameter is dropped at the end of the call.
+    /// Requires [`Runtime::create_xdg_toplevel_icon_manager`](crate::Runtime::create_xdg_toplevel_icon_manager).
+    ///
+    /// Added additively on the same terms as the other defaulted methods here:
+    /// an `impl ToplevelHandler for MyState {}` written against any earlier
+    /// 0.20.x still compiles unchanged.
+    fn toplevel_icon_changed(&mut self, toplevel: &Toplevel<'_>, icon: Option<ToplevelIcon>) {
+        let _ = (toplevel, icon);
+    }
+
+    /// A client set this toplevel's persistence *tag* via
+    /// `xdg-toplevel-tag-v1`. `tag` is the untranslated string the compositor
+    /// should match against its own window rules; `None` only if wlroots
+    /// reported no string at all, which the protocol does not otherwise allow
+    /// (the empty string is a real tag and arrives as `Some("")`).
+    ///
+    /// The string is a copy taken when the signal fired — wlroots does not
+    /// store the tag on the toplevel, so there is nothing to re-read later.
+    /// Requires [`Runtime::create_xdg_toplevel_tag_manager`](crate::Runtime::create_xdg_toplevel_tag_manager).
+    ///
+    /// Added additively on the same terms as the other defaulted methods here:
+    /// an `impl ToplevelHandler for MyState {}` written against any earlier
+    /// 0.20.x still compiles unchanged.
+    fn toplevel_tag_changed(&mut self, toplevel: &Toplevel<'_>, tag: Option<&str>) {
+        let _ = (toplevel, tag);
+    }
+
+    /// A client set this toplevel's human-readable *description* via
+    /// `xdg-toplevel-tag-v1`, the translated counterpart of
+    /// [`toplevel_tag_changed`](ToplevelHandler::toplevel_tag_changed) — for
+    /// display or a screen reader. Same ownership and `None` rules as the tag.
+    /// Requires [`Runtime::create_xdg_toplevel_tag_manager`](crate::Runtime::create_xdg_toplevel_tag_manager).
+    ///
+    /// Added additively on the same terms as the other defaulted methods here:
+    /// an `impl ToplevelHandler for MyState {}` written against any earlier
+    /// 0.20.x still compiles unchanged.
+    fn toplevel_description_changed(&mut self, toplevel: &Toplevel<'_>, description: Option<&str>) {
+        let _ = (toplevel, description);
+    }
+
+    /// A client asked, through `zwlr_foreign_toplevel_management_v1`, to
+    /// activate an exported toplevel. `id` names the handle the compositor
+    /// created with
+    /// [`Runtime::create_foreign_toplevel`](crate::Runtime::create_foreign_toplevel).
+    ///
+    /// wlroots does **not** apply this: the client's seat is deliberately not
+    /// forwarded (this crate has no seat id), and honoring the request is the
+    /// compositor's focus policy — the same shape
+    /// [`SeatHandler::request_activate`](crate::SeatHandler::request_activate)
+    /// has.
+    ///
+    /// Privileged: this carries no client identity, so per-client allow/deny
+    /// is impossible here. Gate the `zwlr_foreign_toplevel_manager_v1` global
+    /// ([`Runtime::create_foreign_toplevel_manager`](crate::Runtime::create_foreign_toplevel_manager))
+    /// at bind time with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny — allow only clients whose context you trust,
+    /// deny the rest:
+    ///
+    /// ```ignore
+    /// // Allow only a known taskbar to drive foreign toplevels.
+    /// let allowed = unsafe { runtime.lookup_security_context(client) }
+    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.taskbar"));
+    /// // return `allowed` from the display's global filter.
+    /// ```
+    /// The same gate covers `close`, `maximize`, `minimize`, `fullscreen`
+    /// and `set_rectangle` below.
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn foreign_toplevel_activate(&mut self, id: ForeignToplevelId) {
+        let _ = id;
+    }
+
+    /// A client asked, through `zwlr_foreign_toplevel_management_v1`, that an
+    /// exported toplevel be closed. Closing the window is the compositor's call.
+    ///
+    /// Privileged: see
+    /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
+    /// gate the `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny.
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn foreign_toplevel_close(&mut self, id: ForeignToplevelId) {
+        let _ = id;
+    }
+
+    /// A client asked to (un)maximize an exported toplevel. `maximized` is the
+    /// requested target, not a toggle: `true` for `set_maximized`, `false` for
+    /// `unset_maximized`. wlroots applies nothing; the compositor answers with
+    /// [`ForeignToplevelHandle::set_maximized`](crate::ForeignToplevelHandle::set_maximized)
+    /// if it honors the request.
+    ///
+    /// Privileged: see
+    /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
+    /// gate the `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny.
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn foreign_toplevel_maximize(&mut self, id: ForeignToplevelId, maximized: bool) {
+        let _ = (id, maximized);
+    }
+
+    /// A client asked to (un)minimize an exported toplevel. Same target-not-
+    /// toggle contract as
+    /// [`foreign_toplevel_maximize`](ToplevelHandler::foreign_toplevel_maximize).
+    ///
+    /// Privileged: see
+    /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
+    /// gate the `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny.
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn foreign_toplevel_minimize(&mut self, id: ForeignToplevelId, minimized: bool) {
+        let _ = (id, minimized);
+    }
+
+    /// A client asked to (un)fullscreen an exported toplevel. Same
+    /// target-not-toggle contract as
+    /// [`foreign_toplevel_maximize`](ToplevelHandler::foreign_toplevel_maximize).
+    ///
+    /// Privileged: see
+    /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
+    /// gate the `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny.
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn foreign_toplevel_fullscreen(&mut self, id: ForeignToplevelId, fullscreen: bool) {
+        let _ = (id, fullscreen);
+    }
+
+    /// A client set a rectangle on one of an exported toplevel's surfaces,
+    /// asking the compositor to treat it as the window's interactive area (for
+    /// example, the area a taskbar preview should cover). `surface` is the
+    /// client-named surface resolved to this crate's own id — `None` when the
+    /// surface is not one this crate tracks. `x`/`y`/`width`/`height` are that
+    /// surface's surface-local rectangle.
+    ///
+    /// Privileged: see
+    /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
+    /// gate the `zwlr_foreign_toplevel_manager_v1` global with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny.
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn foreign_toplevel_set_rectangle(
+        &mut self,
+        id: ForeignToplevelId,
+        surface: Option<SurfaceId>,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) {
+        let _ = (id, surface, x, y, width, height);
+    }
+
+    /// A client committed a batch of `ext_workspace_v1` requests.
+    ///
+    /// The whole batch is delivered at once, copied out of wlroots' request
+    /// list at emission time, because the protocol requires the requests be
+    /// processed atomically. Each [`WorkspaceRequest`] names the workspace
+    /// and/or group it applies to by this crate's own id — the handles created
+    /// with [`Runtime::create_workspace`](crate::Runtime::create_workspace) and
+    /// [`Runtime::create_workspace_group`](crate::Runtime::create_workspace_group).
+    /// wlroots applies none of them; the compositor answers each with the
+    /// matching `WorkspaceHandle`/`WorkspaceGroupHandle` mutator.
+    ///
+    /// A request that named a workspace destroyed before the commit drained
+    /// arrives as [`WorkspaceRequest::Stale`] rather than being dropped — as
+    /// does any unknown request discriminant — so an all-stale batch is
+    /// distinguishable from an empty commit. The workspace such an entry
+    /// names is already gone, so there is nothing to answer for it.
+    ///
+    /// Requires
+    /// [`Runtime::create_ext_workspace_manager`](crate::Runtime::create_ext_workspace_manager).
+    ///
+    /// Privileged: this carries no client identity, so per-client allow/deny
+    /// is impossible here. Gate the `ext_workspace_manager_v1` global at bind
+    /// time with a
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
+    /// filter and default-deny — allow only clients whose context you trust:
+    ///
+    /// ```ignore
+    /// // Allow only a known pager to drive workspaces; deny everyone else.
+    /// let allowed = unsafe { runtime.lookup_security_context(client) }
+    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.pager"));
+    /// // return `allowed` from the display's global filter.
+    /// ```
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn workspace_commit(&mut self, requests: &[WorkspaceRequest]) {
+        let _ = requests;
+    }
+
+    /// A sandbox client committed a `wp_security_context_v1`.
+    ///
+    /// `context` is the metadata the sandbox engine attached — sandbox-engine
+    /// name, application id and instance id — copied out of wlroots at emission
+    /// time, so it owns its strings and may be kept after this call. wlroots
+    /// has already attached the context to the connections the sandbox will
+    /// accept; a compositor resolves one of those later with
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
+    ///
+    /// Requires
+    /// [`Runtime::create_security_context_manager`](crate::Runtime::create_security_context_manager).
+    ///
+    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
+    /// written against any earlier 0.20.x still compiles unchanged.
+    fn security_context_committed(&mut self, context: &crate::SecurityContext) {
+        let _ = context;
     }
 }
 
