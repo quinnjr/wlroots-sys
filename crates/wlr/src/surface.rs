@@ -82,7 +82,7 @@ impl SurfaceId {
     /// (`n % 2^32`), and `n = 0` aliases
     /// [`dangling_for_test`](Self::dangling_for_test); callers wanting an id
     /// distinct from every other test id must pass `n >= 1`. The banding lives
-    /// in [`dangling_test_id`](crate::id::dangling_test_id), shared with every
+    /// in `dangling_test_id`, shared with every
     /// id type that offers one, so the reserved range is one policy rather
     /// than one copy per type.
     pub fn dangling_nth_for_test(n: u64) -> SurfaceId {
