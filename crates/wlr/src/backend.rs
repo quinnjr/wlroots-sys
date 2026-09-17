@@ -543,14 +543,24 @@ impl Registration {
     /// accessors and [`Drop`]; this registration is the only writer of `false`
     /// besides the handle's own destroy call.
     ///
+    /// `alive` must be non-null. A null `alive` would read as "the owner
+    /// outlives everything" in [`Registration::drop`], which skips the unlink —
+    /// but `on_owned_object_destroy` unconditionally writes `alive` when the
+    /// signal fires, so a null here would be a null dereference on exactly the
+    /// destroy emission this constructor exists to observe. The debug assert
+    /// below pins the contract at construction; release keeps the unconditional
+    /// write the callback was written against.
+    ///
     /// # Safety
     ///
-    /// `signal` must point at an initialised `wl_signal`, and `alive` must
-    /// outlive the returned `Registration` (and be on the event loop's thread).
+    /// `signal` must point at an initialised `wl_signal`, and `alive` must be
+    /// non-null and outlive the returned `Registration` (and be on the event
+    /// loop's thread).
     pub(crate) unsafe fn link_owner_destroy(
         signal: *mut sys::wl_signal,
         alive: *const Cell<bool>,
     ) -> Self {
+        debug_assert!(!alive.is_null(), "link_owner_destroy needs a live flag");
         // SAFETY: forwarded verbatim; the caller upholds `link`'s contract.
         // `on_owned_object_destroy` reads only `Bound::alive`.
         unsafe { Self::link_bare(signal, on_owned_object_destroy, std::ptr::null(), alive) }
@@ -4073,21 +4083,11 @@ unsafe extern "C" fn on_xwayland_surface_dissociate<S: Handlers>(
             if !content.is_null()
                 && let Some(raw) = find_surface_id(&raw const (*content).addons)
             {
-                let surface_id = SurfaceId(raw);
-                // Gated on the session row so a destroy that already ran
-                // through `on_surface_destroy_generic` cannot produce a
-                // second teardown or a duplicate `SurfaceDestroyed`.
-                let listeners = (*session).surfaces.borrow_mut().remove(&surface_id);
-                if let Some(listeners) = listeners {
-                    drop(listeners);
-                    (*session).runtime.forget_surface(surface_id);
-                    let deliver = (*session).deliver;
-                    (*session).dispatcher.emit(
-                        &*session,
-                        Event::SurfaceDestroyed(surface_id),
-                        deliver,
-                    );
-                }
+                // The session row gates the teardown: a destroy that already
+                // ran through `on_surface_destroy_generic` leaves nothing
+                // behind, so this becomes a no-op rather than a second
+                // teardown or a duplicate `SurfaceDestroyed`.
+                remove_surface(session, SurfaceId(raw));
             }
         }
 
@@ -7313,6 +7313,9 @@ unsafe extern "C" fn on_system_bell_ring<S: Handlers>(
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let event = data.cast::<sys::wlr_xdg_system_bell_v1_ring_event>();
+        if event.is_null() {
+            return;
+        }
 
         let surface = (*event).surface;
         let surface = if surface.is_null() {
@@ -7464,6 +7467,50 @@ unsafe extern "C" fn on_toplevel_icon_changed<S: Handlers>(
     }
 }
 
+/// The shared body of `on_toplevel_tag_changed` and
+/// `on_toplevel_description_changed`.
+///
+/// The two signals differ only in event type, in which string field they
+/// carry, and in which `Event` variant they become — everything else (the
+/// null-event drop, the toplevel resolution, the id lookup miss, the copy-out
+/// at emission time, the emit) is identical. The callbacks cast their own
+/// event type and hand it over with accessors for the two fields that differ,
+/// so a fix to the shared discipline lands once.
+///
+/// # Safety
+///
+/// `session` must be the `*const Session<'_, S>` for this run, `event` must
+/// be null or a live event of `E` valid for this call, and the two accessors
+/// must read only their own field out of it.
+unsafe fn on_toplevel_tag_event<S: Handlers, E>(
+    session: *const Session<'_, S>,
+    event: *mut E,
+    toplevel_of: impl FnOnce(*mut E) -> *mut sys::wlr_xdg_toplevel,
+    text_of: impl FnOnce(*mut E) -> *const std::ffi::c_char,
+    wrap: impl FnOnce(ToplevelId, Option<String>) -> Event,
+) {
+    // SAFETY: the caller guarantees `session` names the live run and `event`
+    // is either null (checked first) or live for this call; the string is
+    // copied out before the emission returns.
+    unsafe {
+        if event.is_null() {
+            return;
+        }
+        let toplevel = toplevel_of(event);
+        if toplevel.is_null() {
+            return;
+        }
+        let Some(id) = toplevel_id_of_toplevel(toplevel) else {
+            return;
+        };
+        let text = copy_nullable_string(text_of(event));
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, wrap(id, text), deliver);
+    }
+}
+
 /// A client set a toplevel's persistence tag via
 /// `xdg_toplevel_tag_manager_v1.set_toplevel_tag`.
 unsafe extern "C" fn on_toplevel_tag_changed<S: Handlers>(
@@ -7472,26 +7519,19 @@ unsafe extern "C" fn on_toplevel_tag_changed<S: Handlers>(
 ) {
     // SAFETY: as for `on_toplevel_icon_changed`, against
     // `wlr_xdg_toplevel_tag_manager_v1.events.set_tag` and its `set_tag_event`.
-    // The `tag` string is valid only for this call and is copied out.
+    // The `tag` string is valid only for this call and is copied out by the
+    // shared helper.
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let event = data.cast::<sys::wlr_xdg_toplevel_tag_manager_v1_set_tag_event>();
-        if event.is_null() {
-            return;
-        }
-        let toplevel = (*event).toplevel;
-        if toplevel.is_null() {
-            return;
-        }
-        let Some(id) = toplevel_id_of_toplevel(toplevel) else {
-            return;
-        };
-        let tag = copy_nullable_string((*event).tag);
-        let deliver = (*session).deliver;
-        (*session)
-            .dispatcher
-            .emit(&*session, Event::ToplevelTagChanged(id, tag), deliver);
+        on_toplevel_tag_event(
+            session,
+            event,
+            |e| (*e).toplevel,
+            |e| (*e).tag,
+            Event::ToplevelTagChanged,
+        );
     }
 }
 
@@ -7504,27 +7544,17 @@ unsafe extern "C" fn on_toplevel_description_changed<S: Handlers>(
     // SAFETY: as for `on_toplevel_icon_changed`, against
     // `wlr_xdg_toplevel_tag_manager_v1.events.set_description` and its
     // `set_description_event`. The `description` string is valid only for this
-    // call and is copied out.
+    // call and is copied out by the shared helper.
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
         let event = data.cast::<sys::wlr_xdg_toplevel_tag_manager_v1_set_description_event>();
-        if event.is_null() {
-            return;
-        }
-        let toplevel = (*event).toplevel;
-        if toplevel.is_null() {
-            return;
-        }
-        let Some(id) = toplevel_id_of_toplevel(toplevel) else {
-            return;
-        };
-        let description = copy_nullable_string((*event).description);
-        let deliver = (*session).deliver;
-        (*session).dispatcher.emit(
-            &*session,
-            Event::ToplevelDescriptionChanged(id, description),
-            deliver,
+        on_toplevel_tag_event(
+            session,
+            event,
+            |e| (*e).toplevel,
+            |e| (*e).description,
+            Event::ToplevelDescriptionChanged,
         );
     }
 }
@@ -8507,27 +8537,22 @@ unsafe fn toplevel_id_of_surface(surface: *mut sys::wlr_surface) -> Option<Tople
 ///
 /// `on_new_popup` is linked into three different signals — a toplevel's base, a
 /// layer surface's own, and a popup's base — and each site fills exactly one id
-/// slot. The slot is the *only* source of this answer: the signal's `data` is
+/// slot. The kind is the *only* source of this answer: the signal's `data` is
 /// the new popup, and `(*popup).parent` is NULL for a layer-shell popup, which
 /// is precisely the case that has to be distinguished.
 ///
-/// `None` when no slot is set, which cannot happen from the three sites above.
-/// The announcement is dropped in that case rather than guessed at: attaching a
-/// popup to the wrong window is worse than not attaching it, and `unreachable!()`
-/// is not available on a path reached from an `extern "C"` frame, where a panic
-/// aborts the process.
-fn popup_parent_from_slots(
-    toplevel: Option<ToplevelId>,
-    layer: Option<LayerSurfaceId>,
-    popup: Option<PopupId>,
-) -> Option<PopupParent> {
-    if let Some(p) = popup {
-        return Some(PopupParent::Popup(p));
+/// `None` when the kind names no parent, which cannot happen from the three
+/// sites above. The announcement is dropped in that case rather than guessed
+/// at: attaching a popup to the wrong window is worse than not attaching it,
+/// and `unreachable!()` is not available on a path reached from an
+/// `extern "C"` frame, where a panic aborts the process.
+fn popup_parent_from_slots(kind: &BoundKind) -> Option<PopupParent> {
+    match *kind {
+        BoundKind::Toplevel(t) => Some(PopupParent::Toplevel(t)),
+        BoundKind::Layer(l) => Some(PopupParent::Layer(l)),
+        BoundKind::Popup(p) => Some(PopupParent::Popup(p)),
+        _ => None,
     }
-    if let Some(l) = layer {
-        return Some(PopupParent::Layer(l));
-    }
-    toplevel.map(PopupParent::Toplevel)
 }
 
 unsafe extern "C" fn on_surface_commit<S: Handlers>(
@@ -8922,6 +8947,49 @@ unsafe extern "C" fn on_surface_unmap_generic<S: Handlers>(
     }
 }
 
+/// Forget `id`'s generic surface view and tell the handler it is gone.
+///
+/// Drops the runtime row and removes the session's listener row — removing the
+/// entry drops the registrations, unlinking every listener — then emits
+/// `SurfaceDestroyed`. Both tables are cleared before the event is emitted, and
+/// that ordering is the whole soundness argument for deferral: a destroy queued
+/// behind a running handler is delivered long after wlroots freed the surface,
+/// so a lookup at delivery time would resolve the id to freed memory. Clearing
+/// here means it simply misses.
+///
+/// Shared by `on_surface_destroy_generic` and the xwayland dissociate path,
+/// which tear the same view down from two independent signals: the surface's
+/// own `destroy`, and the window's `dissociate` (which runs before wlroots
+/// frees the content surface). Gated on the session row, so whichever runs
+/// second finds nothing and reports `false` instead of tearing down twice or
+/// emitting a duplicate `SurfaceDestroyed`.
+///
+/// Returns whether a listener row was removed — whether this call owned the
+/// teardown. Both callers emit only through this function, so a `false` return
+/// means nothing was delivered either.
+///
+/// # Safety
+///
+/// `session` must be the `*const Session<'_, S>` for this run, valid for as
+/// long as the linked registrations live.
+unsafe fn remove_surface<S: Handlers>(session: *const Session<'_, S>, id: SurfaceId) -> bool {
+    // SAFETY: the caller guarantees `session` names the live run.
+    unsafe {
+        (*session).runtime.forget_surface(id);
+        let listeners = (*session).surfaces.borrow_mut().remove(&id);
+        let Some(listeners) = listeners else {
+            return false;
+        };
+        drop(listeners);
+
+        let deliver = (*session).deliver;
+        (*session)
+            .dispatcher
+            .emit(&*session, Event::SurfaceDestroyed(id), deliver);
+        true
+    }
+}
+
 /// A tracked surface is about to be freed. Forget it *now*, whatever the
 /// handler does.
 unsafe extern "C" fn on_surface_destroy_generic<S: Handlers>(
@@ -8939,24 +9007,11 @@ unsafe extern "C" fn on_surface_destroy_generic<S: Handlers>(
             return;
         };
 
-        // Both tables are cleared before the event is emitted, and that
-        // ordering is the whole soundness argument for deferral: a destroy
-        // queued behind a running handler is delivered long after wlroots
-        // freed the surface, so a lookup at delivery time would resolve the id
-        // to freed memory. Clearing here means it simply misses.
-        //
         // Removing the entry drops the registration that owns this very
         // `Bound`. `wl_signal_emit_mutable` advances past the firing listener
         // before calling us, so `bound` is dangling from here on and is not
         // touched again.
-        (*session).runtime.forget_surface(id);
-        let listeners = (*session).surfaces.borrow_mut().remove(&id);
-        drop(listeners);
-
-        let deliver = (*session).deliver;
-        (*session)
-            .dispatcher
-            .emit(&*session, Event::SurfaceDestroyed(id), deliver);
+        remove_surface(session, id);
     }
 }
 
@@ -9559,16 +9614,7 @@ unsafe extern "C" fn on_new_popup<S: Handlers>(
         // Which parent this listener belongs to. Never `(*popup).parent`: it is
         // NULL for a layer-shell popup at exactly this moment. The listener
         // carries exactly one of the three parent kinds in its `BoundKind`.
-        let (toplevel_slot, layer_slot, popup_slot) = match (*bound).kind {
-            BoundKind::Toplevel(t) => (Some(t), None, None),
-            BoundKind::Layer(l) => (None, Some(l), None),
-            BoundKind::Popup(p) => (None, None, Some(p)),
-            // Anything else (which no `link_*` constructor produces for these
-            // signals) drops the announcement below, as an all-`None` triple
-            // always did.
-            _ => (None, None, None),
-        };
-        let Some(parent) = popup_parent_from_slots(toplevel_slot, layer_slot, popup_slot) else {
+        let Some(parent) = popup_parent_from_slots(&(*bound).kind) else {
             return;
         };
 
@@ -9959,8 +10005,11 @@ unsafe extern "C" fn on_toplevel_request_show_window_menu<S: Handlers>(
     // `wlr_xdg_toplevel_show_window_menu_event` (`wlr_xdg_shell.h`) for the
     // duration of this emission. Seat and serial are deliberately dropped —
     // this crate does not forward them, by design — and only `x`/`y` is read.
-    // Guarded against null on the same "an `extern "C"` frame does not get to
-    // panic, and reading a null pointer would abort just as surely" footing as
+    // A null `data` drops the event outright rather than fabricating a menu
+    // open at the origin: an abnormal emission names no position, and (0, 0)
+    // would be a real position the client never asked for. Guarded on the
+    // same "an `extern "C"` frame does not get to panic, and reading a null
+    // pointer would abort just as surely" footing as
     // `on_toplevel_request_resize`.
     unsafe {
         let bound = bound_of(l);
@@ -9969,11 +10018,10 @@ unsafe extern "C" fn on_toplevel_request_show_window_menu<S: Handlers>(
             return;
         };
         let event = data.cast::<sys::wlr_xdg_toplevel_show_window_menu_event>();
-        let (x, y) = if event.is_null() {
-            (0, 0)
-        } else {
-            ((*event).x, (*event).y)
-        };
+        if event.is_null() {
+            return;
+        }
+        let (x, y) = ((*event).x, (*event).y);
         let deliver = (*session).deliver;
         (*session)
             .dispatcher
@@ -13290,6 +13338,495 @@ mod tests {
         }
     }
 
+    /// Drive a manager-scoped handler (`set_icon`/`set_tag`/`set_description`)
+    /// exactly as wlroots would, through its own signal.
+    ///
+    /// # Safety
+    ///
+    /// `session` must be a live session pointer for `Recorder` that outlives
+    /// the call, and `data` must be null or a live event of the kind `notify`
+    /// reads, valid for the emission.
+    unsafe fn drive_bare(
+        session: *const Session<'_, Recorder>,
+        notify: sys::wl_notify_func_t,
+        data: *mut std::ffi::c_void,
+    ) {
+        // SAFETY: mirrors `drive_output_config` — the harness signal and its
+        // flag outlive the registration, which unlinks (declared after the
+        // harness) while the session it names is still alive.
+        unsafe {
+            let mut h = Harness::new();
+            let hp = &raw mut *h;
+            let _reg = Registration::link_bare(
+                &raw mut (*hp).signal,
+                notify,
+                session.cast::<()>(),
+                std::ptr::null(),
+            );
+            sys::wl_signal_emit_mutable(&raw mut (*hp).signal, data);
+        }
+    }
+
+    /// A zeroed `wlr_xdg_toplevel` wired to a live surface through a zeroed
+    /// `wlr_xdg_surface`: the shape `toplevel_id_of_toplevel` reads. The
+    /// surface's addon set is initialised (so the id lookup is sound) but
+    /// carries no id, which is what makes this toplevel untracked; `track`
+    /// mints one and records it, turning the same allocation tracked.
+    struct ScratchUntrackedToplevel {
+        toplevel: *mut sys::wlr_xdg_toplevel,
+        role: *mut sys::wlr_xdg_surface,
+        surface: ScratchSurface,
+    }
+
+    impl ScratchUntrackedToplevel {
+        fn new() -> Self {
+            let role = unsafe { alloc_zeroed(Layout::new::<sys::wlr_xdg_surface>()) }
+                .cast::<sys::wlr_xdg_surface>();
+            assert!(!role.is_null(), "allocation failed");
+            let toplevel = unsafe { alloc_zeroed(Layout::new::<sys::wlr_xdg_toplevel>()) }
+                .cast::<sys::wlr_xdg_toplevel>();
+            assert!(!toplevel.is_null(), "allocation failed");
+            let surface = ScratchSurface::new();
+            // SAFETY: each pointer is a fresh, exclusively-owned, zeroed
+            // allocation sized for its own type; these writes only touch the
+            // named fields, all in bounds. The surface's addon set was
+            // initialised by `ScratchSurface::new`.
+            unsafe {
+                (*role).surface = surface.raw;
+                (*toplevel).base = role;
+            }
+            Self {
+                toplevel,
+                role,
+                surface,
+            }
+        }
+
+        /// Mint the surface's id and record this toplevel as tracked under it.
+        ///
+        /// The scene tree is faked with a dangling pointer: `with_toplevel`
+        /// never touches it, and the recorder below reads only the id, so no
+        /// scene object is needed for the delivery path under test.
+        ///
+        /// # Safety
+        ///
+        /// `runtime` must outlive the returned id's use as a tracked toplevel.
+        unsafe fn track(&self, runtime: &Runtime) -> ToplevelId {
+            // SAFETY: the surface is live with an initialised addon set, so
+            // minting its id is sound; the toplevel and the dangling tree
+            // outlive the test body, and neither is dereferenced through.
+            unsafe {
+                let id = ToplevelId(ensure_id_raw(&raw mut (*self.surface.raw).addons));
+                let raw = NonNull::new(self.toplevel).expect("allocation failed");
+                runtime.record_toplevel(id, raw, NonNull::dangling());
+                id
+            }
+        }
+    }
+
+    impl Drop for ScratchUntrackedToplevel {
+        fn drop(&mut self) {
+            // SAFETY: each pointer was allocated by `alloc_zeroed` with the
+            // matching layout in `new`, is still exclusively owned, and
+            // nothing else frees or aliases it. The surface frees itself.
+            unsafe {
+                dealloc(self.toplevel.cast(), Layout::new::<sys::wlr_xdg_toplevel>());
+                dealloc(self.role.cast(), Layout::new::<sys::wlr_xdg_surface>());
+            }
+        }
+    }
+
+    /// Icon, tag and description events for a toplevel this run never
+    /// announced are dropped — including null payloads — while the same
+    /// events for a tracked toplevel reach the handler.
+    ///
+    /// The tracked half is the non-vacuity guard: without it, a harness that
+    /// never fires would pass the absence assertions for free.
+    #[test]
+    fn untracked_toplevel_icon_tag_and_description_are_dropped() {
+        let _serialised = crate::id::id_test_lock();
+
+        let mut state = Recorder::default();
+        let p = &raw mut state;
+        let scratch = ScratchUntrackedToplevel::new();
+        let tag = std::ffi::CString::new("persist").expect("CString");
+        let description = std::ffi::CString::new("readable").expect("CString");
+
+        // SAFETY: `p` is a live, exclusively-derived pointer to `state` and no
+        // reference to `state` exists; `scratch`, the event structs and the
+        // strings all outlive the session, and the emissions run with no
+        // handler on the stack, so each is delivered inline.
+        unsafe {
+            let runtime = Runtime::new().expect("runtime");
+            let session = test_session(p, &runtime, deliver_all::<Recorder>);
+            let session_ptr = &raw const session;
+
+            // Null payloads drop before touching anything.
+            drive_bare(
+                session_ptr,
+                on_toplevel_icon_changed::<Recorder>,
+                std::ptr::null_mut(),
+            );
+            drive_bare(
+                session_ptr,
+                on_toplevel_tag_changed::<Recorder>,
+                std::ptr::null_mut(),
+            );
+            drive_bare(
+                session_ptr,
+                on_toplevel_description_changed::<Recorder>,
+                std::ptr::null_mut(),
+            );
+
+            // Events naming the id-less toplevel drop at the id lookup. The
+            // icon is null so the handler would take the `None` arm, not the
+            // `ref` call, had it got that far; the strings are valid so a
+            // delivery would record them.
+            let mut icon_ev = sys::wlr_xdg_toplevel_icon_manager_v1_set_icon_event {
+                toplevel: scratch.toplevel,
+                icon: std::ptr::null_mut(),
+            };
+            let mut tag_ev = sys::wlr_xdg_toplevel_tag_manager_v1_set_tag_event {
+                toplevel: scratch.toplevel,
+                tag: tag.as_ptr(),
+            };
+            let mut desc_ev = sys::wlr_xdg_toplevel_tag_manager_v1_set_description_event {
+                toplevel: scratch.toplevel,
+                description: description.as_ptr(),
+            };
+            drive_bare(
+                session_ptr,
+                on_toplevel_icon_changed::<Recorder>,
+                (&raw mut icon_ev).cast(),
+            );
+            drive_bare(
+                session_ptr,
+                on_toplevel_tag_changed::<Recorder>,
+                (&raw mut tag_ev).cast(),
+            );
+            drive_bare(
+                session_ptr,
+                on_toplevel_description_changed::<Recorder>,
+                (&raw mut desc_ev).cast(),
+            );
+            assert!(
+                state.toplevel_icons.is_empty()
+                    && state.toplevel_tags.is_empty()
+                    && state.toplevel_descriptions.is_empty(),
+                "events for an untracked toplevel must deliver nothing"
+            );
+
+            // The same events for a tracked toplevel reach the handler, so the
+            // absences above pin the drop rather than a dead harness.
+            let id = scratch.track(&runtime);
+            drive_bare(
+                session_ptr,
+                on_toplevel_icon_changed::<Recorder>,
+                (&raw mut icon_ev).cast(),
+            );
+            drive_bare(
+                session_ptr,
+                on_toplevel_tag_changed::<Recorder>,
+                (&raw mut tag_ev).cast(),
+            );
+            drive_bare(
+                session_ptr,
+                on_toplevel_description_changed::<Recorder>,
+                (&raw mut desc_ev).cast(),
+            );
+            assert_eq!(state.toplevel_icons, vec![id], "icon must deliver");
+            assert_eq!(
+                state.toplevel_tags,
+                vec![(id, Some("persist".to_string()))],
+                "tag must deliver the copied string"
+            );
+            assert_eq!(
+                state.toplevel_descriptions,
+                vec![(id, Some("readable".to_string()))],
+                "description must deliver the copied string"
+            );
+        }
+    }
+
+    /// A null `show_window_menu` payload delivers nothing, while a live one on
+    /// the same listener delivers the position it carries.
+    ///
+    /// Delivery resolves nothing — the id rides the `Bound`, not the signal —
+    /// so the harness proves the drop happened at emission, and the live half
+    /// proves the harness itself fires.
+    #[test]
+    fn null_show_window_menu_delivers_nothing() {
+        let _serialised = crate::id::id_test_lock();
+
+        let mut state = Recorder::default();
+        let p = &raw mut state;
+        let id = ToplevelId::dangling_for_test();
+
+        // SAFETY: `p` is a live, exclusively-derived pointer to `state` and no
+        // reference to `state` exists; the event struct outlives the session,
+        // and the emissions run with no handler on the stack, so each is
+        // delivered inline.
+        unsafe {
+            let runtime = Runtime::new().expect("runtime");
+            let session = test_session(p, &runtime, deliver_all::<Recorder>);
+            let session_ptr = &raw const session;
+            let mut h = Harness::new();
+            let hp = &raw mut *h;
+
+            // Declared after `session`, so it unlinks while the session it
+            // names is still alive — the ordering `run` uses.
+            let _reg = Registration::link_toplevel(
+                &raw mut (*hp).signal,
+                on_toplevel_request_show_window_menu::<Recorder>,
+                session_ptr.cast::<()>(),
+                std::ptr::null(),
+                id,
+            );
+
+            sys::wl_signal_emit_mutable(&raw mut (*hp).signal, std::ptr::null_mut());
+            assert!(
+                state.window_menus.is_empty(),
+                "a null menu payload must not fabricate a request at the origin"
+            );
+
+            // A fabricated (0, 0) would be a real position the client never
+            // asked for; the live event carries an unmistakable one instead.
+            let mut ev = sys::wlr_xdg_toplevel_show_window_menu_event {
+                toplevel: std::ptr::null_mut(),
+                seat: std::ptr::null_mut(),
+                serial: 0,
+                x: 30,
+                y: 40,
+            };
+            sys::wl_signal_emit_mutable(&raw mut (*hp).signal, (&raw mut ev).cast());
+            assert_eq!(
+                state.window_menus,
+                vec![(id, 30, 40)],
+                "a live menu event must deliver the position it carries"
+            );
+        }
+    }
+
+    /// Null and null-child `new_subsurface` emissions are dropped.
+    #[test]
+    fn null_and_null_child_new_subsurface_are_dropped() {
+        let _serialised = crate::id::id_test_lock();
+
+        let mut state = Recorder::default();
+        let p = &raw mut state;
+        let parent = ScratchSurface::new_with_signals();
+        // Only the `surface` field is ever read, so a zeroed stack value is a
+        // faithful stand-in for a child-less emission and needs no allocation.
+        let mut hollow = std::mem::MaybeUninit::<sys::wlr_subsurface>::zeroed();
+        let hollow = hollow.as_mut_ptr();
+
+        // SAFETY: `p` is a live, exclusively-derived pointer to `state` and no
+        // reference to `state` exists; `parent` and `hollow` outlive the
+        // session, and the emissions run with no handler on the stack, so each
+        // is delivered inline.
+        unsafe {
+            let runtime = Runtime::new().expect("runtime");
+            let session = test_session(p, &runtime, deliver_all::<Recorder>);
+            let session_ptr = &raw const session;
+
+            install_surface_listeners(session_ptr, parent.raw).expect("parent installed");
+
+            sys::wl_signal_emit_mutable(
+                &raw mut (*parent.raw).events.new_subsurface,
+                std::ptr::null_mut(),
+            );
+            sys::wl_signal_emit_mutable(
+                &raw mut (*parent.raw).events.new_subsurface,
+                hollow.cast(),
+            );
+
+            assert!(
+                state.subsurface_created.is_empty(),
+                "a null payload and a null child must neither announce a subsurface"
+            );
+        }
+    }
+
+    /// A `SurfaceCommitted` that arrives after the surface's destroy was
+    /// cleared is dropped at delivery: the runtime row is gone, so there is
+    /// no object left to borrow.
+    #[test]
+    fn surface_committed_for_a_destroyed_id_is_dropped() {
+        let _serialised = crate::id::id_test_lock();
+
+        let mut state = Recorder::default();
+        let p = &raw mut state;
+        let scratch = ScratchSurface::new_with_signals();
+
+        // SAFETY: `p` is a live, exclusively-derived pointer to `state` and no
+        // reference to `state` exists; `scratch` and `runtime` outlive the
+        // session. The destroy emission below runs with no handler on the
+        // stack, so it is delivered inline.
+        unsafe {
+            let runtime = Runtime::new().expect("runtime");
+            let session = test_session(p, &runtime, deliver_all::<Recorder>);
+            let session_ptr = &raw const session;
+            let surface = scratch.raw;
+
+            let (id, _) = install_surface_listeners(session_ptr, surface).expect("installed");
+            sys::wl_signal_emit_mutable(&raw mut (*surface).events.destroy, std::ptr::null_mut());
+            assert_eq!(
+                state.surface_destroyed,
+                vec![id],
+                "the destroy must have cleared the row first"
+            );
+
+            // A commit queued behind a running destroy handler would arrive
+            // here, long after wlroots freed the surface; delivery must miss
+            // rather than borrow freed memory.
+            deliver_all(&session, &mut state, Event::SurfaceCommitted(id));
+            assert!(
+                state.surface_committed.is_empty(),
+                "a commit for a destroyed id must be dropped, not delivered"
+            );
+        }
+    }
+
+    /// A null surface installs nothing.
+    #[test]
+    fn install_surface_listeners_on_null_returns_none() {
+        let mut state = Recorder::default();
+        let p = &raw mut state;
+
+        // SAFETY: `p` is a live, exclusively-derived pointer to `state` and no
+        // reference to `state` exists; `runtime` outlives the session.
+        unsafe {
+            let runtime = Runtime::new().expect("runtime");
+            let session = test_session(p, &runtime, deliver_all::<Recorder>);
+            let session_ptr = &raw const session;
+
+            assert!(
+                install_surface_listeners(session_ptr, std::ptr::null_mut()).is_none(),
+                "a null surface must install no listeners"
+            );
+            assert!(
+                session.surfaces.borrow().is_empty(),
+                "and must leave no listener row behind"
+            );
+        }
+    }
+
+    /// Associate then dissociate tears the generic surface view down exactly
+    /// once: one `SurfaceDestroyed`, an empty session row, and no second
+    /// destroy when the surface's own destroy fires afterwards.
+    ///
+    /// No Xwayland binary is involved: the window is a zeroed
+    /// `wlr_xwayland_surface` pointing at a scratch content surface, which is
+    /// all either handler reads — and no scene either (`Runtime::new` has no
+    /// bands, so node creation is skipped the way the production path skips
+    /// it when graphics was never initialised).
+    #[cfg(wlr_has_xwayland)]
+    #[test]
+    fn xwayland_dissociate_tears_the_surface_view_down_exactly_once() {
+        let _serialised = crate::id::id_test_lock();
+
+        let mut state = Recorder::default();
+        let p = &raw mut state;
+        let content = ScratchSurface::new_with_signals();
+        let id = XwaylandSurfaceId::dangling_for_test();
+
+        // SAFETY: `p` is a live, exclusively-derived pointer to `state` and no
+        // reference to `state` exists; `content`, the window below and
+        // `runtime` all outlive the session, and the emissions run with no
+        // handler on the stack, so each is delivered inline.
+        unsafe {
+            let layout = Layout::new::<sys::wlr_xwayland_surface>();
+            // SAFETY: the type is non-zero-sized, so `alloc_zeroed` returns
+            // either null (checked) or a suitably aligned zeroed allocation.
+            let window = alloc_zeroed(layout).cast::<sys::wlr_xwayland_surface>();
+            assert!(!window.is_null(), "allocation failed");
+            // The only window fields either handler reads: the content surface
+            // pointer dissociate recovers the surface id from.
+            (*window).surface = content.raw;
+
+            let runtime = Runtime::new().expect("runtime");
+            // SAFETY: `window` is a live, exclusively-owned allocation for the
+            // rest of this block, so recording it names a live window.
+            runtime.record_xwayland_surface(id, NonNull::new(window).expect("allocation failed"));
+            let session = test_session(p, &runtime, deliver_all::<Recorder>);
+            let session_ptr = &raw const session;
+
+            // Drive a handler through its own signal, the way
+            // `drive_output_config` does for the output-manager handlers.
+            let drive_xwayland = |notify: sys::wl_notify_func_t| {
+                let mut h = Harness::new();
+                let hp = &raw mut *h;
+                let _reg = Registration::link_xwayland(
+                    &raw mut (*hp).signal,
+                    notify,
+                    session_ptr.cast::<()>(),
+                    id,
+                );
+                sys::wl_signal_emit_mutable(&raw mut (*hp).signal, std::ptr::null_mut());
+            };
+            drive_xwayland(on_xwayland_surface_associate::<Recorder>);
+
+            let surface_id = SurfaceId(
+                find_surface_id(&raw const (*content.raw).addons)
+                    .expect("associate must mint the content surface's id"),
+            );
+            assert!(
+                session.surfaces.borrow().contains_key(&surface_id),
+                "associate must install the generic surface view"
+            );
+
+            drive_xwayland(on_xwayland_surface_dissociate::<Recorder>);
+            assert_eq!(
+                state.surface_destroyed,
+                vec![surface_id],
+                "dissociate must tear the surface view down exactly once"
+            );
+            assert!(
+                session.surfaces.borrow().is_empty(),
+                "the listener row must be gone"
+            );
+            assert!(
+                runtime.surface(surface_id).is_none(),
+                "the runtime row must be gone"
+            );
+
+            // The surface's own destroy emission afterwards finds no listener
+            // left to fire.
+            sys::wl_signal_emit_mutable(
+                &raw mut (*content.raw).events.destroy,
+                std::ptr::null_mut(),
+            );
+
+            // And a stale destroy watch firing anyway — the emission the
+            // unlink above can no longer produce, driven directly to pin the
+            // gate — must not emit a second time either.
+            let mut h = Harness::new();
+            let hp = &raw mut *h;
+            let stale = Registration::link_surface(
+                &raw mut (*hp).signal,
+                on_surface_destroy_generic::<Recorder>,
+                session_ptr.cast::<()>(),
+                surface_id,
+            );
+            on_surface_destroy_generic::<Recorder>(
+                stale.listener_addr() as *mut sys::wl_listener,
+                std::ptr::null_mut(),
+            );
+            drop(stale);
+
+            assert_eq!(
+                state.surface_destroyed,
+                vec![surface_id],
+                "no second destroy may follow the dissociate teardown"
+            );
+
+            runtime.forget_xwayland_surface(id);
+            // SAFETY: allocated by `alloc_zeroed` with the matching layout
+            // above, still exclusively owned, nothing else frees it.
+            dealloc(window.cast(), layout);
+        }
+    }
+
     /// A handler state that records what it was told, and can be asked to
     /// destroy an output from inside `new_output`.
     #[derive(Default)]
@@ -13308,6 +13845,16 @@ mod tests {
         surface_unmapped: Vec<SurfaceId>,
         surface_destroyed: Vec<SurfaceId>,
         subsurface_created: Vec<(SurfaceId, SurfaceId)>,
+
+        /// Tag/description/icon deliveries, recorded so the negative tests can
+        /// assert an untracked toplevel delivered nothing.
+        toplevel_tags: Vec<(ToplevelId, Option<String>)>,
+        toplevel_descriptions: Vec<(ToplevelId, Option<String>)>,
+        toplevel_icons: Vec<ToplevelId>,
+
+        /// Window-menu requests, recorded so the null-payload test can assert
+        /// the absence of the call.
+        window_menus: Vec<(ToplevelId, i32, i32)>,
 
         /// If set, `new_output` emits this output's `destroy` signal — standing
         /// in for wlroots destroying an output from underneath a handler, which
@@ -13375,6 +13922,28 @@ mod tests {
 
         fn new_subsurface(&mut self, parent: SurfaceId, child: SurfaceId) {
             self.subsurface_created.push((parent, child));
+        }
+
+        fn toplevel_tag_changed(&mut self, toplevel: &Toplevel<'_>, tag: Option<&str>) {
+            self.toplevel_tags
+                .push((toplevel.id(), tag.map(str::to_string)));
+        }
+
+        fn toplevel_description_changed(
+            &mut self,
+            toplevel: &Toplevel<'_>,
+            description: Option<&str>,
+        ) {
+            self.toplevel_descriptions
+                .push((toplevel.id(), description.map(str::to_string)));
+        }
+
+        fn toplevel_icon_changed(&mut self, toplevel: &Toplevel<'_>, _icon: Option<ToplevelIcon>) {
+            self.toplevel_icons.push(toplevel.id());
+        }
+
+        fn request_show_window_menu(&mut self, id: ToplevelId, x: i32, y: i32) {
+            self.window_menus.push((id, x, y));
         }
     }
     impl crate::SeatHandler for Recorder {}
@@ -14361,73 +14930,50 @@ mod implicit_grab_tests {
 mod popup_bound_tests {
     use super::*;
 
-    /// The id slot a `new_popup` listener carries is what decides the parent
+    /// The kind a `new_popup` listener carries is what decides the parent
     /// kind, because the signal's own `data` cannot: a layer-shell popup's
     /// `popup->parent` is NULL at announcement time. This pins the mapping
     /// `on_new_popup` performs, without needing a live signal to fire.
-    fn parent_from_slots(
-        toplevel: Option<ToplevelId>,
-        layer: Option<LayerSurfaceId>,
-        popup: Option<PopupId>,
-    ) -> Option<PopupParent> {
-        popup_parent_from_slots(toplevel, layer, popup)
+    fn parent_from_kind(kind: &BoundKind) -> Option<PopupParent> {
+        popup_parent_from_slots(kind)
     }
 
     #[test]
-    fn a_toplevel_slot_names_a_toplevel_parent() {
+    fn a_toplevel_kind_names_a_toplevel_parent() {
         let t = ToplevelId::dangling_for_test();
         assert_eq!(
-            parent_from_slots(Some(t), None, None),
+            parent_from_kind(&BoundKind::Toplevel(t)),
             Some(PopupParent::Toplevel(t))
         );
     }
 
     #[test]
-    fn a_layer_slot_names_a_layer_parent() {
+    fn a_layer_kind_names_a_layer_parent() {
         let l = LayerSurfaceId::dangling_for_test();
         assert_eq!(
-            parent_from_slots(None, Some(l), None),
+            parent_from_kind(&BoundKind::Layer(l)),
             Some(PopupParent::Layer(l))
         );
     }
 
     #[test]
-    fn a_popup_slot_names_a_nested_parent() {
+    fn a_popup_kind_names_a_nested_parent() {
         let p = PopupId::dangling_for_test();
         assert_eq!(
-            parent_from_slots(None, None, Some(p)),
+            parent_from_kind(&BoundKind::Popup(p)),
             Some(PopupParent::Popup(p))
         );
     }
 
-    /// A `Bound` with no id slot set cannot have come from any of the three
-    /// sites `on_new_popup` is linked at. Returning `None` (and so dropping the
-    /// announcement) rather than guessing is the only safe answer: guessing
-    /// would attach a popup to the wrong window, and `unreachable!()` is
-    /// forbidden here because this runs under an `extern "C"` frame where a
-    /// panic aborts the process.
+    /// A `Bound` whose kind names no parent cannot have come from any of the
+    /// three sites `on_new_popup` is linked at. Returning `None` (and so
+    /// dropping the announcement) rather than guessing is the only safe
+    /// answer: guessing would attach a popup to the wrong window, and
+    /// `unreachable!()` is forbidden here because this runs under an
+    /// `extern "C"` frame where a panic aborts the process.
     #[test]
-    fn no_slot_at_all_resolves_to_nothing_rather_than_guessing() {
-        assert_eq!(parent_from_slots(None, None, None), None);
-    }
-
-    /// Precedence is popup, then layer, then toplevel. No real `Bound` ever has
-    /// two set — each of the three link sites fills exactly one — but the
-    /// function is total, and a deterministic answer beats an arbitrary one if
-    /// the invariant is ever broken by a future link site.
-    #[test]
-    fn the_deepest_slot_wins_if_two_are_somehow_set() {
-        let t = ToplevelId::dangling_for_test();
-        let l = LayerSurfaceId::dangling_for_test();
-        let p = PopupId::dangling_for_test();
-        assert_eq!(
-            parent_from_slots(Some(t), Some(l), Some(p)),
-            Some(PopupParent::Popup(p))
-        );
-        assert_eq!(
-            parent_from_slots(Some(t), Some(l), None),
-            Some(PopupParent::Layer(l))
-        );
+    fn a_bare_kind_resolves_to_nothing_rather_than_guessing() {
+        assert_eq!(parent_from_kind(&BoundKind::Bare), None);
     }
 
     /// `toplevel_id_of_surface` must not hand back a `ToplevelId` for a surface
