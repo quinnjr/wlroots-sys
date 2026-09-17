@@ -1328,6 +1328,13 @@ pub trait ToplevelHandler {
     /// accept; a compositor resolves one of those later with
     /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     ///
+    /// The metadata is a self-asserted claim, not an identity: attribute it
+    /// through [`SecurityContext::committing_client`](crate::SecurityContext::committing_client)
+    /// — the sandbox-engine connection that committed, valid for this call —
+    /// and gate privileged globals on that correlated identity, never on bare
+    /// metadata. See [`SecurityContext`](crate::SecurityContext)'s docs for
+    /// the full trust model.
+    ///
     /// Requires
     /// [`Runtime::create_security_context_manager`](crate::Runtime::create_security_context_manager).
     ///

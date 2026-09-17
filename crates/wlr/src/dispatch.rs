@@ -455,7 +455,11 @@ pub(crate) enum Event {
     /// A sandbox client committed a `wp_security_context_v1`. The metadata is
     /// copied out of wlroots' state at emission time, so the owned
     /// [`SecurityContext`] may be delivered later and outlives the client that
-    /// produced it.
+    /// produced it. The committing-client identity travels with it
+    /// ([`SecurityContext::committing_client`](crate::SecurityContext::committing_client)):
+    /// the metadata strings are a self-asserted claim, so correlate before
+    /// trusting — see [`SecurityContext`](crate::SecurityContext)'s docs for
+    /// the trust model.
     SecurityContextCommitted(SecurityContext),
 
     /// A `zwlr_gamma_control_manager_v1` client set a gamma ramp for an

@@ -7364,7 +7364,10 @@ unsafe extern "C" fn on_security_context_commit<S: Handlers>(
     // `*const Session<'_, S>` paired with this instantiation. The signal
     // carries a live `*mut wlr_security_context_v1_commit_event` valid only for
     // this call; the state pointer it holds is copied out before the emission
-    // returns, because the context that owns it dies with its client.
+    // returns, because the context that owns it dies with its client. The
+    // event's `parent_client` (the sandbox-engine connection that committed)
+    // is stored opaquely alongside for the same reason — see
+    // `SecurityContext::committing_client`.
     unsafe {
         let bound = bound_of(l);
         let session = (*bound).session.cast::<Session<'_, S>>();
@@ -7376,7 +7379,8 @@ unsafe extern "C" fn on_security_context_commit<S: Handlers>(
         if state.is_null() {
             return;
         }
-        let context = crate::security_context::snapshot(state);
+        let committer = NonNull::new((*event).parent_client);
+        let context = crate::security_context::snapshot(state, committer);
         let deliver = (*session).deliver;
         (*session)
             .dispatcher

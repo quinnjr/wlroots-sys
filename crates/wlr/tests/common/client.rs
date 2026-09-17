@@ -21,12 +21,15 @@ use std::os::unix::net::UnixStream;
 
 use wayland_client::globals::{BindError, GlobalList, GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
-    wl_buffer, wl_compositor, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_subcompositor,
-    wl_subsurface, wl_surface,
+    wl_buffer, wl_compositor, wl_output, wl_registry, wl_seat, wl_shm, wl_shm_pool,
+    wl_subcompositor, wl_subsurface, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_handle_v1, ext_foreign_toplevel_list_v1,
+};
+use wayland_protocols::ext::session_lock::v1::client::{
+    ext_session_lock_manager_v1, ext_session_lock_surface_v1, ext_session_lock_v1,
 };
 use wayland_protocols::ext::workspace::v1::client::{
     ext_workspace_group_handle_v1, ext_workspace_handle_v1, ext_workspace_manager_v1,
@@ -130,6 +133,23 @@ pub struct ExtForeignToplevelEvents {
     pub saw_closed: bool,
 }
 
+/// What an `ext_session_lock_v1` client observed, returned by
+/// [`spawn_session_lock`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionLockEvents {
+    /// The last `configure` event's `(serial, width, height)`.
+    pub configure: Option<(u32, u32, u32)>,
+    /// The serial the driver acked after the first round-trip (the configure
+    /// above may be a later one, re-sent after the map).
+    pub acked_serial: Option<u32>,
+    /// Whether the lock's `locked` event arrived — the server sends it once
+    /// every output is covered by a mapped lock surface.
+    pub saw_locked: bool,
+    /// Whether the lock's `finished` event arrived. The locker never unlocks
+    /// during the run; recorded rather than swallowed.
+    pub saw_finished: bool,
+}
+
 /// What an `ext_workspace_manager_v1` client observed, returned by
 /// [`spawn_ext_workspace`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -189,6 +209,9 @@ pub struct ClientState {
     pub ext_workspace_group: Option<ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1>,
     /// The workspace the manager replayed on bind.
     pub ext_workspace_handle: Option<ext_workspace_handle_v1::ExtWorkspaceHandleV1>,
+    /// What an `ext-session-lock` client observed; returned by
+    /// [`spawn_session_lock`].
+    pub session_lock: SessionLockEvents,
 }
 
 impl ClientState {
@@ -586,6 +609,115 @@ pub fn spawn_security_context(socket: &str) -> std::thread::JoinHandle<()> {
         drop((context, listener, close_write, manager));
         // Best-effort: unlink the listen socket now that it is closed.
         let _ = std::fs::remove_file(&listen_path);
+    })
+}
+
+/// Drive a real `ext_session_lock_v1` locker: lock, create a lock surface on
+/// the advertised output, wait for its configure, ack it, and commit a buffer
+/// so the server applies the ack and maps the surface.
+///
+/// The server configures the lock surface to the output's current size when
+/// the role is created, so the returned [`SessionLockEvents::configure`]
+/// is the exact `(serial, width, height)` the server-side `LockSurface`
+/// accessors must agree with. Two round-trips separate the phases the way
+/// [`spawn`] documents: the first flushes the lock requests and dispatches
+/// the configure; the second dispatches the ack and the mapped commit.
+/// Proxies are held until the second round-trip is answered.
+pub fn spawn_session_lock(socket: &str) -> std::thread::JoinHandle<SessionLockEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let shm_path = crate::common::shm_path_for(&format!("{socket}-lock"));
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
+        let qh = queue.handle();
+
+        let manager: ext_session_lock_manager_v1::ExtSessionLockManagerV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind ext_session_lock_manager_v1");
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("bind wl_shm");
+        // The headless output is announced when the server's backend starts —
+        // after this thread already connected and listed globals — so it is
+        // not in the initial list. Re-list until it appears: every round-trip
+        // dispatches the registry events the server sent since the last one,
+        // and the server keeps running while this thread is alive, so each
+        // iteration makes progress rather than blocking forever.
+        let output: wl_output::WlOutput = {
+            let mut bound = None;
+            for _ in 0..30 {
+                match globals.bind(&qh, 1..=4, ()) {
+                    Ok(output) => {
+                        bound = Some(output);
+                        break;
+                    }
+                    Err(BindError::NotPresent) => {
+                        queue
+                            .roundtrip(&mut state)
+                            .expect("roundtrip for late globals");
+                    }
+                    Err(e) => panic!("bind wl_output: {e}"),
+                }
+            }
+            bound.expect("bind wl_output")
+        };
+
+        let lock = manager.lock(&qh, ());
+        let surface = compositor.create_surface(&qh, ());
+        let lock_surface = lock.get_lock_surface(&surface, &output, &qh, ());
+
+        // The role (and the server's first configure) exists once the server
+        // has seen `get_lock_surface` — committing before that configure
+        // arrives is a protocol error ("has never been configured"). So the
+        // first round-trip carries no commit: it lets the server create the
+        // role and dispatches its configure.
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server creates the lock surface and configures");
+        let serial = state
+            .session_lock
+            .configure
+            .map(|(serial, width, height)| (serial, width as i32, height as i32))
+            .expect("the server configured the lock surface");
+        lock_surface.ack_configure(serial.0);
+        state.session_lock.acked_serial = Some(serial.0);
+
+        // Unlike xdg-shell (bufferless first commit), the committed lock
+        // surface must carry a buffer — wlroots raises a protocol error on a
+        // null-buffer commit — and its dimensions must match the acked
+        // configure, so the shm buffer is sized from the configure the server
+        // just sent rather than a constant. This commit is also what applies
+        // the ack to the server's `current` and maps the surface.
+        let (_, w, h) = serial;
+        let stride = w * 4;
+        let size = stride * h;
+        let file = crate::common::create_shm_backing(&shm_path, size as u64);
+        let pool = shm.create_pool(file.as_fd(), size, &qh, ());
+        let buffer = pool.create_buffer(0, w, h, stride, wl_shm::Format::Argb8888, &qh, ());
+        surface.attach(Some(&buffer), 0, 0);
+        surface.damage(0, 0, w, h);
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server applies the ack and maps");
+
+        // Held until the round-trip above was answered, then dropped here —
+        // after the map, not before it. The session stays locked after the
+        // locker goes away (the crash-stays-locked rule); the test tears the
+        // whole compositor down afterwards.
+        drop((
+            lock_surface,
+            surface,
+            lock,
+            output,
+            buffer,
+            pool,
+            shm,
+            manager,
+            file,
+        ));
+        let _ = std::fs::remove_file(&shm_path);
+        state.session_lock
     })
 }
 
@@ -2154,6 +2286,82 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ()> for ClientState {
                 state.events.layer_closed = true;
             }
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, ()> for ClientState {
+    /// `wl_output` events are irrelevant to the lock-surface flow; the
+    /// Dispatch impl exists only so [`spawn_session_lock`] can bind the
+    /// output the lock surface covers.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wl_output::WlOutput,
+        _event: wl_output::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ext_session_lock_manager_v1::ExtSessionLockManagerV1, ()> for ClientState {
+    /// `ext_session_lock_manager_v1` carries no events; the Dispatch impl
+    /// exists only so [`spawn_session_lock`] can bind the global.
+    fn event(
+        _state: &mut Self,
+        _proxy: &ext_session_lock_manager_v1::ExtSessionLockManagerV1,
+        _event: ext_session_lock_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ext_session_lock_v1::ExtSessionLockV1, ()> for ClientState {
+    /// Records `locked` and `finished`. The driver never unlocks, so
+    /// `finished` must stay false; `locked` proves the server mapped the
+    /// covering surface.
+    fn event(
+        state: &mut Self,
+        _proxy: &ext_session_lock_v1::ExtSessionLockV1,
+        event: ext_session_lock_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_session_lock_v1::Event::Locked => {
+                state.session_lock.saw_locked = true;
+            }
+            ext_session_lock_v1::Event::Finished => {
+                state.session_lock.saw_finished = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ext_session_lock_surface_v1::ExtSessionLockSurfaceV1, ()> for ClientState {
+    /// Records the last `configure` (serial, width, height). The ack is
+    /// driven by [`spawn_session_lock`] between the round-trips — not here —
+    /// so the acked serial is known separately from a later re-configure.
+    fn event(
+        state: &mut Self,
+        _proxy: &ext_session_lock_surface_v1::ExtSessionLockSurfaceV1,
+        event: ext_session_lock_surface_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let ext_session_lock_surface_v1::Event::Configure {
+            serial,
+            width,
+            height,
+        } = event
+        {
+            state.session_lock.configure = Some((serial, width, height));
         }
     }
 }
