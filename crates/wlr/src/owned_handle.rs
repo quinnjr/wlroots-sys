@@ -150,7 +150,15 @@ pub(crate) unsafe extern "C" fn on_watched_destroy<T>(
     // the registration below is dropped from inside this emission, while its
     // own owner's signal is still alive.
     unsafe {
-        let Some(ctx) = ctx_of::<T>(l) else { return };
+        let Some(ctx) = ctx_of::<T>(l) else {
+            // Observability only: an unresolvable watch context means the
+            // listener outlived its box (or was never linked with one), which
+            // must never happen — but the release path stays a silent return,
+            // since the use-after-free chain this would imply is unproven and
+            // trapping the compositor over it is not warranted.
+            debug_assert!(false, "unresolvable watch context for listener {l:p}");
+            return;
+        };
         ctx.alive.set(false);
         remove_listener(l);
         let registration = ctx.watched_destroy.borrow_mut().take();
@@ -171,6 +179,15 @@ pub(crate) unsafe extern "C" fn on_watched_destroy<T>(
 /// counter, where an unclamped subtraction could in principle collide with a
 /// live value for a very large `n`. Address-keyed ids cannot collide that way
 /// — no allocation lives at `usize::MAX` — so no banding is needed.
+///
+/// For new internal-only users: call this helper rather than spelling out
+/// `usize::MAX - n` again. The identical inline bodies on the
+/// `#[doc(hidden)] pub dangling_nth_for_test` constructors in `runtime.rs`
+/// (and the `usize::MAX` singletons like `CursorId`'s, which are that shape's
+/// `n = 0`) predate this helper and are frozen public API within the 0.20.x
+/// line, so they are intentionally left as-is; the `usize::MAX - 7` argument
+/// at the `forget_transient_seat` call site and the `mapped_len` bound probe
+/// in `buffer.rs` are uses of the same guarantee, not new spellings of it.
 pub(crate) fn dangling_usize_test_id(n: usize) -> usize {
     usize::MAX - n
 }
