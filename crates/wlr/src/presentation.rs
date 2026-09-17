@@ -37,9 +37,12 @@ use crate::{OutputId, Runtime, sys};
 /// An owned value snapshot rather than a borrow of wlroots memory — the C
 /// `wlr_presentation_event` is a plain value the caller fills in, and
 /// `PresentEvent::as_c` is its only in-crate producer besides
-/// [`from_output`](Self::from_output) itself.
+/// [`from_output`](Self::from_output) itself. The output id is resolved
+/// eagerly at construction for the same reason: a held event must stay valid
+/// across output teardown, so it stores the id, not the output pointer.
 pub struct PresentationEvent {
     raw: sys::wlr_presentation_event,
+    output: Option<OutputId>,
 }
 
 impl std::fmt::Debug for PresentationEvent {
@@ -74,27 +77,29 @@ impl PresentationEvent {
         // SAFETY: `raw` points at a live local sized for exactly the event the
         // C function writes, and `output_event` is a live local the function
         // only reads. The call initialises every field of `raw`.
-        unsafe {
+        let raw = unsafe {
             sys::wlr_presentation_event_from_output(raw.as_mut_ptr(), &output_event);
-            PresentationEvent {
-                raw: raw.assume_init(),
-            }
+            raw.assume_init()
+        };
+        // Eager: `output` is borrowed live here, so the addon read cannot
+        // race teardown; the stored id (or its absence) is what `output_id`
+        // reports from then on, whatever happens to the output. A missing id
+        // addon maps to `None`, the same by-id miss every other lookup in
+        // this crate reports.
+        PresentationEvent {
+            raw,
+            output: output.try_id(),
         }
     }
 
     /// The output the frame reached, as its stable id, when one is attached.
     ///
-    /// `None` when the event names no output, or names one this crate never
-    /// registered — the same by-id miss every other lookup in this crate
-    /// reports.
+    /// A plain field read of the id [`from_output`](Self::from_output)
+    /// resolved while the output was borrowed live: holding the event across
+    /// output teardown stays valid. `None` when the event names no output,
+    /// or names one this crate never registered.
     pub fn output_id(&self) -> Option<OutputId> {
-        if self.raw.output.is_null() {
-            return None;
-        }
-        // SAFETY: `from_output` copied the output pointer the caller handed in,
-        // so it is the live output the caller was working with; this reads its
-        // addon set without mutating it.
-        unsafe { crate::id::find_id(&raw const (*self.raw.output).addons).map(OutputId) }
+        self.output
     }
 
     /// Whole seconds of the presentation timestamp.
@@ -254,44 +259,40 @@ mod tests {
     use super::{PresentationEvent, PresentationFeedback};
     use crate::output::{Output, PresentEvent, PresentFlags};
     use crate::sys;
-    use std::alloc::{Layout, alloc_zeroed, dealloc};
+    use crate::test_support::Scratch;
     use std::ptr::NonNull;
 
-    /// A zeroed `wlr_output` with an initialised addon set, enough for
-    /// `wlr_presentation_event_from_output` to read its fields and for
-    /// `output_id` to walk it. Same shape as `output.rs`'s scratch output.
-    struct ScratchOutput(*mut sys::wlr_output);
-
-    impl ScratchOutput {
-        fn new() -> Self {
-            let layout = Layout::new::<sys::wlr_output>();
-            // SAFETY: `wlr_output` is non-zero-sized, so `alloc_zeroed` returns
-            // null (checked) or a suitably aligned, zeroed allocation.
-            let ptr = unsafe { alloc_zeroed(layout) }.cast::<sys::wlr_output>();
-            assert!(!ptr.is_null(), "allocation failed");
-            // SAFETY: `ptr` is a fresh, exclusively-owned allocation sized for
-            // the addon set it embeds; `wlr_addon_set_init` writes only the two
-            // `wl_list` fields it owns, in bounds.
-            unsafe { sys::wlr_addon_set_init(&raw mut (*ptr).addons) };
-            Self(ptr)
-        }
+    /// Initialise a zeroed output's addon set so `output_id`'s eager lookup
+    /// can walk it; `wlr_presentation_event_from_output` reads nothing else
+    /// off the output.
+    fn init_output(ptr: *mut sys::wlr_output) {
+        // SAFETY: `ptr` is a fresh, exclusively-owned, zeroed allocation
+        // sized for the addon set it embeds; `wlr_addon_set_init` writes
+        // only the two `wl_list` fields it owns, in bounds.
+        unsafe { sys::wlr_addon_set_init(&raw mut (*ptr).addons) };
     }
 
-    impl Drop for ScratchOutput {
-        fn drop(&mut self) {
-            // SAFETY: the addon set was initialised in `new` and no addon is
-            // attached, so finishing it exactly undoes that init.
-            unsafe { sys::wlr_addon_set_finish(&raw mut (*self.0).addons) };
-            // SAFETY: `self.0` was allocated by `alloc_zeroed` with this layout.
-            unsafe { dealloc(self.0.cast::<u8>(), Layout::new::<sys::wlr_output>()) };
-        }
+    /// Undo exactly what [`init_output`] did, plus any id addon the test
+    /// attached.
+    fn fini_output(ptr: *mut sys::wlr_output) {
+        // SAFETY: the addon set was initialised in `init_output`, and the
+        // allocation is still exclusively owned; finishing it runs any
+        // attached addon's destroy hook and frees it.
+        unsafe { sys::wlr_addon_set_finish(&raw mut (*ptr).addons) };
+    }
+
+    /// A zeroed `wlr_output` with an initialised addon set, enough for
+    /// `wlr_presentation_event_from_output` to read its fields and for the
+    /// eager id lookup to walk it.
+    fn new_output() -> Scratch<sys::wlr_output> {
+        Scratch::new(init_output, fini_output)
     }
 
     #[test]
     fn from_output_copies_the_output_events_fields() {
-        let scratch = ScratchOutput::new();
+        let scratch = new_output();
         // SAFETY: `scratch` outlives the handle and the event.
-        let output = unsafe { Output::from_raw(scratch.0) };
+        let output = unsafe { Output::from_raw(scratch.ptr) };
         let present = PresentEvent {
             commit_seq: 7,
             presented: true,
@@ -317,6 +318,53 @@ mod tests {
             None,
             "a scratch output carries no id addon, so the lookup misses"
         );
+    }
+
+    /// The eager half of the `output_id` contract: an output carrying an id
+    /// addon resolves to exactly that id at construction time, so a held
+    /// event never needs to touch the output again.
+    #[test]
+    fn from_output_resolves_the_outputs_id_eagerly() {
+        let _serialised = crate::id::id_test_lock();
+        let scratch = new_output();
+        // SAFETY: `scratch` is a live, exclusively-owned output with an
+        // initialised addon set carrying no id addon yet, which is exactly
+        // what `attach_id` requires.
+        let id = crate::OutputId(unsafe { crate::id::attach_id(&raw mut (*scratch.ptr).addons) });
+        // SAFETY: `scratch` outlives the handle and the event. `from_raw`
+        // (not the id-caching constructor) proves the eager lookup reads the
+        // addon set rather than a cached field.
+        let output = unsafe { Output::from_raw(scratch.ptr) };
+        let present = PresentEvent {
+            commit_seq: 1,
+            presented: true,
+            when: std::time::Duration::new(3, 4),
+            seq: 5,
+            refresh: 60_000,
+            flags: PresentFlags::VSYNC,
+        };
+
+        let event = PresentationEvent::from_output(&output, &present);
+
+        assert_eq!(
+            event.output_id(),
+            Some(id),
+            "the event must carry the output's registered id"
+        );
+    }
+
+    /// An event naming no output reports exactly `None`: the miss a held
+    /// event across output teardown degrades to.
+    #[test]
+    fn an_event_with_no_output_has_no_output_id() {
+        let event = PresentationEvent {
+            // SAFETY: `wlr_presentation_event` is a plain aggregate of a
+            // pointer and integers; the all-zero pattern is a null output
+            // with zeroed fields, which `output_id` never reads.
+            raw: unsafe { std::mem::zeroed() },
+            output: None,
+        };
+        assert_eq!(event.output_id(), None);
     }
 
     /// wlroots frees the feedback in `wlr_presentation_feedback_destroy`, and
@@ -355,6 +403,7 @@ mod tests {
             // a no-op, so no field of it is read, and no output is needed.
             let event = PresentationEvent {
                 raw: unsafe { std::mem::zeroed() },
+                output: None,
             };
             if i % 2 == 0 {
                 // Consumes the handle; the destroy runs when the method returns.

@@ -12,19 +12,17 @@
 //! A real `wp_presentation` feedback object also needs the client to bind
 //! `wp_presentation` and ask for feedback; `common::client::spawn_mapped` does
 //! that, so `sampled()` takes a genuinely-present feedback on the first commit.
-//! Handler observations are recorded on the app and asserted after the run,
-//! never inside a handler, where a panic would abort through C.
+//! The tearing-control legs reuse the same shared driver through
+//! [`common::client::spawn_mapped_with_tearing`](TearingSetup): creating the
+//! control object (and optionally the async hint) before the first commit is
+//! the driver's one parameter, not a fork of it. Handler observations are
+//! recorded on the app and asserted after the run, never inside a handler,
+//! where a panic would abort through C.
 
-use std::thread::JoinHandle;
-
-use wayland_client::globals::{GlobalListContents, registry_queue_init};
-use wayland_client::protocol::{wl_compositor, wl_registry, wl_surface};
-use wayland_client::{Connection, Dispatch, QueueHandle};
-use wayland_protocols::wp::tearing_control::v1::client::{
-    wp_tearing_control_manager_v1, wp_tearing_control_v1,
+use wlr::{
+    Backend, Display, Output, OutputId, PresentEvent, PresentFlags, PresentationEvent,
+    PresentationFeedback, Runtime, Surface, SurfaceId, TearingHint, Until,
 };
-use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
-use wlr::{Backend, Display, Output, OutputId, Runtime, Surface, SurfaceId, TearingHint, Until};
 
 mod common;
 
@@ -46,15 +44,45 @@ struct App {
     sampled_none: usize,
     /// Commits where `tearing_hint()` reported the vsync default.
     hinted_vsync: usize,
+    /// Commits where `tearing_hint()` reported the async hint.
+    hinted_async: usize,
     /// Commits where `tearing_control()` correctly missed.
     control_missing: usize,
-    /// Commits where the textured/scanned wrappers ran with a live output.
-    textured: usize,
-    scanned: usize,
     /// Commits where a client-created tearing control resolved and named
     /// this very surface through `surface_id()`.
     control_surface_matched: usize,
-    client: Option<JoinHandle<common::client::ClientEvents>>,
+    /// One `(current, pending, previous)` triple per commit where a control
+    /// object resolved; the async leg asserts its transitions on these.
+    hint_triples: Vec<(TearingHint, TearingHint, TearingHint)>,
+    /// Commits where `textured_on_output`/`scanned_out_on_output` ran with a
+    /// live output.
+    textured: usize,
+    scanned: usize,
+    /// When set, the handler resolves everything through stored ids — the
+    /// by-id battery — instead of the direct handle calls above.
+    by_id: bool,
+    /// The first surface id the handler saw, captured for the by-id asserts.
+    first_surface: Option<SurfaceId>,
+    /// Commits where `sample_presentation(id)` resolved a live feedback.
+    by_id_sampled_some: usize,
+    /// Commits where the by-id hint read the vsync default.
+    by_id_hinted_vsync: usize,
+    /// Commits where the by-id control lookup resolved an object.
+    by_id_control_some: usize,
+    /// When set, the first sampled feedback is reported with
+    /// `send_presented` instead of being dropped.
+    send_presented: bool,
+    /// How many sampled feedbacks were reported with `send_presented`.
+    presented_sent: usize,
+    /// The sent event's fields, read back off the owned event for the
+    /// round-trip assert: the output id, the `(tv_sec, tv_nsec)` timestamp,
+    /// the refresh, the sequence, and the flags.
+    presented_output: Option<OutputId>,
+    presented_time: Option<(u64, u32)>,
+    presented_refresh: Option<u32>,
+    presented_seq: Option<u64>,
+    presented_flags: Option<PresentFlags>,
+    client: Option<std::thread::JoinHandle<common::client::ClientEvents>>,
 }
 
 impl wlr::OutputHandler for App {
@@ -63,39 +91,115 @@ impl wlr::OutputHandler for App {
     }
 }
 
-impl wlr::ToplevelHandler for App {
-    fn surface_committed(&mut self, surface: &Surface<'_>) {
-        self.committed += 1;
-
-        // Runs the sampled FFI against the real surface. With the client's
-        // `wp_presentation.feedback` request applied, the first commit returns
-        // `Some`; the wrapper detaches it and dropping it sends `discarded`.
-        // Later commits miss: the single client request is take-once.
-        if surface.sampled().is_some() {
+impl App {
+    /// The sampling concern: take the surface's feedback when the client
+    /// asked for one, reporting or dropping it per the test's mode.
+    ///
+    /// With the client's `wp_presentation.feedback` request applied, the
+    /// first commit returns `Some`; the wrapper detaches it and dropping it
+    /// sends `discarded`. Later commits miss: the single client request is
+    /// take-once. In by-id mode the same take happens through the stored id
+    /// instead, and the direct call is skipped — it could only miss after
+    /// the by-id lookup detached the feedback.
+    fn observe_sampling(&mut self, surface: &Surface<'_>) {
+        if self.by_id {
+            let id = surface.id();
+            self.first_surface.get_or_insert(id);
+            if self.runtime.sample_presentation(id).is_some() {
+                self.by_id_sampled_some += 1;
+            }
+            return;
+        }
+        if let Some(feedback) = surface.sampled() {
             self.sampled_some += 1;
+            if self.send_presented && self.presented_sent == 0 {
+                self.send_first_presented(feedback, surface);
+            }
+            // Otherwise the feedback drops here, which destroys it
+            // server-side and sends `discarded` to the listening client.
         } else {
             self.sampled_none += 1;
         }
+    }
 
-        // The tearing manager was cached onto this handle by `with_surface`; a
-        // surface with no client-created control reports the wlroots default.
+    /// Report the first sampled feedback as presented, from a real
+    /// [`PresentEvent`] resolved against the live output.
+    ///
+    /// The event's fields are recorded for the post-run round-trip assert;
+    /// the client observes `presented` on a later round-trip.
+    fn send_first_presented(&mut self, feedback: PresentationFeedback, surface: &Surface<'_>) {
+        let _ = surface;
+        let Some(output_id) = self.output else {
+            debug_assert!(false, "no output announced before the first sampled commit");
+            return;
+        };
+        let Some(output) = self.runtime.output(output_id) else {
+            debug_assert!(false, "the announced output no longer resolves");
+            return;
+        };
+        let present = PresentEvent {
+            commit_seq: 1,
+            presented: true,
+            when: std::time::Duration::new(9, 8),
+            seq: 7,
+            refresh: 60_000,
+            flags: PresentFlags::VSYNC,
+        };
+        let event = PresentationEvent::from_output(&output, &present);
+        self.presented_output = event.output_id();
+        self.presented_time = Some((event.tv_sec(), event.tv_nsec()));
+        self.presented_refresh = Some(event.refresh());
+        self.presented_seq = Some(event.seq());
+        self.presented_flags = Some(event.flags());
+        feedback.send_presented(&event);
+        self.presented_sent += 1;
+    }
+
+    /// The tearing concern: read the effective hint, the control object, and
+    /// — through the stored id in by-id mode — the by-id twins.
+    ///
+    /// The manager was cached onto the handle by `with_surface`; a surface
+    /// with no client-created control reports the wlroots default. A
+    /// client-created control names the surface it was created for, so the
+    /// id-addon lookup must resolve to the committing surface's own id.
+    fn observe_tearing(&mut self, surface: &Surface<'_>) {
         if surface.tearing_hint() == Some(TearingHint::Vsync) {
             self.hinted_vsync += 1;
+        }
+        if surface.tearing_hint() == Some(TearingHint::Async) {
+            self.hinted_async += 1;
         }
         if surface.tearing_control().is_none() {
             self.control_missing += 1;
         }
-        // A client-created control names the surface it was created for: the
-        // id-addon lookup must resolve to this very surface's id.
         if surface
             .tearing_control()
             .is_some_and(|control| control.surface_id() == Some(surface.id()))
         {
             self.control_surface_matched += 1;
         }
+        if self.by_id {
+            let id = surface.id();
+            self.first_surface.get_or_insert(id);
+            if self.runtime.tearing_hint(id) == Some(TearingHint::Vsync) {
+                self.by_id_hinted_vsync += 1;
+            }
+            if self.runtime.tearing_control(id).is_some() {
+                self.by_id_control_some += 1;
+            }
+        }
+        if let Some(control) = surface.tearing_control() {
+            self.hint_triples.push((
+                control.current_hint(),
+                control.pending_hint(),
+                control.previous_hint(),
+            ));
+        }
+    }
 
-        // Resolve the announced output to a live handle and run both
-        // output-taking presentation wrappers against it.
+    /// The output concern: run both output-taking presentation wrappers
+    /// against the announced output, resolved to a live handle.
+    fn run_output_wrappers(&mut self, surface: &Surface<'_>) {
         if let Some(output_id) = self.output
             && let Some(output) = self.runtime.output(output_id)
         {
@@ -106,11 +210,51 @@ impl wlr::ToplevelHandler for App {
         }
     }
 }
+
+impl wlr::ToplevelHandler for App {
+    fn surface_committed(&mut self, surface: &Surface<'_>) {
+        self.committed += 1;
+        self.observe_sampling(surface);
+        self.observe_tearing(surface);
+        self.run_output_wrappers(surface);
+    }
+}
 impl wlr::SeatHandler for App {}
 impl wlr::FdHandler for App {}
 impl wlr::LoopHandler for App {
     fn should_stop(&mut self) -> bool {
         self.client.as_ref().is_some_and(|h| h.is_finished())
+    }
+}
+
+/// A fresh `App` over `runtime` with every counter at zero and both modes off.
+fn new_app(runtime: &Runtime) -> App {
+    App {
+        runtime: runtime.clone(),
+        output: None,
+        committed: 0,
+        sampled_some: 0,
+        sampled_none: 0,
+        hinted_vsync: 0,
+        hinted_async: 0,
+        control_missing: 0,
+        control_surface_matched: 0,
+        hint_triples: Vec::new(),
+        textured: 0,
+        scanned: 0,
+        by_id: false,
+        first_surface: None,
+        by_id_sampled_some: 0,
+        by_id_hinted_vsync: 0,
+        by_id_control_some: 0,
+        send_presented: false,
+        presented_sent: 0,
+        presented_output: None,
+        presented_time: None,
+        presented_refresh: None,
+        presented_seq: None,
+        presented_flags: None,
+        client: None,
     }
 }
 
@@ -199,19 +343,8 @@ fn a_real_surface_runs_the_presentation_and_tearing_wrappers() {
         .expect("tearing control");
     let socket = display.add_socket_auto().expect("socket");
 
-    let mut app = App {
-        runtime: runtime.clone(),
-        output: None,
-        committed: 0,
-        sampled_some: 0,
-        sampled_none: 0,
-        hinted_vsync: 0,
-        control_missing: 0,
-        textured: 0,
-        scanned: 0,
-        control_surface_matched: 0,
-        client: Some(common::client::spawn_mapped(&socket)),
-    };
+    let mut app = new_app(&runtime);
+    app.client = Some(common::client::spawn_mapped(&socket));
 
     // One run, so the output and the client's surface stay live together; the
     // client's disconnect ends it through `should_stop`.
@@ -266,137 +399,6 @@ fn a_real_surface_runs_the_presentation_and_tearing_wrappers() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Tearing-control positive: a client-created control names its surface
-// ---------------------------------------------------------------------------
-
-/// Test-local client state for the tearing-control leg: the shared
-/// `spawn_mapped` driver never creates a control object, so this file owns
-/// the variant that does.
-struct TearingState;
-
-macro_rules! tearing_empty_dispatch {
-    ($($t:ty),+) => {$(
-        impl Dispatch<$t, ()> for TearingState {
-            fn event(
-                _state: &mut Self,
-                _proxy: &$t,
-                _event: <$t as wayland_client::Proxy>::Event,
-                _data: &(),
-                _conn: &Connection,
-                _qh: &QueueHandle<Self>,
-            ) {
-            }
-        }
-    )+};
-}
-
-tearing_empty_dispatch!(
-    wl_compositor::WlCompositor,
-    wl_surface::WlSurface,
-    xdg_toplevel::XdgToplevel,
-    wp_tearing_control_manager_v1::WpTearingControlManagerV1,
-    wp_tearing_control_v1::WpTearingControlV1
-);
-
-impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for TearingState {
-    fn event(
-        _state: &mut Self,
-        _proxy: &wl_registry::WlRegistry,
-        _event: wl_registry::Event,
-        _data: &GlobalListContents,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<xdg_wm_base::XdgWmBase, ()> for TearingState {
-    fn event(
-        _state: &mut Self,
-        proxy: &xdg_wm_base::XdgWmBase,
-        event: xdg_wm_base::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-        if let xdg_wm_base::Event::Ping { serial } = event {
-            proxy.pong(serial);
-        }
-    }
-}
-
-impl Dispatch<xdg_surface::XdgSurface, ()> for TearingState {
-    fn event(
-        _state: &mut Self,
-        proxy: &xdg_surface::XdgSurface,
-        event: xdg_surface::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-    ) {
-        if let xdg_surface::Event::Configure { serial } = event {
-            proxy.ack_configure(serial);
-        }
-    }
-}
-
-/// Like the shared mapped driver, but creates a tearing-control object for
-/// the toplevel surface before its first commit, so the server observes at
-/// least one commit where `tearing_control()` resolves and `surface_id()`
-/// names the committing surface.
-fn spawn_mapped_with_tearing_control(socket: &str) -> JoinHandle<common::client::ClientEvents> {
-    let path = common::isolated_runtime_dir().join(socket);
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
-    std::thread::spawn(move || {
-        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
-        let (globals, mut queue) =
-            registry_queue_init::<TearingState>(&conn).expect("registry queue init");
-        let qh = queue.handle();
-        let mut state = TearingState;
-        let events = common::client::ClientEvents::default();
-
-        let compositor: wl_compositor::WlCompositor =
-            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
-        let wm_base: xdg_wm_base::XdgWmBase =
-            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
-        let tearing_manager: wp_tearing_control_manager_v1::WpTearingControlManagerV1 = globals
-            .bind(&qh, 1..=1, ())
-            .expect("bind wp_tearing_control_manager_v1");
-
-        let surface = compositor.create_surface(&qh, ());
-        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
-        let _toplevel = xdg_surface.get_toplevel(&qh, ());
-        // The control object exists from this request on; creating it before
-        // the first commit means the server's commit handler observes it.
-        let _control = tearing_manager.get_tearing_control(&surface, &qh, ());
-        surface.commit();
-        queue
-            .roundtrip(&mut state)
-            .expect("roundtrip so the server tracks the surface and its control");
-        queue
-            .roundtrip(&mut state)
-            .expect("roundtrip so the server drains");
-
-        drop((
-            _control,
-            surface,
-            xdg_surface,
-            _toplevel,
-            tearing_manager,
-            wm_base,
-            compositor,
-        ));
-        events
-    })
-}
-
 /// A client creates a tearing-control object for its toplevel surface; the
 /// server must resolve it through `Surface::tearing_control`, and its
 /// `surface_id()` must name the committing surface — the id-addon positive
@@ -416,19 +418,11 @@ fn a_client_created_tearing_control_names_its_surface() {
         .expect("tearing control");
     let socket = display.add_socket_auto().expect("socket");
 
-    let mut app = App {
-        runtime: runtime.clone(),
-        output: None,
-        committed: 0,
-        sampled_some: 0,
-        sampled_none: 0,
-        hinted_vsync: 0,
-        control_missing: 0,
-        textured: 0,
-        scanned: 0,
-        control_surface_matched: 0,
-        client: Some(spawn_mapped_with_tearing_control(&socket)),
-    };
+    let mut app = new_app(&runtime);
+    app.client = Some(common::client::spawn_mapped_with_tearing(
+        &socket,
+        common::client::TearingSetup::Control,
+    ));
     backend
         .run_all(&display, &mut app, &runtime, Until::Stop)
         .expect("run_all");
@@ -445,5 +439,204 @@ fn a_client_created_tearing_control_names_its_surface() {
     assert!(
         app.control_surface_matched >= 1,
         "tearing_control() resolved on a commit and surface_id() named that surface"
+    );
+}
+
+/// The by-id battery against a live surface: the handler captures the
+/// surface's id on the first commit and resolves everything a compositor
+/// would need outside a handler — the sampled feedback, the vsync hint, and
+/// the client-created control — through the stored id.
+#[test]
+fn by_id_lookups_resolve_a_live_surface() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime.create_xdg_shell(&display, 6).expect("xdg-shell");
+    runtime
+        .create_presentation(&display, &backend)
+        .expect("presentation");
+    runtime
+        .create_tearing_control_manager(&display, 1)
+        .expect("tearing control");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = new_app(&runtime);
+    app.by_id = true;
+    app.client = Some(common::client::spawn_mapped_with_tearing(
+        &socket,
+        common::client::TearingSetup::Control,
+    ));
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Stop)
+        .expect("run_all");
+    app.client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+
+    assert!(
+        app.committed >= 1,
+        "the client commits at least once and commits reach surface_committed"
+    );
+    assert!(
+        app.first_surface.is_some(),
+        "the handler captured the live surface's id"
+    );
+    assert!(
+        app.by_id_sampled_some >= 1,
+        "sample_presentation(id) must reach the client's requested feedback"
+    );
+    assert!(
+        app.by_id_hinted_vsync >= 1,
+        "tearing_hint(id) must read the vsync default through the stored id"
+    );
+    assert!(
+        app.by_id_control_some >= 1,
+        "tearing_control(id) must resolve the client-created control through the stored id"
+    );
+}
+
+/// The real send path: the handler builds a `PresentationEvent` from a real
+/// present report against the live output and reports the first sampled
+/// feedback with it. The client must observe `presented`, and the sent
+/// event's fields must round-trip.
+#[test]
+fn reporting_a_sample_sends_presented_to_the_client() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime.create_xdg_shell(&display, 6).expect("xdg-shell");
+    runtime
+        .create_presentation(&display, &backend)
+        .expect("presentation");
+    runtime
+        .create_tearing_control_manager(&display, 1)
+        .expect("tearing control");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = new_app(&runtime);
+    app.send_presented = true;
+    app.client = Some(common::client::spawn_mapped(&socket));
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Stop)
+        .expect("run_all");
+
+    let events = app
+        .client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+
+    assert_eq!(
+        app.presented_sent, 1,
+        "exactly the first sampled feedback is reported"
+    );
+    assert_eq!(
+        app.presented_output, app.output,
+        "the sent event names the output it was built against"
+    );
+    assert_eq!(
+        app.presented_time,
+        Some((9, 8)),
+        "the sent event carries the reported timestamp"
+    );
+    assert_eq!(
+        app.presented_refresh,
+        Some(60_000),
+        "the sent event carries the reported refresh"
+    );
+    assert_eq!(
+        app.presented_seq,
+        Some(7),
+        "the sent event carries the reported sequence"
+    );
+    assert_eq!(
+        app.presented_flags,
+        Some(PresentFlags::VSYNC),
+        "the sent event carries the reported flags"
+    );
+    assert!(
+        events.feedback_presented,
+        "the client observed `presented` for the reported sample"
+    );
+}
+
+/// The async half of the hint contract: the client sets the async hint
+/// before its first commit, and the server must observe `Some(Async)` plus
+/// the current/pending/previous transitions across the two commits.
+#[test]
+fn an_async_hint_reaches_the_server_across_commits() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime.create_xdg_shell(&display, 6).expect("xdg-shell");
+    runtime
+        .create_tearing_control_manager(&display, 1)
+        .expect("tearing control");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = new_app(&runtime);
+    app.client = Some(common::client::spawn_mapped_with_tearing(
+        &socket,
+        common::client::TearingSetup::Async,
+    ));
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Stop)
+        .expect("run_all");
+    app.client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+
+    assert!(
+        app.committed >= 2,
+        "the mapped flow commits twice, so the hint transitions are observable"
+    );
+    assert!(
+        app.hinted_async >= 1,
+        "the server observed the async hint through tearing_hint"
+    );
+    assert!(
+        app.hint_triples.len() >= 2,
+        "a control object resolved on at least two commits"
+    );
+    assert!(
+        app.hint_triples
+            .iter()
+            .all(|&(_, pending, _)| pending == TearingHint::Async),
+        "the client asked for async once and never changed it, so pending stays async"
+    );
+    assert!(
+        app.hint_triples
+            .iter()
+            .any(|&(current, _, _)| current == TearingHint::Async),
+        "the committed hint became async"
+    );
+    assert!(
+        app.hint_triples
+            .iter()
+            .any(|&(current, _, previous)| current == TearingHint::Async
+                && previous == TearingHint::Vsync),
+        "one commit moved the hint from vsync to async"
+    );
+    assert_eq!(
+        app.hint_triples.last().map(|&(current, _, _)| current),
+        Some(TearingHint::Async),
+        "the hint stays async once applied"
     );
 }

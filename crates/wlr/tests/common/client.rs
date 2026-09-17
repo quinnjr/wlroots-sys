@@ -35,6 +35,9 @@ use wayland_protocols::wp::presentation_time::client::{wp_presentation, wp_prese
 use wayland_protocols::wp::security_context::v1::client::{
     wp_security_context_manager_v1, wp_security_context_v1,
 };
+use wayland_protocols::wp::tearing_control::v1::client::{
+    wp_tearing_control_manager_v1, wp_tearing_control_v1,
+};
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols::xdg::toplevel_icon::v1::client::{
@@ -73,6 +76,12 @@ pub struct ClientEvents {
     /// server-side `sampled()` + drop path does — so a mapped client that
     /// asked for feedback observes it on a later round-trip.
     pub feedback_discarded: bool,
+    /// Whether a presentation-feedback client observed the server's
+    /// `presented` event for its feedback. The server sends it when the
+    /// commit handler reports the sample via `send_presented` — the
+    /// counterpart to [`feedback_discarded`](Self::feedback_discarded),
+    /// which the drop-without-send path produces instead.
+    pub feedback_presented: bool,
 }
 
 /// What a `zwlr_foreign_toplevel_manager_v1` client observed, returned by
@@ -752,6 +761,135 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
             xdg_surface,
             _toplevel,
             feedback,
+            buffer,
+            pool,
+            shm,
+            presentation,
+            file,
+        ));
+        // Best-effort: the backing file is unlinked now that every handle is
+        // closed, so a crashed run cannot leave a stale file behind.
+        let _ = std::fs::remove_file(&shm_path);
+        state.events
+    })
+}
+
+/// Which tearing-control setup a mapped client performs before its first
+/// commit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TearingSetup {
+    /// No tearing-control object: byte-identical to [`spawn_mapped`].
+    #[default]
+    None,
+    /// Create a control object for the toplevel surface before the first
+    /// commit; the hint stays at the vsync default.
+    Control,
+    /// Create a control object and set the async hint before the first
+    /// commit, so the server observes the async half of the hint contract.
+    Async,
+}
+
+/// Like [`spawn_mapped`], but the client also performs `setup`'s
+/// tearing-control requests before its first commit.
+///
+/// The two-phase mapped flow is otherwise unchanged — role plus feedback
+/// request and bufferless commit first, shm-backed map second — so every
+/// other server observation (feedback, configure, map) behaves exactly as
+/// under `spawn_mapped`. The control and manager proxies are held until the
+/// second round-trip has been answered, like every other handle here.
+pub fn spawn_mapped_with_tearing(
+    socket: &str,
+    setup: TearingSetup,
+) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    // Built before the thread starts: `socket` is a borrow that cannot cross
+    // into the `'static` thread, and the closure needs an owned path anyway.
+    let shm_path = crate::common::shm_path_for(&format!("{socket}-mapped-tearing"));
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
+        let qh = queue.handle();
+
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("bind wl_shm");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+
+        // Opportunistic, as for `wp_presentation` in `spawn_mapped`: only the
+        // not-advertised case falls through to `None`.
+        let presentation: Option<wp_presentation::WpPresentation> =
+            match globals.bind(&qh, 1..=1, ()) {
+                Ok(presentation) => Some(presentation),
+                Err(BindError::NotPresent) => None,
+                Err(e) => panic!("bind wp_presentation: {e}"),
+            };
+        // Required whenever the setup creates a control: the test created
+        // the manager global, so a missing bind is a harness bug, not an
+        // optional path.
+        let tearing_manager: Option<wp_tearing_control_manager_v1::WpTearingControlManagerV1> =
+            match setup {
+                TearingSetup::None => None,
+                TearingSetup::Control | TearingSetup::Async => Some(
+                    globals
+                        .bind(&qh, 1..=1, ())
+                        .expect("bind wp_tearing_control_manager_v1"),
+                ),
+            };
+
+        // Phase 1: role + bufferless commit, then a round-trip so the server's
+        // initial configure arrives and is acked.
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let _toplevel = xdg_surface.get_toplevel(&qh, ());
+        // Ask for presentation feedback before the first commit, as in
+        // `spawn_mapped`.
+        let feedback = presentation
+            .as_ref()
+            .map(|presentation| presentation.feedback(&surface, &qh, ()));
+        // The control object exists from this request on; creating it before
+        // the first commit means the server's commit handler observes it.
+        let control = tearing_manager
+            .as_ref()
+            .map(|manager| manager.get_tearing_control(&surface, &qh, ()));
+        if setup == TearingSetup::Async {
+            control
+                .as_ref()
+                .expect("the async setup creates a control object")
+                .set_presentation_hint(wp_tearing_control_v1::PresentationHint::Async);
+        }
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the initial configure is dispatched and acked");
+
+        // Phase 2: an shm buffer, attached and committed — same shape as
+        // `spawn_mapped`, so the map the server observes is unchanged.
+        const W: i32 = 64;
+        const H: i32 = 64;
+        const STRIDE: i32 = W * 4;
+        let size = STRIDE * H;
+        let file = crate::common::create_shm_backing(&shm_path, size as u64);
+        let pool = shm.create_pool(file.as_fd(), size, &qh, ());
+        let buffer = pool.create_buffer(0, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
+        surface.attach(Some(&buffer), 0, 0);
+        surface.damage(0, 0, W, H);
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the buffered commit and maps");
+
+        // Keep every handle alive until the round-trip above has been answered,
+        // then drop them here — after the map, not before it.
+        drop((
+            surface,
+            xdg_surface,
+            _toplevel,
+            feedback,
+            control,
+            tearing_manager,
             buffer,
             pool,
             shm,
@@ -1691,9 +1829,10 @@ impl Dispatch<wp_presentation::WpPresentation, ()> for ClientState {
 }
 
 impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for ClientState {
-    /// `presented`/`sync_output` carry no test signal. The server destroys the
-    /// feedback (sending `discarded`) once the commit handler samples it, so
-    /// that event is recorded; the round-trips drain everything.
+    /// `sync_output` carries no test signal. The server either reports the
+    /// sample (`presented`, via `send_presented`) or destroys the feedback
+    /// (sending `discarded`, via the sampled-then-dropped path); both are
+    /// recorded, and the round-trips drain everything.
     fn event(
         state: &mut Self,
         _proxy: &wp_presentation_feedback::WpPresentationFeedback,
@@ -1702,9 +1841,44 @@ impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for ClientSt
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
-        if let wp_presentation_feedback::Event::Discarded = event {
-            state.events.feedback_discarded = true;
+        match event {
+            wp_presentation_feedback::Event::Discarded => {
+                state.events.feedback_discarded = true;
+            }
+            wp_presentation_feedback::Event::Presented { .. } => {
+                state.events.feedback_presented = true;
+            }
+            _ => {}
         }
+    }
+}
+
+impl Dispatch<wp_tearing_control_manager_v1::WpTearingControlManagerV1, ()> for ClientState {
+    /// `wp_tearing_control_manager_v1` carries no events; the Dispatch impl
+    /// exists only so [`spawn_mapped_with_tearing`] can bind the global.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wp_tearing_control_manager_v1::WpTearingControlManagerV1,
+        _event: wp_tearing_control_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wp_tearing_control_v1::WpTearingControlV1, ()> for ClientState {
+    /// `wp_tearing_control_v1` carries no events; the hint is read
+    /// server-side. The Dispatch impl exists only so
+    /// [`spawn_mapped_with_tearing`] can create the control object.
+    fn event(
+        _state: &mut Self,
+        _proxy: &wp_tearing_control_v1::WpTearingControlV1,
+        _event: wp_tearing_control_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
     }
 }
 
