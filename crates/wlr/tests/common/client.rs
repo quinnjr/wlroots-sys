@@ -42,6 +42,9 @@ use wayland_protocols::wp::tearing_control::v1::client::{
     wp_tearing_control_manager_v1, wp_tearing_control_v1,
 };
 use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
+use wayland_protocols::xdg::decoration::zv1::client::{
+    zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
+};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
 use wayland_protocols::xdg::toplevel_icon::v1::client::{
     xdg_toplevel_icon_manager_v1, xdg_toplevel_icon_v1,
@@ -65,6 +68,11 @@ pub struct ClientEvents {
     pub configure_events: u32,
     /// `xdg_surface.ack_configure` requests sent in response to those.
     pub acked_configures: u32,
+    /// `zxdg_toplevel_decoration_v1.configure` events dispatched to a
+    /// decoration client. The decoration protocol carries no ack of its own —
+    /// the mode takes effect when the accompanying `xdg_surface` configure
+    /// is acked — so this counts arrivals only, proving the server answered.
+    pub decoration_configures: u32,
     /// Whether the activation client received the `done` event carrying its
     /// token string — the server-side half of the xdg-activation round trip.
     pub activation_token_received: bool,
@@ -1046,6 +1054,16 @@ pub fn spawn_mapped_with_tearing(
 /// then disconnects. Returns the observed [`ClientEvents`] via the
 /// `JoinHandle`.
 pub fn spawn_layer_surface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    spawn_layer_surface_with_zone(socket, 32)
+}
+
+/// [`spawn_layer_surface`] with the exclusive zone supplied by the caller, so
+/// a leg that needs a nonpositive zone (whose exclusive edge must read back
+/// as none) shares the same client-observable life.
+pub fn spawn_layer_surface_with_zone(
+    socket: &str,
+    exclusive_zone: i32,
+) -> std::thread::JoinHandle<ClientEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
     let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
@@ -1070,7 +1088,7 @@ pub fn spawn_layer_surface(socket: &str) -> std::thread::JoinHandle<ClientEvents
         );
         layer_surface.set_size(64, 48);
         layer_surface.set_anchor(zwlr_layer_surface_v1::Anchor::Top);
-        layer_surface.set_exclusive_zone(32);
+        layer_surface.set_exclusive_zone(exclusive_zone);
         layer_surface
             .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
         surface.commit();
@@ -1095,6 +1113,296 @@ pub fn spawn_layer_surface(socket: &str) -> std::thread::JoinHandle<ClientEvents
             layer_shell,
             compositor,
             state.compositor.take(),
+        ));
+        state.events
+    })
+}
+
+/// Like [`spawn_layer_surface`], but maps the surface with a real buffer.
+///
+/// Layer-shell roles map on a buffered commit, so the flow is two-phase like
+/// [`spawn_mapped`]: phase one commits bufferless and round-trips so the
+/// server's configure arrives and is acked, phase two attaches a 64x48 shm
+/// buffer (the size the test compositor configures) and commits twice more —
+/// the second buffered commit guarantees the server's commit handler runs at
+/// least once with the surface already mapped, rather than only on the
+/// commit that maps it. No destroy is driven: the test compositor for this
+/// leg never destroys, and the run ends when the client disconnects.
+///
+/// Returns the observed [`ClientEvents`] via the `JoinHandle`.
+pub fn spawn_layer_surface_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    // Built before the thread starts: `socket` is a borrow that cannot cross
+    // into the `'static` thread, and the closure needs an owned path anyway.
+    let shm_path = crate::common::shm_path_for(&format!("{socket}-layer-mapped"));
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
+        let qh = queue.handle();
+
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let layer_shell: zwlr_layer_shell_v1::ZwlrLayerShellV1 = globals
+            .bind(&qh, 1..=4, ())
+            .expect("bind zwlr_layer_shell_v1");
+        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("bind wl_shm");
+        state.compositor = Some(compositor.clone());
+
+        // Phase 1: the layer role, bufferless, so the server announces and
+        // configures it.
+        let surface = compositor.create_surface(&qh, ());
+        let layer_surface = layer_shell.get_layer_surface(
+            &surface,
+            None,
+            zwlr_layer_shell_v1::Layer::Top,
+            "wlr-rs-layer-mapped".to_owned(),
+            &qh,
+            (),
+        );
+        layer_surface.set_size(64, 48);
+        layer_surface.set_anchor(zwlr_layer_surface_v1::Anchor::Top);
+        layer_surface.set_exclusive_zone(32);
+        layer_surface
+            .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server announces and configures the layer surface");
+
+        // Phase 2: a 64x48 shm buffer, attached and committed twice. The
+        // first buffered commit maps the surface; the second runs the
+        // server's commit handler against the already-mapped surface.
+        const W: i32 = 64;
+        const H: i32 = 48;
+        const STRIDE: i32 = W * 4;
+        let size = STRIDE * H;
+        let file = crate::common::create_shm_backing(&shm_path, size as u64);
+        let pool = shm.create_pool(file.as_fd(), size, &qh, ());
+        let buffer = pool.create_buffer(0, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
+        for _ in 0..2 {
+            surface.attach(Some(&buffer), 0, 0);
+            surface.damage(0, 0, W, H);
+            surface.commit();
+            queue
+                .roundtrip(&mut state)
+                .expect("roundtrip so the server sees the buffered commit");
+        }
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server drains");
+
+        drop((
+            layer_surface,
+            surface,
+            layer_shell,
+            compositor,
+            buffer,
+            pool,
+            shm,
+            file,
+            state.compositor.take(),
+        ));
+        // Best-effort: the backing file is unlinked now that every handle is
+        // closed, so a crashed run cannot leave a stale file behind.
+        let _ = std::fs::remove_file(&shm_path);
+        state.events
+    })
+}
+
+/// Like [`spawn_layer_surface_mapped`], but parents a mapped `wl_subsurface`
+/// child on the layer surface.
+///
+/// A sub-surface maps only once its parent is mapped, so the child is
+/// created after the parent's buffered commit: child surface plus
+/// `wl_subsurface` role at `(10, 20)`, mapped with its own buffer, then a
+/// parent commit folds it into the parent's current state and a final
+/// child-plus-parent commit pair runs the server's handlers against the live
+/// role. Returns the observed [`ClientEvents`] via the `JoinHandle`.
+pub fn spawn_layer_surface_mapped_with_subsurface(
+    socket: &str,
+) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let shm_path = crate::common::shm_path_for(&format!("{socket}-layer-subsurface"));
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
+        let qh = queue.handle();
+
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let layer_shell: zwlr_layer_shell_v1::ZwlrLayerShellV1 = globals
+            .bind(&qh, 1..=4, ())
+            .expect("bind zwlr_layer_shell_v1");
+        // `init_graphics` always creates the subcompositor, so the global is
+        // present before any client connects.
+        let subcompositor: wl_subcompositor::WlSubcompositor =
+            globals.bind(&qh, 1..=1, ()).expect("bind wl_subcompositor");
+        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("bind wl_shm");
+        state.compositor = Some(compositor.clone());
+
+        // Phase 1: the layer role, bufferless, so the server announces and
+        // configures it.
+        let surface = compositor.create_surface(&qh, ());
+        let layer_surface = layer_shell.get_layer_surface(
+            &surface,
+            None,
+            zwlr_layer_shell_v1::Layer::Top,
+            "wlr-rs-layer-subsurface".to_owned(),
+            &qh,
+            (),
+        );
+        layer_surface.set_size(64, 48);
+        layer_surface.set_anchor(zwlr_layer_surface_v1::Anchor::Top);
+        layer_surface.set_exclusive_zone(32);
+        layer_surface
+            .set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server announces and configures the layer surface");
+
+        // Phase 2: map the parent with a 64x48 shm buffer.
+        const W: i32 = 64;
+        const H: i32 = 48;
+        const STRIDE: i32 = W * 4;
+        const CW: i32 = 16;
+        const CH: i32 = 16;
+        const CSTRIDE: i32 = CW * 4;
+        let parent_size = STRIDE * H;
+        let child_size = CSTRIDE * CH;
+        let file = crate::common::create_shm_backing(&shm_path, (parent_size + child_size) as u64);
+        let pool = shm.create_pool(file.as_fd(), parent_size + child_size, &qh, ());
+        let parent_buffer = pool.create_buffer(0, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
+        let child_buffer = pool.create_buffer(
+            parent_size,
+            CW,
+            CH,
+            CSTRIDE,
+            wl_shm::Format::Argb8888,
+            &qh,
+            (),
+        );
+        surface.attach(Some(&parent_buffer), 0, 0);
+        surface.damage(0, 0, W, H);
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the parent maps");
+
+        // Phase 3: the child sub-surface, mapped with its own buffer, then
+        // the parent commit that folds it into the parent's current state.
+        let child = compositor.create_surface(&qh, ());
+        let subsurface = subcompositor.get_subsurface(&child, &surface, &qh, ());
+        subsurface.set_position(10, 20);
+        child.attach(Some(&child_buffer), 0, 0);
+        child.damage(0, 0, CW, CH);
+        child.commit();
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the mapped child subsurface");
+
+        // Phase 4: one more child-plus-parent commit after the role was
+        // announced, so the server's commit handlers run against the live
+        // role with the child already in the tree.
+        child.attach(Some(&child_buffer), 0, 0);
+        child.damage(0, 0, CW, CH);
+        child.commit();
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the post-announce child commit");
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server drains");
+
+        drop((
+            child,
+            subsurface,
+            layer_surface,
+            surface,
+            layer_shell,
+            subcompositor,
+            parent_buffer,
+            child_buffer,
+            pool,
+            shm,
+            compositor,
+            file,
+            state.compositor.take(),
+        ));
+        // Best-effort: the backing file is unlinked now that every handle is
+        // closed, so a crashed run cannot leave a stale file behind.
+        let _ = std::fs::remove_file(&shm_path);
+        state.events
+    })
+}
+
+/// Drive an xdg-decoration client through a full negotiation round trip.
+///
+/// Creates a toplevel, asks for client-side chrome via
+/// `zxdg_decoration_manager_v1.get_toplevel_decoration` plus `set_mode`,
+/// and commits bufferless; later round-trips carry the server's answering
+/// configure (its `xdg_surface` half acked through the shared impl) back
+/// and let the server apply the ack to the decoration's current state.
+/// A final bufferless commit, round-tripped, guarantees the mode is current
+/// even if wlroots applies the ack on a later commit rather than
+/// synchronously. Returns the observed [`ClientEvents`] via the
+/// `JoinHandle`.
+pub fn spawn_decoration_client(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
+        let qh = queue.handle();
+
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let manager: zxdg_decoration_manager_v1::ZxdgDecorationManagerV1 = globals
+            .bind(&qh, 1..=2, ())
+            .expect("bind zxdg_decoration_manager_v1");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let toplevel = xdg_surface.get_toplevel(&qh, ());
+        // Before the first commit: stating the preference first is the
+        // ordinary client sequence the server's staging exists for, and at
+        // manager version 1 decorating an already-committed toplevel is a
+        // protocol error.
+        let decoration = manager.get_toplevel_decoration(&toplevel, &qh, ());
+        decoration.set_mode(zxdg_toplevel_decoration_v1::Mode::ClientSide);
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server announces, answers and configures");
+        // The ack went out on the round-trip above; two more round-trips let
+        // the server process it — applying the mode to the decoration's
+        // current state — and drain.
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server applies the ack");
+        // One more bufferless commit after the ack, round-tripped, so the
+        // mode is current even if wlroots only applies it on a later commit.
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the post-ack commit");
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server drains");
+
+        drop((
+            decoration,
+            surface,
+            xdg_surface,
+            toplevel,
+            manager,
+            state.compositor.take(),
+            state.wm_base.take(),
         ));
         state.events
     })
@@ -1836,6 +2144,40 @@ impl Dispatch<xdg_toplevel::XdgToplevel, ()> for ClientState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1, ()> for ClientState {
+    /// `zxdg_decoration_manager_v1` carries no events; the Dispatch impl
+    /// exists only so [`spawn_decoration_client`] can bind the global.
+    fn event(
+        _state: &mut Self,
+        _proxy: &zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
+        _event: zxdg_decoration_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1, ()> for ClientState {
+    /// Record the server's `configure`: the decoration protocol has no ack
+    /// request of its own, so arriving here is the whole client-side
+    /// exchange — the mode takes effect once the accompanying
+    /// `xdg_surface` configure (acked by the shared impl above) is
+    /// processed by the server.
+    fn event(
+        state: &mut Self,
+        _proxy: &zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
+        event: zxdg_toplevel_decoration_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let zxdg_toplevel_decoration_v1::Event::Configure { .. } = event {
+            state.events.decoration_configures += 1;
+        }
     }
 }
 

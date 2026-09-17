@@ -112,11 +112,30 @@ impl DecorationMode {
     /// there: reporting an uninterpretable mode as "no mode" leaves the
     /// decision to the compositor rather than guessing.
     pub(crate) fn from_raw(raw: u32) -> Option<DecorationMode> {
-        match raw {
-            1 => Some(DecorationMode::ClientSide),
-            2 => Some(DecorationMode::ServerSide),
-            _ => None,
-        }
+        decode_mode_bits(raw)
+    }
+}
+
+/// Decode the decoration mode wire values both
+/// [`DecorationMode::from_raw`] and [`requested_preference`] read, against
+/// the named `WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_*` constants rather than
+/// bare integers: the two call sites used to re-match the same table
+/// independently, so a value added on one side and missed on the other would
+/// have read differently depending on which half of the negotiation saw it.
+/// One shared core keeps them identical by construction.
+///
+/// Anything outside client-side/server-side — `MODE_NONE` (the client has
+/// not stated a preference) or a value this crate does not recognize —
+/// maps to `None`; see [`requested_preference`] for why that is the honest
+/// reading on both sides.
+pub(crate) fn decode_mode_bits(raw: u32) -> Option<DecorationMode> {
+    use sys::wlr_xdg_toplevel_decoration_v1_mode as Wire;
+    if raw == Wire::WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE.0 {
+        Some(DecorationMode::ClientSide)
+    } else if raw == Wire::WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE.0 {
+        Some(DecorationMode::ServerSide)
+    } else {
+        None
     }
 }
 
@@ -201,9 +220,44 @@ pub(crate) struct DecorationEntry {
 pub(crate) fn requested_preference(
     mode: sys::wlr_xdg_toplevel_decoration_v1_mode,
 ) -> Option<DecorationMode> {
-    match mode.0 {
-        1 => Some(DecorationMode::ClientSide),
-        2 => Some(DecorationMode::ServerSide),
-        _ => None,
+    decode_mode_bits(mode.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The wire table both halves of the negotiation share: client-side is
+    /// `1`, server-side is `2`, and everything else — `MODE_NONE` (`0`), the
+    /// next undefined value (`3`), and the far end of the range — is "no
+    /// mode", never a guess at a kind of chrome.
+    #[test]
+    fn from_raw_decodes_the_shared_wire_table() {
+        assert_eq!(
+            DecorationMode::from_raw(1),
+            Some(DecorationMode::ClientSide)
+        );
+        assert_eq!(
+            DecorationMode::from_raw(2),
+            Some(DecorationMode::ServerSide)
+        );
+        assert_eq!(DecorationMode::from_raw(0), None);
+        assert_eq!(DecorationMode::from_raw(3), None);
+        assert_eq!(DecorationMode::from_raw(u32::MAX), None);
+    }
+
+    /// `requested_preference` reads through the same core, so the request
+    /// side can never disagree with the answering side about what a wire
+    /// value means.
+    #[test]
+    fn requested_preference_agrees_with_from_raw_on_every_table_entry() {
+        use sys::wlr_xdg_toplevel_decoration_v1_mode as Wire;
+        for raw in [0u32, 1, 2, 3, u32::MAX] {
+            assert_eq!(
+                requested_preference(Wire(raw)),
+                DecorationMode::from_raw(raw),
+                "raw = {raw}"
+            );
+        }
     }
 }

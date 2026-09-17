@@ -102,15 +102,16 @@ rustix = { version = "1", features = ["pipe", "std"] }
 wayland-client = "=0.31.15"
 # xdg-shell client bindings for the seed toplevel test. `client` selects the
 # client-side generated code; xdg-shell itself is stable, so it comes from the
-# ungated `xdg` module and needs no `unstable` feature (which would only add
-# the deprecated `z`-prefixed protocols).
+# ungated `xdg` module. (`unstable` is enabled below, for xdg-decoration.)
 # `staging` adds the staging protocols the client-driven tests drive —
 # xdg-activation-v1 (Task 5) plus xdg-toplevel-icon-v1 and
-# xdg-toplevel-tag-v1 (Task 6). 0.32 is the first line that carries the
+# xdg-toplevel-tag-v1 (Task 6). `unstable` adds the one unstable protocol a
+# client leg drives: xdg-decoration-unstable-v1, for the live decoration
+# negotiation test. 0.32 is the first line that carries the
 # icon/tag bindings; its own MSRV is 1.86, inside the workspace's 1.88 floor.
 # Dev-dependency only, like the rest. `=`-pinned for the same reason as
 # `wayland-client` above (no committed lockfile): re-pin deliberately.
-wayland-protocols = { version = "=0.32.13", features = ["client", "staging"] }
+wayland-protocols = { version = "=0.32.13", features = ["client", "staging", "unstable"] }
 # wlr-protocols client bindings (foreign-toplevel-management) for the
 # client-driven export/request tests. `wlr-protocols` is not part of
 # wayland-protocols; this companion crate carries the wlroots extensions.

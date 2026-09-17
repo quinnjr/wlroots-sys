@@ -128,6 +128,10 @@ struct LayerProbe {
     surface_at_missed: bool,
     popup_surface_at_missed: bool,
     as_layer_surface_resolved: bool,
+    /// How many surfaces the last `for_each_surface` walk yielded, and
+    /// whether every yielded id resolved through `Runtime::surface`.
+    walk_surfaces: Option<usize>,
+    walk_all_resolved: bool,
     destroyed: Option<wlr::LayerSurfaceId>,
     destroy_called: bool,
 }
@@ -186,6 +190,20 @@ impl wlr::ToplevelHandler for LayerApp {
         self.probe.popup_surfaces = Some(popups);
         self.probe.surface_at_missed &= surface.surface_at(1.0, 1.0).is_none();
         self.probe.popup_surface_at_missed &= surface.popup_surface_at(1.0, 1.0).is_none();
+        // The full-tree walk: count every yielded surface and resolve each
+        // id through `Runtime::surface`, the layer-shell half of the
+        // role-id-versus-surface-id regression `xdg_remainder.rs` covers for
+        // toplevels.
+        let mut walked = 0usize;
+        let mut all_resolved = true;
+        surface.for_each_surface(|leaf, _, _| {
+            walked += 1;
+            if self.runtime.surface(leaf.id()).is_none() {
+                all_resolved = false;
+            }
+        });
+        self.probe.walk_surfaces = Some(walked);
+        self.probe.walk_all_resolved = all_resolved;
     }
 
     fn surface_committed(&mut self, surface: &wlr::Surface<'_>) {
@@ -219,13 +237,12 @@ impl wlr::LoopHandler for LayerApp {
     }
 }
 
-/// A real layer-shell client states its anchors, exclusive zone, size and
-/// keyboard mode, commits, and waits to be closed. The server must observe each
-/// through the `LayerSurface` accessors, hit-test empty popup trees without
-/// faulting, downcast the generic surface, and destroy the surface through
-/// `Runtime::destroy_layer_surface` — which the client sees as `closed`.
-#[test]
-fn a_real_layer_surface_answers_its_operations_and_destroys() {
+/// Shared headless bootstrap for the destroying layer runs below: display,
+/// backend, graphics, layer shell, one client, run to the client's
+/// disconnect, join.
+fn run_layer_app(
+    spawn: impl FnOnce(&str) -> std::thread::JoinHandle<common::client::ClientEvents>,
+) -> (LayerApp, common::client::ClientEvents) {
     let _serial = common::headless_guard();
     common::headless_env();
     common::isolated_runtime_dir();
@@ -239,7 +256,7 @@ fn a_real_layer_surface_answers_its_operations_and_destroys() {
     let socket = display.add_socket_auto().expect("socket");
 
     let mut app = LayerApp::new(&runtime);
-    app.client = Some(common::client::spawn_layer_surface(&socket));
+    app.client = Some(spawn(&socket));
 
     backend
         .run_all(&display, &mut app, &runtime, wlr::Until::Stop)
@@ -251,6 +268,17 @@ fn a_real_layer_surface_answers_its_operations_and_destroys() {
         .expect("client handle")
         .join()
         .expect("client thread");
+    (app, events)
+}
+
+/// A real layer-shell client states its anchors, exclusive zone, size and
+/// keyboard mode, commits, and waits to be closed. The server must observe each
+/// through the `LayerSurface` accessors, hit-test empty popup trees without
+/// faulting, downcast the generic surface, and destroy the surface through
+/// `Runtime::destroy_layer_surface` — which the client sees as `closed`.
+#[test]
+fn a_real_layer_surface_answers_its_operations_and_destroys() {
+    let (app, events) = run_layer_app(common::client::spawn_layer_surface);
     let probe = &app.probe;
 
     assert!(
@@ -300,6 +328,15 @@ fn a_real_layer_surface_answers_its_operations_and_destroys() {
         "an empty popup tree iterates nothing"
     );
     assert!(
+        probe.walk_surfaces.is_some_and(|n| n >= 1),
+        "for_each_surface yields at least the root, got {:?}",
+        probe.walk_surfaces
+    );
+    assert!(
+        probe.walk_all_resolved,
+        "every yielded SurfaceId resolves through Runtime::surface"
+    );
+    assert!(
         probe.surface_at_missed,
         "an unmapped layer surface hit-tests to nothing"
     );
@@ -322,6 +359,207 @@ fn a_real_layer_surface_answers_its_operations_and_destroys() {
     assert!(
         events.layer_closed,
         "destroying the layer surface sends the client a closed event"
+    );
+}
+
+/// What the mapped layer runs observed: walk yields and hit-test outcomes.
+///
+/// A separate app from [`LayerApp`] because these runs must never destroy:
+/// `LayerApp::should_stop` destroys on the first turn that knows an id,
+/// which can land before the client's buffered (mapping) commit is even
+/// dispatched — and then nothing is ever mapped and every hit assertion
+/// below fails. This app only watches; the run ends when the client
+/// disconnects.
+#[derive(Default)]
+struct MappedProbe {
+    /// Largest `for_each_surface` yield seen across commits, and whether
+    /// every id in that walk resolved through `Runtime::surface`.
+    walk_max: usize,
+    walk_max_resolved: bool,
+    /// Whether `surface_at` inside the surface hit a leaf that resolved.
+    /// `None` until the first hit, so the bufferless first commit (a miss)
+    /// cannot clear a later mapped hit.
+    hit_resolved: Option<bool>,
+    /// `popup_surface_at` inside the surface misses on every commit: a layer
+    /// surface hosts no popup tree. Starts true, like
+    /// [`LayerProbe::surface_at_missed`](LayerProbe::surface_at_missed).
+    popup_inside_missed: bool,
+    /// Both hit-tests miss far outside the tree on every commit.
+    far_missed: bool,
+}
+
+struct MappedLayerApp {
+    runtime: wlr::Runtime,
+    id: Option<wlr::LayerSurfaceId>,
+    probe: MappedProbe,
+    client: Option<std::thread::JoinHandle<common::client::ClientEvents>>,
+}
+
+impl MappedLayerApp {
+    fn new(runtime: &wlr::Runtime) -> MappedLayerApp {
+        MappedLayerApp {
+            runtime: runtime.clone(),
+            id: None,
+            probe: MappedProbe {
+                popup_inside_missed: true,
+                far_missed: true,
+                ..MappedProbe::default()
+            },
+            client: None,
+        }
+    }
+}
+
+impl wlr::OutputHandler for MappedLayerApp {
+    fn new_output(&mut self, output: &wlr::Output<'_>) {
+        let _ = output.enable_with_preferred_mode();
+        let _ = self.runtime.init_output(output);
+    }
+}
+
+impl wlr::ToplevelHandler for MappedLayerApp {
+    fn new_layer_surface(&mut self, surface: &wlr::LayerSurface<'_>) {
+        self.id = Some(surface.id());
+        // As in `LayerApp`: answering is mandatory, and the size the mapped
+        // clients attach (64x48) is what is configured here.
+        let _ = self.runtime.configure_layer_surface(surface.id(), 64, 48);
+    }
+
+    fn layer_surface_commit(&mut self, surface: &wlr::LayerSurface<'_>) {
+        let mut count = 0usize;
+        let mut all_resolved = true;
+        surface.for_each_surface(|leaf, _, _| {
+            count += 1;
+            if self.runtime.surface(leaf.id()).is_none() {
+                all_resolved = false;
+            }
+        });
+        if count >= self.probe.walk_max {
+            self.probe.walk_max = count;
+            self.probe.walk_max_resolved = all_resolved;
+        }
+        if let Some((leaf, _, _)) = surface.surface_at(1.0, 1.0) {
+            self.probe.hit_resolved = Some(self.runtime.surface(leaf.id()).is_some());
+        }
+        self.probe.popup_inside_missed &= surface.popup_surface_at(1.0, 1.0).is_none();
+        self.probe.far_missed &= surface.surface_at(1_000_000.0, 1_000_000.0).is_none();
+        self.probe.far_missed &= surface.popup_surface_at(1_000_000.0, 1_000_000.0).is_none();
+    }
+}
+
+impl wlr::SeatHandler for MappedLayerApp {}
+impl wlr::FdHandler for MappedLayerApp {}
+impl wlr::LoopHandler for MappedLayerApp {
+    fn should_stop(&mut self) -> bool {
+        self.client.as_ref().is_some_and(|h| h.is_finished())
+    }
+}
+
+/// As [`run_layer_app`], but for the watching [`MappedLayerApp`]: same
+/// bootstrap, no destroy.
+fn run_mapped_layer_app(
+    spawn: impl FnOnce(&str) -> std::thread::JoinHandle<common::client::ClientEvents>,
+) -> (MappedLayerApp, common::client::ClientEvents) {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime
+        .create_layer_shell(&display, 4)
+        .expect("layer shell");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = MappedLayerApp::new(&runtime);
+    app.client = Some(spawn(&socket));
+
+    backend
+        .run_all(&display, &mut app, &runtime, wlr::Until::Stop)
+        .expect("run_all");
+
+    let events = app
+        .client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+    (app, events)
+}
+
+/// A mapped layer surface hit-tests: `surface_at` inside strikes a leaf that
+/// resolves through `Runtime::surface`, and both hit-tests miss far outside.
+/// `popup_surface_at` inside still misses — a layer surface hosts no popup
+/// tree, so there is no popup leaf to strike; that half of the brief cannot
+/// be a `Some` and is pinned as a miss instead.
+#[test]
+fn a_mapped_layer_surface_hits_inside_and_misses_outside() {
+    let (app, events) = run_mapped_layer_app(common::client::spawn_layer_surface_mapped);
+    let probe = &app.probe;
+
+    assert!(
+        events.configure_events >= 1 && events.acked_configures >= 1,
+        "the server's layer configure must reach the client and be acked"
+    );
+    assert!(app.id.is_some(), "a layer surface was announced");
+    assert_eq!(
+        probe.hit_resolved,
+        Some(true),
+        "surface_at inside the mapped surface hits a resolvable leaf"
+    );
+    assert!(
+        probe.popup_inside_missed,
+        "a layer surface hosts no popup tree, so popup_surface_at inside misses"
+    );
+    assert!(probe.far_missed, "both hit-tests miss far outside the tree");
+    assert!(
+        probe.walk_max >= 1 && probe.walk_max_resolved,
+        "for_each_surface yields at least the root, all resolvable"
+    );
+}
+
+/// A mapped sub-surface child on a layer surface is visited by the
+/// full-tree walk with a resolvable id: the largest walk names both.
+#[test]
+fn a_mapped_subsurface_is_walked_on_a_layer_surface() {
+    let (app, events) =
+        run_mapped_layer_app(common::client::spawn_layer_surface_mapped_with_subsurface);
+    let probe = &app.probe;
+
+    assert!(
+        events.configure_events >= 1 && events.acked_configures >= 1,
+        "the server's layer configure must reach the client and be acked"
+    );
+    assert!(
+        probe.walk_max >= 2,
+        "the walk visited the root and the mapped sub-surface, got {}",
+        probe.walk_max
+    );
+    assert!(
+        probe.walk_max_resolved,
+        "every yielded SurfaceId resolved through Runtime::surface"
+    );
+}
+
+/// A nonpositive exclusive zone applies to no edge: the same headless layer
+/// run with `set_exclusive_zone(0)` reads `exclusive_edge() == None`,
+/// alongside the existing run's `Some(top)` for a positive zone.
+#[test]
+fn exclusive_edge_is_none_for_a_nonpositive_zone() {
+    let (app, _events) =
+        run_layer_app(|socket| common::client::spawn_layer_surface_with_zone(socket, 0));
+    let probe = &app.probe;
+
+    assert_eq!(
+        probe.exclusive_zone,
+        Some(0),
+        "the committed zero zone is read back"
+    );
+    assert!(probe.exclusive_edge_called, "exclusive_edge was exercised");
+    assert_eq!(
+        probe.exclusive_edge, None,
+        "a zero exclusive zone applies to no edge"
     );
 }
 
