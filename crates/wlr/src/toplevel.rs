@@ -936,6 +936,21 @@ mod tests {
         assert!(!WmCapabilities::MAXIMIZE.contains(WmCapabilities::MINIMIZE));
     }
 
+    /// `Default` is the empty mask, and `BitOrAssign` accumulates exactly like
+    /// `BitOr`: the two spellings must agree, or a caller mixing them silently
+    /// advertises different capabilities.
+    #[test]
+    fn wm_capabilities_default_is_none_and_assign_accumulates() {
+        assert_eq!(WmCapabilities::default(), WmCapabilities::NONE);
+        assert_eq!(WmCapabilities::NONE.bits(), 0);
+        let mut caps = WmCapabilities::default();
+        caps |= WmCapabilities::MAXIMIZE;
+        assert_eq!(caps, WmCapabilities::MAXIMIZE);
+        caps |= WmCapabilities::MINIMIZE;
+        assert_eq!(caps, WmCapabilities::MAXIMIZE | WmCapabilities::MINIMIZE);
+        assert!(caps.contains(WmCapabilities::MAXIMIZE | WmCapabilities::MINIMIZE));
+    }
+
     /// `Edges::to_xdg` is the exact inverse of `from_xdg` over the whole
     /// domain, which is what the tiled/constrained setters rely on.
     #[test]

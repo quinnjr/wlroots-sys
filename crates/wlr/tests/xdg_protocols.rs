@@ -102,8 +102,11 @@ fn dialog_manager_creates_once_and_downcast_misses_cleanly() {
         .create_xdg_dialog_manager(&display, 1)
         .expect("dialog manager");
     assert!(
-        runtime.create_xdg_dialog_manager(&display, 1).is_err(),
-        "a second dialog manager is refused"
+        matches!(
+            runtime.create_xdg_dialog_manager(&display, 1),
+            Err(wlr::Error::Operation(_))
+        ),
+        "a second dialog manager is refused as a double-create"
     );
     assert!(
         runtime.dialog(ToplevelId::dangling_for_test()).is_none(),
@@ -470,6 +473,12 @@ fn dialog_downcast_misses_on_a_live_toplevel() {
         saw_toplevel: bool,
         dialog: Option<bool>,
         dialog_of: Option<bool>,
+        surface_id: Option<wlr::SurfaceId>,
+        /// `dialog_of` on the live toplevel's own surface: `Some(true)` when
+        /// it misses, since no client bound `xdg_wm_dialog_v1`.
+        dialog_of_live: Option<bool>,
+        /// `dialog_of` on a dangling surface id: always a miss.
+        dialog_of_dangling: Option<bool>,
     }
     impl wlr::OutputHandler for DialogApp {}
     impl wlr::FdHandler for DialogApp {}
@@ -485,6 +494,19 @@ fn dialog_downcast_misses_on_a_live_toplevel() {
             let id = toplevel.id();
             self.dialog = Some(toplevel.dialog().is_none());
             self.dialog_of = Some(self.runtime.dialog(id).is_none());
+            self.dialog_of_dangling = Some(
+                self.runtime
+                    .dialog_of(wlr::SurfaceId::dangling_for_test())
+                    .is_none(),
+            );
+        }
+
+        fn surface_committed(&mut self, surface: &wlr::Surface<'_>) {
+            if self.surface_id.is_none() && wlr::Toplevel::from_surface(surface).is_some() {
+                let id = surface.id();
+                self.surface_id = Some(id);
+                self.dialog_of_live = Some(self.runtime.dialog_of(id).is_none());
+            }
         }
     }
 
@@ -496,6 +518,9 @@ fn dialog_downcast_misses_on_a_live_toplevel() {
         saw_toplevel: false,
         dialog: None,
         dialog_of: None,
+        surface_id: None,
+        dialog_of_live: None,
+        dialog_of_dangling: None,
     };
     backend
         .run_all(&display, &mut app, &runtime, Until::Stop)
@@ -514,6 +539,16 @@ fn dialog_downcast_misses_on_a_live_toplevel() {
         "the toplevel carries no dialog role"
     );
     assert_eq!(app.dialog_of, Some(true), "and the by-id path misses too");
+    assert_eq!(
+        app.dialog_of_live,
+        Some(true),
+        "dialog_of misses on a live dialog-less toplevel's surface"
+    );
+    assert_eq!(
+        app.dialog_of_dangling,
+        Some(true),
+        "dialog_of misses on a dangling surface id"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -212,6 +212,23 @@ impl ClientState {
         let _toplevel = xdg_surface.get_toplevel(qh, ());
         surface.commit();
     }
+
+    /// Like [`create_toplevel`](Self::create_toplevel), but the client asks
+    /// for every requestable state — maximized, fullscreen and minimized —
+    /// before the first commit, so the server's `requested` snapshot reads
+    /// all trues. `set_fullscreen(None)` names no output, which the protocol
+    /// allows and wlroots records as a bare fullscreen request.
+    pub fn create_toplevel_with_requests(&mut self, qh: &QueueHandle<Self>) {
+        let compositor = self.compositor.as_ref().expect("wl_compositor not bound");
+        let wm_base = self.wm_base.as_ref().expect("xdg_wm_base not bound");
+        let surface = compositor.create_surface(qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, qh, ());
+        let toplevel = xdg_surface.get_toplevel(qh, ());
+        toplevel.set_maximized();
+        toplevel.set_fullscreen(None);
+        toplevel.set_minimized();
+        surface.commit();
+    }
 }
 
 /// Drive a client that asks for a window menu after its toplevel is configured.
@@ -1060,7 +1077,22 @@ pub fn spawn_activation_round_trip(socket: &str) -> std::thread::JoinHandle<Clie
 /// arrive. Each phase is round-tripped so the server has observed it before
 /// the client returns. No [`ClientEvents`] field records the exchange — the
 /// server-side handler assertions are the proof.
+///
+/// This is [`spawn_toplevel_meta_with`] with the tag phases on; the icon-only
+/// form exists so a test can cover the icon clear path without creating a tag
+/// manager at all.
 pub fn spawn_toplevel_meta(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    spawn_toplevel_meta_with(socket, true)
+}
+
+/// Like [`spawn_toplevel_meta`], but the tag phases — and the tag-manager
+/// bind they need — run only when `with_tag` is set. With `false` the driver
+/// is the shared icon set/reset flow on its own: the clearing leg reuses it
+/// instead of forking a second driver for the same phases.
+pub fn spawn_toplevel_meta_with(
+    socket: &str,
+    with_tag: bool,
+) -> std::thread::JoinHandle<ClientEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
     let shm_path = crate::common::shm_path_for(&format!("{socket}-meta"));
     let stream = crate::common::connect_socket(&path);
@@ -1076,9 +1108,15 @@ pub fn spawn_toplevel_meta(socket: &str) -> std::thread::JoinHandle<ClientEvents
         let icon_manager: xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1 = globals
             .bind(&qh, 1..=1, ())
             .expect("bind xdg_toplevel_icon_manager_v1");
-        let tag_manager: xdg_toplevel_tag_manager_v1::XdgToplevelTagManagerV1 = globals
-            .bind(&qh, 1..=1, ())
-            .expect("bind xdg_toplevel_tag_manager_v1");
+        // Bound only when the tag phases will run: binding a global the
+        // server never advertised fails, and the icon-only leg creates no tag
+        // manager.
+        let tag_manager: Option<xdg_toplevel_tag_manager_v1::XdgToplevelTagManagerV1> = with_tag
+            .then(|| {
+                globals
+                    .bind(&qh, 1..=1, ())
+                    .expect("bind xdg_toplevel_tag_manager_v1")
+            });
         state.compositor = Some(compositor.clone());
         state.wm_base = Some(wm_base.clone());
 
@@ -1123,20 +1161,22 @@ pub fn spawn_toplevel_meta(socket: &str) -> std::thread::JoinHandle<ClientEvents
 
         // Phase 3: the tag and its translated description. wlroots forwards
         // each request immediately rather than at commit.
-        tag_manager.set_toplevel_tag(&toplevel, "wlr-test-tag".to_owned());
-        tag_manager.set_toplevel_description(&toplevel, "WlR test description".to_owned());
-        queue
-            .roundtrip(&mut state)
-            .expect("roundtrip so the server sees the tag and description");
+        if let Some(tag_manager) = tag_manager.as_ref() {
+            tag_manager.set_toplevel_tag(&toplevel, "wlr-test-tag".to_owned());
+            tag_manager.set_toplevel_description(&toplevel, "WlR test description".to_owned());
+            queue
+                .roundtrip(&mut state)
+                .expect("roundtrip so the server sees the tag and description");
 
-        // Phase 3b: the empty tag and description. Empty strings are legal
-        // protocol values, forwarded like any other; the handler must observe
-        // them after the non-empty ones.
-        tag_manager.set_toplevel_tag(&toplevel, String::new());
-        tag_manager.set_toplevel_description(&toplevel, String::new());
-        queue
-            .roundtrip(&mut state)
-            .expect("roundtrip so the server sees the empty tag and description");
+            // Phase 3b: the empty tag and description. Empty strings are legal
+            // protocol values, forwarded like any other; the handler must observe
+            // them after the non-empty ones.
+            tag_manager.set_toplevel_tag(&toplevel, String::new());
+            tag_manager.set_toplevel_description(&toplevel, String::new());
+            queue
+                .roundtrip(&mut state)
+                .expect("roundtrip so the server sees the empty tag and description");
+        }
 
         drop((
             icon,
@@ -1154,6 +1194,129 @@ pub fn spawn_toplevel_meta(socket: &str) -> std::thread::JoinHandle<ClientEvents
         ));
         // Best-effort: the backing file is unlinked now that every handle is
         // closed, so a crashed run cannot leave a stale file behind.
+        let _ = std::fs::remove_file(&shm_path);
+        state.events
+    })
+}
+
+/// Which single-form icon [`spawn_toplevel_icon_form`] assigns to its
+/// toplevel: the protocol allows a name, pixel buffers, or both, and each
+/// partial form must reach the handler with the other half absent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IconForm {
+    /// `set_name` only: `name()` reads back, `buffer()` is absent.
+    NameOnly,
+    /// One 64x64 pixel buffer, no name: `name()` is absent, `buffer()` is
+    /// present at that size.
+    BufferOnly,
+    /// Two pixel buffers (64x64, then 32x32) and no name: `buffer()` returns
+    /// the first the client added.
+    TwoBuffers,
+}
+
+/// Drive an icon carrying exactly one [`IconForm`] on a fresh toplevel: the
+/// role is committed bufferless and round-tripped first (so the server has
+/// announced it), then the icon is assigned and applied by a second commit.
+/// Each phase is round-tripped; the server-side handler assertions are the
+/// proof, as for [`spawn_toplevel_meta`].
+pub fn spawn_toplevel_icon_form(
+    socket: &str,
+    form: IconForm,
+) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let shm_path = crate::common::shm_path_for(&format!("{socket}-icon-form"));
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
+        let qh = queue.handle();
+
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("bind wl_shm");
+        let icon_manager: xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind xdg_toplevel_icon_manager_v1");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+
+        // Phase 1: the toplevel, committed bufferless and round-tripped.
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let toplevel = xdg_surface.get_toplevel(&qh, ());
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server announces the toplevel");
+
+        // Phase 2: the icon in the requested form. The backing store (when
+        // the form needs buffers) is held to the end of the thread so the
+        // server never reads a torn-down pool.
+        let icon = icon_manager.create_icon(&qh, ());
+        let _backing: Option<(
+            std::fs::File,
+            wl_shm_pool::WlShmPool,
+            wl_buffer::WlBuffer,
+            Option<wl_buffer::WlBuffer>,
+        )> = match form {
+            IconForm::NameOnly => {
+                icon.set_name("wlr-form-name".to_owned());
+                None
+            }
+            IconForm::BufferOnly => {
+                const W: i32 = 64;
+                const H: i32 = 64;
+                const STRIDE: i32 = W * 4;
+                let size = STRIDE * H;
+                let file = crate::common::create_shm_backing(&shm_path, size as u64);
+                let pool = shm.create_pool(file.as_fd(), size, &qh, ());
+                let buffer = pool.create_buffer(0, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
+                icon.add_buffer(&buffer, 1);
+                Some((file, pool, buffer, None))
+            }
+            IconForm::TwoBuffers => {
+                // Deliberately different sizes so the handler can tell which
+                // buffer `buffer()` returned: the first added is 64x64.
+                const W1: i32 = 64;
+                const H1: i32 = 64;
+                const W2: i32 = 32;
+                const H2: i32 = 32;
+                let size1 = W1 * 4 * H1;
+                let size2 = W2 * 4 * H2;
+                let file = crate::common::create_shm_backing(&shm_path, (size1 + size2) as u64);
+                let pool = shm.create_pool(file.as_fd(), size1 + size2, &qh, ());
+                let first =
+                    pool.create_buffer(0, W1, H1, W1 * 4, wl_shm::Format::Argb8888, &qh, ());
+                let second =
+                    pool.create_buffer(size1, W2, H2, W2 * 4, wl_shm::Format::Argb8888, &qh, ());
+                icon.add_buffer(&first, 1);
+                icon.add_buffer(&second, 2);
+                Some((file, pool, first, Some(second)))
+            }
+        };
+        icon_manager.set_icon(&toplevel, Some(&icon));
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server applies the icon");
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server drains");
+
+        drop((
+            icon,
+            icon_manager,
+            _backing,
+            surface,
+            xdg_surface,
+            toplevel,
+            shm,
+            wm_base,
+            compositor,
+        ));
+        // Best-effort, as for the meta driver; the name-only form created no
+        // file, so there is nothing to unlink there.
         let _ = std::fs::remove_file(&shm_path);
         state.events
     })

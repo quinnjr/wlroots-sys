@@ -114,15 +114,17 @@ impl ToplevelIcon {
     pub fn buffer(&self) -> Option<Buffer<'_>> {
         // SAFETY: the handle's lifetime guarantees the icon is live, so its
         // `buffers` list is an initialised sentinel. Nothing dispatches or
-        // frees while the iterator is outstanding: the first entry is turned
+        // frees while the iterator is outstanding: the last entry is turned
         // into a borrowed `Buffer` and the raw pointers never escape.
+        // The last entry is the first the client added — wlroots head-inserts
+        // each `add_buffer`, so forward iteration runs newest-first.
         unsafe {
             sys::wl_list_for_each!(
                 &raw mut (*self.raw.as_ptr()).buffers,
                 sys::wlr_xdg_toplevel_icon_v1_buffer,
                 link
             )
-            .next()
+            .last()
             .and_then(|entry| {
                 let buffer = (*entry).buffer;
                 NonNull::new(buffer).map(|buffer| Buffer::from_raw(buffer.as_ptr()))
@@ -160,11 +162,16 @@ impl Runtime {
     ///
     /// wlroots copies the slice and forwards it to bound clients as
     /// `icon_size` events followed by `done`; an empty slice advertises no
-    /// preference at all, which the protocol explicitly allows. A no-op when
-    /// no manager was created.
-    pub fn set_toplevel_icon_sizes(&self, sizes: &[i32]) {
+    /// preference at all, which the protocol explicitly allows. Errors with
+    /// [`Error::Operation`] when no manager was created — sizing a global
+    /// that does not exist is a caller bug, not a silent default, the same
+    /// double-create guard [`create_xdg_toplevel_icon_manager`](Runtime::create_xdg_toplevel_icon_manager)
+    /// applies in the other direction.
+    pub fn set_toplevel_icon_sizes(&self, sizes: &[i32]) -> Result<()> {
         let Some(manager) = *self.inner.xdg_toplevel_icon_manager.borrow() else {
-            return;
+            return Err(Error::Operation(
+                "Runtime::set_toplevel_icon_sizes with no icon manager",
+            ));
         };
         // SAFETY: the manager is live. wlroots copies `n_sizes` ints out of the
         // pointer, so the borrow only has to outlive the call — which it does.
@@ -179,6 +186,7 @@ impl Runtime {
         unsafe {
             sys::wlr_xdg_toplevel_icon_manager_v1_set_sizes(manager.as_ptr(), sizes, n_sizes)
         };
+        Ok(())
     }
 
     /// The `xdg_toplevel_icon_manager_v1` manager, once created via
@@ -203,6 +211,10 @@ mod tests {
     // with the C `free`.
     unsafe extern "C" {
         fn calloc(nmemb: usize, size: usize) -> *mut c_void;
+        /// `strdup`, so the name wlroots' destroy path `free`s is C-allocated
+        /// rather than Rust-allocated — freeing a Rust `CString` with C
+        /// `free` would be allocator mismatch.
+        fn strdup(s: *const std::ffi::c_char) -> *mut std::ffi::c_char;
     }
 
     /// A heap icon wlroots is allowed to free, with the empty buffer list its
@@ -278,6 +290,35 @@ mod tests {
         // The handle owns the one reference the scratch stands for; dropping
         // it frees the scratch (whose own `Drop` is the no-op that lets
         // wlroots do that free).
+        drop(handle);
+    }
+
+    /// A clone names the same icon (`Eq` by pointer), and `Debug` carries the
+    /// client-facing name — the two handle conveniences a compositor logging
+    /// or comparing icons relies on.
+    #[test]
+    fn clone_is_equal_and_debug_names_the_icon() {
+        let scratch = ScratchIcon::new();
+        // SAFETY: `scratch` outlives the handle below; `strdup` returns null
+        // (checked) or a C-allocated copy wlroots' destroy path may `free`.
+        let name = unsafe { strdup(c"wlr-test-icon".as_ptr()) };
+        assert!(!name.is_null(), "strdup failed");
+        // SAFETY: `scratch.0` is live and exclusively owned; writing the name
+        // field is in bounds.
+        unsafe { (*scratch.0).name = name };
+        // SAFETY: `scratch` outlives the handle below.
+        let raw = NonNull::new(scratch.0).expect("scratch icon is non-null");
+        // SAFETY: `raw` is live with one reference held; the handle takes it.
+        let handle = unsafe { ToplevelIcon::from_raw(raw) };
+        assert_eq!(handle.name().as_deref(), Some("wlr-test-icon"));
+        assert_eq!(handle.clone(), handle, "a clone is the same icon");
+        let debug = format!("{:?}", handle);
+        assert!(
+            debug.contains("wlr-test-icon"),
+            "Debug names the icon: {debug}"
+        );
+        // Both drops release one reference each; the last frees the scratch
+        // including the `strdup`'d name, which is why the name is C-allocated.
         drop(handle);
     }
 }

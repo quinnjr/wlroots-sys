@@ -64,6 +64,16 @@ struct App {
     /// the struck surface's `popup_of` named the live toplevel.
     popup_hit: Option<bool>,
     popup_hit_parent_ok: Option<bool>,
+    /// Whether the full-tree `surface_at` at the same popup point hit a
+    /// resolvable surface, and whether both hit-tests miss far outside the
+    /// tree.
+    surface_at_hit: Option<bool>,
+    surface_at_miss: Option<bool>,
+    popup_miss: Option<bool>,
+    /// Roles of committed surfaces `Toplevel::from_surface` refused: the
+    /// sub-surface child's commits land here, proving the downcast says no
+    /// on a real non-toplevel surface.
+    from_surface_misses: Vec<SurfaceRole>,
     client: Option<JoinHandle<common::client::ClientEvents>>,
 }
 
@@ -95,6 +105,10 @@ impl App {
             popup_nonroot_with_parent: 0,
             popup_hit: None,
             popup_hit_parent_ok: None,
+            surface_at_hit: None,
+            surface_at_miss: None,
+            popup_miss: None,
+            from_surface_misses: Vec::new(),
             client: None,
         }
     }
@@ -183,6 +197,7 @@ impl wlr::ToplevelHandler for App {
         }
         self.roles.push(surface.role());
         let Some(toplevel) = wlr::Toplevel::from_surface(surface) else {
+            self.from_surface_misses.push(surface.role());
             return;
         };
         self.downcast_toplevels += 1;
@@ -257,11 +272,37 @@ impl wlr::ToplevelHandler for App {
                     self.popup_hit = Some(false);
                 }
             }
+            // The full-tree hit test covers the popup tree too, so the same
+            // point must hit a resolvable surface through it as well.
+            match top.surface_at(tx as f64, ty as f64) {
+                Some((hit, _, _)) => {
+                    self.surface_at_hit = Some(self.runtime.surface(hit.id()).is_some());
+                }
+                None => {
+                    self.surface_at_hit = Some(false);
+                }
+            }
         }
+        // Far outside the tree both hit-tests must miss.
+        self.surface_at_miss = Some(top.surface_at(1_000_000.0, 1_000_000.0).is_none());
+        self.popup_miss = Some(top.popup_surface_at(1_000_000.0, 1_000_000.0).is_none());
     }
 }
 
 fn run_client_round_trip() -> (App, common::client::ClientEvents) {
+    run_client_round_trip_with(|socket| {
+        common::client::spawn(socket, |state, qh| {
+            state.create_toplevel(qh);
+        })
+    })
+}
+
+/// [`run_client_round_trip`] with the client driver supplied by the caller,
+/// so legs that need a different client (mapped buffers, state requests)
+/// share the same server-side observation.
+fn run_client_round_trip_with(
+    spawn_client: impl FnOnce(&str) -> JoinHandle<common::client::ClientEvents>,
+) -> (App, common::client::ClientEvents) {
     let _serial = common::headless_guard();
     common::headless_env();
     common::isolated_runtime_dir();
@@ -273,9 +314,7 @@ fn run_client_round_trip() -> (App, common::client::ClientEvents) {
     let socket = display.add_socket_auto().expect("socket");
 
     let mut app = App {
-        client: Some(common::client::spawn(&socket, |state, qh| {
-            state.create_toplevel(qh);
-        })),
+        client: Some(spawn_client(&socket)),
         ..App::new(runtime.clone())
     };
 
@@ -339,7 +378,123 @@ fn a_live_toplevel_exposes_the_xdg_remainder() {
         Some((false, false, false)),
         "the client requested no states"
     );
-    assert!(app.wm_caps_sample.is_some(), "wm_capabilities() reads");
+    assert_eq!(
+        app.wm_caps_sample,
+        Some(WmCapabilities::MAXIMIZE | WmCapabilities::MINIMIZE),
+        "wm_capabilities() reads back exactly what was just configured"
+    );
+}
+
+/// A client that asks for maximized, fullscreen and minimized before its
+/// first commit: `requested()` reads every request back as true.
+#[test]
+fn requested_true_paths_read_back_client_requests() {
+    let (app, _events) = run_client_round_trip_with(|socket| {
+        common::client::spawn(socket, |state, qh| {
+            state.create_toplevel_with_requests(qh);
+        })
+    });
+
+    assert_eq!(
+        app.requested_sample,
+        Some((true, true, true)),
+        "maximized, minimized and fullscreen were all requested"
+    );
+}
+
+/// Staged configure state reads back through `state()` once the client has
+/// acked the configure and committed: the full scheduled → acked → current
+/// path, which is what `wm_capabilities()`' synchronous `scheduled` read
+/// never exercises.
+#[test]
+fn staged_configure_state_reads_back_after_map() {
+    struct ConfigureApp {
+        runtime: Runtime,
+        client: Option<JoinHandle<common::client::ClientEvents>>,
+        staged: Vec<Option<()>>,
+        mapped_state: Option<ToplevelState>,
+    }
+
+    impl wlr::OutputHandler for ConfigureApp {}
+    impl wlr::SeatHandler for ConfigureApp {}
+    impl wlr::FdHandler for ConfigureApp {}
+    impl wlr::LoopHandler for ConfigureApp {
+        fn should_stop(&mut self) -> bool {
+            self.client.as_ref().is_some_and(|h| h.is_finished())
+        }
+    }
+    impl wlr::ToplevelHandler for ConfigureApp {
+        fn initial_commit(&mut self, toplevel: &wlr::Toplevel<'_>) {
+            let id = toplevel.id();
+            self.staged = vec![
+                self.runtime.set_toplevel_size(id, 800, 600),
+                self.runtime.set_toplevel_maximized(id, true),
+                self.runtime.set_toplevel_fullscreen(id, true),
+                self.runtime.set_toplevel_tiled(
+                    id,
+                    wlr::Edges {
+                        top: true,
+                        ..Default::default()
+                    },
+                ),
+                self.runtime.set_toplevel_constrained(
+                    id,
+                    wlr::Edges {
+                        left: true,
+                        ..Default::default()
+                    },
+                ),
+            ];
+        }
+
+        fn mapped(&mut self, toplevel: &wlr::Toplevel<'_>) {
+            // The client's map commit applied the acked configure, so
+            // `current` — what `state()` reads — carries the staged values.
+            self.mapped_state = Some(toplevel.state());
+        }
+    }
+
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime.create_xdg_shell(&display, 7).expect("xdg-shell");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = ConfigureApp {
+        client: Some(common::client::spawn_mapped(&socket)),
+        staged: Vec::new(),
+        mapped_state: None,
+        runtime: runtime.clone(),
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Stop)
+        .expect("run_all");
+    let _events = app
+        .client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("join");
+
+    assert!(
+        app.staged.iter().all(|r| *r == Some(())),
+        "every staged setter resolved the live toplevel: {:?}",
+        app.staged
+    );
+    let state = app.mapped_state.expect("the toplevel mapped");
+    assert!(state.maximized, "staged maximized reads back");
+    assert!(state.fullscreen, "staged fullscreen reads back");
+    assert!(state.tiled.top, "staged tiled.top reads back");
+    assert!(state.constrained.left, "staged constrained.left reads back");
+    assert_eq!(
+        (state.width, state.height),
+        (800, 600),
+        "the staged size reads back"
+    );
 }
 
 #[test]
@@ -516,6 +671,11 @@ fn traversal_yields_resolvable_ids_and_visits_a_subsurface() {
     assert!(
         app.walk_other_surface,
         "a non-root sub-surface was yielded, not skipped"
+    );
+    assert!(
+        app.from_surface_misses.contains(&SurfaceRole::None),
+        "the sub-surface child's commits miss the toplevel downcast: {:?}",
+        app.from_surface_misses
     );
 }
 
@@ -941,5 +1101,20 @@ fn popup_tree_is_walkable_and_hittable_on_a_live_toplevel() {
         app.popup_hit_parent_ok,
         Some(true),
         "the struck surface's popup_of names the live toplevel"
+    );
+    assert_eq!(
+        app.surface_at_hit,
+        Some(true),
+        "surface_at hits the popup area through the full tree"
+    );
+    assert_eq!(
+        app.surface_at_miss,
+        Some(true),
+        "surface_at misses far outside the tree"
+    );
+    assert_eq!(
+        app.popup_miss,
+        Some(true),
+        "popup_surface_at misses far outside the tree"
     );
 }
