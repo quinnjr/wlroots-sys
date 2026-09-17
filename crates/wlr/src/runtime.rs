@@ -2609,15 +2609,71 @@ pub(crate) struct RuntimeInner {
     /// manager, once created — lets a taskbar or dock observe and drive the
     /// toplevels this compositor exports. Display-owned; `Option`, same
     /// rationale as the other manager globals.
+    ///
+    /// Cleared by the manager's `destroy` watch (see
+    /// `foreign_toplevel_manager_alive`): after display teardown this is
+    /// `None`, so [`Runtime::create_foreign_toplevel`] misses instead of
+    /// dereferencing freed memory.
     pub(crate) foreign_toplevel_manager:
         RefCell<Option<NonNull<sys::wlr_foreign_toplevel_manager_v1>>>,
+
+    /// Whether the foreign-toplevel manager is still alive.
+    ///
+    /// Set true by
+    /// [`create_foreign_toplevel_manager`](Runtime::create_foreign_toplevel_manager)
+    /// once the teardown watch is linked, and set false by that watch when the
+    /// manager's `events.destroy` fires (display teardown). The flag is what
+    /// [`Runtime::create_foreign_toplevel`] consults before touching the
+    /// stored pointer, and what the watch's own [`Registration`](crate::backend::Registration)
+    /// consults in its `Drop` to skip unlinking from the freed signal list.
+    /// The cell lives in this `Rc`-allocated struct, whose heap address never
+    /// moves, so the raw pointer handed to the watch stays valid for the
+    /// registration's whole life. Init `false` (no manager yet).
+    pub(crate) foreign_toplevel_manager_alive: std::cell::Cell<bool>,
+
+    /// The foreign-toplevel manager's `destroy` watch, linked at creation into
+    /// the manager's `events.destroy`.
+    ///
+    /// Unlinked by its own callback (display teardown, while the manager
+    /// memory is still valid) or by this runtime's drop while the manager
+    /// still stands — never from freed memory, because the callback clears the
+    /// liveness flag first and `Drop` skips the unlink once it reads false.
+    /// `None` until
+    /// [`create_foreign_toplevel_manager`](Runtime::create_foreign_toplevel_manager)
+    /// runs, and again after the watch has fired.
+    pub(crate) foreign_toplevel_manager_destroy: RefCell<Option<crate::backend::Registration>>,
 
     /// The `ext_foreign_toplevel_list_v1` list, once created — lets a client
     /// observe the toplevels this compositor exports through the standardized
     /// `ext` protocol. Display-owned; `Option`, same rationale as the other
     /// manager globals.
+    ///
+    /// Cleared by the list's `destroy` watch (see
+    /// `ext_foreign_toplevel_list_alive`): after display teardown this is
+    /// `None`, so [`Runtime::create_ext_foreign_toplevel`] misses instead of
+    /// dereferencing freed memory.
     pub(crate) ext_foreign_toplevel_list:
         RefCell<Option<NonNull<sys::wlr_ext_foreign_toplevel_list_v1>>>,
+
+    /// Whether the ext-foreign-toplevel list is still alive.
+    ///
+    /// The list side of the same teardown-watch shape
+    /// [`foreign_toplevel_manager_alive`](Self::foreign_toplevel_manager_alive)
+    /// documents: set true by
+    /// [`create_ext_foreign_toplevel_list`](Runtime::create_ext_foreign_toplevel_list)
+    /// once the watch is linked, set false by that watch on display teardown.
+    /// Init `false` (no list yet).
+    pub(crate) ext_foreign_toplevel_list_alive: std::cell::Cell<bool>,
+
+    /// The ext-foreign-toplevel list's `destroy` watch, linked at creation
+    /// into the list's `events.destroy`.
+    ///
+    /// The list side of the same shape
+    /// [`foreign_toplevel_manager_destroy`](Self::foreign_toplevel_manager_destroy)
+    /// documents. `None` until
+    /// [`create_ext_foreign_toplevel_list`](Runtime::create_ext_foreign_toplevel_list)
+    /// runs, and again after the watch has fired.
+    pub(crate) ext_foreign_toplevel_list_destroy: RefCell<Option<crate::backend::Registration>>,
 
     /// The `ext_workspace_manager_v1` manager, once created — lets a taskbar or
     /// dock list and drive the compositor's workspaces. Display-owned; `Option`,
@@ -3743,7 +3799,11 @@ impl Runtime {
                 xdg_foreign_v1: RefCell::new(None),
                 xdg_foreign_v2: RefCell::new(None),
                 foreign_toplevel_manager: RefCell::new(None),
+                foreign_toplevel_manager_alive: std::cell::Cell::new(false),
+                foreign_toplevel_manager_destroy: RefCell::new(None),
                 ext_foreign_toplevel_list: RefCell::new(None),
+                ext_foreign_toplevel_list_alive: std::cell::Cell::new(false),
+                ext_foreign_toplevel_list_destroy: RefCell::new(None),
                 ext_workspace_manager: RefCell::new(None),
                 gamma_control_manager: RefCell::new(None),
                 text_input_manager: RefCell::new(None),
@@ -3998,6 +4058,15 @@ impl Runtime {
     /// after `wl_event_loop_dispatch` returns, so the request signal that
     /// produced the drop is no longer being emitted and the handle memory can
     /// be freed. An empty list is the ordinary case.
+    ///
+    /// When the manager died with its display after a handle was queued — the
+    /// teardown watch cleared `foreign_toplevel_manager_alive` between the
+    /// deferral and this drain — the queued pointers are dropped without
+    /// destroying: wlroots freed the handles with the manager, so destroying
+    /// into it would dereference freed memory. Leaking the queue entries is
+    /// the safe answer (they are bare pointers, not allocations this crate
+    /// owns), and the handles' own listeners were already unlinked by their
+    /// manager-death watches.
     pub(crate) fn drain_pending_foreign_toplevel_destroys(&self) {
         let pending: Vec<NonNull<sys::wlr_foreign_toplevel_handle_v1>> = self
             .inner
@@ -4005,13 +4074,15 @@ impl Runtime {
             .borrow_mut()
             .drain(..)
             .collect();
+        if !self.inner.foreign_toplevel_manager_alive.get() {
+            return;
+        }
         for raw in pending {
             // SAFETY: each pointer was a live handle whose owner dropped it
-            // during this turn's dispatch and deferred the release; the manager
-            // that owns it is alive because the run driving the dispatch is on
-            // the stack. `wlr_foreign_toplevel_handle_v1_destroy` is
-            // idempotent-free: it removes the handle from the manager and frees
-            // it exactly once.
+            // during this turn's dispatch and deferred the release; the
+            // liveness flag above is true, so the manager that owns it is
+            // alive. `wlr_foreign_toplevel_handle_v1_destroy` removes the
+            // handle from the manager and frees it exactly once.
             unsafe { sys::wlr_foreign_toplevel_handle_v1_destroy(raw.as_ptr()) };
         }
     }

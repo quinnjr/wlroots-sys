@@ -334,6 +334,86 @@ pub fn spawn_foreign_toplevel(socket: &str) -> std::thread::JoinHandle<ForeignTo
     })
 }
 
+/// Drive a `zwlr_foreign_toplevel_manager_v1` client whose `set_rectangle`
+/// names a surface the compositor tracks.
+///
+/// Binds the manager and round-trips the bind-time replay, then builds an
+/// xdg-toplevel parent and a bufferless child subsurface — both committed and
+/// round-tripped, so the server has announced and tracked each surface — and
+/// sends `set_rectangle` with the **child** surface and a distinctive
+/// rectangle. The server resolves it to `Some` id, unlike the untracked
+/// surface [`spawn_foreign_toplevel`] rectangles. A final `close()` drops the
+/// server-side handle, matching that driver's end state. Returns the observed
+/// [`ForeignToplevelEvents`].
+pub fn spawn_foreign_toplevel_tracked_rectangle(
+    socket: &str,
+) -> std::thread::JoinHandle<ForeignToplevelEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
+        let qh = queue.handle();
+
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let subcompositor: wl_subcompositor::WlSubcompositor =
+            globals.bind(&qh, 1..=1, ()).expect("bind wl_subcompositor");
+        let manager: zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1 = globals
+            .bind(&qh, 1..=3, ())
+            .expect("bind zwlr_foreign_toplevel_manager_v1");
+
+        // The manager replays every toplevel that already exists when a client
+        // binds, then its details, then `done`.
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the replayed handle is dispatched");
+
+        // An xdg-toplevel parent, committed bufferless and round-tripped, so
+        // the server has announced and tracked its surface.
+        let parent = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&parent, &qh, ());
+        let _toplevel = xdg_surface.get_toplevel(&qh, ());
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server announces the parent toplevel");
+
+        // The child subsurface, whose role the server announces (and tracks)
+        // on the parent's next commit.
+        let child = compositor.create_surface(&qh, ());
+        let subsurface = subcompositor.get_subsurface(&child, &parent, &qh, ());
+        child.commit();
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the child subsurface");
+
+        let handle = state
+            .foreign_handle
+            .as_ref()
+            .expect("the manager replayed a handle")
+            .clone();
+        handle.set_rectangle(&child, 11, 22, 33, 44);
+        handle.close();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the rectangle and close");
+
+        drop((
+            child,
+            subsurface,
+            parent,
+            xdg_surface,
+            handle,
+            manager,
+            compositor,
+        ));
+        state.foreign
+    })
+}
+
 /// Drive an `ext_foreign_toplevel_list_v1` client against a handle the
 /// compositor exported before the connection.
 ///

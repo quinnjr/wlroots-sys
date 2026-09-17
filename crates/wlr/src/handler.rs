@@ -1245,6 +1245,21 @@ pub trait ToplevelHandler {
     /// surface is not one this crate tracks. `x`/`y`/`width`/`height` are that
     /// surface's surface-local rectangle.
     ///
+    /// `surface: None` means the client named a surface this crate never
+    /// tracked (never announced through a role it follows, or announced after
+    /// this request was already queued). The other theoretical case — a
+    /// client-sent null surface — never reaches this handler: wlroots calls
+    /// `wlr_surface_from_resource` on the surface unconditionally, which
+    /// asserts rather than returning null, so a null kills the compositor
+    /// before this event exists (verified against upstream wlroots'
+    /// `foreign_toplevel_handle_set_rectangle`; the null arm of the mapping
+    /// is defensive only). Treat `None` as "no verified surface" and fall
+    /// back to the compositor's policy default (usually: ignore the rectangle
+    /// for placement, or apply it to the toplevel as a whole). In particular,
+    /// do not treat `None` as proof the client cleared the rectangle, and do
+    /// not go looking for the surface elsewhere: the event shape carries no
+    /// further identity to look it up by.
+    ///
     /// Privileged: see
     /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
     /// gate the `zwlr_foreign_toplevel_manager_v1` global with a

@@ -146,12 +146,32 @@ fn ext_foreign_toplevel_handle_state_round_trips() {
     );
     assert_eq!(handle.state().title.as_deref(), Some("Second"));
 
+    // The app-id field refuses the same way, leaving the previous state in
+    // place.
+    let before = handle.state();
+    assert_eq!(
+        handle.update_state(&foreign_state(None, Some("bad\0id"))),
+        None,
+        "an app id with an interior NUL is refused"
+    );
+    assert_eq!(
+        handle.state(),
+        before,
+        "a refused update leaves the previous state in place"
+    );
+
     // Creation refuses a NUL title the same way the update path does.
     assert!(
         runtime
             .create_ext_foreign_toplevel(&foreign_state(Some("a\0b"), None))
             .is_none(),
         "a create with an interior-NUL title is refused"
+    );
+    assert!(
+        runtime
+            .create_ext_foreign_toplevel(&foreign_state(None, Some("a\0b")))
+            .is_none(),
+        "a create with an interior-NUL app id is refused"
     );
 }
 
@@ -216,6 +236,13 @@ fn ext_foreign_toplevel_display_death_makes_handle_inert() {
         handle.update_state(&ExtForeignToplevelState::default()),
         None,
         "no mutator writes either"
+    );
+    assert!(
+        runtime
+            .create_ext_foreign_toplevel(&foreign_state(Some("late"), None))
+            .is_none(),
+        "the list's death cleared the stored pointer, so a post-teardown \
+         create misses instead of dereferencing freed memory"
     );
     drop(handle);
 }
