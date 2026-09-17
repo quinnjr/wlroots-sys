@@ -15,12 +15,15 @@ mod common;
 use std::thread::JoinHandle;
 
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
-use wayland_client::protocol::{wl_compositor, wl_registry, wl_surface};
+use wayland_client::protocol::{wl_compositor, wl_registry, wl_seat, wl_surface};
 use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xdg_activation_v1};
 use wayland_protocols::xdg::dialog::v1::client::{xdg_dialog_v1, xdg_wm_dialog_v1};
-use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::shell::client::{
+    xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
+};
 use wayland_protocols::xdg::system_bell::v1::client::xdg_system_bell_v1;
-use wlr::{Backend, Display, Runtime, ToplevelId, Until};
+use wlr::{ActivationToken, Backend, Display, Runtime, ToplevelId, Until};
 
 // ---------------------------------------------------------------------------
 // Activation: client-free token lifecycle
@@ -201,12 +204,30 @@ fn foreign_registry_and_managers_are_created_once() {
 struct App {
     runtime: Runtime,
     client: Option<JoinHandle<common::client::ClientEvents>>,
-    activations: Vec<Option<ToplevelId>>,
+    /// Every `request_activate` delivery: the resolved target plus the token
+    /// evidence snapshot. The token is stored (not just the target) so the
+    /// serial/seat/requesting-surface snapshot gets asserted, not only the
+    /// target resolution.
+    activations: Vec<(Option<ToplevelId>, ActivationToken)>,
     /// The handle string an export of the live toplevel produced, and whether
     /// the registry resolved it back to the same toplevel while it was live.
     foreign_handle: Option<String>,
-    foreign_found: Option<Option<ToplevelId>>,
+    foreign_lookup: Option<ForeignLookup>,
     foreign_gone_after_drop: Option<bool>,
+}
+
+/// What the registry lookup in [`App::round_trip_foreign`] observed.
+///
+/// Stored as an `Option` where `None` means the lookup never ran (no live
+/// toplevel committed): `Missing` is no entry under the handle, `Untracked`
+/// is an entry naming no tracked toplevel, and `Found` carries the resolved
+/// id. An explicit enum rather than nested `Option`s so a missed lookup and
+/// an untracked entry cannot be confused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForeignLookup {
+    Missing,
+    Untracked,
+    Found(ToplevelId),
 }
 
 impl App {
@@ -216,7 +237,7 @@ impl App {
             client: None,
             activations: Vec::new(),
             foreign_handle: None,
-            foreign_found: None,
+            foreign_lookup: None,
             foreign_gone_after_drop: None,
         }
     }
@@ -226,13 +247,17 @@ impl App {
     /// toplevel is alive. The repeated export/drop loop proves the
     /// allocate/init/finish/dealloc cycle is balanced (ASan/LSan is the oracle).
     fn round_trip_foreign(&mut self, id: ToplevelId) {
-        for _ in 0..16 {
+        /// Stress repetitions for the export/drop balance loop: enough
+        /// allocate/init/finish/dealloc cycles to trip a systematic imbalance
+        /// under ASan/LSan without making the suite slow.
+        const FOREIGN_STRESS_ROUNDS: usize = 16;
+        for _ in 0..FOREIGN_STRESS_ROUNDS {
             let Some(owned) = self.runtime.export_foreign(id) else {
                 return;
             };
             assert!(owned.is_alive(), "a live toplevel yields a live export");
             assert!(owned.handle().is_some());
-            assert_eq!(owned.toplevel_id(), id);
+            assert_eq!(owned.toplevel_id(), Some(id));
         }
 
         let Some(exported) = self.runtime.export_foreign(id) else {
@@ -241,12 +266,29 @@ impl App {
         let Some(handle) = exported.handle() else {
             return;
         };
-        let found = self
-            .runtime
-            .find_foreign_exported(&handle)
-            .map(|info| info.toplevel);
+        // Keep the full snapshot, not just the id: the handle echo proves the
+        // lookup returned *this* entry, and the toplevel half proves it still
+        // names the live toplevel.
+        let info = self.runtime.find_foreign_exported(&handle);
         self.foreign_handle = Some(handle.clone());
-        self.foreign_found = found;
+        self.foreign_lookup = Some(match &info {
+            None => ForeignLookup::Missing,
+            Some(info) => match info.toplevel {
+                None => ForeignLookup::Untracked,
+                Some(found) => ForeignLookup::Found(found),
+            },
+        });
+        if let Some(info) = info {
+            assert_eq!(
+                info.handle, handle,
+                "the registry echoes the exported handle"
+            );
+            assert_eq!(
+                info.toplevel,
+                Some(id),
+                "the registry resolves the handle to the exported toplevel"
+            );
+        }
         drop(exported);
         self.foreign_gone_after_drop = Some(self.runtime.find_foreign_exported(&handle).is_none());
     }
@@ -262,8 +304,8 @@ impl wlr::LoopHandler for App {
 }
 
 impl wlr::SeatHandler for App {
-    fn request_activate(&mut self, target: Option<ToplevelId>, _token: wlr::ActivationToken) {
-        self.activations.push(target);
+    fn request_activate(&mut self, target: Option<ToplevelId>, token: wlr::ActivationToken) {
+        self.activations.push((target, token));
     }
 }
 
@@ -314,9 +356,156 @@ fn activation_token_round_trips_from_a_client() {
         1,
         "the redemption reached request_activate exactly once"
     );
+    let (target, token) = &app.activations[0];
     assert_eq!(
-        app.activations[0], None,
+        *target, None,
         "the activated surface was a plain surface, not a tracked toplevel"
+    );
+    // The token was minted with no seat or surface attached, so it carries no
+    // evidence: no seat, the zero serial, and no requesting toplevel.
+    assert!(!token.has_seat, "a seatless token reports no seat");
+    assert_eq!(token.serial, 0, "a token with no set_serial carries 0");
+    assert_eq!(
+        token.requesting_toplevel, None,
+        "a token with no set_surface names no requesting toplevel"
+    );
+}
+
+/// A real client mints a token naming its tracked toplevel and redeems it on
+/// that toplevel: `request_activate` observes the target and the requesting
+/// toplevel coinciding, with the token carrying no seat evidence (the launcher
+/// case — see the driver's doc for why no `set_serial` is driven here).
+#[test]
+fn activation_token_names_a_tracked_requesting_toplevel() {
+    struct TrackedApp {
+        client: Option<JoinHandle<()>>,
+        activations: Vec<(Option<ToplevelId>, ActivationToken)>,
+    }
+    impl wlr::OutputHandler for TrackedApp {}
+    impl wlr::FdHandler for TrackedApp {}
+    impl wlr::SeatHandler for TrackedApp {
+        fn request_activate(&mut self, target: Option<ToplevelId>, token: ActivationToken) {
+            self.activations.push((target, token));
+        }
+    }
+    impl wlr::LoopHandler for TrackedApp {
+        fn should_stop(&mut self) -> bool {
+            self.client.as_ref().is_some_and(|h| h.is_finished())
+        }
+    }
+    impl wlr::ToplevelHandler for TrackedApp {}
+
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime.create_seat(&display, "seat0").expect("seat");
+    runtime
+        .create_xdg_activation_manager(&display)
+        .expect("activation manager");
+    runtime.create_xdg_shell(&display, 7).expect("xdg-shell");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = TrackedApp {
+        client: Some(spawn_activation_tracked_client(&socket)),
+        activations: Vec::new(),
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Stop)
+        .expect("run_all");
+    app.client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+
+    assert_eq!(
+        app.activations.len(),
+        1,
+        "the redemption reached request_activate exactly once"
+    );
+    let (target, token) = &app.activations[0];
+    let id = target.expect("the activated surface is the tracked toplevel");
+    assert!(
+        !token.has_seat,
+        "no seat was attached, so the snapshot reports none — even with a seat around"
+    );
+    assert_eq!(
+        token.serial, 0,
+        "the unset serial round-trips as 0, matching the minted default"
+    );
+    assert_eq!(
+        token.requesting_toplevel,
+        Some(id),
+        "set_surface named the tracked toplevel the token was redeemed on"
+    );
+}
+
+/// A token naming a popup surface resolves its requesting toplevel to `None`:
+/// the popup's own id addon must not mislabel as a toplevel, while the
+/// redemption target (the tracked parent) still resolves.
+#[test]
+fn activation_token_requesting_popup_resolves_to_none() {
+    struct PopupApp {
+        client: Option<JoinHandle<()>>,
+        activations: Vec<(Option<ToplevelId>, ActivationToken)>,
+    }
+    impl wlr::OutputHandler for PopupApp {}
+    impl wlr::FdHandler for PopupApp {}
+    impl wlr::SeatHandler for PopupApp {
+        fn request_activate(&mut self, target: Option<ToplevelId>, token: ActivationToken) {
+            self.activations.push((target, token));
+        }
+    }
+    impl wlr::LoopHandler for PopupApp {
+        fn should_stop(&mut self) -> bool {
+            self.client.as_ref().is_some_and(|h| h.is_finished())
+        }
+    }
+    impl wlr::ToplevelHandler for PopupApp {}
+
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime
+        .create_xdg_activation_manager(&display)
+        .expect("activation manager");
+    runtime.create_xdg_shell(&display, 7).expect("xdg-shell");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = PopupApp {
+        client: Some(spawn_activation_popup_client(&socket)),
+        activations: Vec::new(),
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Stop)
+        .expect("run_all");
+    app.client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+
+    assert_eq!(
+        app.activations.len(),
+        1,
+        "the redemption reached request_activate exactly once"
+    );
+    let (target, token) = &app.activations[0];
+    assert!(
+        target.is_some(),
+        "the redemption target is the tracked parent toplevel"
+    );
+    assert_eq!(
+        token.requesting_toplevel, None,
+        "a popup requesting surface is filtered, not mislabelled as a toplevel"
     );
 }
 
@@ -359,9 +548,7 @@ fn foreign_export_round_trips_a_live_toplevel() {
         .expect("the toplevel was exported while live");
     assert!(!handle.is_empty(), "the export produced a non-empty handle");
     assert!(
-        app.foreign_found
-            .expect("the registry was queried")
-            .is_some(),
+        matches!(app.foreign_lookup, Some(ForeignLookup::Found(_))),
         "the registry resolved the handle to the exported toplevel"
     );
     assert_eq!(
@@ -439,6 +626,15 @@ fn foreign_export_is_withdrawn_when_its_toplevel_dies() {
     assert!(
         !exported.is_alive(),
         "the toplevel's destruction withdrew the export"
+    );
+    assert!(
+        exported.handle().is_none(),
+        "a withdrawn export yields no handle"
+    );
+    assert_eq!(
+        exported.toplevel_id(),
+        None,
+        "a withdrawn export names no toplevel"
     );
     // The lookup must not dereference the freed toplevel: the entry is gone.
     assert!(
@@ -556,12 +752,14 @@ fn dialog_downcast_misses_on_a_live_toplevel() {
 // ---------------------------------------------------------------------------
 
 /// Test-local client state shared by the dialog and bell legs.
-/// `common::client::ClientState` cannot grow these bindings from here (its
-/// `Dispatch` impls live in `common/`), so this file owns the small state its
-/// own drivers need. wayland-protocols 0.32 *does* ship the staging dialog
-/// and system-bell bindings, so the generated types are used here with these
-/// local impls — no raw-opcode dispatch was needed.
-struct LiveState;
+///
+/// `activation_token` serves the activation legs below: the `done` event
+/// carries the server-generated token name the driver redeems afterwards.
+/// The dialog/bell legs never set it.
+#[derive(Default)]
+struct LiveState {
+    activation_token: Option<String>,
+}
 
 macro_rules! live_empty_dispatch {
     ($($t:ty),+) => {$(
@@ -582,10 +780,14 @@ macro_rules! live_empty_dispatch {
 live_empty_dispatch!(
     wl_compositor::WlCompositor,
     wl_surface::WlSurface,
+    wl_seat::WlSeat,
     xdg_toplevel::XdgToplevel,
     xdg_dialog_v1::XdgDialogV1,
     xdg_wm_dialog_v1::XdgWmDialogV1,
-    xdg_system_bell_v1::XdgSystemBellV1
+    xdg_system_bell_v1::XdgSystemBellV1,
+    xdg_popup::XdgPopup,
+    xdg_positioner::XdgPositioner,
+    xdg_activation_v1::XdgActivationV1
 );
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for LiveState {
@@ -630,25 +832,40 @@ impl Dispatch<xdg_surface::XdgSurface, ()> for LiveState {
     }
 }
 
+impl Dispatch<xdg_activation_token_v1::XdgActivationTokenV1, ()> for LiveState {
+    /// `done` carries the token string the server generated; the activation
+    /// legs store it so they can redeem it with `activate`.
+    fn event(
+        state: &mut Self,
+        _proxy: &xdg_activation_token_v1::XdgActivationTokenV1,
+        event: xdg_activation_token_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let xdg_activation_token_v1::Event::Done { token } = event {
+            state.activation_token = Some(token);
+        }
+    }
+}
+
 /// Spawn the dialog driver: bind `xdg_wm_dialog_v1`, mark the new toplevel
 /// modal *before* its first commit (the role exists from `get_xdg_dialog`
 /// on), commit, then clear the flag with `unset_modal` and commit again so
 /// the server observes both edges.
 fn spawn_dialog_client(socket: &str) -> JoinHandle<()> {
     let path = common::isolated_runtime_dir().join(socket);
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
+    // `connect_socket` bounds the blocking waits inside the thread (see
+    // `common::IO_TIMEOUT`): without them a stuck hop leaves `roundtrip`
+    // blocked forever, the thread never finishes, and CI hangs where it should
+    // fail.
+    let stream = common::connect_socket(&path);
     std::thread::spawn(move || {
         let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
             registry_queue_init::<LiveState>(&conn).expect("registry queue init");
         let qh = queue.handle();
-        let mut state = LiveState;
+        let mut state = LiveState::default();
 
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -697,19 +914,15 @@ fn spawn_dialog_client(socket: &str) -> JoinHandle<()> {
 /// generated `XdgSystemBellV1` type needs — no harness change.
 fn spawn_bell_client(socket: &str) -> JoinHandle<()> {
     let path = common::isolated_runtime_dir().join(socket);
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
+    // Bounded waits, as for the dialog driver above (`common::IO_TIMEOUT` via
+    // the helper).
+    let stream = common::connect_socket(&path);
     std::thread::spawn(move || {
         let conn = Connection::from_socket(stream).expect("wrap wayland socket");
         let (globals, mut queue) =
             registry_queue_init::<LiveState>(&conn).expect("registry queue init");
         let qh = queue.handle();
-        let mut state = LiveState;
+        let mut state = LiveState::default();
 
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
@@ -739,6 +952,174 @@ fn spawn_bell_client(socket: &str) -> JoinHandle<()> {
             .expect("roundtrip so the server drains");
 
         drop((surface, xdg_surface, _toplevel, bell, wm_base, compositor));
+    })
+}
+
+/// Spawn the tracked-surface activation driver: track a toplevel, then mint a
+/// token naming that toplevel (`set_surface`) with no seat evidence attached
+/// and redeem it on the same toplevel — the launcher case, where the token is
+/// minted for another process to redeem. Target and requesting surface
+/// coincide here, so `request_activate` observes both as the one tracked id.
+///
+/// Deliberately no `set_serial`: wlroots delivers no `request_activate` for a
+/// token whose serial is not a genuine seat event (observed: the redemption is
+/// silently swallowed, with no protocol error), and a genuine serial needs a
+/// real input device plus a mapped, focused surface — beyond what this
+/// harness drives. The token therefore carries the unset serial `0` and no
+/// seat, which the test pins alongside the tracked requesting toplevel.
+fn spawn_activation_tracked_client(socket: &str) -> JoinHandle<()> {
+    let path = common::isolated_runtime_dir().join(socket);
+    // Bounded waits, as for the dialog driver above (`common::IO_TIMEOUT` via
+    // the helper).
+    let stream = common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<LiveState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+        let mut state = LiveState::default();
+
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let activation: xdg_activation_v1::XdgActivationV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind xdg_activation_v1");
+
+        // A tracked requesting surface: role plus bufferless commit, then a
+        // round-trip so the server has announced the toplevel before the token
+        // names it.
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let toplevel = xdg_surface.get_toplevel(&qh, ());
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server tracks the toplevel");
+
+        // Mint naming the tracked surface, then redeem naming the same
+        // toplevel; the round-trip between commit and redeem is what delivers
+        // the `done` carrying the token name.
+        let token = activation.get_activation_token(&qh, ());
+        token.set_surface(&surface);
+        token.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sends the token `done`");
+
+        let name = state
+            .activation_token
+            .take()
+            .expect("the server sent a token name");
+        activation.activate(name, &surface);
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the activate request");
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server drains");
+
+        drop((
+            surface,
+            xdg_surface,
+            toplevel,
+            token,
+            activation,
+            wm_base,
+            compositor,
+        ));
+    })
+}
+
+/// Spawn the popup-requesting activation driver: track a parent toplevel and a
+/// popup parented on it (the honest role-then-commit path, configure acked by
+/// the shared `xdg_surface` impl), then mint a token naming the *popup*
+/// surface and redeem it on the parent. The server resolves the redemption
+/// target to the parent but must filter the requesting surface to `None`:
+/// since 0.20.28 a popup surface carries an id addon of its own, and without
+/// the popup check that id would mislabel as a toplevel.
+fn spawn_activation_popup_client(socket: &str) -> JoinHandle<()> {
+    let path = common::isolated_runtime_dir().join(socket);
+    // Bounded waits, as for the dialog driver above (`common::IO_TIMEOUT` via
+    // the helper).
+    let stream = common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, mut queue) =
+            registry_queue_init::<LiveState>(&conn).expect("registry queue init");
+        let qh = queue.handle();
+        let mut state = LiveState::default();
+
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let activation: xdg_activation_v1::XdgActivationV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind xdg_activation_v1");
+
+        // The parent toplevel, committed bufferless so the server announces
+        // and tracks it.
+        let parent = compositor.create_surface(&qh, ());
+        let parent_xdg = wm_base.get_xdg_surface(&parent, &qh, ());
+        let _parent_toplevel = parent_xdg.get_toplevel(&qh, ());
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server tracks the parent");
+
+        // The popup off the parent's xdg_surface. Committing a buffer before
+        // the server configures it is a protocol error, so the first commit
+        // is bufferless and a second round-trip drains the configure (acked
+        // by the shared impl) before the token names the surface.
+        let popup_surface = compositor.create_surface(&qh, ());
+        let popup_xdg = wm_base.get_xdg_surface(&popup_surface, &qh, ());
+        let positioner = wm_base.create_positioner(&qh, ());
+        positioner.set_size(32, 32);
+        positioner.set_anchor_rect(0, 0, 10, 10);
+        let popup = popup_xdg.get_popup(Some(&parent_xdg), &positioner, &qh, ());
+        popup_surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server creates the popup role");
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the popup configure is dispatched and acked");
+
+        // The token names the popup; the redemption names the tracked parent.
+        let token = activation.get_activation_token(&qh, ());
+        token.set_surface(&popup_surface);
+        token.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sends the token `done`");
+
+        let name = state
+            .activation_token
+            .take()
+            .expect("the server sent a token name");
+        activation.activate(name, &parent);
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the activate request");
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server drains");
+
+        drop((
+            popup,
+            positioner,
+            popup_surface,
+            popup_xdg,
+            parent,
+            parent_xdg,
+            _parent_toplevel,
+            token,
+            activation,
+            wm_base,
+            compositor,
+        ));
     })
 }
 

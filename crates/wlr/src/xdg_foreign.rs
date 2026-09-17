@@ -38,16 +38,29 @@ use crate::id::find_id;
 use crate::runtime::copy_nullable_string;
 use crate::{Display, Error, Result, Runtime, ToplevelId, sys};
 
-/// The state a [`ForeignExported`]'s toplevel-destroy watch shares with the
-/// handle: the entry to withdraw, and whether it is still registered.
+/// The state a [`ForeignExported`]'s watches share with the handle: the entry
+/// to withdraw, and whether each owner is still registered.
 ///
-/// Kept in a `Box` on the handle so both the address the callback receives and
-/// the [`Cell`] it clears are stable for the registration's whole life.
+/// Two flags, one per watched signal, because the two owners die
+/// independently: the toplevel may die while the entry lives (its callback
+/// finishes the entry), or teardown may finish the entry while the toplevel
+/// lives. Each [`Registration`] names only its own flag for its `Drop`-time
+/// unlink decision, so a dead entry never tricks the toplevel watch into
+/// skipping its unlink from a still-live toplevel (which would leave a
+/// dangling listener behind), and vice versa. [`ForeignExported::is_alive`]
+/// is the AND: the export is registered only while both owners stand.
+///
+/// Kept in a `Box` on the handle so both the address the toplevel callback
+/// receives and the [`Cell`]s the callbacks clear are stable for the
+/// registrations' whole life.
 struct ExportWatch {
     entry: NonNull<sys::wlr_xdg_foreign_exported>,
-    /// `false` once the entry has been withdrawn from the registry — by the
-    /// toplevel's death or by the handle's own [`Drop`].
-    alive: Cell<bool>,
+    /// `false` once the toplevel's destroy callback ran.
+    toplevel_alive: Cell<bool>,
+    /// `false` once the entry has been finished — by the toplevel's death, by
+    /// the handle's own [`Drop`], or by teardown finishing it underneath us
+    /// (registry/display destroy emits the entry's own `destroy`).
+    entry_alive: Cell<bool>,
 }
 
 /// One surface this compositor has exported, owned by this crate.
@@ -61,21 +74,35 @@ struct ExportWatch {
 /// owns the memory as well as the registry membership; both are released in
 /// [`Drop`].
 ///
-/// # It withdraws itself when its toplevel dies
+/// # It withdraws itself when its toplevel dies — or when teardown finishes it
 ///
 /// wlroots' import path follows the base's `toplevel` pointer, so an entry left
 /// in the registry after that toplevel is freed would be a use-after-free the
 /// moment anyone imported or looked it up. This handle therefore links a
 /// listener into the toplevel's `destroy` signal: when the toplevel dies, the
 /// entry is finished out of the registry first, and this handle is marked dead.
-/// [`is_alive`](Self::is_alive) reports that, and [`Drop`] then only releases
-/// the memory it owns.
+///
+/// It also watches the entry's *own* `destroy` signal (mirroring
+/// [`crate::ActivationTokenHandle`'s](crate::ActivationTokenHandle) owner watch):
+/// display teardown finishes the entry out of the registry without touching
+/// the toplevel, and without this second watch the handle would still read
+/// alive and its [`Drop`] would finish an already-finished entry — a double
+/// list removal that corrupts the registry's heap list.
+/// [`is_alive`](Self::is_alive) reports the AND of both watches, and [`Drop`]
+/// then only releases the memory it owns.
 pub struct ForeignExported {
     toplevel: ToplevelId,
     /// The toplevel's `destroy` listener, unlinked by its own callback when the
     /// toplevel dies and by this registration's `Drop` otherwise. Declared
-    /// before `watch` so it is dropped first — its `Drop` reads `watch.alive`.
+    /// before `watch` so it is dropped first — its `Drop` reads
+    /// `watch.toplevel_alive`.
     _toplevel_destroy: Registration,
+    /// The entry's own `destroy` listener: teardown finishing the entry clears
+    /// `watch.entry_alive` and unlinks this, so [`Drop`] knows the entry is
+    /// already gone. Declared before `watch` for the same reason; it names
+    /// only `watch.entry_alive`, never the toplevel flag, so one owner's death
+    /// cannot trick the other registration into skipping its unlink.
+    _entry_destroy: Registration,
     watch: Box<ExportWatch>,
 }
 
@@ -99,10 +126,22 @@ impl ForeignExported {
     /// entry. Copied lossily, matching [`Runtime::find_foreign_exported`] and
     /// every other copied C string in this crate: replacing spec-violating
     /// bytes is preferable to rejecting the whole handle.
+    ///
+    /// Deliberately `None` once dead (like
+    /// [`ActivationTokenHandle::name`](crate::ActivationTokenHandle::name)):
+    /// the entry memory is still this handle's allocation after withdrawal, so
+    /// the bytes could be read — but the handle string no longer resolves, and
+    /// handing out a stale bearer secret invites an import the registry will
+    /// refuse. Callers that need the last-known handle must copy it while
+    /// [`is_alive`](Self::is_alive) holds.
     pub fn handle(&self) -> Option<String> {
-        // SAFETY: the entry allocation lives until `Drop`, which runs after
-        // every accessor; `handle` is a fixed NUL-terminated `char[37]` wlroots
-        // wrote at init. Single policy with every other copy in this crate
+        if !self.is_alive() {
+            return None;
+        }
+        // SAFETY: `is_alive` is true, so the entry is still registered and the
+        // allocation lives until `Drop`, which runs after every accessor;
+        // `handle` is a fixed NUL-terminated `char[37]` wlroots wrote at init.
+        // Single policy with every other copy in this crate
         // (`crate::runtime::copy_nullable_string`).
         unsafe {
             let bytes = &(*self.watch.entry.as_ptr()).handle;
@@ -110,26 +149,38 @@ impl ForeignExported {
         }
     }
 
-    /// The toplevel this export names.
-    pub fn toplevel_id(&self) -> ToplevelId {
-        self.toplevel
+    /// The toplevel this export names, while the export is registered.
+    ///
+    /// `None` once the export has been withdrawn — by the toplevel's death, by
+    /// teardown finishing the entry, or (transiently) after this handle's own
+    /// `Drop` began — mirroring [`handle`](Self::handle): the stored id would
+    /// still be readable, but it no longer names a resolvable export.
+    pub fn toplevel_id(&self) -> Option<ToplevelId> {
+        if !self.is_alive() {
+            return None;
+        }
+        Some(self.toplevel)
     }
 
     /// Whether the export is still registered.
     ///
     /// `false` once the toplevel it names has been destroyed — wlroots has
     /// removed the entry from the registry and
-    /// [`Runtime::find_foreign_exported`] no longer resolves the handle.
+    /// [`Runtime::find_foreign_exported`] no longer resolves the handle — or
+    /// once teardown has finished the entry underneath a still-live toplevel.
     pub fn is_alive(&self) -> bool {
-        self.watch.alive.get()
+        self.watch.toplevel_alive.get() && self.watch.entry_alive.get()
     }
 }
 
 /// The toplevel an export names is about to be freed.
 ///
 /// Finishes the entry out of the registry *before* the pointer it carries goes
-/// stale, then marks the owning handle dead and unlinks this listener (wlroots
-/// commonly asserts the signal is empty after its own destroy).
+/// stale, then marks the toplevel side dead and unlinks this listener (wlroots
+/// commonly asserts the signal is empty after its own destroy). The entry-side
+/// watch clears the entry flag itself from inside the `finish` emission, so a
+/// teardown that already finished the entry (entry flag clear) skips the
+/// second `finish` here rather than removing an unlinked list node twice.
 unsafe extern "C" fn on_exported_toplevel_destroy(
     l: *mut sys::wl_listener,
     _data: *mut std::ffi::c_void,
@@ -144,9 +195,11 @@ unsafe extern "C" fn on_exported_toplevel_destroy(
             return;
         }
         let watch = &*session.cast::<ExportWatch>();
-        if watch.alive.replace(false) {
+        if watch.toplevel_alive.replace(false) {
             remove_listener(l);
-            sys::wlr_xdg_foreign_exported_finish(watch.entry.as_ptr());
+            if watch.entry_alive.get() {
+                sys::wlr_xdg_foreign_exported_finish(watch.entry.as_ptr());
+            }
         }
     }
 }
@@ -154,10 +207,14 @@ unsafe extern "C" fn on_exported_toplevel_destroy(
 impl Drop for ForeignExported {
     fn drop(&mut self) {
         if self.is_alive() {
-            // SAFETY: the entry is still registered and this is its sole owner,
-            // so `finish` emits its `destroy` signal — telling any importer —
-            // and unlinks it from the registry list. The toplevel is still
-            // alive, so the destroy registration below unlinks normally.
+            // SAFETY: both flags are true, so the entry is still registered and
+            // this is its sole owner: `finish` emits its `destroy` signal —
+            // telling any importer — and unlinks it from the registry list. The
+            // emission trips the entry-side watch, which clears `entry_alive`
+            // and unlinks itself before returning, so the `_entry_destroy`
+            // field drop below correctly skips its own unlink while the
+            // toplevel watch (flag still true, toplevel still alive) unlinks
+            // normally. The toplevel is still alive for the same reason.
             unsafe { sys::wlr_xdg_foreign_exported_finish(self.watch.entry.as_ptr()) };
         }
         // SAFETY: the entry memory is this crate's allocation whether or not the
@@ -255,6 +312,60 @@ impl Runtime {
         *self.inner.xdg_foreign_registry.borrow()
     }
 
+    /// Link both death watches for a freshly initialised entry.
+    ///
+    /// Split from [`export_foreign`](Self::export_foreign) so tests can drive
+    /// the entry-destroy path with scratch signals through the same linking
+    /// code: the toplevel watch finishes a still-registered entry when the
+    /// toplevel dies, and the entry watch marks the handle dead when teardown
+    /// finishes the entry first. Each registration names only its own flag
+    /// (see [`ExportWatch`]), so the returned pair must be stored in
+    /// toplevel-then-entry order on a handle that drops both before `watch`.
+    ///
+    /// # Safety
+    ///
+    /// * `entry` must be an exclusively-owned entry whose `events.destroy`
+    ///   signal is initialised (what `wlr_xdg_foreign_exported_init` leaves
+    ///   behind on success).
+    /// * `toplevel_destroy` must point at a live toplevel's initialised
+    ///   `events.destroy` signal.
+    /// * The returned watch (third element) must outlive both registrations:
+    ///   the caller stores all three on one handle with the watch last.
+    unsafe fn link_export_watches(
+        entry: NonNull<sys::wlr_xdg_foreign_exported>,
+        toplevel_destroy: *mut sys::wl_signal,
+    ) -> (Registration, Registration, Box<ExportWatch>) {
+        let watch = Box::new(ExportWatch {
+            entry,
+            toplevel_alive: Cell::new(true),
+            entry_alive: Cell::new(true),
+        });
+        // Both the watch address and its flags are heap-stable, so the
+        // listeners may name them for as long as the registrations live.
+        let session: *const () = (&*watch as *const ExportWatch).cast();
+        let toplevel_alive: *const Cell<bool> = &watch.toplevel_alive;
+        // SAFETY: `toplevel_destroy` is a live toplevel's initialised `destroy`
+        // signal per the caller; `watch` (the session and the flag) outlives
+        // the registration, which the handle drops before it.
+        let destroy = unsafe {
+            Registration::link_watched(
+                toplevel_destroy,
+                on_exported_toplevel_destroy,
+                session,
+                toplevel_alive,
+            )
+        };
+        let entry_alive: *const Cell<bool> = &watch.entry_alive;
+        // SAFETY: `entry` is exclusively owned with an initialised `destroy`
+        // signal per the caller, mirroring
+        // `ActivationTokenHandle::from_non_null`'s owner watch; `watch`
+        // outlives the registration the same way.
+        let entry_destroy = unsafe {
+            Registration::link_owner_destroy(&raw mut (*entry.as_ptr()).events.destroy, entry_alive)
+        };
+        (destroy, entry_destroy, watch)
+    }
+
     /// Export a toplevel into the registry and return the owned entry.
     ///
     /// The returned handle owns the entry: dropping it withdraws the export.
@@ -293,28 +404,17 @@ impl Runtime {
         // this pointer can go stale.
         unsafe { (*raw.as_ptr()).toplevel = toplevel_entry.raw.as_ptr() };
 
-        let watch = Box::new(ExportWatch {
-            entry: raw,
-            alive: Cell::new(true),
-        });
-        // Both the watch address and its flag are heap-stable, so the listener
-        // may name them for as long as the registration lives.
-        let session: *const () = (&*watch as *const ExportWatch).cast();
-        let alive: *const Cell<bool> = &watch.alive;
         // SAFETY: `toplevel_entry.raw` is a live toplevel with an initialised
-        // `destroy` signal; `watch` (the session and the flag) outlives the
-        // registration, which `ForeignExported` drops before it.
-        let destroy = unsafe {
-            Registration::link_watched(
-                &raw mut (*toplevel_entry.raw.as_ptr()).events.destroy,
-                on_exported_toplevel_destroy,
-                session,
-                alive,
-            )
+        // `destroy` signal, and `raw` is a freshly initialised, exclusively
+        // owned entry; the watch box outlives both registrations, which the
+        // handle drops before it (see `link_export_watches`).
+        let (destroy, entry_destroy, watch) = unsafe {
+            Self::link_export_watches(raw, &raw mut (*toplevel_entry.raw.as_ptr()).events.destroy)
         };
         Some(ForeignExported {
             toplevel,
             _toplevel_destroy: destroy,
+            _entry_destroy: entry_destroy,
             watch,
         })
     }
@@ -352,11 +452,19 @@ impl Runtime {
                 // `wlr_xdg_foreign_exported.toplevel` names an `xdg_toplevel`;
                 // its role id lives on the toplevel's own `wlr_surface`, the
                 // same place `backend.rs`'s `toplevel_id_of_surface` reads it.
-                let surface = (*(*toplevel).base).surface;
-                if surface.is_null() {
+                // A null `base` is a miss, mirroring the null `toplevel` and
+                // null `surface` checks around it: the entry names nothing
+                // resolvable, and dereferencing it would be a null read.
+                let base = (*toplevel).base;
+                if base.is_null() {
                     None
                 } else {
-                    find_id(&raw const (*surface).addons).map(ToplevelId)
+                    let surface = (*base).surface;
+                    if surface.is_null() {
+                        None
+                    } else {
+                        find_id(&raw const (*surface).addons).map(ToplevelId)
+                    }
                 }
             };
             Some(ForeignExportInfo {
@@ -364,5 +472,163 @@ impl Runtime {
                 toplevel,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ForeignExported;
+    use crate::backend::Registration;
+    use crate::{Runtime, ToplevelId, sys};
+    use std::alloc::{Layout, alloc_zeroed};
+    use std::cell::Cell;
+    use std::ptr::NonNull;
+
+    /// A scratch entry plus a scratch stand-in for the toplevel's
+    /// `events.destroy`, driving the same [`Runtime::link_export_watches`]
+    /// linking code `export_foreign` uses — without a display.
+    ///
+    /// The entry's `link` is self-pointing (an empty list) and its `destroy`
+    /// signal is initialised; the toplevel side is just an initialised
+    /// signal. The entry memory is freed by the handle's `Drop`, so this
+    /// owner must not free it.
+    struct ScratchExport {
+        entry: NonNull<sys::wlr_xdg_foreign_exported>,
+        toplevel_destroy: Box<sys::wl_signal>,
+    }
+
+    impl ScratchExport {
+        fn new() -> Self {
+            let layout = Layout::new::<sys::wlr_xdg_foreign_exported>();
+            // SAFETY: `layout` is non-zero-sized, so `alloc_zeroed` returns
+            // null or a suitably aligned, zeroed block for exactly one entry.
+            let ptr = unsafe { alloc_zeroed(layout) }.cast::<sys::wlr_xdg_foreign_exported>();
+            let entry = NonNull::new(ptr).expect("scratch entry allocation");
+            // SAFETY: `ptr` is a live, exclusively-owned, zeroed entry. An
+            // empty `wl_list` points at itself; the `destroy` signal is
+            // initialised so watches can link into it.
+            unsafe {
+                (*ptr).link.prev = &raw mut (*ptr).link;
+                (*ptr).link.next = &raw mut (*ptr).link;
+                sys::wl_signal_init(&raw mut (*ptr).events.destroy);
+            }
+            // SAFETY: zeroed then initialised before any listener links in.
+            let mut toplevel_destroy: Box<sys::wl_signal> = unsafe { Box::new(std::mem::zeroed()) };
+            unsafe { sys::wl_signal_init(&raw mut *toplevel_destroy) };
+            Self {
+                entry,
+                toplevel_destroy,
+            }
+        }
+
+        /// The production handle for this scratch entry, for tests that drive
+        /// one side's destroy first.
+        fn handle(&mut self, toplevel: ToplevelId) -> ForeignExported {
+            // SAFETY: `entry` is an exclusively-owned entry with an
+            // initialised `destroy` signal and `toplevel_destroy` is a live,
+            // initialised signal; the handle stores all three together with
+            // the watch last, as the contract requires.
+            let (destroy, entry_destroy, watch) = unsafe {
+                Runtime::link_export_watches(self.entry, &raw mut *self.toplevel_destroy)
+            };
+            ForeignExported {
+                toplevel,
+                _toplevel_destroy: destroy,
+                _entry_destroy: entry_destroy,
+                watch,
+            }
+        }
+    }
+
+    /// Teardown finishing the entry first must mark the export dead, blank its
+    /// accessors, and disarm `Drop`'s own `finish`: the emission counter (a
+    /// `link_flag` probe reset before the drop) proves no second `finish`
+    /// ran. Without the entry-side watch `alive` stays true and `Drop`
+    /// removes an already-removed list node — the heap-list corruption this
+    /// pins.
+    #[test]
+    fn teardown_finish_marks_the_export_dead_and_drop_skips_its_own() {
+        let mut scratch = ScratchExport::new();
+        let id = ToplevelId::dangling_for_test();
+        let handle = scratch.handle(id);
+        assert!(handle.is_alive(), "a fresh handle owns a live entry");
+        assert!(handle.handle().is_some());
+        assert_eq!(handle.toplevel_id(), Some(id));
+
+        // A `link_flag` probe counts entry-destroy emissions: it sets the flag
+        // on every emission, so resetting it before the drop detects a second
+        // `finish`. Linked after the handle (declared after it) so it unlinks
+        // while the entry is still alive — before the handle's `Drop` frees it.
+        // `link_flag`'s null-`alive` contract needs exactly that ordering.
+        let fired = Box::new(Cell::new(false));
+        let fired_ptr: *const Cell<bool> = &*fired;
+        // SAFETY: the entry signal is initialised and outlives `probe` (the
+        // handle below frees it only after `probe` unlinks); `fired` outlives
+        // `probe` too.
+        let probe = unsafe {
+            Registration::link_flag(&raw mut (*scratch.entry.as_ptr()).events.destroy, fired_ptr)
+        };
+
+        // Teardown: the registry finishes the entry underneath a live
+        // toplevel. `emit_mutable` tolerates the self-unlinking watches, as a
+        // real wlroots destroy emission does.
+        // SAFETY: the entry signal is initialised with the production watches
+        // plus the probe linked in.
+        unsafe {
+            sys::wl_signal_emit_mutable(
+                &raw mut (*scratch.entry.as_ptr()).events.destroy,
+                std::ptr::null_mut(),
+            )
+        };
+        assert!(fired.get(), "the teardown emission ran");
+
+        assert!(
+            !handle.is_alive(),
+            "teardown finishing the entry withdrew the export"
+        );
+        assert!(
+            handle.handle().is_none(),
+            "no handle is read off a withdrawn entry"
+        );
+        assert_eq!(
+            handle.toplevel_id(),
+            None,
+            "no id is reported for a withdrawn entry"
+        );
+
+        fired.set(false);
+        drop(probe);
+        drop(handle);
+        assert!(
+            !fired.get(),
+            "drop after teardown does not finish the entry again"
+        );
+    }
+
+    /// The toplevel dying first still withdraws the export (finishing the
+    /// entry through the production callback) and blanks the accessors: the
+    /// pre-existing path the second watch must not disturb.
+    #[test]
+    fn toplevel_death_still_withdraws_the_export() {
+        let mut scratch = ScratchExport::new();
+        let id = ToplevelId::dangling_for_test();
+        let handle = scratch.handle(id);
+        assert!(handle.is_alive());
+
+        // SAFETY: the scratch toplevel signal is initialised with the
+        // production watch linked in.
+        unsafe {
+            sys::wl_signal_emit_mutable(&raw mut *scratch.toplevel_destroy, std::ptr::null_mut())
+        };
+
+        assert!(
+            !handle.is_alive(),
+            "the toplevel's destruction withdrew the export"
+        );
+        assert!(handle.handle().is_none());
+        assert_eq!(handle.toplevel_id(), None);
+        // `Drop` sees the same dead flags and only frees the entry memory;
+        // under the allocator a double free would be reported.
+        drop(handle);
     }
 }

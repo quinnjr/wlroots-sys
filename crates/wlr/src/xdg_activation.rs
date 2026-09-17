@@ -197,12 +197,6 @@ unsafe fn snapshot_of(raw: NonNull<sys::wlr_xdg_activation_token_v1>) -> Activat
 }
 
 impl Runtime {
-    /// The `xdg_activation_v1` manager, once
-    /// [`Runtime::create_xdg_activation_manager`] has run.
-    fn activation_manager(&self) -> Option<NonNull<sys::wlr_xdg_activation_v1>> {
-        self.xdg_activation_manager_ptr()
-    }
-
     /// Mint a fresh activation token and return an owned handle for it.
     ///
     /// The token is registered with the activation manager, so its name is
@@ -210,7 +204,7 @@ impl Runtime {
     /// [`Runtime::create_xdg_activation_manager`] ran, or wlroots could not
     /// allocate the token.
     pub fn create_activation_token(&self) -> Option<ActivationTokenHandle> {
-        let manager = self.activation_manager()?;
+        let manager = self.xdg_activation_manager_ptr()?;
         // SAFETY: `manager` is a live manager owned by the display, and the
         // returned token is freshly allocated and inserted into the manager's
         // pool; `from_non_null` takes ownership of it.
@@ -229,7 +223,7 @@ impl Runtime {
     /// `None` when no activation manager was created, when `name` contains an
     /// interior NUL, or when wlroots could not allocate the token.
     pub fn add_activation_token(&self, name: &str) -> Option<ActivationTokenHandle> {
-        let manager = self.activation_manager()?;
+        let manager = self.xdg_activation_manager_ptr()?;
         let name = CString::new(name).ok()?;
         // SAFETY: `manager` is live; the token is freshly allocated and
         // inserted into its pool, and `from_non_null` takes ownership.
@@ -250,7 +244,7 @@ impl Runtime {
     /// it alive.
     #[must_use]
     pub fn find_activation_token(&self, name: &str) -> Option<ActivationToken> {
-        let manager = self.activation_manager()?;
+        let manager = self.xdg_activation_manager_ptr()?;
         let name = CString::new(name).ok()?;
         // SAFETY: `manager` is live and `name` is a NUL-terminated string the
         // call only reads. The returned token is borrowed from the manager's
@@ -343,7 +337,10 @@ mod tests {
     /// double free or a use of the freed listener would be reported.
     #[test]
     fn dropping_a_live_handle_destroys_the_token_once() {
-        for _ in 0..8 {
+        /// Enough repetitions to trip a systematic double free under the
+        /// allocator without making the unit suite slow.
+        const DROP_ROUNDS: usize = 8;
+        for _ in 0..DROP_ROUNDS {
             let scratch = ScratchToken::new();
             // SAFETY: `scratch` is non-null and outlives the handle.
             let raw = NonNull::new(scratch.0).expect("scratch token is non-null");
