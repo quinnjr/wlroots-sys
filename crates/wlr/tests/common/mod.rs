@@ -13,7 +13,7 @@
 //! hide genuinely dead helpers from every binary at once.
 
 use std::cell::Cell;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, Once, OnceLock};
 
@@ -159,6 +159,27 @@ pub fn connect_socket(path: &std::path::Path) -> std::os::unix::net::UnixStream 
         .set_write_timeout(Some(IO_TIMEOUT))
         .expect("set write timeout on wayland socket");
     stream
+}
+
+/// Create a `0o600` shm backing file at `path` with length `len`.
+///
+/// Read-write, not `File::create`'s write-only: the server mmaps the fd with
+/// `PROT_READ`, and mapping a write-only fd fails `EACCES` (libwayland then
+/// rejects the pool with "Failed to create memory mapping"). `create_new` so
+/// a stale path fails instead of being adopted, with mode `0o600` so no other
+/// user can read the pixels.
+// Shared harness: see `IO_TIMEOUT` above.
+#[allow(dead_code)]
+pub fn create_shm_backing(path: &std::path::Path, len: u64) -> std::fs::File {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .expect("create shm backing file");
+    file.set_len(len).expect("size shm backing file");
+    file
 }
 
 /// Unique backing path for a per-test shm file or listen socket, under

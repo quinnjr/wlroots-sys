@@ -273,6 +273,11 @@ fn a_client_observes_an_ext_foreign_toplevel() {
         events.identifier.is_some(),
         "the stable identifier event arrived"
     );
+    assert!(
+        !events.saw_closed,
+        "the observed handle is never closed during the run, so no request \
+         is driven against it post-close"
+    );
     drop(handle);
 }
 
@@ -555,6 +560,18 @@ fn a_client_commits_workspace_requests() {
     assert_eq!(events.groups_seen, 1, "the client saw one group");
     assert_eq!(events.workspaces_seen, 1, "the client saw one workspace");
     assert!(events.saw_done, "the initial done event arrived");
+    assert!(
+        !events.saw_finished,
+        "the manager was never finished while requests were committed against it"
+    );
+    assert!(
+        !events.group_removed,
+        "the group was never removed while the client drove requests against it"
+    );
+    assert!(
+        !events.workspace_removed,
+        "the workspace was never removed while the client drove requests against it"
+    );
 
     assert_eq!(
         app.requests,

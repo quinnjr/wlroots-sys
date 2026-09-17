@@ -230,6 +230,11 @@ fn a_real_surface_runs_the_presentation_and_tearing_wrappers() {
         events.configure_events >= 1,
         "the client's configure should have been acked before the map"
     );
+    assert!(
+        events.feedback_discarded,
+        "the server's commit handler sampled the requested feedback and dropped it, \
+         which destroys it server-side and sends `discarded` to the listening client"
+    );
     assert!(app.output.is_some(), "the headless output was announced");
     assert!(
         app.committed >= 1,

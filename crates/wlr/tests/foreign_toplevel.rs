@@ -289,6 +289,22 @@ fn a_client_observes_and_drives_an_exported_handle() {
     assert_eq!(events.app_id.as_deref(), Some("org.wlr.test"));
     assert!(events.saw_done, "the initial done event arrived");
     assert!(events.state_events >= 1, "the initial state array arrived");
+    // The driven flow ends with the client's own `close()` request, which
+    // drops the server-side handle; wlroots answers with `closed`, dispatched
+    // by the final round-trip. Asserting it proves the recording arm fires —
+    // no request is driven after it, since `close()` was the last one sent.
+    assert!(
+        events.saw_closed,
+        "the server's `closed` answer to the client's own `close()` request must arrive"
+    );
+    // The bind-time replay sends one `parent` event (naming no parent — the
+    // handle is never parented); nothing re-parents it afterwards, so exactly
+    // one arrives. Asserting the count proves the recording arm fires instead
+    // of swallowing the event.
+    assert_eq!(
+        events.parent_events, 1,
+        "the bind-time replay sends exactly one `parent` event"
+    );
 
     assert_eq!(app.requests.maximize, vec![true]);
     assert_eq!(app.requests.minimize, vec![true, false]);

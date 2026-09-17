@@ -17,14 +17,14 @@
 //! thread entirely.
 
 use std::os::fd::AsFd;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::net::UnixStream;
 
-use wayland_client::globals::{GlobalListContents, registry_queue_init};
+use wayland_client::globals::{BindError, GlobalList, GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
     wl_buffer, wl_compositor, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_subcompositor,
     wl_subsurface, wl_surface,
 };
-use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
     ext_foreign_toplevel_handle_v1, ext_foreign_toplevel_list_v1,
 };
@@ -67,6 +67,12 @@ pub struct ClientEvents {
     /// Whether a layer-shell client observed the server's `closed` event after
     /// the compositor destroyed its layer surface.
     pub layer_closed: bool,
+    /// Whether a presentation-feedback client observed the server's
+    /// `discarded` event for its feedback. The server sends it when the
+    /// feedback is destroyed without being presented — which is what the
+    /// server-side `sampled()` + drop path does — so a mapped client that
+    /// asked for feedback observes it on a later round-trip.
+    pub feedback_discarded: bool,
 }
 
 /// What a `zwlr_foreign_toplevel_manager_v1` client observed, returned by
@@ -83,6 +89,16 @@ pub struct ForeignToplevelEvents {
     pub state_events: u32,
     /// Whether the initial `done` arrived.
     pub saw_done: bool,
+    /// Whether the server's `closed` event arrived. The driven flow ends with
+    /// the client's own `close()` request, which the server answers with
+    /// `closed`; tests assert it arrived, proving the recording arm fires.
+    /// No request is driven after it, since `close()` was the last one sent.
+    pub saw_closed: bool,
+    /// How many `parent` events arrived. The bind-time replay sends exactly
+    /// one (naming no parent — the handle is never parented); recorded rather
+    /// than swallowed so a replay that parents one shows up instead of
+    /// vanishing into `_`.
+    pub parent_events: u32,
 }
 
 /// What an `ext_foreign_toplevel_list_v1` client observed, returned by
@@ -99,6 +115,10 @@ pub struct ExtForeignToplevelEvents {
     pub identifier: Option<String>,
     /// Whether the initial `done` arrived.
     pub saw_done: bool,
+    /// Whether the server's `closed` event arrived. The observed handle is
+    /// never closed during the run; recorded rather than swallowed so a close
+    /// shows up instead of vanishing into `_`.
+    pub saw_closed: bool,
 }
 
 /// What an `ext_workspace_manager_v1` client observed, returned by
@@ -111,6 +131,16 @@ pub struct ExtWorkspaceEvents {
     pub workspaces_seen: u32,
     /// Whether the initial `done` arrived.
     pub saw_done: bool,
+    /// Whether the manager's `finished` event arrived. The manager outlives
+    /// the run, so tests assert this stayed false.
+    pub saw_finished: bool,
+    /// Whether the replayed group's `removed` event arrived. The group is
+    /// never removed during the run; recorded rather than swallowed.
+    pub group_removed: bool,
+    /// Whether the replayed workspace's `removed` event arrived. The
+    /// workspace is never removed during the run; recorded rather than
+    /// swallowed.
+    pub workspace_removed: bool,
 }
 
 /// The globals a driven client has bound.
@@ -153,6 +183,21 @@ pub struct ClientState {
 }
 
 impl ClientState {
+    /// The in-thread preamble every `spawn_*` driver shares.
+    ///
+    /// Wraps the caller-connected `stream` (connected on the caller thread via
+    /// [`crate::common::connect_socket` — the socket name borrows from the
+    /// test and `XDG_RUNTIME_DIR` is resolved there), runs the registry
+    /// round-trip, and hands back a default state. Returns the connection too:
+    /// it must stay alive until the thread returns, so the caller binds it to
+    /// a named `_conn` that outlives the driven requests. Per-protocol binds
+    /// stay inline in each driver, against the returned [`GlobalList`].
+    fn fresh(stream: UnixStream) -> (Connection, GlobalList, EventQueue<Self>, Self) {
+        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
+        let (globals, queue) = registry_queue_init::<Self>(&conn).expect("registry queue init");
+        (conn, globals, queue, Self::default())
+    }
+
     /// Create and commit an unmapped xdg-shell toplevel.
     ///
     /// No buffer is attached: the server's `new_toplevel` fires when the
@@ -184,21 +229,9 @@ pub fn spawn_show_window_menu(
     let path = crate::common::isolated_runtime_dir().join(socket);
     let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
-        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
-        let (globals, mut queue) =
-            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
         let qh = queue.handle();
 
-        let mut state = ClientState {
-            compositor: None,
-            wm_base: None,
-            seat: None,
-            activation_token: None,
-            events: ClientEvents::default(),
-            foreign: ForeignToplevelEvents::default(),
-            foreign_handle: None,
-            ..ClientState::default()
-        };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
         let wm_base: xdg_wm_base::XdgWmBase =
@@ -243,21 +276,9 @@ pub fn spawn_foreign_toplevel(socket: &str) -> std::thread::JoinHandle<ForeignTo
     let path = crate::common::isolated_runtime_dir().join(socket);
     let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
-        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
-        let (globals, mut queue) =
-            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
         let qh = queue.handle();
 
-        let mut state = ClientState {
-            compositor: None,
-            wm_base: None,
-            seat: None,
-            activation_token: None,
-            events: ClientEvents::default(),
-            foreign: ForeignToplevelEvents::default(),
-            foreign_handle: None,
-            ..ClientState::default()
-        };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
         let seat: wl_seat::WlSeat = globals.bind(&qh, 1..=1, ()).expect("bind wl_seat");
@@ -310,14 +331,9 @@ pub fn spawn_ext_foreign_toplevel(
     let path = crate::common::isolated_runtime_dir().join(socket);
     let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
-        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
-        let (globals, mut queue) =
-            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
         let qh = queue.handle();
 
-        let mut state = ClientState {
-            ..ClientState::default()
-        };
         let list: ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1 = globals
             .bind(&qh, 1..=1, ())
             .expect("bind ext_foreign_toplevel_list_v1");
@@ -344,14 +360,9 @@ pub fn spawn_ext_workspace(socket: &str) -> std::thread::JoinHandle<ExtWorkspace
     let path = crate::common::isolated_runtime_dir().join(socket);
     let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
-        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
-        let (globals, mut queue) =
-            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
         let qh = queue.handle();
 
-        let mut state = ClientState {
-            ..ClientState::default()
-        };
         let manager: ext_workspace_manager_v1::ExtWorkspaceManagerV1 = globals
             .bind(&qh, 1..=1, ())
             .expect("bind ext_workspace_manager_v1");
@@ -403,14 +414,9 @@ pub fn spawn_security_context(socket: &str) -> std::thread::JoinHandle<()> {
     let path = crate::common::isolated_runtime_dir().join(socket);
     let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
-        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
-        let (globals, mut queue) =
-            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
         let qh = queue.handle();
 
-        let mut state = ClientState {
-            ..ClientState::default()
-        };
         let manager: wp_security_context_manager_v1::WpSecurityContextManagerV1 = globals
             .bind(&qh, 1..=1, ())
             .expect("bind wp_security_context_manager_v1");
@@ -473,34 +479,14 @@ pub fn spawn(
     drive: impl FnOnce(&mut ClientState, &QueueHandle<ClientState>) + Send + 'static,
 ) -> std::thread::JoinHandle<ClientEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
-    let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
-    // Bound the blocking waits inside the thread. Without these a stuck hop
-    // leaves `roundtrip` blocked forever, the thread never finishes, and CI
-    // hangs where it should fail: the read call returns `TimedOut`/
-    // `WouldBlock` after ten seconds, `roundtrip` surfaces the `Err`, and the
-    // thread panics with the message below.
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set read timeout on wayland socket");
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(10)))
-        .expect("set write timeout on wayland socket");
+    // `connect_socket` bounds the blocking waits inside the thread (see
+    // `IO_TIMEOUT`): without them a stuck hop leaves `roundtrip` blocked
+    // forever, the thread never finishes, and CI hangs where it should fail.
+    let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
-        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
-        let (globals, mut queue) =
-            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
         let qh = queue.handle();
 
-        let mut state = ClientState {
-            compositor: None,
-            wm_base: None,
-            seat: None,
-            activation_token: None,
-            events: ClientEvents::default(),
-            foreign: ForeignToplevelEvents::default(),
-            foreign_handle: None,
-            ..ClientState::default()
-        };
         // `registry_queue_init` buffers the initial globals rather than
         // forwarding them to a handler, so the standard `GlobalList::bind` is
         // the way to bind them; binding here also guarantees both are present
@@ -509,8 +495,14 @@ pub fn spawn(
         state.wm_base = Some(globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base"));
         // Opportunistic: a seat exists only when the server called
         // `Runtime::create_seat`. A test that needs one creates it; the rest
-        // leave this `None` and never ask for it.
-        state.seat = globals.bind(&qh, 1..=1, ()).ok();
+        // leave this `None` and never ask for it. Only the not-advertised
+        // case may fall through to `None` — a version mismatch must fail at
+        // the bind site rather than as a confusing `None` downstream.
+        state.seat = match globals.bind(&qh, 1..=1, ()) {
+            Ok(seat) => Some(seat),
+            Err(BindError::NotPresent) => None,
+            Err(e) => panic!("bind wl_seat: {e}"),
+        };
 
         drive(&mut state, &qh);
 
@@ -563,21 +555,9 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
     let shm_path = crate::common::shm_path_for(&format!("{socket}-mapped"));
     let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
-        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
-        let (globals, mut queue) =
-            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
         let qh = queue.handle();
 
-        let mut state = ClientState {
-            compositor: None,
-            wm_base: None,
-            seat: None,
-            activation_token: None,
-            events: ClientEvents::default(),
-            foreign: ForeignToplevelEvents::default(),
-            foreign_handle: None,
-            ..ClientState::default()
-        };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
         let wm_base: xdg_wm_base::XdgWmBase =
@@ -588,11 +568,15 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
 
         // Opportunistic: the global exists only when the server called
         // `Runtime::create_presentation`. Tests that never do are unchanged —
-        // `bind` returns `Err(Missing)` and the client drives its surface
-        // without asking for feedback. Version 1 is the client bindings'
-        // maximum even though the server advertises 2.
+        // only the not-advertised case falls through to `None`; a version
+        // mismatch panics at the bind site. Version 1 is the client
+        // bindings' maximum even though the server advertises 2.
         let presentation: Option<wp_presentation::WpPresentation> =
-            globals.bind(&qh, 1..=1, ()).ok();
+            match globals.bind(&qh, 1..=1, ()) {
+                Ok(presentation) => Some(presentation),
+                Err(BindError::NotPresent) => None,
+                Err(e) => panic!("bind wp_presentation: {e}"),
+            };
 
         // Phase 1: role + bufferless commit, then a round-trip so the server's
         // initial configure arrives and is acked.
@@ -618,19 +602,7 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
         const H: i32 = 64;
         const STRIDE: i32 = W * 4;
         let size = STRIDE * H;
-        // Read-write, not `File::create`'s write-only: the server mmaps the fd
-        // with `PROT_READ`, and mapping a write-only fd fails `EACCES`.
-        // libwayland then rejects the pool with "Failed to create memory
-        // mapping". `create_new` so a stale path fails instead of being
-        // adopted, with mode `0o600` so no other user can read the pixels.
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&shm_path)
-            .expect("create shm backing file");
-        file.set_len(size as u64).expect("size shm backing file");
+        let file = crate::common::create_shm_backing(&shm_path, size as u64);
         let pool = shm.create_pool(file.as_fd(), size, &qh, ());
         let buffer = pool.create_buffer(0, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
         surface.attach(Some(&buffer), 0, 0);
@@ -674,21 +646,9 @@ pub fn spawn_layer_surface(socket: &str) -> std::thread::JoinHandle<ClientEvents
     let path = crate::common::isolated_runtime_dir().join(socket);
     let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
-        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
-        let (globals, mut queue) =
-            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
         let qh = queue.handle();
 
-        let mut state = ClientState {
-            compositor: None,
-            wm_base: None,
-            seat: None,
-            activation_token: None,
-            events: ClientEvents::default(),
-            foreign: ForeignToplevelEvents::default(),
-            foreign_handle: None,
-            ..ClientState::default()
-        };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
         let layer_shell: zwlr_layer_shell_v1::ZwlrLayerShellV1 = globals
@@ -755,21 +715,9 @@ pub fn spawn_subsurface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
     let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
-        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
-        let (globals, mut queue) =
-            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
         let qh = queue.handle();
 
-        let mut state = ClientState {
-            compositor: None,
-            wm_base: None,
-            seat: None,
-            activation_token: None,
-            events: ClientEvents::default(),
-            foreign: ForeignToplevelEvents::default(),
-            foreign_handle: None,
-            ..ClientState::default()
-        };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
         let wm_base: xdg_wm_base::XdgWmBase =
@@ -828,26 +776,19 @@ pub fn spawn_subsurface(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
 /// bufferless child `spawn_subsurface` creates is never visited by the tree
 /// walk. This helper exists for the traversal regression that needs a
 /// non-root surface the walk actually yields.
+///
+/// Phase 4 commits the child once more *after* the role was announced, with
+/// its buffer re-attached so it stays mapped: the server's `surface_committed`
+/// handler then runs against a live role, which the commit-time accessor test
+/// in `tests/subsurfaces.rs` asserts on.
 pub fn spawn_subsurface_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
     let path = crate::common::isolated_runtime_dir().join(socket);
     let shm_path = crate::common::shm_path_for(&format!("{socket}-child"));
     let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
-        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
-        let (globals, mut queue) =
-            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
         let qh = queue.handle();
 
-        let mut state = ClientState {
-            compositor: None,
-            wm_base: None,
-            seat: None,
-            activation_token: None,
-            events: ClientEvents::default(),
-            foreign: ForeignToplevelEvents::default(),
-            foreign_handle: None,
-            ..ClientState::default()
-        };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
         let wm_base: xdg_wm_base::XdgWmBase =
@@ -875,18 +816,7 @@ pub fn spawn_subsurface_mapped(socket: &str) -> std::thread::JoinHandle<ClientEv
         const H: i32 = 64;
         const STRIDE: i32 = W * 4;
         let size = STRIDE * H;
-        // `create_new` so a stale path fails instead of being adopted, with mode
-        // `0o600` so no other user can read the pixels; read-write so the
-        // server can mmap the fd with `PROT_READ`.
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&shm_path)
-            .expect("create shm backing file");
-        file.set_len((2 * size) as u64)
-            .expect("size shm backing file");
+        let file = crate::common::create_shm_backing(&shm_path, (2 * size) as u64);
         let pool = shm.create_pool(file.as_fd(), 2 * size, &qh, ());
         let parent_buffer = pool.create_buffer(0, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
         let child_buffer =
@@ -910,6 +840,20 @@ pub fn spawn_subsurface_mapped(socket: &str) -> std::thread::JoinHandle<ClientEv
         queue
             .roundtrip(&mut state)
             .expect("roundtrip so the server sees the mapped child subsurface");
+
+        // Phase 4: one more child commit after the role was announced. The
+        // child was installed when phase 3's parent commit emitted
+        // `new_subsurface`, so this commit reaches the server's
+        // `surface_committed` with the role live — unlike phase 3's, which
+        // ran before the install. The buffer is re-attached so the child
+        // stays mapped; the parent commit re-applies the `(10, 20)` position.
+        child.attach(Some(&child_buffer), 0, 0);
+        child.damage(0, 0, W, H);
+        child.commit();
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the post-announce child commit");
 
         drop((
             child,
@@ -945,21 +889,9 @@ pub fn spawn_subsurface_then_destroy_parent(socket: &str) -> std::thread::JoinHa
     let path = crate::common::isolated_runtime_dir().join(socket);
     let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
-        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
-        let (globals, mut queue) =
-            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
         let qh = queue.handle();
 
-        let mut state = ClientState {
-            compositor: None,
-            wm_base: None,
-            seat: None,
-            activation_token: None,
-            events: ClientEvents::default(),
-            foreign: ForeignToplevelEvents::default(),
-            foreign_handle: None,
-            ..ClientState::default()
-        };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
         let wm_base: xdg_wm_base::XdgWmBase =
@@ -1005,6 +937,60 @@ pub fn spawn_subsurface_then_destroy_parent(socket: &str) -> std::thread::JoinHa
     })
 }
 
+/// Like [`spawn_subsurface`], but the parent is a roleless plain surface: no
+/// xdg role, only a bufferless commit.
+///
+/// The server tracks surfaces exclusively through role announce sites (an
+/// xdg toplevel, layer surface, popup, …), so a roleless parent is never
+/// installed: it gets no surface-id addon, no `new_subsurface` listener, and
+/// the child is never announced or committed server-side. The test in
+/// `tests/subsurfaces.rs` asserts that invisibility — no toplevel, no
+/// `new_subsurface`, no commit, no configure — which is the observable half
+/// of the untracked-parent case. (The other half, reading
+/// `subsurface_parent_id() == None` alongside a `Some` position through a
+/// handler, is unexpressible: any child the server can hand a handler
+/// necessarily descends from an installed parent, and installation always
+/// attaches the addon — see that test.)
+pub fn spawn_subsurface_on_roleless_parent(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
+        let qh = queue.handle();
+
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        // `init_graphics` always creates the subcompositor, so the global is
+        // present before any client connects. No `xdg_wm_base` bind: nothing
+        // here takes an xdg role.
+        let subcompositor: wl_subcompositor::WlSubcompositor =
+            globals.bind(&qh, 1..=1, ()).expect("bind wl_subcompositor");
+        state.compositor = Some(compositor.clone());
+
+        // A plain parent: created and committed with no role, so the server
+        // never announces or tracks it.
+        let parent = compositor.create_surface(&qh, ());
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server ignores the roleless parent");
+
+        // The child sub-surface at `(10, 20)`, committed like the real client
+        // sequence, then the parent commit that would fold it in.
+        let child = compositor.create_surface(&qh, ());
+        let subsurface = subcompositor.get_subsurface(&child, &parent, &qh, ());
+        subsurface.set_position(10, 20);
+        child.commit();
+        parent.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server ignores the untracked child");
+
+        drop((child, subsurface, parent, subcompositor));
+        state.events
+    })
+}
+
 /// Drive the xdg-activation round trip: mint a token, commit it, read the
 /// server-generated name out of the `done` event, then redeem it with
 /// `activate`.
@@ -1020,21 +1006,9 @@ pub fn spawn_activation_round_trip(socket: &str) -> std::thread::JoinHandle<Clie
     let path = crate::common::isolated_runtime_dir().join(socket);
     let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
-        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
-        let (globals, mut queue) =
-            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
         let qh = queue.handle();
 
-        let mut state = ClientState {
-            compositor: None,
-            wm_base: None,
-            seat: None,
-            activation_token: None,
-            events: ClientEvents::default(),
-            foreign: ForeignToplevelEvents::default(),
-            foreign_handle: None,
-            ..ClientState::default()
-        };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
         let activation: xdg_activation_v1::XdgActivationV1 = globals
@@ -1091,21 +1065,9 @@ pub fn spawn_toplevel_meta(socket: &str) -> std::thread::JoinHandle<ClientEvents
     let shm_path = crate::common::shm_path_for(&format!("{socket}-meta"));
     let stream = crate::common::connect_socket(&path);
     std::thread::spawn(move || {
-        let conn = Connection::from_socket(stream).expect("wrap wayland socket");
-        let (globals, mut queue) =
-            registry_queue_init::<ClientState>(&conn).expect("registry queue init");
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
         let qh = queue.handle();
 
-        let mut state = ClientState {
-            compositor: None,
-            wm_base: None,
-            seat: None,
-            activation_token: None,
-            events: ClientEvents::default(),
-            foreign: ForeignToplevelEvents::default(),
-            foreign_handle: None,
-            ..ClientState::default()
-        };
         let compositor: wl_compositor::WlCompositor =
             globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
         let wm_base: xdg_wm_base::XdgWmBase =
@@ -1137,17 +1099,7 @@ pub fn spawn_toplevel_meta(socket: &str) -> std::thread::JoinHandle<ClientEvents
         const H: i32 = 64;
         const STRIDE: i32 = W * 4;
         let size = STRIDE * H;
-        // `create_new` so a stale path fails instead of being adopted, with mode
-        // `0o600` so no other user can read the pixels; read-write so the
-        // server can mmap the fd with `PROT_READ`.
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&shm_path)
-            .expect("create shm backing file");
-        file.set_len(size as u64).expect("size shm backing file");
+        let file = crate::common::create_shm_backing(&shm_path, size as u64);
         let pool = shm.create_pool(file.as_fd(), size, &qh, ());
         let buffer = pool.create_buffer(0, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
         let icon = icon_manager.create_icon(&qh, ());
@@ -1460,17 +1412,20 @@ impl Dispatch<wp_presentation::WpPresentation, ()> for ClientState {
 }
 
 impl Dispatch<wp_presentation_feedback::WpPresentationFeedback, ()> for ClientState {
-    /// `presented`/`discarded`/`sync_output`. The server may destroy the
-    /// feedback (sending `discarded`) once the commit handler samples it; the
-    /// events are drained by the round-trips and need no action here.
+    /// `presented`/`sync_output` carry no test signal. The server destroys the
+    /// feedback (sending `discarded`) once the commit handler samples it, so
+    /// that event is recorded; the round-trips drain everything.
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         _proxy: &wp_presentation_feedback::WpPresentationFeedback,
-        _event: wp_presentation_feedback::Event,
+        event: wp_presentation_feedback::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+        if let wp_presentation_feedback::Event::Discarded = event {
+            state.events.feedback_discarded = true;
+        }
     }
 }
 
@@ -1502,9 +1457,11 @@ impl Dispatch<zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1, ()
 }
 
 impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ()> for ClientState {
-    /// Records the title/app-id/state the server replayed. `closed` and
-    /// `parent` need no action for this flow; the client's requests are driven
-    /// by [`spawn_foreign_toplevel`].
+    /// Records the title/app-id/state the server replayed. `closed` (the
+    /// answer to the driven flow's own terminal `close()` request) and
+    /// `parent` (one per bind-time replay) are recorded too rather than
+    /// swallowed. The client's requests are driven by
+    /// [`spawn_foreign_toplevel`].
     fn event(
         state: &mut Self,
         _proxy: &zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1,
@@ -1525,6 +1482,12 @@ impl Dispatch<zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1, ()> 
             }
             zwlr_foreign_toplevel_handle_v1::Event::Done => {
                 state.foreign.saw_done = true;
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::Closed => {
+                state.foreign.saw_closed = true;
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::Parent { .. } => {
+                state.foreign.parent_events += 1;
             }
             _ => {}
         }
@@ -1557,8 +1520,9 @@ impl Dispatch<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, ()> for Cl
 }
 
 impl Dispatch<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()> for ClientState {
-    /// Records the title/app-id/identifier the list replayed; `closed` and the
-    /// list's `finished` need no action for this flow.
+    /// Records the title/app-id/identifier the list replayed. `closed` is
+    /// recorded too: the observed handle is never closed during the run, so a
+    /// close would show up here instead of vanishing into `_`.
     fn event(
         state: &mut Self,
         _proxy: &ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
@@ -1580,6 +1544,11 @@ impl Dispatch<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()> fo
             ext_foreign_toplevel_handle_v1::Event::Done => {
                 state.ext_foreign.saw_done = true;
             }
+            ext_foreign_toplevel_handle_v1::Event::Closed => {
+                state.ext_foreign.saw_closed = true;
+            }
+            // The generated enum is `non_exhaustive`, so the wildcard stays
+            // even with every known variant named.
             _ => {}
         }
     }
@@ -1609,6 +1578,11 @@ impl Dispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, ()> for ClientSta
             ext_workspace_manager_v1::Event::Done => {
                 state.ext_workspace.saw_done = true;
             }
+            ext_workspace_manager_v1::Event::Finished => {
+                state.ext_workspace.saw_finished = true;
+            }
+            // The generated enum is `non_exhaustive`, so the wildcard stays
+            // even with every known variant named.
             _ => {}
         }
     }
@@ -1627,31 +1601,39 @@ impl Dispatch<ext_workspace_manager_v1::ExtWorkspaceManagerV1, ()> for ClientSta
 
 impl Dispatch<ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1, ()> for ClientState {
     /// `capabilities`/`output_enter`/`output_leave`/`workspace_enter`/
-    /// `workspace_leave`/`removed` are advisory for this flow; the group is
-    /// bound only so [`spawn_ext_workspace`] can call `create_workspace`.
+    /// `workspace_leave` are advisory for this flow; the group is bound only
+    /// so [`spawn_ext_workspace`] can call `create_workspace`. `removed` is
+    /// recorded: the group is never removed during the run.
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         _proxy: &ext_workspace_group_handle_v1::ExtWorkspaceGroupHandleV1,
-        _event: ext_workspace_group_handle_v1::Event,
+        event: ext_workspace_group_handle_v1::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+        if let ext_workspace_group_handle_v1::Event::Removed = event {
+            state.ext_workspace.group_removed = true;
+        }
     }
 }
 
 impl Dispatch<ext_workspace_handle_v1::ExtWorkspaceHandleV1, ()> for ClientState {
-    /// `id`/`name`/`coordinates`/`state`/`capabilities`/`removed` are advisory
-    /// for this flow; the workspace is bound only so [`spawn_ext_workspace`]
-    /// can send its requests.
+    /// `id`/`name`/`coordinates`/`state`/`capabilities` are advisory for this
+    /// flow; the workspace is bound only so [`spawn_ext_workspace`] can send
+    /// its requests. `removed` is recorded: the workspace is never removed
+    /// during the run.
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         _proxy: &ext_workspace_handle_v1::ExtWorkspaceHandleV1,
-        _event: ext_workspace_handle_v1::Event,
+        event: ext_workspace_handle_v1::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+        if let ext_workspace_handle_v1::Event::Removed = event {
+            state.ext_workspace.workspace_removed = true;
+        }
     }
 }
 
