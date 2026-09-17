@@ -2678,7 +2678,41 @@ pub(crate) struct RuntimeInner {
     /// The `ext_workspace_manager_v1` manager, once created — lets a taskbar or
     /// dock list and drive the compositor's workspaces. Display-owned; `Option`,
     /// same rationale as the other manager globals.
+    ///
+    /// Cleared by the manager's `destroy` watch (see
+    /// `ext_workspace_manager_alive`): after display teardown this is
+    /// `None`, so [`Runtime::create_workspace_group`] and
+    /// [`Runtime::create_workspace`] miss instead of dereferencing freed
+    /// memory — and so the double-create guard resets, letting a fresh
+    /// display install a new manager on the same runtime.
     pub(crate) ext_workspace_manager: RefCell<Option<NonNull<sys::wlr_ext_workspace_manager_v1>>>,
+
+    /// Whether the ext-workspace manager is still alive.
+    ///
+    /// Set true by
+    /// [`create_ext_workspace_manager`](Runtime::create_ext_workspace_manager)
+    /// once the teardown watch is linked, and set false by that watch when the
+    /// manager's `events.destroy` fires (display teardown). The flag is what
+    /// [`Runtime::create_workspace_group`] and [`Runtime::create_workspace`]
+    /// consult before touching the stored pointer, and what the watch's own
+    /// [`Registration`](crate::backend::Registration) consults in its `Drop`
+    /// to skip unlinking from the freed signal list. The cell lives in this
+    /// `Rc`-allocated struct, whose heap address never moves, so the raw
+    /// pointer handed to the watch stays valid for the registration's whole
+    /// life. Init `false` (no manager yet).
+    pub(crate) ext_workspace_manager_alive: std::cell::Cell<bool>,
+
+    /// The ext-workspace manager's `destroy` watch, linked at creation into
+    /// the manager's `events.destroy`.
+    ///
+    /// Unlinked by its own callback (display teardown, while the manager
+    /// memory is still valid) or by this runtime's drop while the manager
+    /// still stands — never from freed memory, because the callback clears the
+    /// liveness flag first and `Drop` skips the unlink once it reads false.
+    /// `None` until
+    /// [`create_ext_workspace_manager`](Runtime::create_ext_workspace_manager)
+    /// runs, and again after the watch has fired.
+    pub(crate) ext_workspace_manager_destroy: RefCell<Option<crate::backend::Registration>>,
 
     /// The gamma-control (`zwlr_gamma_control_manager_v1`) manager, once
     /// created — lets a client (a night-light tool such as `wlsunset` or
@@ -3805,6 +3839,8 @@ impl Runtime {
                 ext_foreign_toplevel_list_alive: std::cell::Cell::new(false),
                 ext_foreign_toplevel_list_destroy: RefCell::new(None),
                 ext_workspace_manager: RefCell::new(None),
+                ext_workspace_manager_alive: std::cell::Cell::new(false),
+                ext_workspace_manager_destroy: RefCell::new(None),
                 gamma_control_manager: RefCell::new(None),
                 text_input_manager: RefCell::new(None),
                 tearing_control_manager: RefCell::new(None),

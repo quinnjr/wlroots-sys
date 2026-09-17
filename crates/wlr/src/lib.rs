@@ -78,6 +78,10 @@ pub(crate) mod sys;
 mod addon;
 mod backend;
 mod buffer;
+// `#[macro_use]` so the capability-bitmask core is available to every module
+// declared below; the list is otherwise alphabetical.
+#[macro_use]
+mod capability_mask;
 mod decoration;
 mod dispatch;
 mod display;

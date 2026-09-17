@@ -498,6 +498,42 @@ pub fn spawn_ext_workspace(socket: &str) -> std::thread::JoinHandle<ExtWorkspace
     })
 }
 
+/// Drive an `ext_workspace_manager_v1` client that binds the manager and
+/// commits nothing.
+///
+/// Binds the manager and round-trips so the bind-time replay of the group and
+/// workspace is dispatched, then sends one bare `commit` with no staged
+/// requests. The server still emits its commit signal for the empty batch, so
+/// this is the baseline that distinguishes "no requests" from "all requests
+/// stale". Returns the observed [`ExtWorkspaceEvents`].
+pub fn spawn_empty_commit(socket: &str) -> std::thread::JoinHandle<ExtWorkspaceEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
+        let qh = queue.handle();
+
+        let manager: ext_workspace_manager_v1::ExtWorkspaceManagerV1 = globals
+            .bind(&qh, 1..=1, ())
+            .expect("bind ext_workspace_manager_v1");
+
+        // The manager replays every group and workspace that already exists on
+        // bind, then `done`.
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the replayed objects are dispatched");
+
+        // Commit with nothing staged: the server drains an empty batch.
+        manager.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the empty commit");
+
+        drop((manager,));
+        state.ext_workspace
+    })
+}
+
 /// Drive a `wp_security_context_manager_v1` client that creates a security
 /// context with a real listening socket, attaches its metadata and commits it.
 ///
