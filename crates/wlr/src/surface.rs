@@ -1144,6 +1144,16 @@ mod tests {
         }
     }
 
+    /// `from_raw_opt` is the nullable sibling: null reads `None` rather
+    /// than aborting, so nullable callers (hit-tests, `extern "C"` frames)
+    /// never abort through C.
+    #[test]
+    fn from_raw_opt_returns_none_on_null() {
+        // SAFETY: none — null is the whole point; `None` is the contract.
+        let got = unsafe { super::Surface::from_raw_opt(std::ptr::null_mut(), SurfaceId(0)) };
+        assert!(got.is_none(), "null must read None, not abort or fabricate");
+    }
+
     /// `role()` on a surface with no xdg-surface role reads `None` rather
     /// than faulting: wlroots' `try_from` answers null for a roleless surface
     /// (a zeroed scratch has a null role), which is the ordinary "no role"
@@ -1250,6 +1260,32 @@ mod tests {
         let mut visits = 0;
         surface.for_each_surface(|_, _, _| visits += 1);
         assert_eq!(visits, 0, "an id-less surface must be skipped, not visited");
+    }
+
+    /// The `visit` thunk refuses null surface/data pointers without running
+    /// the closure: a null here would be a dereference in an `extern "C"`
+    /// frame, so it is refused rather than dereferenced — and refusal must
+    /// not panic either, since a panic out of `extern "C"` aborts. Each
+    /// half is tripped separately.
+    #[test]
+    fn visit_refuses_null_pointers_without_running_the_closure() {
+        use std::ffi::c_void;
+        let scratch = crate::test_support::ScratchSurface::new();
+        let mut visits = 0;
+        let mut f = |_: &super::Surface<'_>, _: i32, _: i32| visits += 1;
+        // SAFETY: the stubs invoke the handed iterator synchronously with
+        // the pointers named; `scratch` outlives both calls, and neither
+        // call dereferences (that is the point under test).
+        unsafe {
+            super::for_each_surface_with(&mut f, |iterate, data| {
+                iterate.expect("iterator fn")(std::ptr::null_mut(), 0, 0, data);
+            });
+            super::for_each_surface_with(&mut f, |iterate, _| {
+                iterate.expect("iterator fn")(scratch.raw, 0, 0, std::ptr::null_mut::<c_void>());
+            });
+        }
+        assert_eq!(visits, 0, "null surface/data must skip the closure");
+        drop(scratch);
     }
 
     /// `surface_at` on a childless scratch surface misses through the real

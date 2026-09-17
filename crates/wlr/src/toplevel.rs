@@ -341,7 +341,7 @@ impl<'h> Toplevel<'h> {
     /// Hit-test this toplevel's tree at a point in its own surface-local
     /// coordinates.
     ///
-    /// Returns the struck leaf surface, its id, and the point in that leaf's
+    /// Returns the struck leaf surface and the point in that leaf's
     /// coordinates; `None` for a miss. This wraps
     /// `wlr_xdg_surface_surface_at` — the walk includes the toplevel's
     /// sub-surfaces.
@@ -442,94 +442,65 @@ impl Edges {
     }
 }
 
-/// A `u32`-backed capability bitmask: named constants plus
-/// `contains`/`bits`/`from_raw` and `BitOr`/`BitOrAssign`.
+/// The window-manager capabilities a compositor advertises to a toplevel.
 ///
-/// Local to this module: no crate-wide `bitmask!` exists (a parallel review
-/// asked for one in `ext_workspace.rs`, but that module still hand-rolls its
-/// own masks), so the macro lives here, next to its single use. A second
-/// bitmask type should move this into a shared spot (e.g. `surface.rs`,
-/// which `layer.rs` and this module already both reach through
-/// `crate::surface::`) rather than growing a second copy.
-macro_rules! bitmask {
-    (
-        $(#[$ty_attr:meta])*
-        $name:ident {
-            $(
-                $(#[$c_attr:meta])*
-                $const:ident = $val:expr
-            ),* $(,)?
-        }
-    ) => {
-        $(#[$ty_attr])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-        pub struct $name(u32);
+/// A `u32`-backed bitmask hand-rolled exactly like
+/// [`ConstraintAdjustment`](crate::ConstraintAdjustment) — named constants
+/// plus `contains`/`bits`/`from_raw` and `BitOr`/`BitOrAssign` as plain
+/// code, not a macro: with a single bitmask type in the crate, a macro
+/// would leave the next author choosing between two spellings. If a second
+/// bitmask type ever lands, promote the shared shape to a module both
+/// reach rather than growing a second copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct WmCapabilities(u32);
 
-        impl $name {
-            $(
-                $(#[$c_attr])*
-                pub const $const: $name = $name($val);
-            )*
+impl WmCapabilities {
+    /// No capabilities advertised; the protocol's initial value, and
+    /// [`Default`].
+    pub const NONE: WmCapabilities = WmCapabilities(0);
+    /// The compositor can show a client window menu.
+    pub const WINDOW_MENU: WmCapabilities = WmCapabilities(1);
+    /// The compositor can maximize.
+    pub const MAXIMIZE: WmCapabilities = WmCapabilities(2);
+    /// The compositor can fullscreen.
+    pub const FULLSCREEN: WmCapabilities = WmCapabilities(4);
+    /// The compositor can minimize.
+    pub const MINIMIZE: WmCapabilities = WmCapabilities(8);
 
-            /// Whether **every** bit of `other` is set here — not "any".
-            #[must_use]
-            pub fn contains(self, other: $name) -> bool {
-                self.0 & other.0 == other.0
-            }
+    /// Whether **every** bit of `other` is set here — not "any".
+    #[must_use]
+    pub fn contains(self, other: WmCapabilities) -> bool {
+        self.0 & other.0 == other.0
+    }
 
-            /// The raw mask, as the protocol numbers it.
-            #[must_use]
-            pub fn bits(self) -> u32 {
-                self.0
-            }
+    /// The raw mask, as the protocol numbers it.
+    #[must_use]
+    pub fn bits(self) -> u32 {
+        self.0
+    }
 
-            /// Build from the raw protocol value.
-            ///
-            /// Unknown bits are kept, not dropped: the mask is handed straight
-            /// back to wlroots by the setter that interprets it, so silently
-            /// clearing a bit would change the caller's request rather than
-            /// merely fail to describe it.
-            pub(crate) fn from_raw(raw: u32) -> $name {
-                $name(raw)
-            }
-        }
-
-        impl std::ops::BitOr for $name {
-            type Output = $name;
-
-            fn bitor(self, rhs: $name) -> $name {
-                $name(self.0 | rhs.0)
-            }
-        }
-
-        impl std::ops::BitOrAssign for $name {
-            fn bitor_assign(&mut self, rhs: $name) {
-                self.0 |= rhs.0;
-            }
-        }
-    };
+    /// Build from the raw protocol value.
+    ///
+    /// Unknown bits are kept, not dropped: the mask is handed straight
+    /// back to wlroots by the setter that interprets it, so silently
+    /// clearing a bit would change the caller's request rather than
+    /// merely fail to describe it.
+    pub(crate) fn from_raw(raw: u32) -> WmCapabilities {
+        WmCapabilities(raw)
+    }
 }
 
-bitmask! {
-    /// The window-manager capabilities a compositor advertises to a toplevel.
-    ///
-    /// A bitmask of `enum wlr_xdg_toplevel_wm_capabilities`, built with the
-    /// `bitmask!` macro above rather than a `bitflags` dependency following
-    /// [`ConstraintAdjustment`](crate::ConstraintAdjustment): the four bits are
-    /// the whole domain and are pinned against the generated constants by this
-    /// module's own tests.
-    WmCapabilities {
-        /// No capabilities advertised; the protocol's initial value, and
-        /// [`Default`].
-        NONE = 0,
-        /// The compositor can show a client window menu.
-        WINDOW_MENU = 1,
-        /// The compositor can maximize.
-        MAXIMIZE = 2,
-        /// The compositor can fullscreen.
-        FULLSCREEN = 4,
-        /// The compositor can minimize.
-        MINIMIZE = 8,
+impl std::ops::BitOr for WmCapabilities {
+    type Output = WmCapabilities;
+
+    fn bitor(self, rhs: WmCapabilities) -> WmCapabilities {
+        WmCapabilities(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for WmCapabilities {
+    fn bitor_assign(&mut self, rhs: WmCapabilities) {
+        self.0 |= rhs.0;
     }
 }
 
