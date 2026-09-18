@@ -11618,8 +11618,11 @@ unsafe fn emit_relative_motion<S: Handlers>(
     // SAFETY-adjacent but safe: a pure range check, no dereference. Huge-
     // yet-finite scaled deltas survive the finiteness gate above while still
     // saturating the `as i64` cast below into a wild jump, so drop them here
-    // — before either the forward or the announce, on the same terms.
-    if udx_milli.abs() > i64::MAX as f64 || udy_milli.abs() > i64::MAX as f64 {
+    // — before either the forward or the announce, on the same terms. The
+    // comparison is `>=`, not `>`: `i64::MAX as f64` rounds up to exactly
+    // 2^63, so `>` would let precisely that magnitude through to the
+    // saturating cast.
+    if udx_milli.abs() >= i64::MAX as f64 || udy_milli.abs() >= i64::MAX as f64 {
         return;
     }
     // SAFETY: `session` is live per this function's contract; `runtime`
@@ -14538,6 +14541,18 @@ mod tests {
                 state.relative, pinned,
                 "non-finite deltas — and finite ones whose milli-scaling overflows — \
                  must drop before the forward and the announce"
+            );
+            // The boundary itself: `i64::MAX as f64` rounds UP to exactly
+            // 2^63, so `>` would let precisely that magnitude through to a
+            // saturating cast. `9.223372036854776e15 * 1000.0` is exactly
+            // 2^63 — it must drop like every other out-of-range magnitude
+            // (the symmetric `-2^63`, exactly `i64::MIN`, drops too: still a
+            // wild jump, and one rule for both signs beats an asymmetric
+            // carve-out).
+            emit_relative_motion(session_ptr, 18, 1.0, 1.0, 9.223372036854776e15, 0.5);
+            assert_eq!(
+                state.relative, pinned,
+                "exactly-2^63 milli magnitude must drop at the i64-range guard"
             );
         }
     }

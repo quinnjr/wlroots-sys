@@ -92,6 +92,15 @@ jobs:
       # resolve under every feature set the lint steps above compile.
       - run: cargo test --workspace
 
+      # Release-only behavior pins: several tests assert clearing paths that
+      # only execute with debug_assertions off (touch-cancel null-device
+      # clearing and friends are `#[cfg(not(debug_assertions))]`-gated, since
+      # driving them in debug would unwind across wlroots' C emit frames).
+      # Debug CI never executes those arms, so one filtered release run pins
+      # them. Narrow filter keeps the release build cost to the backend unit
+      # target only.
+      - run: cargo test -p wlr --release backend::tests::touch_cancel_
+
       # Compile the bench target without running it. The separate `bench` job
       # is develop-push-only and non-gating, so a bench that stopped compiling
       # would otherwise be invisible on a PR. Not `cargo bench` for real:
