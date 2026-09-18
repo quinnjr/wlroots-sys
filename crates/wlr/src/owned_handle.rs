@@ -182,11 +182,10 @@ pub(crate) unsafe extern "C" fn on_watched_destroy<T>(
 ///
 /// For new internal-only users: call this helper rather than spelling out
 /// `usize::MAX - n` again. The `#[doc(hidden)] pub dangling_nth_for_test`
-/// constructors in `runtime.rs` (and the `usize::MAX` singletons like
-/// `CursorId`'s, which are that shape's `n = 0`) are minted by the
-/// `opaque_id!` macro with byte-identical bodies rather than by this helper,
-/// and are frozen public API within the 0.20.x line, so they are
-/// intentionally left as-is; the `usize::MAX - 7` argument
+/// constructors in `runtime.rs` (and the singletons like `CursorId`'s, which
+/// are that shape's `n = 0`) are minted by the `opaque_id!` macro through
+/// this helper — same band, one spelling — and are frozen public API within
+/// the 0.20.x line; the `usize::MAX - 7` argument
 /// at the `forget_transient_seat` call site and the `mapped_len` bound probe
 /// in `buffer.rs` are uses of the same guarantee, not new spellings of it.
 pub(crate) fn dangling_usize_test_id(n: usize) -> usize {

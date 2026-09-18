@@ -72,12 +72,41 @@ fn xcursor_theme_destroy_roundtrip() {
         assert!(rt.destroy_xcursor_theme(id), "first destroy releases");
         assert!(!rt.destroy_xcursor_theme(id), "second destroy misses");
     }
-    // A NUL in the name can never load. In debug builds that is a loud
-    // programming error — the `debug_assert!` in `load_xcursor_theme` fires
-    // before the `None` is reached — so only release builds can observe the
-    // quiet `None` here.
-    #[cfg(not(debug_assertions))]
-    assert!(rt.load_xcursor_theme("def\0ault", 24).is_none());
+}
+
+/// A NUL in the xcursor theme name can never load, in either build mode.
+///
+/// The refusal is a programming error — `load_xcursor_theme`'s
+/// `debug_assert!` fires in debug builds before the `None` is reached — so
+/// the attempt is caught: debug observes the gate's message, release
+/// observes the quiet `None`. The same shape as
+/// `destroy_seat_refused_inside_handler` below, and the integration twin of
+/// the `xcursor_theme_nul_name_is_refused_in_both_modes` unit test.
+#[test]
+fn xcursor_theme_nul_name_is_refused_in_both_modes() {
+    common::headless_env();
+    let rt = wlr::Runtime::new().unwrap();
+
+    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rt.load_xcursor_theme("def\0ault", 24)
+    }));
+    if cfg!(debug_assertions) {
+        let message = attempt.expect_err("the debug gate must fire, not load");
+        let message = message
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| message.downcast_ref::<&str>().map(|s| (*s).to_string()))
+            .unwrap_or_else(|| "(non-string panic)".to_string());
+        assert!(
+            message.contains("NUL"),
+            "the gate names the fault: {message}"
+        );
+    } else {
+        assert!(
+            attempt.expect("no panic in release").is_none(),
+            "a NUL name never loads"
+        );
+    }
 }
 
 /// M7 Task 2 compile assertion: the pointer-protocol handler surface.
@@ -376,6 +405,16 @@ fn constraint_state_misses_cleanly() {
 /// without a seat. Null is the documented miss case for every one of these
 /// (each takes null-or-live), so null probes the shared guard without any
 /// hardware; only a real name on a live seat renames.
+///
+/// Only miss shapes are pinned here, deliberately: a live probe needs a
+/// real `wl_client` (`seat_has_client`) or a real `wl_resource` (the other
+/// three) that only a protocol round-trip creates, and the harness holds no
+/// handle on the server-side objects its client thread bound — the client
+/// proxies never cross the thread boundary as raw pointers, and the runtime
+/// offers no accessor that hands one out. A dangling stand-in would be
+/// unsound rather than honest (the lookups dereference what they are given
+/// past the null check), so the populated shapes stay uncovered instead of
+/// faked; SAFETY FIRST — no fake pointers.
 #[test]
 fn seat_name_and_serial_guards_miss_cleanly() {
     let _serial = common::headless_guard();
@@ -406,32 +445,25 @@ fn seat_name_and_serial_guards_miss_cleanly() {
     }
 }
 
-/// M7 review (d), constraint group: the commit hook survives a real run
-/// without firing. Driving it needs a client that binds
+/// M7 review (d), constraint group: a compile-pin for the commit hook's
+/// signature, not a behavioral test — it never runs, so it asserts nothing
+/// about delivery. An earlier revision ran a real headless run and asserted
+/// the hook never fired, which read as behavioral coverage while proving
+/// only that nothing happened.
+/// Driving it for real needs a client that binds
 /// `zwp_pointer_constraints_v1` and commits a region on a mapped surface —
 /// `tests/common/client.rs` has no such helper (and the only emitters,
 /// `backend.rs`'s `on_new_pointer_constraint`/`on_constraint_commit`, run
-/// on client protocol traffic) — so headless cannot produce the event, and
-/// what this pins is that the hook is wired without synthesising one from
-/// nowhere. Routing itself is `backend::pointer_protocol_delivery_tests`.
+/// on client protocol traffic) — so headless cannot produce the event.
+/// Behavioral coverage lives in
+/// `backend::pointer_protocol_delivery_tests::constraint_and_gesture_events_route_their_ids`
+/// (routing) and `backend`'s
+/// `constraint_set_region_relay_announces_the_committing_constraint`
+/// (real signal emission into the hook).
 #[test]
-fn constraint_hook_survives_a_run_without_firing() {
-    let _serial = common::headless_guard();
-    common::headless_env();
-
-    #[derive(Default)]
+fn constraint_hook_signature_compiles() {
     struct App {
-        turns: u32,
         constraints: Vec<wlr::ConstraintId>,
-    }
-    impl wlr::OutputHandler for App {}
-    impl wlr::ToplevelHandler for App {}
-    impl wlr::FdHandler for App {}
-    impl wlr::LoopHandler for App {
-        fn should_stop(&mut self) -> bool {
-            self.turns += 1;
-            self.turns >= 4
-        }
     }
     impl wlr::SeatHandler for App {
         fn pointer_constraint_committed(&mut self, id: wlr::ConstraintId) {
@@ -439,51 +471,32 @@ fn constraint_hook_survives_a_run_without_firing() {
         }
     }
 
-    let display = wlr::Display::new().expect("display");
-    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
-    let runtime = wlr::Runtime::new().expect("runtime");
-    runtime.init_graphics(&display, &backend).expect("graphics");
-    runtime.create_seat(&display, "seat0").expect("seat");
-    runtime
-        .create_pointer_constraints_manager(&display)
-        .expect("manager");
-
-    let mut app = App::default();
-    backend
-        .run_all(&display, &mut app, &runtime, wlr::Until::Turns(4))
-        .expect("run_all");
-
-    assert!(
-        app.constraints.is_empty(),
-        "no client committed a constraint, so none may have been reported"
-    );
+    let app = App {
+        constraints: Vec::new(),
+    };
+    assert!(app.constraints.is_empty());
 }
 
-/// M7 review (d), gesture group: the begin/end hooks survive a real run
-/// without firing. The only emitters are the hardware-pointer gesture
-/// signals (`backend.rs`'s swipe/pinch/hold handlers), and headless offers
-/// no pointer device through the safe API — the same limit `seat.rs`'s
-/// header note records for key presses — so the event is unproducible here.
-/// Routing itself is `backend::pointer_protocol_delivery_tests`.
+/// M7 review (d), gesture group: a compile-pin for the begin/end hooks'
+/// signatures, not a behavioral test — it never runs, so it asserts nothing
+/// about delivery. An earlier revision ran a real headless run and asserted
+/// the hooks never fired, which read as behavioral coverage while proving
+/// only that nothing happened.
+/// The only emitters are the hardware-pointer gesture signals
+/// (`backend.rs`'s swipe/pinch/hold handlers), and headless offers no
+/// pointer device through the safe API — the same limit `seat.rs`'s header
+/// note records for key presses — so the event is unproducible here.
+/// Behavioral coverage lives in
+/// `backend::pointer_protocol_delivery_tests::constraint_and_gesture_events_route_their_ids`
+/// (routing) and `backend`'s `swipe_begin_and_end_emit_without_a_manager_or_seat`,
+/// `pinch_begin_and_end_emit_without_a_manager_or_seat` and
+/// `hold_begin_and_end_emit_without_a_manager_or_seat` (real signal
+/// emission into the hooks).
 #[test]
-fn gesture_hooks_survive_a_run_without_firing() {
-    let _serial = common::headless_guard();
-    common::headless_env();
-
-    #[derive(Default)]
+fn gesture_hooks_signature_compiles() {
     struct App {
-        turns: u32,
         began: Vec<wlr::GestureId>,
         ended: Vec<wlr::GestureId>,
-    }
-    impl wlr::OutputHandler for App {}
-    impl wlr::ToplevelHandler for App {}
-    impl wlr::FdHandler for App {}
-    impl wlr::LoopHandler for App {
-        fn should_stop(&mut self) -> bool {
-            self.turns += 1;
-            self.turns >= 4
-        }
     }
     impl wlr::SeatHandler for App {
         fn gesture_began(&mut self, id: wlr::GestureId) {
@@ -494,20 +507,10 @@ fn gesture_hooks_survive_a_run_without_firing() {
         }
     }
 
-    let display = wlr::Display::new().expect("display");
-    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
-    let runtime = wlr::Runtime::new().expect("runtime");
-    runtime.init_graphics(&display, &backend).expect("graphics");
-    runtime.create_seat(&display, "seat0").expect("seat");
-    runtime
-        .create_pointer_gestures_manager(&display)
-        .expect("manager");
-
-    let mut app = App::default();
-    backend
-        .run_all(&display, &mut app, &runtime, wlr::Until::Turns(4))
-        .expect("run_all");
-
+    let app = App {
+        began: Vec::new(),
+        ended: Vec::new(),
+    };
     assert!(app.began.is_empty() && app.ended.is_empty());
 }
 
@@ -576,30 +579,22 @@ fn touch_hooks_survive_real_injection_without_firing() {
     assert_eq!(app.cancelled, 0);
 }
 
-/// M7 review (d), switch group: the toggle hook survives a real run without
-/// firing. The only emitter is the switch-hardware toggle signal, and
-/// headless has no switch device — nor any safe-API injection for one
+/// M7 review (d), switch group: a compile-pin for the toggle hook's
+/// signature, not a behavioral test — it never runs, so it asserts nothing
+/// about delivery. An earlier revision ran a real headless run and asserted
+/// the hook never fired, which read as behavioral coverage while proving
+/// only that nothing happened.
+/// The only emitter is the switch-hardware toggle signal, and headless has
+/// no switch device — nor any safe-API injection for one
 /// (`note_switch_toggle` is `pub(crate)`, reachable only from that signal)
-/// — so the event is unproducible here. Routing itself is
-/// `backend::touch_switch_delivery_tests`.
+/// — so the event is unproducible here. Behavioral coverage lives in
+/// `backend::touch_switch_delivery_tests::touch_and_switch_events_route_their_payloads`
+/// (routing) and `backend`'s `switch_toggle_relay_records_and_announces`
+/// (real signal emission into the hook).
 #[test]
-fn switch_hook_survives_a_run_without_firing() {
-    let _serial = common::headless_guard();
-    common::headless_env();
-
-    #[derive(Default)]
+fn switch_hook_signature_compiles() {
     struct App {
-        turns: u32,
         toggles: Vec<(wlr::SwitchId, bool)>,
-    }
-    impl wlr::OutputHandler for App {}
-    impl wlr::ToplevelHandler for App {}
-    impl wlr::FdHandler for App {}
-    impl wlr::LoopHandler for App {
-        fn should_stop(&mut self) -> bool {
-            self.turns += 1;
-            self.turns >= 4
-        }
     }
     impl wlr::SeatHandler for App {
         fn switch_toggled(&mut self, id: wlr::SwitchId, on: bool) {
@@ -607,17 +602,9 @@ fn switch_hook_survives_a_run_without_firing() {
         }
     }
 
-    let display = wlr::Display::new().expect("display");
-    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
-    let runtime = wlr::Runtime::new().expect("runtime");
-    runtime.init_graphics(&display, &backend).expect("graphics");
-    runtime.create_seat(&display, "seat0").expect("seat");
-
-    let mut app = App::default();
-    backend
-        .run_all(&display, &mut app, &runtime, wlr::Until::Turns(4))
-        .expect("run_all");
-
+    let app = App {
+        toggles: Vec::new(),
+    };
     assert!(app.toggles.is_empty());
 }
 

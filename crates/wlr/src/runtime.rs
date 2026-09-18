@@ -39,6 +39,7 @@ use crate::buffer::create_pixel_buffer;
 use crate::decoration::{DecorationEntry, DecorationMode};
 use crate::id::{SourceId, find_id, next_id};
 use crate::layer::Layer;
+use crate::owned_handle::dangling_usize_test_id;
 use crate::scene::output::SceneOutputEntry;
 use crate::scene::{
     LegacyId, NodeId, NodeKind, SceneBuffer, SceneBufferOptions, SceneNode, SceneOutput,
@@ -97,7 +98,7 @@ macro_rules! opaque_id {
             $(#[$dangling_meta])*
             #[doc(hidden)]
             pub fn dangling_nth_for_test(n: usize) -> Self {
-                Self(usize::MAX - n)
+                Self(dangling_usize_test_id(n))
             }
         }
     };
@@ -116,7 +117,7 @@ macro_rules! opaque_id {
             $(#[$dangling_meta])*
             #[doc(hidden)]
             pub fn dangling() -> Self {
-                Self(usize::MAX)
+                Self(dangling_usize_test_id(0))
             }
         }
     };
@@ -148,7 +149,7 @@ macro_rules! opaque_id {
             $(#[$dangling_meta])*
             #[doc(hidden)]
             pub fn dangling_nth_for_test(n: usize) -> Self {
-                Self(usize::MAX - n, u64::MAX - n as u64)
+                Self(dangling_usize_test_id(n), u64::MAX - n as u64)
             }
         }
     };
@@ -14411,22 +14412,48 @@ mod tests {
 
     /// The one policy the `opaque_id!` macro mints for every address-keyed
     /// id: `dangling_nth_for_test(n)` is `usize::MAX - n`, and the
-    /// singletons are `n = 0` of that same shape. Two different id types
-    /// must agree on the wrapped value for the same `n` — if they ever
-    /// drift, the "one policy" claim in the macro docs is a lie — and the
-    /// redacted `Debug` strings must still name their own type.
+    /// singletons are `n = 0` of that same shape. Every address-keyed id
+    /// type must agree on the wrapped value for the same `n` — if any one
+    /// drifts, the "one policy" claim in the macro docs is a lie — and the
+    /// redacted `Debug` strings must still name their own type. The wire
+    /// (`TouchId`) and generational (`TransientSeatId`) keyings keep their
+    /// own bands, pinned here alongside so a change to any arm shows up in
+    /// exactly one place.
     #[test]
     fn opaque_ids_share_one_dangling_band_policy() {
         for n in [0usize, 1, 7, 100] {
-            assert_eq!(
+            let band = usize::MAX - n;
+            for id in [
+                InputPopupSurfaceId::dangling_nth_for_test(n).0,
+                KeyboardGroupId::dangling_nth_for_test(n).0,
+                ShortcutsInhibitorId::dangling_nth_for_test(n).0,
+                TabletToolId::dangling_nth_for_test(n).0,
+                TabletPadId::dangling_nth_for_test(n).0,
+                VirtualKeyboardId::dangling_nth_for_test(n).0,
+                VirtualPointerId::dangling_nth_for_test(n).0,
                 ConstraintId::dangling_nth_for_test(n).0,
                 GestureId::dangling_nth_for_test(n).0,
-                "ConstraintId and GestureId share one band"
+                SwitchId::dangling_nth_for_test(n).0,
+            ] {
+                assert_eq!(
+                    id, band,
+                    "every address-keyed nth id shares one band for n = {n}"
+                );
+            }
+            assert_eq!(
+                TouchId::dangling_nth_for_test(n).0,
+                i32::MAX - n as i32,
+                "the wire band is i32::MAX - n for n = {n}"
+            );
+            let transient = TransientSeatId::dangling_nth_for_test(n);
+            assert_eq!(
+                transient.0, band,
+                "the generational address half shares the band for n = {n}"
             );
             assert_eq!(
-                ConstraintId::dangling_nth_for_test(n).0,
-                SwitchId::dangling_nth_for_test(n).0,
-                "ConstraintId and SwitchId share one band"
+                transient.1,
+                u64::MAX - n as u64,
+                "the generational counter half sits at the top for n = {n}"
             );
         }
         assert_eq!(
@@ -14447,6 +14474,10 @@ mod tests {
             format!("{:?}", GestureId::dangling_nth_for_test(1)),
             "GestureId(..)"
         );
+        assert_eq!(
+            format!("{:?}", SwitchId::dangling_nth_for_test(1)),
+            "SwitchId(..)"
+        );
     }
 
     /// `send_cancel` answers whether the cancel notify went out: `false`
@@ -14454,6 +14485,20 @@ mod tests {
     /// on a live seat (no such point — nothing went out, so no client could
     /// have been notified). The `TouchCancelled` handler event is delivered
     /// regardless; this answers only the client-forward half.
+    ///
+    /// The `true` arm is deliberately unpinned here: it needs a live touch
+    /// point *with a client* — `send_cancel` resolves the point through
+    /// `wlr_seat_touch_get_point` and notifies its `wlr_seat_client`, which
+    /// wlroots only creates when a real Wayland client binds the seat and
+    /// holds a `wl_touch` resource (see `enable_test_touch`'s doc for why a
+    /// headless seat never grows one on its own). Unit scope has no client,
+    /// and synthesising either pointer would be unsound: a dangling
+    /// `wlr_seat_client` is dereferenced by the notify, and a point
+    /// fabricated with a null client exercises the *clientless* arm instead
+    /// (pinned by `send_cancel_reports_a_clientless_point_as_unemitted`).
+    /// An integration leg would need a `wl_touch`-binding, mapped-surface
+    /// client helper that `tests/common/client.rs` does not offer, so the
+    /// `true` arm stays documented-until-covered rather than faked.
     #[test]
     fn send_cancel_reports_whether_the_notify_was_emitted() {
         let _guard = crate::test_support::test_display_guard();
@@ -14468,6 +14513,112 @@ mod tests {
             !TouchFrame::of(&runtime).send_cancel(7),
             "no touch point with this id, so nothing was emitted"
         );
+    }
+
+    /// The third `send_cancel` miss: the id names a live point, but the
+    /// point names no client — a programming error (wlroots sets the client
+    /// at creation), loud in debug builds and a quiet miss in release.
+    ///
+    /// The point is honestly constructible here because `send_cancel`
+    /// resolves it through the seat's own `touch_points` list
+    /// (`wlr_seat_touch_get_point` walks that list comparing `touch_id`):
+    /// the seat is this runtime's own live one, and the point is a
+    /// test-owned zeroed allocation — client null by construction — linked
+    /// into that list and unlinked again before asserting, so nothing
+    /// wlroots frees later ever names it. No garbage pointer is
+    /// dereferenced: the lookup reads only the list links and the `touch_id`
+    /// this test wrote, and the null client is compared, never followed.
+    /// The `true` arm needs the same list entry with a *live*
+    /// `wlr_seat_client`, which only a real Wayland client grows — that is
+    /// why it stays documented-only (see the test above).
+    #[test]
+    fn send_cancel_reports_a_clientless_point_as_unemitted() {
+        let _guard = crate::test_support::test_display_guard();
+        let display = crate::Display::new().expect("display");
+        let runtime = Runtime::new().expect("runtime");
+        runtime.create_seat(&display, "seat0").expect("seat");
+        let seat = runtime.seat_ptr().expect("seat");
+
+        let layout = std::alloc::Layout::new::<sys::wlr_touch_point>();
+        // SAFETY: `wlr_touch_point` is non-zero-sized, so `alloc_zeroed`
+        // returns either null (checked below) or a suitably aligned, zeroed
+        // allocation of exactly that size, exclusively owned by this test.
+        let point = unsafe { std::alloc::alloc_zeroed(layout) }.cast::<sys::wlr_touch_point>();
+        assert!(!point.is_null(), "allocation failed");
+        // SAFETY: `point` is live and exclusively owned; `seat` is this
+        // runtime's own live seat, whose `touch_points` is an initialised
+        // list head. Only `touch_id` is written and the `link` is inserted
+        // — the insert touches the head and the link, both live — and the
+        // entry is unlinked again below before anything is asserted, so the
+        // seat never outlives the entry.
+        unsafe {
+            (*point).touch_id = 7;
+            sys::wayland_sys::server::wl_list_insert(
+                &raw mut (*seat.as_ptr()).touch_state.touch_points,
+                &raw mut (*point).link,
+            );
+        }
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            TouchFrame::of(&runtime).send_cancel(7)
+        }));
+        // SAFETY: the entry was linked above and nothing else could have
+        // unlinked it (no emission ran in between that touches the list —
+        // the caught attempt returns before any notify); removing it here
+        // restores the seat to exactly the state `create_seat` left it in,
+        // before any assertion can fail and skip the cleanup.
+        unsafe {
+            sys::wayland_sys::server::wl_list_remove(&raw mut (*point).link);
+            std::alloc::dealloc(point.cast::<u8>(), layout);
+        }
+        if cfg!(debug_assertions) {
+            let message = attempt.expect_err("the debug gate must fire, not emit");
+            let message = message
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| message.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                .unwrap_or_else(|| "(non-string panic)".to_string());
+            assert!(
+                message.contains("no client"),
+                "the gate names the fault: {message}"
+            );
+        } else {
+            assert!(
+                !attempt.expect("no panic in release"),
+                "a clientless point names nothing to notify"
+            );
+        }
+    }
+
+    /// A NUL in the xcursor theme name can never load: no Wayland string can
+    /// carry one. That is a loud programming error in debug builds — the
+    /// `debug_assert!` in `load_xcursor_theme` fires before the `None` is
+    /// reached — so the attempt is caught: debug observes the gate's
+    /// message, release observes the quiet `None`. Needs no seat, no
+    /// display and no theme installed, so this pins the gate at unit scope;
+    /// the integration twin lives in `tests/pointer.rs`.
+    #[test]
+    fn xcursor_theme_nul_name_is_refused_in_both_modes() {
+        let runtime = Runtime::new().expect("runtime");
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.load_xcursor_theme("def\0ault", 24)
+        }));
+        if cfg!(debug_assertions) {
+            let message = attempt.expect_err("the debug gate must fire, not load");
+            let message = message
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| message.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                .unwrap_or_else(|| "(non-string panic)".to_string());
+            assert!(
+                message.contains("NUL"),
+                "the gate names the fault: {message}"
+            );
+        } else {
+            assert!(
+                attempt.expect("no panic in release").is_none(),
+                "a NUL name never loads"
+            );
+        }
     }
 
     fn pipe_read_end() -> OwnedFd {
