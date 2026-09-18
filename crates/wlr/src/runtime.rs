@@ -14520,9 +14520,10 @@ mod tests {
     /// `wlr_seat_client` is dereferenced by the notify, and a point
     /// fabricated with a null client exercises the *clientless* arm instead
     /// (pinned by `send_cancel_reports_a_clientless_point_as_unemitted`).
-    /// An integration leg would need a `wl_touch`-binding, mapped-surface
-    /// client helper that `tests/common/client.rs` does not offer, so the
-    /// `Cancelled` arm stays documented-until-covered rather than faked.
+    /// An integration leg for the `Cancelled` arm needs a hardware cancel
+    /// signal, which no headless source produces — `spawn_touch_client`
+    /// (tests/common/client.rs) covers down/up legs; cancel stays
+    /// documented-until-covered rather than faked.
     #[test]
     fn send_cancel_reports_each_miss_distinctly() {
         let _guard = crate::test_support::test_display_guard();
