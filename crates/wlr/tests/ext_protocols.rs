@@ -891,7 +891,7 @@ enum StagedDestroy {
 }
 
 /// Which single request the staged leg stages before the commit drains.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum StagedRequest {
     Assign,
     Activate,
@@ -974,6 +974,10 @@ fn spawn_staged_request(
 struct StagedApp {
     client: Option<JoinHandle<()>>,
     requests: Vec<WorkspaceRequest>,
+    /// How many `workspace_commit` deliveries fired. The staged tests assert
+    /// on the delivered batch, so a run where the drain never fired must fail
+    /// here rather than passing vacuously on an empty vec.
+    commits: u32,
     staged: std::sync::mpsc::Receiver<()>,
     destroyed: Option<std::sync::mpsc::Sender<()>>,
     group: Option<WorkspaceGroupHandle>,
@@ -987,6 +991,7 @@ impl wlr::FdHandler for StagedApp {}
 
 impl ToplevelHandler for StagedApp {
     fn workspace_commit(&mut self, requests: &[WorkspaceRequest]) {
+        self.commits += 1;
         self.requests.extend_from_slice(requests);
     }
 }
@@ -1048,6 +1053,7 @@ fn assign_with_destroyed_group_arrives_with_none_group() {
             StagedRequest::Assign,
         )),
         requests: Vec::new(),
+        commits: 0,
         staged: staged_rx,
         destroyed: Some(destroyed_tx),
         group: Some(group),
@@ -1114,6 +1120,7 @@ fn assign_with_destroyed_workspace_arrives_stale() {
             StagedRequest::Assign,
         )),
         requests: Vec::new(),
+        commits: 0,
         staged: staged_rx,
         destroyed: Some(destroyed_tx),
         group: Some(group),
@@ -1163,6 +1170,13 @@ fn assign_with_destroyed_workspace_arrives_stale() {
 
 /// Stage one workspace-only request, have the server destroy the workspace
 /// before the commit drains, and return the delivered batch.
+///
+/// The deactivate leg pre-activates server-side first: a `deactivate`
+/// staged against an inactive workspace is a protocol no-op wlroots may
+/// legitimately drop before anything is queued, so pinning `Stale` on that
+/// path would test unspecified behavior. A deactivate staged against an
+/// ACTIVE workspace is a genuine state transition, and its survival past
+/// the destroy is the contract under test for every kind here.
 fn staged_workspace_destroy_delivers(request: StagedRequest) -> Vec<WorkspaceRequest> {
     let _serial = common::headless_guard();
     common::headless_env();
@@ -1187,6 +1201,15 @@ fn staged_workspace_destroy_delivers(request: StagedRequest) -> Vec<WorkspaceReq
                 | WorkspaceCapabilities::REMOVE,
         )
         .expect("workspace");
+    if request == StagedRequest::Deactivate {
+        workspace
+            .set_active(true)
+            .expect("pre-activate for deactivate");
+        assert!(
+            workspace.active(),
+            "the deactivate leg stages against an active workspace"
+        );
+    }
 
     let socket = display.add_socket_auto().expect("socket");
     let (staged_tx, staged_rx) = std::sync::mpsc::channel();
@@ -1199,6 +1222,7 @@ fn staged_workspace_destroy_delivers(request: StagedRequest) -> Vec<WorkspaceReq
             request,
         )),
         requests: Vec::new(),
+        commits: 0,
         staged: staged_rx,
         destroyed: Some(destroyed_tx),
         group: Some(group),
@@ -1213,6 +1237,11 @@ fn staged_workspace_destroy_delivers(request: StagedRequest) -> Vec<WorkspaceReq
         .expect("client handle")
         .join()
         .expect("client thread");
+    assert!(
+        app.commits >= 1,
+        "the commit drained at least once: an empty final batch means \
+         the drain never fired, not an empty commit"
+    );
     app.requests
 }
 
