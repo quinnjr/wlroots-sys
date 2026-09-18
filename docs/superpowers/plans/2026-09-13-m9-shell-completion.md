@@ -29,6 +29,7 @@
 | `wlr_ext_foreign_toplevel_image_capture_source_manager_v1*` (4) | **M10** |
 | `wlr_surface_get_content_type_v1` | **M11** |
 | `wlr_compositor_set_renderer` | **M13** |
+| `wlr_surface_reject_pending` | **M13** |
 
 ---
 
@@ -241,8 +242,8 @@ SubsurfaceCreated(SurfaceId, SurfaceId),
 
 ```rust
 Event::SurfaceCommitted(id) => with_surface(session, id, |s| state.surface_committed(s)),
-Event::SurfaceMapped(id) => with_surface(session, id, |s| state.surface_mapped(s)),
-Event::SurfaceUnmapped(id) => with_surface(session, id, |s| state.surface_unmapped(s)),
+Event::SurfaceMapped(id) => state.surface_mapped(id),
+Event::SurfaceUnmapped(id) => state.surface_unmapped(id),
 Event::SurfaceDestroyed(id) => state.surface_destroyed(id),
 Event::SubsurfaceCreated(p, c) => state.new_subsurface(p, c),
 ```
@@ -255,7 +256,7 @@ In `handler.rs`, beside `layer_surface_mapped`, each with an "Added additively" 
 
 ```rust
 fn surface_committed(&mut self, surface: &Surface<'_>) { let _ = surface; }
-fn surface_mapped(&mut self, surface: &Surface<'_>) { let _ = surface; }
+fn surface_mapped(&mut self, id: SurfaceId) { let _ = id; }
 fn surface_unmapped(&mut self, id: SurfaceId) { let _ = id; }
 fn surface_destroyed(&mut self, id: SurfaceId) { let _ = id; }
 fn new_subsurface(&mut self, parent: SurfaceId, child: SurfaceId) { let _ = (parent, child); }
