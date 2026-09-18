@@ -3035,6 +3035,24 @@ pub(crate) struct RuntimeInner {
     /// rule every other by-id table here follows.
     pub(crate) layer_surfaces: RefCell<HashMap<LayerSurfaceId, LayerSurfaceEntry>>,
 
+    /// Layer-surface destroys asked for from inside a handler frame, whose
+    /// wlroots destroy is deferred to the turn's drain.
+    ///
+    /// Freeing a layer surface runs the destroy emission while wlroots may
+    /// still be walking that same surface (a `layer_surface_commit` handler
+    /// asking to close the surface it was just handed, say), which is a
+    /// use-after-free. So [`Runtime::destroy_layer_surface`] queues the id
+    /// here when [`crate::dispatch::in_handler`] is set, and the queue drains
+    /// with [`Runtime::drain_pending_foreign_toplevel_destroys`], at the same
+    /// per-turn point and for the same reason: after every callback of the
+    /// turn has returned, no emission is in flight.
+    ///
+    /// Ids, not raw pointers (unlike `pending_foreign_toplevel_destroys`):
+    /// the drain re-resolves each one, so a surface that died on its own
+    /// before the drain simply misses and is skipped. Nothing here can
+    /// dangle, and there is nothing to leak when the runtime drops.
+    pub(crate) pending_layer_destroys: RefCell<Vec<LayerSurfaceId>>,
+
     /// Reverse lookup for the scene hit test, which finds a `wlr_scene_tree`
     /// and has to name the toplevel it belongs to. Keyed by the tree pointer
     /// because that is what `wlr_scene_node_at` walks back to.
@@ -3807,6 +3825,7 @@ impl Runtime {
                 live_sources: RefCell::new(HashMap::new()),
                 pending_close: RefCell::new(Vec::new()),
                 pending_foreign_toplevel_destroys: RefCell::new(Vec::new()),
+                pending_layer_destroys: RefCell::new(Vec::new()),
                 xdg_shell: RefCell::new(None),
                 xdg_shell_version: std::cell::Cell::new(None),
                 xdg_decoration_manager: RefCell::new(None),
@@ -4088,12 +4107,21 @@ impl Runtime {
             .push(raw);
     }
 
-    /// Release every handle whose destroy was deferred this turn.
+    /// Release every handle whose destroy was deferred this turn, plus every
+    /// layer-surface destroy [`destroy_layer_surface`](Self::destroy_layer_surface)
+    /// deferred this turn.
     ///
     /// Runs at the same point as [`drain_pending_closes`](Self::drain_pending_closes):
     /// after `wl_event_loop_dispatch` returns, so the request signal that
     /// produced the drop is no longer being emitted and the handle memory can
     /// be freed. An empty list is the ordinary case.
+    ///
+    /// The layer-surface queue shares this drain point rather than growing its
+    /// own hook in `backend.rs`'s `run_inner`: the safety property is the
+    /// same ("no wlroots emission in flight"), so one per-turn drain covers
+    /// both. Each queued id is re-resolved and a surface that died on its own
+    /// before the drain simply misses — ids cannot dangle, so unlike the
+    /// handle queue below there is no liveness flag to consult first.
     ///
     /// When the manager died with its display after a handle was queued — the
     /// teardown watch cleared `foreign_toplevel_manager_alive` between the
@@ -4104,6 +4132,15 @@ impl Runtime {
     /// owns), and the handles' own listeners were already unlinked by their
     /// manager-death watches.
     pub(crate) fn drain_pending_foreign_toplevel_destroys(&self) {
+        let pending_layers: Vec<LayerSurfaceId> = self
+            .inner
+            .pending_layer_destroys
+            .borrow_mut()
+            .drain(..)
+            .collect();
+        for id in pending_layers {
+            self.destroy_layer_surface_now(id);
+        }
         let pending: Vec<NonNull<sys::wlr_foreign_toplevel_handle_v1>> = self
             .inner
             .pending_foreign_toplevel_destroys
@@ -7821,24 +7858,10 @@ impl Runtime {
             return None;
         }
         let entry = self.toplevel_entry(id)?;
-        // Debug-only tripwires naming the three distinct `None` causes (old
-        // shell / bad extent / unknown-or-stale id). Release behavior stays
-        // bare `None` — there is no logging facade in this crate — while
-        // each assert pins which guard discharged wlroots' own assert on
-        // this path. They cannot fire: the early returns above already
-        // refused every case they deny.
-        debug_assert!(
-            min_version.is_none_or(|min| self.xdg_shell_at_least(min)),
-            "with_live_toplevel: version guard discharged before live entry use"
-        );
-        debug_assert!(
-            check_extent.is_none_or(|(width, height)| Self::non_negative_extent(width, height)),
-            "with_live_toplevel: extent guard discharged before live entry use"
-        );
-        debug_assert!(
-            self.inner.toplevels.borrow().contains_key(&id),
-            "with_live_toplevel: entry present between lookup and use"
-        );
+        // The three guards above discharged wlroots' own asserts on this path
+        // (old shell / bad extent / unknown-or-stale id); by the time the
+        // live entry is used each has already refused its case, so these read
+        // as comments rather than re-checks.
         f(entry.raw);
         Some(())
     }
@@ -11708,10 +11731,15 @@ impl Runtime {
     /// The decoration mode queued in the **next** configure for this
     /// toplevel's decoration, read from the head of wlroots' configure list.
     ///
-    /// `None` when nothing is queued (the common case between configures) or
-    /// when the id names no decoration. The record's `link` is its first
-    /// field, so the list node *is* the record pointer; see
-    /// [`DecorationMode`] for the wire values.
+    /// `None` conflates two cases: nothing is queued (the common case between
+    /// configures) or the id names no decoration. An empty queue on a live id
+    /// and a stale id read identically here — there is no logging facade in
+    /// this crate to tell them apart, and a richer return would cost every
+    /// caller ergonomics for a diagnostic. To tell them apart, pair this with
+    /// [`decoration_state`](Runtime::decoration_state): `Some` there means the
+    /// id is live, so a `None` here means "nothing queued". The record's
+    /// `link` is its first field, so the list node *is* the record pointer;
+    /// see [`DecorationMode`] for the wire values.
     #[must_use]
     pub fn decoration_configure(&self, id: ToplevelId) -> Option<DecorationMode> {
         let raw = self.decoration_ptr(id)?;
@@ -12575,13 +12603,34 @@ impl Runtime {
     /// event stream reports the surface destroyed as on any other path.
     ///
     /// `None` for an unknown or stale id, the by-id miss every mutator in this
-    /// crate keeps. **Do not call it from inside a wlroots callback**: it frees
-    /// the layer surface wlroots may still be walking, which is a
-    /// use-after-free. Call it from between turns instead — a
-    /// [`LoopHandler::should_stop`](crate::LoopHandler::should_stop), say, the
-    /// same way this crate's own layer test does; the method is `&self` and
-    /// cannot forbid the unsafe call, so the precondition is on the caller.
+    /// crate keeps.
+    ///
+    /// Safe to call from inside a handler — including
+    /// [`LoopHandler::should_stop`](crate::LoopHandler::should_stop), which
+    /// runs as a handler frame: while a handler is on the stack
+    /// (`dispatch::in_handler`) the destroy is queued and runs at the turn's
+    /// drain, after every callback of the turn has returned, rather than
+    /// freeing the surface wlroots may still be walking. `Some(())` is still
+    /// returned — the destroy was accepted, not refused — but the surface
+    /// stays live until the drain, so a commit handler that closes its own
+    /// surface must not assume the id is gone on return.
     pub fn destroy_layer_surface(&self, id: LayerSurfaceId) -> Option<()> {
+        // Resolve first so a stale id misses without touching the queue.
+        self.layer_surface_ptr(id)?;
+        if crate::dispatch::in_handler() {
+            // A commit handler closing its own surface would otherwise free
+            // the surface wlroots is still emitting for. Queue the id; the
+            // turn drain re-resolves it and destroys what is still live.
+            self.inner.pending_layer_destroys.borrow_mut().push(id);
+            return Some(());
+        }
+        self.destroy_layer_surface_now(id)
+    }
+
+    /// Destroy `id`'s layer surface synchronously. `id` was resolved by the
+    /// caller; the entry may still be gone (a destroy queued behind a death),
+    /// in which case this is a miss.
+    fn destroy_layer_surface_now(&self, id: LayerSurfaceId) -> Option<()> {
         let raw = self.layer_surface_ptr(id)?;
         // SAFETY: a present `layer_surfaces` entry names a live layer surface
         // (its destroy callback removes the entry before wlroots frees it), and

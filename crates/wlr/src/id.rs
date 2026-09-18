@@ -24,6 +24,26 @@ use crate::sys;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OutputId(pub(crate) u64);
 
+impl OutputId {
+    /// An id no live output can have, for testing the "unknown id" path.
+    ///
+    /// Public for the same reason
+    /// [`ToplevelId::dangling_for_test`](crate::ToplevelId::dangling_for_test)
+    /// is: "every by-id operation reports a miss rather than dereferencing" is
+    /// a promise to consumers, and a promise nobody can write a test for is
+    /// not one. Ids come from the process-wide counter that backs every id in
+    /// this crate, which starts at 1, only increments and never reuses a
+    /// value, so `u64::MAX` cannot be handed to a real output.
+    ///
+    /// Not for production code. An id from a real output is the one
+    /// [`Output::id`](crate::Output::id) returns, and it stops resolving once
+    /// the [`Backend::run_all`](crate::Backend::run_all) call that announced
+    /// it has returned — at which point it behaves exactly like this one.
+    pub fn dangling_for_test() -> OutputId {
+        OutputId(dangling_test_id(0))
+    }
+}
+
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Identifies an fd source for as long as the consumer chooses to remember it.

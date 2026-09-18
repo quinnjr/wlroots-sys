@@ -260,10 +260,7 @@ pub trait OutputHandler {
     /// [`AppliedHead`] values (see that type's own doc) — the compositor's cue
     /// to re-derive its geometry from the new layout and persist it.
     ///
-    /// Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl OutputHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     ///
     /// Only fired after a **successful** apply — a rejected configuration
     /// sends the client `failed` and this is not called. The crate has already
@@ -308,8 +305,7 @@ pub trait OutputHandler {
     /// make (backend-driven mode repair, for instance). It is observation,
     /// not a veto point: the state is already applied.
     ///
-    /// Added additively: it is defaulted, so an `impl OutputHandler`
-    /// written against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn output_committed(
         &mut self,
         output: &Output<'_>,
@@ -326,8 +322,7 @@ pub trait OutputHandler {
     /// snapshot survived to delivery this is not called at all. There is no
     /// empty-damage call and no per-emission 1:1 delivery to rely on.
     ///
-    /// Added additively: it is defaulted, so an `impl OutputHandler`
-    /// written against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn output_damaged(&mut self, output: &Output<'_>, damage: Region) {
         let _ = (output, damage);
     }
@@ -336,8 +331,7 @@ pub trait OutputHandler {
     /// Same payload as [`output_committed`](OutputHandler::output_committed);
     /// the state is staged, not yet applied.
     ///
-    /// Added additively: it is defaulted, so an `impl OutputHandler`
-    /// written against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn output_precommitted(
         &mut self,
         output: &Output<'_>,
@@ -351,8 +345,7 @@ pub trait OutputHandler {
     /// compositor can notice unexpected clients, not so it can refuse them
     /// (the bind already happened).
     ///
-    /// Added additively: it is defaulted, so an `impl OutputHandler`
-    /// written against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     ///
     /// Fires only with a Wayland client in the loop; the in-tree harness
     /// has none, so this is e2e-only (icedtea harness — no wlr milestone,
@@ -366,8 +359,7 @@ pub trait OutputHandler {
     /// applying it is the compositor's decision, made by committing its own
     /// state for this output.
     ///
-    /// Added additively: it is defaulted, so an `impl OutputHandler`
-    /// written against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     ///
     /// Fires only with a client speaking output-management; e2e-only
     /// (icedtea harness — no wlr milestone, the gap is environmental).
@@ -384,8 +376,7 @@ pub trait OutputHandler {
     /// manager-scoped signals (power, gamma) pass ids while output-scoped
     /// signals pass handles.
     ///
-    /// Added additively: it is defaulted, so an `impl OutputHandler`
-    /// written against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     ///
     /// Fires only when a client bound to `zwlr_output_power_manager_v1`
     /// requests a mode; requires
@@ -449,19 +440,15 @@ pub trait LoopHandler {
 /// xdg-shell toplevel lifecycle.
 ///
 /// Declared with no methods in 0.20.1 so that [`Handlers`]' supertrait list
-/// could freeze from the first release; these methods were added in 0.20.2,
-/// which is additive because they are all defaulted. An
-/// `impl ToplevelHandler for MyState {}` written against 0.20.1 still
-/// compiles unchanged.
+/// could freeze from the first release; these methods were added in 0.20.2 —
+/// see the guarantee in [`crate`].
 ///
 /// `request_maximize`, `request_fullscreen`, `request_move` and
-/// `request_resize` were added in 0.20.7, additively for the same reason:
-/// every one of them is defaulted, so an impl written against any earlier
-/// 0.20.x still compiles.
+/// `request_resize` were added in 0.20.7, on the same terms.
 ///
 /// `new_layer_surface`, `layer_surface_commit`, `layer_surface_mapped`,
 /// `layer_surface_unmapped` and `layer_surface_destroyed` were added in
-/// 0.20.11, on the same additive terms — wlr-layer-shell surfaces are not
+/// 0.20.11, on the same terms — wlr-layer-shell surfaces are not
 /// xdg-shell toplevels, but they share this trait rather than getting their
 /// own for the identical reason `request_decoration_mode` does: one more
 /// defaulted method costs an implementor nothing, and a second trait would
@@ -470,8 +457,7 @@ pub trait LoopHandler {
 /// `surface_committed`, `surface_mapped`, `surface_unmapped`,
 /// `surface_destroyed` and `new_subsurface` — the generic `wlr_surface`
 /// lifecycle, alongside the role-specific methods above — were added in
-/// 0.20.36, on the same additive terms: every one is defaulted, so an impl
-/// written against any earlier 0.20.x still compiles unchanged. They live
+/// 0.20.36, on the same terms. They live
 /// here rather than on a new `SurfaceHandler` for the reason this trait's own
 /// doc gives, and because adding a trait to [`Handlers`]' supertrait list
 /// would be a source-breaking change to a frozen bound.
@@ -626,9 +612,7 @@ pub trait ToplevelHandler {
     /// state, none of which the handle carries, and the seat/serial the wire
     /// event also carried are deliberately dropped.
     ///
-    /// Added in 0.20.36, additively: defaulted, so an
-    /// `impl ToplevelHandler for MyState {}` written against any earlier
-    /// 0.20.x still compiles unchanged.
+    /// Added in 0.20.36 — see the guarantee in [`crate`].
     fn request_show_window_menu(&mut self, id: ToplevelId, x: i32, y: i32) {
         let _ = (id, x, y);
     }
@@ -666,11 +650,9 @@ pub trait ToplevelHandler {
 
     /// A client created a wlr-layer-shell surface (`get_layer_surface`).
     ///
-    /// Added in 0.20.11, additively, on this trait rather than a new one —
-    /// see this trait's own doc for why `request_maximize` and its 0.20.7
-    /// siblings live here rather than on a `LayerShellHandler`: every method
-    /// is defaulted, so an `impl ToplevelHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged.
+    /// Added in 0.20.11 — see the guarantee in [`crate`], and this trait's own
+    /// doc for why `request_maximize` and its 0.20.7 siblings live here rather
+    /// than on a `LayerShellHandler`.
     ///
     /// Like [`new_toplevel`](ToplevelHandler::new_toplevel), the surface is
     /// not mapped yet and has no buffer. Answer with
@@ -728,9 +710,7 @@ pub trait ToplevelHandler {
     /// counterpart of [`layer_surface_commit`](ToplevelHandler::layer_surface_commit),
     /// which fires for the same reason and is not limited to the first commit.
     ///
-    /// Added additively, on the same terms as the layer-surface methods above:
-    /// it is defaulted, so an `impl ToplevelHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     ///
     /// Fires for every surface this run tracks — a toplevel, a layer surface,
     /// a popup, an Xwayland content surface, a session-lock surface, and every
@@ -750,8 +730,7 @@ pub trait ToplevelHandler {
     /// crate has already inserted the surface (or its role object) into the
     /// scene graph by this point, and the id is what a handler remembers.
     ///
-    /// Added additively: defaulted, so an impl written against any earlier
-    /// 0.20.x still compiles.
+    /// Added additively — see the guarantee in [`crate`].
     fn surface_mapped(&mut self, id: SurfaceId) {
         let _ = id;
     }
@@ -760,8 +739,7 @@ pub trait ToplevelHandler {
     /// as destruction — a surface can unmap and map again while keeping its
     /// id. Mirrors [`layer_surface_unmapped`](ToplevelHandler::layer_surface_unmapped).
     ///
-    /// Added additively: defaulted, so an impl written against any earlier
-    /// 0.20.x still compiles.
+    /// Added additively — see the guarantee in [`crate`].
     fn surface_unmapped(&mut self, id: SurfaceId) {
         let _ = id;
     }
@@ -772,8 +750,7 @@ pub trait ToplevelHandler {
     /// same "queued behind a running handler" grounds. Write this so an
     /// unknown id is harmless.
     ///
-    /// Added additively: defaulted, so an impl written against any earlier
-    /// 0.20.x still compiles.
+    /// Added additively — see the guarantee in [`crate`].
     fn surface_destroyed(&mut self, id: SurfaceId) {
         let _ = id;
     }
@@ -786,8 +763,7 @@ pub trait ToplevelHandler {
     /// `new_subsurface` signal, at the moment the child joins the parent's
     /// current state — not when the role object is created.
     ///
-    /// Added additively: defaulted, so an impl written against any earlier
-    /// 0.20.x still compiles.
+    /// Added additively — see the guarantee in [`crate`].
     fn new_subsurface(&mut self, parent: SurfaceId, child: SurfaceId) {
         let _ = (parent, child);
     }
@@ -1065,23 +1041,10 @@ pub trait ToplevelHandler {
     /// all — is entirely its own policy), so a compositor that wants the global
     /// to do anything overrides this.
     ///
-    /// Privileged: this carries no client identity, so per-client allow/deny
-    /// is impossible here. Gate the `xdg_system_bell_v1` global
-    /// ([`Runtime::create_xdg_system_bell`](crate::Runtime::create_xdg_system_bell))
-    /// at bind time with a
-    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
-    /// filter and default-deny — allow only clients whose context you trust:
+    /// Privileged: gate the `xdg_system_bell_v1` global — see the rule in
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     ///
-    /// ```ignore
-    /// // Allow only a known panel to ring the bell; deny everyone else.
-    /// let allowed = unsafe { runtime.lookup_security_context(client) }
-    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.panel"));
-    /// // return `allowed` from the display's global filter.
-    /// ```
-    ///
-    /// Added additively on the same terms as the other defaulted methods here:
-    /// an `impl ToplevelHandler for MyState {}` written against any earlier
-    /// 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn system_bell_ring(&mut self, surface: Option<SurfaceId>) {
         let _ = surface;
     }
@@ -1102,9 +1065,7 @@ pub trait ToplevelHandler {
     /// when this default's `icon` parameter is dropped at the end of the call.
     /// Requires [`Runtime::create_xdg_toplevel_icon_manager`](crate::Runtime::create_xdg_toplevel_icon_manager).
     ///
-    /// Added additively on the same terms as the other defaulted methods here:
-    /// an `impl ToplevelHandler for MyState {}` written against any earlier
-    /// 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn toplevel_icon_changed(&mut self, toplevel: &Toplevel<'_>, icon: Option<ToplevelIcon>) {
         let _ = (toplevel, icon);
     }
@@ -1119,9 +1080,7 @@ pub trait ToplevelHandler {
     /// store the tag on the toplevel, so there is nothing to re-read later.
     /// Requires [`Runtime::create_xdg_toplevel_tag_manager`](crate::Runtime::create_xdg_toplevel_tag_manager).
     ///
-    /// Added additively on the same terms as the other defaulted methods here:
-    /// an `impl ToplevelHandler for MyState {}` written against any earlier
-    /// 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn toplevel_tag_changed(&mut self, toplevel: &Toplevel<'_>, tag: Option<&str>) {
         let _ = (toplevel, tag);
     }
@@ -1132,9 +1091,7 @@ pub trait ToplevelHandler {
     /// display or a screen reader. Same ownership and `None` rules as the tag.
     /// Requires [`Runtime::create_xdg_toplevel_tag_manager`](crate::Runtime::create_xdg_toplevel_tag_manager).
     ///
-    /// Added additively on the same terms as the other defaulted methods here:
-    /// an `impl ToplevelHandler for MyState {}` written against any earlier
-    /// 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn toplevel_description_changed(&mut self, toplevel: &Toplevel<'_>, description: Option<&str>) {
         let _ = (toplevel, description);
     }
@@ -1150,25 +1107,12 @@ pub trait ToplevelHandler {
     /// [`SeatHandler::request_activate`](crate::SeatHandler::request_activate)
     /// has.
     ///
-    /// Privileged: this carries no client identity, so per-client allow/deny
-    /// is impossible here. Gate the `zwlr_foreign_toplevel_manager_v1` global
-    /// ([`Runtime::create_foreign_toplevel_manager`](crate::Runtime::create_foreign_toplevel_manager))
-    /// at bind time with a
-    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
-    /// filter and default-deny — allow only clients whose context you trust,
-    /// deny the rest:
-    ///
-    /// ```ignore
-    /// // Allow only a known taskbar to drive foreign toplevels.
-    /// let allowed = unsafe { runtime.lookup_security_context(client) }
-    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.taskbar"));
-    /// // return `allowed` from the display's global filter.
-    /// ```
+    /// Privileged: gate the `zwlr_foreign_toplevel_manager_v1` global — see the
+    /// rule in [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     /// The same gate covers `close`, `maximize`, `minimize`, `fullscreen`
     /// and `set_rectangle` below.
     ///
-    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
-    /// written against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn foreign_toplevel_activate(&mut self, id: ForeignToplevelId) {
         let _ = id;
     }
@@ -1176,14 +1120,10 @@ pub trait ToplevelHandler {
     /// A client asked, through `zwlr_foreign_toplevel_management_v1`, that an
     /// exported toplevel be closed. Closing the window is the compositor's call.
     ///
-    /// Privileged: see
-    /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
-    /// gate the `zwlr_foreign_toplevel_manager_v1` global with a
-    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
-    /// filter and default-deny.
+    /// Privileged: gate the `zwlr_foreign_toplevel_manager_v1` global — see the
+    /// rule in [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     ///
-    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
-    /// written against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn foreign_toplevel_close(&mut self, id: ForeignToplevelId) {
         let _ = id;
     }
@@ -1194,14 +1134,10 @@ pub trait ToplevelHandler {
     /// [`ForeignToplevelHandle::set_maximized`](crate::ForeignToplevelHandle::set_maximized)
     /// if it honors the request.
     ///
-    /// Privileged: see
-    /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
-    /// gate the `zwlr_foreign_toplevel_manager_v1` global with a
-    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
-    /// filter and default-deny.
+    /// Privileged: gate the `zwlr_foreign_toplevel_manager_v1` global — see the
+    /// rule in [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     ///
-    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
-    /// written against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn foreign_toplevel_maximize(&mut self, id: ForeignToplevelId, maximized: bool) {
         let _ = (id, maximized);
     }
@@ -1210,14 +1146,10 @@ pub trait ToplevelHandler {
     /// toggle contract as
     /// [`foreign_toplevel_maximize`](ToplevelHandler::foreign_toplevel_maximize).
     ///
-    /// Privileged: see
-    /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
-    /// gate the `zwlr_foreign_toplevel_manager_v1` global with a
-    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
-    /// filter and default-deny.
+    /// Privileged: gate the `zwlr_foreign_toplevel_manager_v1` global — see the
+    /// rule in [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     ///
-    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
-    /// written against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn foreign_toplevel_minimize(&mut self, id: ForeignToplevelId, minimized: bool) {
         let _ = (id, minimized);
     }
@@ -1226,14 +1158,10 @@ pub trait ToplevelHandler {
     /// target-not-toggle contract as
     /// [`foreign_toplevel_maximize`](ToplevelHandler::foreign_toplevel_maximize).
     ///
-    /// Privileged: see
-    /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
-    /// gate the `zwlr_foreign_toplevel_manager_v1` global with a
-    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
-    /// filter and default-deny.
+    /// Privileged: gate the `zwlr_foreign_toplevel_manager_v1` global — see the
+    /// rule in [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     ///
-    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
-    /// written against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn foreign_toplevel_fullscreen(&mut self, id: ForeignToplevelId, fullscreen: bool) {
         let _ = (id, fullscreen);
     }
@@ -1260,14 +1188,10 @@ pub trait ToplevelHandler {
     /// not go looking for the surface elsewhere: the event shape carries no
     /// further identity to look it up by.
     ///
-    /// Privileged: see
-    /// [`foreign_toplevel_activate`](ToplevelHandler::foreign_toplevel_activate) —
-    /// gate the `zwlr_foreign_toplevel_manager_v1` global with a
-    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
-    /// filter and default-deny.
+    /// Privileged: gate the `zwlr_foreign_toplevel_manager_v1` global — see the
+    /// rule in [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     ///
-    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
-    /// written against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn foreign_toplevel_set_rectangle(
         &mut self,
         id: ForeignToplevelId,
@@ -1300,21 +1224,10 @@ pub trait ToplevelHandler {
     /// Requires
     /// [`Runtime::create_ext_workspace_manager`](crate::Runtime::create_ext_workspace_manager).
     ///
-    /// Privileged: this carries no client identity, so per-client allow/deny
-    /// is impossible here. Gate the `ext_workspace_manager_v1` global at bind
-    /// time with a
-    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
-    /// filter and default-deny — allow only clients whose context you trust:
+    /// Privileged: gate the `ext_workspace_manager_v1` global — see the rule in
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     ///
-    /// ```ignore
-    /// // Allow only a known pager to drive workspaces; deny everyone else.
-    /// let allowed = unsafe { runtime.lookup_security_context(client) }
-    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.pager"));
-    /// // return `allowed` from the display's global filter.
-    /// ```
-    ///
-    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
-    /// written against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn workspace_commit(&mut self, requests: &[WorkspaceRequest]) {
         let _ = requests;
     }
@@ -1338,8 +1251,7 @@ pub trait ToplevelHandler {
     /// Requires
     /// [`Runtime::create_security_context_manager`](crate::Runtime::create_security_context_manager).
     ///
-    /// Added additively: defaulted, so an `impl ToplevelHandler for MyState {}`
-    /// written against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn security_context_committed(&mut self, context: &crate::SecurityContext) {
         let _ = context;
     }
@@ -1348,9 +1260,7 @@ pub trait ToplevelHandler {
 /// Seat, keyboard and pointer input.
 ///
 /// Declared with no methods in 0.20.1 so that [`Handlers`]' supertrait list
-/// could freeze; these were added in 0.20.4, additively. An
-/// `impl SeatHandler for MyState {}` written against 0.20.1 still compiles
-/// unchanged.
+/// could freeze; these were added in 0.20.4 — see the guarantee in [`crate`].
 ///
 /// # Panics
 ///
@@ -1599,12 +1509,7 @@ pub trait SeatHandler {
     /// reposition was for. Write this so an unknown id is harmless: every
     /// popup accessor returns `None` for one.
     ///
-    /// Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged (see commit
-    /// `f2cc8a9`, which dropped a would-be `SessionLockHandler` for the same
-    /// reason a new supertrait on [`Handlers`] is not how this ships).
+    /// Added additively — see the guarantee in [`crate`].
     fn popup_repositioned(&mut self, popup: InputPopupSurfaceId) {
         let _ = popup;
     }
@@ -1617,12 +1522,7 @@ pub trait SeatHandler {
     /// [`Runtime::committed_ime_state`](crate::Runtime::committed_ime_state).
     /// Defaulted to a no-op.
     ///
-    /// Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged (see commit
-    /// `f2cc8a9`, which dropped a would-be `SessionLockHandler` for the same
-    /// reason a new supertrait on [`Handlers`] is not how this ships).
+    /// Added additively — see the guarantee in [`crate`].
     fn input_method_committed(&mut self) {}
 
     /// The bound input-method deactivated. Notification only — the
@@ -1631,12 +1531,7 @@ pub trait SeatHandler {
     /// whatever overlay the committed state was showing. Defaulted to a
     /// no-op.
     ///
-    /// Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged (see commit
-    /// `f2cc8a9`, which dropped a would-be `SessionLockHandler` for the same
-    /// reason a new supertrait on [`Handlers`] is not how this ships).
+    /// Added additively — see the guarantee in [`crate`].
     fn input_method_deactivated(&mut self) {}
 
     /// A shortcuts inhibitor announced a state. `active` is `true` when the
@@ -1660,10 +1555,7 @@ pub trait SeatHandler {
     /// stays semver-additive: a new supertrait on [`Handlers`] would break
     /// every downstream consumer that does not also implement it (see commit
     /// `f2cc8a9`, which dropped a would-be `SessionLockHandler` for the same
-    /// reason). Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged.
+    /// reason). Added additively — see the guarantee in [`crate`].
     fn shortcuts_inhibitor_toggled(&mut self, _id: crate::ShortcutsInhibitorId, _active: bool) {}
 
     /// A tablet tool did something — proximity, motion, tip or button.
@@ -1679,10 +1571,7 @@ pub trait SeatHandler {
     /// the reason `shortcuts_inhibitor_toggled`'s own doc gives: one more
     /// defaulted method costs an implementor nothing, whereas a new
     /// supertrait on [`Handlers`] would be a breaking change to a frozen
-    /// list (see commit `f2cc8a9`). Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged.
+    /// list (see commit `f2cc8a9`). Added additively — see the guarantee in [`crate`].
     fn tablet_tool_event(&mut self, _id: crate::TabletToolId) {}
 
     /// A tablet pad did something — button, ring or strip. Notification
@@ -1691,12 +1580,7 @@ pub trait SeatHandler {
     /// the hardware pad, client-bound feedback is driven separately, and an
     /// unknown id must be harmless.
     ///
-    /// Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged (see commit
-    /// `f2cc8a9`, which dropped a would-be `SessionLockHandler` for the same
-    /// reason a new supertrait on [`Handlers`] is not how this ships).
+    /// Added additively — see the guarantee in [`crate`].
     fn tablet_pad_event(&mut self, _id: crate::TabletPadId) {}
 
     /// A client injected a virtual keyboard. Notification only: the id
@@ -1712,10 +1596,7 @@ pub trait SeatHandler {
     /// `shortcuts_inhibitor_toggled`'s own doc gives: one more defaulted
     /// method costs an implementor nothing, whereas a new supertrait on
     /// [`Handlers`] would be a breaking change to a frozen list (see commit
-    /// `f2cc8a9`). Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged.
+    /// `f2cc8a9`). Added additively — see the guarantee in [`crate`].
     fn virtual_keyboard_created(&mut self, _id: crate::VirtualKeyboardId) {}
 
     /// A client injected a virtual pointer. Notification only, on the same
@@ -1724,12 +1605,7 @@ pub trait SeatHandler {
     /// the id names the virtual pointer, the cursor already has the device
     /// attached before this runs, and an unknown id must be harmless.
     ///
-    /// Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged (see commit
-    /// `f2cc8a9`, which dropped a would-be `SessionLockHandler` for the same
-    /// reason a new supertrait on [`Handlers`] is not how this ships).
+    /// Added additively — see the guarantee in [`crate`].
     fn virtual_pointer_created(&mut self, _id: crate::VirtualPointerId) {}
 
     /// A client asked for a seat of its own. The id names the *pending
@@ -1745,10 +1621,7 @@ pub trait SeatHandler {
     ///
     /// Lives on `SeatHandler` rather than a trait of its own for the reason
     /// `shortcuts_inhibitor_toggled`'s own doc gives (see commit `f2cc8a9`).
-    /// Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn transient_seat_requested(&mut self, _id: crate::TransientSeatId) {}
 
     /// A pointer constraint committed — the client (re)set the constraint's
@@ -1763,10 +1636,7 @@ pub trait SeatHandler {
     ///
     /// Lives on `SeatHandler` rather than a trait of its own for the reason
     /// `shortcuts_inhibitor_toggled`'s own doc gives (see commit `f2cc8a9`).
-    /// Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn pointer_constraint_committed(&mut self, _id: ConstraintId) {}
 
     /// Unaccelerated relative motion on the seat: the raw device deltas for
@@ -1777,11 +1647,7 @@ pub trait SeatHandler {
     /// control, say), not the thing that makes clients work. Defaulted
     /// to a no-op.
     ///
-    /// Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged (see commit
-    /// `f2cc8a9`).
+    /// Added additively — see the guarantee in [`crate`].
     fn relative_motion(&mut self, dx: f64, dy: f64, time_msec: u32) {
         let _ = (dx, dy, time_msec);
     }
@@ -1801,10 +1667,7 @@ pub trait SeatHandler {
     /// the reason `shortcuts_inhibitor_toggled`'s own doc gives: one more
     /// defaulted method costs an implementor nothing, whereas a new
     /// supertrait on [`Handlers`] would be a breaking change to a frozen
-    /// list (see commit `f2cc8a9`). Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged.
+    /// list (see commit `f2cc8a9`). Added additively — see the guarantee in [`crate`].
     fn gesture_began(&mut self, _id: GestureId) {}
 
     /// A pointer gesture ended — completed or cancelled (a cancel ends the
@@ -1814,11 +1677,7 @@ pub trait SeatHandler {
     /// announcing pointer, the end forward has already gone out, and an
     /// unknown id must be harmless.
     ///
-    /// Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged (see commit
-    /// `f2cc8a9`).
+    /// Added additively — see the guarantee in [`crate`].
     fn gesture_ended(&mut self, _id: GestureId) {}
 
     /// A touch point went down — a finger landed. Notification only: the id
@@ -1835,10 +1694,7 @@ pub trait SeatHandler {
     /// `shortcuts_inhibitor_toggled`'s own doc gives: one more defaulted
     /// method costs an implementor nothing, whereas a new supertrait on
     /// [`Handlers`] would be a breaking change to a frozen list (see commit
-    /// `f2cc8a9`). Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged.
+    /// `f2cc8a9`). Added additively — see the guarantee in [`crate`].
     fn touch_down(&mut self, _id: TouchId) {}
 
     /// A touch point went up — the finger lifted. Notification only, on the
@@ -1846,11 +1702,7 @@ pub trait SeatHandler {
     /// the point that went up, the up forward (which removes the point) has
     /// already gone out, and an unknown id must be harmless.
     ///
-    /// Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged (see commit
-    /// `f2cc8a9`).
+    /// Added additively — see the guarantee in [`crate`].
     fn touch_up(&mut self, _id: TouchId) {}
 
     /// A touch gesture was cancelled wholesale. Notification only: the
@@ -1859,11 +1711,7 @@ pub trait SeatHandler {
     /// in-flight touch state the down/up notifications built. Carries no
     /// id: the cancel names no single point.
     ///
-    /// Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged (see commit
-    /// `f2cc8a9`).
+    /// Added additively — see the guarantee in [`crate`].
     fn touch_cancelled(&mut self) {}
 
     /// A switch toggled. `on` is the position it toggled to: `true` is on
@@ -1878,10 +1726,7 @@ pub trait SeatHandler {
     ///
     /// Lives on `SeatHandler` rather than a trait of its own for the reason
     /// `shortcuts_inhibitor_toggled`'s own doc gives (see commit `f2cc8a9`).
-    /// Added additively, on the same terms as
-    /// [`SeatHandler::session_lock_changed`](crate::SeatHandler::session_lock_changed):
-    /// it is defaulted, so an `impl SeatHandler for MyState {}` written
-    /// against any earlier 0.20.x still compiles unchanged.
+    /// Added additively — see the guarantee in [`crate`].
     fn switch_toggled(&mut self, _id: SwitchId, _on: bool) {
         let _ = (_id, _on);
     }

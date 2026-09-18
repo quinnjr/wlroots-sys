@@ -13,10 +13,8 @@
 //! can connect, and a ready-made sandbox-enumeration primitive: "observation
 //! only" describes the request direction, not the exposure.
 //!
-//! Gate the list global at bind time with a
-//! [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
-//! filter on the display and default-deny: allow only clients whose context
-//! you trust (a known taskbar or picker, say), deny the rest.
+//! Gate the list global at bind time — see the rule in
+//! [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
 //!
 //! A compositor calls [`Runtime::create_ext_foreign_toplevel_list`] once and
 //! then mints one owned [`ExtForeignToplevelHandle`] per window with

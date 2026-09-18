@@ -347,6 +347,13 @@ fn a_client_observes_and_drives_an_exported_handle() {
         app.handle.is_none(),
         "the close handler dropped the exported handle"
     );
+    // The turn drained without fault — the run above returned `Ok` and the
+    // client's `closed` arrived — and the manager still mints handles after
+    // an in-handler drop.
+    assert!(
+        runtime.create_foreign_toplevel().is_some(),
+        "a later create works after an in-handler drop drained"
+    );
 }
 
 /// `set_rectangle` naming a surface the compositor tracks resolves to `Some`:

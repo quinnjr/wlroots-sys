@@ -65,6 +65,10 @@ struct Probe {
     /// `Surface::as_toplevel` on the live toplevel surface: every commit must
     /// resolve, and the resolved id must name the same surface.
     as_toplevel_matched: Vec<bool>,
+    /// `Runtime::surface` at each `surface_mapped`: the mapped id must
+    /// resolve while its run is live, so the post-run miss below proves
+    /// staleness rather than a surface that never resolved.
+    mapped_live: Vec<bool>,
 }
 
 impl Probe {
@@ -175,6 +179,9 @@ impl wlr::ToplevelHandler for App {
 
     fn surface_mapped(&mut self, id: SurfaceId) {
         self.probe.mapped.push(id);
+        self.probe
+            .mapped_live
+            .push(self.runtime.surface(id).is_some());
     }
 
     fn surface_unmapped(&mut self, id: SurfaceId) {
@@ -392,6 +399,18 @@ fn a_real_client_surface_is_committed_mapped_and_destroyed() {
             "the walk over a childless live tree visits exactly its root"
         );
     }
+    assert!(
+        !probe.mapped_live.is_empty() && probe.mapped_live.iter().all(|v| *v),
+        "the mapped id resolved while its run was live"
+    );
+    // Surface tables are per-run — the same rule output_layout.rs's
+    // `layout_box_after_the_run_is_stale_and_misses_cleanly` pins for
+    // outputs — so the mapped id, announced by this run, is stale now that
+    // `run_all` has returned and must miss rather than resolve freed memory.
+    assert!(
+        runtime.surface(mapped).is_none(),
+        "a SurfaceId kept past its run must miss"
+    );
 }
 
 /// A mapped child sub-surface resolves its foreign root to the tracked

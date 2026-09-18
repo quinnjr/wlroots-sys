@@ -70,6 +70,15 @@
 //! `wlr`'s minor version tracks the wlroots minor it binds; see this crate's
 //! README. `docs/superpowers/specs/2026-08-03-wlr-safe-wrapper-design.md` in the
 //! repository records why, along with the rest of the design.
+//!
+//! Within a `wlr` minor line, releases are additive only, and handler traits
+//! are where that promise bites: every new handler method is defaulted, so an
+//! `impl OutputHandler for MyState {}` (or any other handler trait) written
+//! against any earlier 0.20.x still compiles unchanged. New behaviour lands
+//! as defaulted methods on the existing traits rather than as new supertraits
+//! on [`Handlers`], which would break every consumer that does not also
+//! implement them. Per-method docs note only which release added the method
+//! and point here for the guarantee itself.
 
 #![warn(missing_docs)]
 

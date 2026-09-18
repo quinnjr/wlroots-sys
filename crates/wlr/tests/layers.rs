@@ -48,11 +48,11 @@ fn add_rect_in_band_on_a_fresh_runtime_without_graphics_errors() {
     );
 }
 
-/// `OutputId` has no public dangling constructor (unlike `LayerSurfaceId`
-/// and `ToplevelId`; see those types' own `dangling_for_test`), so a live
-/// one is captured from a short `run_all`, the same way
-/// `output_layout.rs`'s stale-id test does. What is under test here is the
-/// *layer-surface* id miss specifically: `set_layer_surface_output`
+/// A live output id is captured from a short `run_all`, the same way
+/// `output_layout.rs`'s stale-id test does (an `OutputId` from
+/// [`wlr::OutputId::dangling_for_test`] would do as well, but a real one
+/// proves output resolution is never reached at all). What is under test here
+/// is the *layer-surface* id miss specifically: `set_layer_surface_output`
 /// resolves the layer id first (see that method's own doc), so a dead
 /// layer id paired with a perfectly live, real output must still be
 /// `None` — output resolution is never reached at all.
@@ -571,5 +571,128 @@ fn destroy_layer_surface_on_a_dead_id_is_none() {
     assert_eq!(
         runtime.destroy_layer_surface(wlr::LayerSurfaceId::dangling_for_test()),
         None
+    );
+}
+
+/// Destroying a layer surface from inside its own commit handler defers to
+/// the turn drain instead of freeing mid-walk.
+///
+/// [`wlr::Runtime::destroy_layer_surface`] queues the destroy when a handler
+/// frame is on the stack (see its own doc): the call is accepted (`Some`),
+/// the surface stays live for the rest of the handler — a second mutator
+/// against the same id still resolves — and the turn drain destroys it
+/// afterwards, which the client sees as `closed`. A synchronous free here
+/// would free the surface wlroots is still emitting for.
+#[test]
+fn destroy_layer_surface_from_inside_a_commit_handler_defers_to_the_drain() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+
+    struct App {
+        runtime: wlr::Runtime,
+        id: Option<wlr::LayerSurfaceId>,
+        attempted: bool,
+        accepted: Option<bool>,
+        /// A second mutator against the same id, issued from the same commit
+        /// handler right after the destroy call: `Some` proves the surface
+        /// was not freed synchronously mid-walk.
+        still_live_after_call: Option<bool>,
+        destroyed: Option<wlr::LayerSurfaceId>,
+        client: Option<std::thread::JoinHandle<common::client::ClientEvents>>,
+    }
+    impl wlr::OutputHandler for App {
+        fn new_output(&mut self, output: &wlr::Output<'_>) {
+            let _ = output.enable_with_preferred_mode();
+            let _ = self.runtime.init_output(output);
+        }
+    }
+    impl wlr::ToplevelHandler for App {
+        fn new_layer_surface(&mut self, surface: &wlr::LayerSurface<'_>) {
+            self.id = Some(surface.id());
+            let _ = self.runtime.configure_layer_surface(surface.id(), 64, 48);
+        }
+        fn layer_surface_commit(&mut self, surface: &wlr::LayerSurface<'_>) {
+            if self.attempted {
+                return;
+            }
+            self.attempted = true;
+            let id = surface.id();
+            self.accepted = Some(self.runtime.destroy_layer_surface(id).is_some());
+            self.still_live_after_call =
+                Some(self.runtime.configure_layer_surface(id, 64, 48).is_some());
+        }
+        fn layer_surface_destroyed(&mut self, id: wlr::LayerSurfaceId) {
+            self.destroyed = Some(id);
+        }
+    }
+    impl wlr::SeatHandler for App {}
+    impl wlr::FdHandler for App {}
+    impl wlr::LoopHandler for App {
+        fn should_stop(&mut self) -> bool {
+            if self.client.as_ref().is_some_and(|h| h.is_finished()) {
+                return true;
+            }
+            // Fallback only: the commit handler above is where the destroy is
+            // attempted. If no commit ever arrived, close from here so the
+            // client still terminates instead of hanging the run.
+            if !self.attempted
+                && let Some(id) = self.id
+            {
+                self.attempted = true;
+                let _ = self.runtime.destroy_layer_surface(id);
+            }
+            false
+        }
+    }
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime
+        .create_layer_shell(&display, 4)
+        .expect("layer shell");
+    let socket = display.add_socket_auto().expect("socket");
+    let mut app = App {
+        runtime: runtime.clone(),
+        id: None,
+        attempted: false,
+        accepted: None,
+        still_live_after_call: None,
+        destroyed: None,
+        client: Some(common::client::spawn_layer_surface(&socket)),
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, wlr::Until::Stop)
+        .expect("run_all");
+    let events = app
+        .client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+
+    assert!(
+        app.attempted,
+        "a commit arrived to attempt the in-handler destroy from"
+    );
+    assert_eq!(
+        app.accepted,
+        Some(true),
+        "the in-handler destroy was accepted (deferred), not refused"
+    );
+    assert_eq!(
+        app.still_live_after_call,
+        Some(true),
+        "the surface was not freed synchronously: a second mutator in the same handler still resolves"
+    );
+    assert_eq!(
+        app.destroyed, app.id,
+        "the turn drain destroyed the surface afterwards"
+    );
+    assert!(
+        events.layer_closed,
+        "destroying the layer surface sends the client a closed event"
     );
 }

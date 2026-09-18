@@ -15,10 +15,9 @@
 //! none of them, so every one is the compositor's to allow or refuse, exactly
 //! like `SeatHandler::request_activate`.
 //!
-//! Gate the manager global at bind time with a
-//! [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context)-based
-//! filter on the display and default-deny: allow only clients whose context
-//! you trust (a known taskbar, say), deny the rest. The six request handlers
+//! Gate the manager global at bind time — see the rule in
+//! [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
+//! The six request handlers
 //! are defaulted, and the default ignores every request — keep that posture
 //! until a request arrives from a client you vetted at bind time.
 //!

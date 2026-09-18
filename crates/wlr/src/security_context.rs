@@ -246,6 +246,27 @@ impl Runtime {
     /// so, what metadata. `None` when no manager was created, when the manager
     /// died with its display, or when `client` has no attached context.
     ///
+    /// # Privileged globals
+    ///
+    /// Several protocol globals in this crate broadcast sensitive state or let
+    /// any bound client drive another client's windows — `xdg_system_bell_v1`,
+    /// `zwlr_foreign_toplevel_manager_v1`, `ext_workspace_manager_v1` — and the
+    /// events and handler methods for them carry no client identity, so
+    /// per-client allow/deny is impossible at the handler. Gate each such
+    /// global at bind time with a filter on the display built on this
+    /// function, and default-deny — allow only clients whose context you
+    /// trust, deny the rest:
+    ///
+    /// ```ignore
+    /// // Allow only a known client to bind the privileged global; deny the rest.
+    /// let allowed = unsafe { runtime.lookup_security_context(client) }
+    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.trusted"));
+    /// // return `allowed` from the display's global filter.
+    /// ```
+    ///
+    /// Per-event docs name only which global to gate and point here for the
+    /// rule itself.
+    ///
     /// # Safety
     ///
     /// `client` must be null or a live `wl_client`. wlroots keys the lookup on

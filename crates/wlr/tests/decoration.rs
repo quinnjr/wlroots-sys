@@ -138,6 +138,19 @@ fn decoration_state_returns_the_mode_set_via_set_decoration_mode() {
         /// returns, so a post-run query is inherently racy where these
         /// samples are not.
         state_samples: Vec<Option<wlr::DecorationMode>>,
+        /// `decoration_configure` sampled alongside, one entry per commit in
+        /// the same order: the generic commit listener runs before the role
+        /// listener's flush, so every commit sample sees a settled queue —
+        /// empty on the initial commit (the answer is staged, not yet
+        /// queued) and empty again once the client acked and committed. The
+        /// queued window in between is sampled from `should_stop` below,
+        /// which runs every turn.
+        configure_samples: Vec<Option<wlr::DecorationMode>>,
+        /// Whether any between-turn `should_stop` observed the queued
+        /// configure: after the initial-commit flush and before the client's
+        /// ack+commit drains it, the queue holds the answered mode for whole
+        /// turns, so at least one `should_stop` must see it.
+        saw_queued: bool,
         client: Option<std::thread::JoinHandle<common::client::ClientEvents>>,
     }
     impl wlr::OutputHandler for App {}
@@ -157,6 +170,8 @@ fn decoration_state_returns_the_mode_set_via_set_decoration_mode() {
         fn surface_committed(&mut self, _surface: &wlr::Surface<'_>) {
             if let Some(id) = self.id {
                 self.state_samples.push(self.runtime.decoration_state(id));
+                self.configure_samples
+                    .push(self.runtime.decoration_configure(id));
             }
         }
     }
@@ -164,6 +179,15 @@ fn decoration_state_returns_the_mode_set_via_set_decoration_mode() {
     impl wlr::FdHandler for App {}
     impl wlr::LoopHandler for App {
         fn should_stop(&mut self) -> bool {
+            // Between-turn sample of the queued window: the flush went out
+            // during the initial commit's turn and wlroots pops the queue
+            // only once the client's ack+commit is processed, so whole turns
+            // in between must observe the queued mode here.
+            if let Some(id) = self.id
+                && self.runtime.decoration_configure(id) == Some(wlr::DecorationMode::ClientSide)
+            {
+                self.saw_queued = true;
+            }
             self.client.as_ref().is_some_and(|h| h.is_finished())
         }
     }
@@ -183,6 +207,8 @@ fn decoration_state_returns_the_mode_set_via_set_decoration_mode() {
         id: None,
         preference: None,
         state_samples: Vec::new(),
+        configure_samples: Vec::new(),
+        saw_queued: false,
         client: Some(common::client::spawn_decoration_client(&socket)),
     };
     backend
@@ -218,5 +244,20 @@ fn decoration_state_returns_the_mode_set_via_set_decoration_mode() {
         app.state_samples.last(),
         Some(&Some(wlr::DecorationMode::ClientSide)),
         "decoration_state returns the mode set via set_decoration_mode once the client acked"
+    );
+    // `decoration_configure` is live, not just decodable: a between-turn
+    // sample sees the queued mode after the initial-commit flush and before
+    // the client's ack+commit drains it.
+    assert!(
+        app.saw_queued,
+        "decoration_configure reports the queued mode while the client has yet to ack it"
+    );
+    // The drained-queue `None` lands on a live id — `decoration_state` on the
+    // same commit is `Some` — so this pins the empty-queue arm, distinct from
+    // the ghost-id arm `set_decoration_mode_on_a_dead_id_is_none` covers.
+    assert_eq!(
+        app.configure_samples.last(),
+        Some(&None),
+        "decoration_configure is None once the client acked and committed"
     );
 }
