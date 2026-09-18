@@ -2136,8 +2136,10 @@ impl std::fmt::Debug for TouchFrame {
 impl TouchFrame {
     /// The live frame for one input event. Infallible — a missing seat is
     /// not an error here but a per-send no-op below, so callers keep their
-    /// shape (the handler event is still delivered; only the client forward
-    /// is skipped).
+    /// shape. Whether the handler event follows a skipped forward is each
+    /// relay's own decision: the down/up relays skip it (a `0` serial names
+    /// no point), the cancel relay still emits (clearing must not depend on
+    /// the client forward).
     #[must_use]
     pub(crate) fn of(runtime: &Runtime) -> Self {
         Self {
@@ -2210,7 +2212,8 @@ impl TouchFrame {
     /// conventional path to `send_cancel`. The cancel notify addresses the
     /// point's *client*, so the point is resolved first — a stale id (the
     /// point already up, or never down) resolves to nothing and this no-ops,
-    /// while the `TouchCancelled` event is still delivered.
+    /// while the `TouchCancelled` event is still delivered on the live-device
+    /// path (a dead device with an unknown id emits nothing at all).
     ///
     /// Returns whether the cancel notify was emitted: `false` when there is
     /// no seat, when `touch_id` names no live point, or when the point
