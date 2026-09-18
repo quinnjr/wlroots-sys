@@ -634,10 +634,11 @@ fn cursor_region_mapping_is_recorded_in_the_snapshot() {
 /// Populating `points` needs a surface under the cursor *and* a client
 /// holding a `wl_touch` resource (wlroots' `touch_point_create` refuses
 /// otherwise) — an empty scene has neither, so the injection misses and the
-/// snapshot stays at rest. A populated-points assertion would need a client
-/// helper that binds `wl_touch`, which `tests/common/client.rs` has none
-/// of; this pins the reachable half (miss shape + resting snapshot) and
-/// records the gap.
+/// snapshot stays at rest. The populated-points shape is pinned instead by
+/// the `wl_touch`-client legs below (`touch_down_announces_with_id_to_a_wl_touch_client`
+/// and `touch_up_announces_for_the_known_point`, driven through
+/// `common::client::spawn_touch_client`); this pins the reachable half here
+/// (miss shape + resting snapshot).
 #[test]
 fn touch_snapshot_after_inject_down_and_up() {
     let _serial = common::headless_guard();
@@ -802,4 +803,299 @@ fn touch_switch_ids_are_usable_from_outside_the_crate() {
     let d = wlr::SwitchId::dangling_nth_for_test(2);
     assert_ne!(c, d);
     assert_eq!(format!("{c:?}"), "SwitchId(..)");
+}
+
+/// The server side of the `wl_touch` integration legs below.
+///
+/// One run owns the whole client lifecycle (as in `surfaces.rs`): a fresh
+/// `Session` per `run_all` call unlinks every per-object listener when the
+/// call returns, so a toplevel announced by one run is deaf in the next —
+/// the map would fire with no listener left to hear it. The touch inject
+/// therefore happens inside the same run, from `should_stop` once the map
+/// has been observed: between turns every commit is fully applied (during
+/// the `mapped` emission itself the scene side has not settled and the hit
+/// test misses), the session is still live, and a zero serial — the
+/// client's `wl_touch` resource still in flight — simply retries next turn.
+/// The parked client observes the inject, exits, and `should_stop` ends the
+/// single `Until::Stop` run.
+struct TouchApp {
+    runtime: wlr::Runtime,
+    mapped: Vec<wlr::ToplevelId>,
+    /// The down inject, retried from `should_stop` until it mints: `None`
+    /// until then, then the inject's answer. Recorded rather than asserted
+    /// anywhere near the run — the assertions below read it after the run
+    /// returns.
+    injected_down: Option<Option<u32>>,
+    /// Server-side point ids read back synchronously right after the minted
+    /// down — and right after the up when `inject_up` is set, in the same
+    /// turn, before any flush, client exit, or disconnect can disturb them.
+    /// (After the run returns the client has disconnected and the run has
+    /// dispatched the disconnect, so a post-run snapshot can no longer
+    /// prove anything about the drive.)
+    points_after_drive: Option<Vec<i32>>,
+    /// When set, the up for the same point follows a minted down
+    /// immediately — the down/up round trip as one atomic drive.
+    inject_up: bool,
+    /// The client thread, owned here so [`wlr::LoopHandler::should_stop`]
+    /// can end the single run once the client observed what it waits for.
+    client: Option<std::thread::JoinHandle<common::client::TouchClientEvents>>,
+}
+
+impl wlr::OutputHandler for TouchApp {
+    fn new_output(&mut self, output: &wlr::Output<'_>) {
+        let _ = output.enable_with_preferred_mode();
+        let _ = self.runtime.init_output(output);
+    }
+}
+
+impl wlr::ToplevelHandler for TouchApp {
+    fn mapped(&mut self, toplevel: &wlr::Toplevel<'_>) {
+        self.mapped.push(toplevel.id());
+    }
+}
+
+impl wlr::SeatHandler for TouchApp {}
+impl wlr::FdHandler for TouchApp {}
+impl wlr::LoopHandler for TouchApp {
+    fn should_stop(&mut self) -> bool {
+        // Inject between turns, never inside `mapped`: during the map
+        // emission the scene side has not settled (the hit test misses
+        // there), while here every commit has been fully applied. Retried
+        // every turn until it mints: a zero serial means the surface
+        // resolved but the client's `wl_touch` resource is not in place
+        // yet — its get_touch round-trip is still in flight — so the next
+        // turn tries again. Failed attempts create nothing, so retrying
+        // with the same id is safe.
+        if !self.mapped.is_empty() && self.injected_down.is_none() {
+            match self.runtime.inject_touch_down(10.0, 10.0, 7, 1) {
+                Some(serial) if serial != 0 => {
+                    self.injected_down = Some(Some(serial));
+                    if self.inject_up {
+                        self.runtime.inject_touch_up(7, 2);
+                    }
+                    self.points_after_drive = Some(
+                        self.runtime
+                            .touch_state()
+                            .map(|state| state.points.iter().map(|point| point.id).collect())
+                            .unwrap_or_default(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        self.client.as_ref().is_some_and(|h| h.is_finished())
+    }
+}
+
+/// A touch down through a real `wl_touch`-holding client: the server grows a
+/// point with the injected id, and the client observes the down with that id.
+///
+/// This is the integration half of the unit `touch_down_without_a_cursor`
+/// gate pin: there the hit and the forward-and-announce tail stay undriven
+/// for lack of a scene and a `wl_touch`-holding client; here both exist — a
+/// mapped surface under the cursor and a client holding `wl_touch` — so the
+/// down resolves, forwards, and announces with its id on both sides of the
+/// wire.
+#[test]
+fn touch_down_announces_with_id_to_a_wl_touch_client() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime.create_xdg_shell(&display, 6).expect("xdg-shell");
+    runtime.create_seat(&display, "seat0").expect("seat");
+    // Advertise touch before the client binds, so its seat carries the
+    // capability whose `wl_touch` resource lets the server grow a point.
+    runtime.enable_test_touch();
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = TouchApp {
+        runtime: runtime.clone(),
+        mapped: Vec::new(),
+        injected_down: None,
+        points_after_drive: None,
+        inject_up: false,
+        client: Some(common::client::spawn_touch_client(&socket)),
+    };
+    // One run: the client's map, the `should_stop` inject once the map is
+    // observed, the flushes that carry the down to the parked client, and
+    // finally the client's own exit (via `should_stop`) once it observed
+    // the down. Both sides are deadline-bounded (the client's park, the
+    // run's end on client exit), so a stuck peer fails assertions rather
+    // than hanging the suite.
+    backend
+        .run_all(&display, &mut app, &runtime, wlr::Until::Stop)
+        .expect("run_all");
+
+    assert_eq!(app.mapped.len(), 1, "the touch client's surface must map");
+    let serial = app
+        .injected_down
+        .expect("the mapped handler must have attempted the inject")
+        .expect("mapped surface under (10, 10)");
+    assert_ne!(
+        serial, 0,
+        "a down for a wl_touch-holding client must mint a serial"
+    );
+    assert_eq!(
+        app.points_after_drive,
+        Some(vec![7]),
+        "the server must track the injected point"
+    );
+
+    let events = app
+        .client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+    assert_eq!(
+        events.downs,
+        vec![7],
+        "the client must observe the down with its id"
+    );
+}
+
+/// A touch up for the known point: the server clears the point, and the
+/// client observes the up with the down's id.
+///
+/// The integration half of the unit `touch_up_for_an_unknown_point` pin,
+/// whose known-with-client positive needs exactly this — a live point with
+/// a client, which only a `wl_touch`-holding client plus an inject can make.
+#[test]
+fn touch_up_announces_for_the_known_point() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime.create_seat(&display, "seat0").expect("seat");
+    runtime.enable_test_touch();
+    runtime.create_xdg_shell(&display, 6).expect("xdg-shell");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = TouchApp {
+        runtime: runtime.clone(),
+        mapped: Vec::new(),
+        injected_down: None,
+        points_after_drive: None,
+        inject_up: true,
+        client: Some(common::client::spawn_touch_client_until_up(&socket)),
+    };
+    // One run, as for the down leg: the `should_stop` drive injects the down
+    // and the up back-to-back once the down mints, the flushes carry both
+    // to the parked client, and the client's exit on the up ends the run.
+    backend
+        .run_all(&display, &mut app, &runtime, wlr::Until::Stop)
+        .expect("run_all");
+
+    assert_eq!(app.mapped.len(), 1, "the touch client's surface must map");
+    assert!(
+        app.injected_down
+            .expect("the drive must have attempted the inject")
+            .is_some(),
+        "mapped surface under (10, 10)"
+    );
+    assert_eq!(
+        app.points_after_drive,
+        Some(vec![]),
+        "the up must clear the server-side point"
+    );
+
+    let events = app
+        .client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+    assert_eq!(
+        events.downs,
+        vec![7],
+        "the client must observe the down with its id"
+    );
+    assert_eq!(
+        events.ups,
+        vec![7],
+        "the client must observe the up for the known point"
+    );
+}
+
+/// The cancel leg has no headless driver, so this pins its reachable setup
+/// and documents the gap instead of faking the event.
+///
+/// What runs here is real: a `wl_touch`-holding client maps, the server
+/// grows a point for it, and the point is still tracked after a flush —
+/// the exact precondition a cancel would need. What cannot run is the
+/// cancel itself: nothing headless emits it. The hardware path needs a
+/// `wlr_touch.events.cancel` emission, and headless has no touch device to
+/// emit one (no virtual-touch protocol exists, so `on_new_input` has no
+/// touch arm); the inject path has no cancel either (`TouchFrame::send_cancel`
+/// is `pub(crate)`, and `inject_touch_*` offers down/motion/up only). A
+/// fabricated server-side point cannot stand in: it names no client, and
+/// the cancel notify addresses the point's client. Until a headless cancel
+/// source exists, the `Cancelled` arm stays covered by the unit
+/// `send_cancel_reports_each_miss_distinctly` gate pin plus these two
+/// integration legs, never by a real `wl_touch.cancel` on the wire.
+#[test]
+fn touch_cancel_has_no_headless_driver() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime.create_seat(&display, "seat0").expect("seat");
+    runtime.enable_test_touch();
+    runtime.create_xdg_shell(&display, 6).expect("xdg-shell");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = TouchApp {
+        runtime: runtime.clone(),
+        mapped: Vec::new(),
+        injected_down: None,
+        points_after_drive: None,
+        inject_up: false,
+        client: Some(common::client::spawn_touch_client(&socket)),
+    };
+    // One run, as for the down leg: the `should_stop` down is the cancel
+    // precondition, and the client's exit on it ends the run.
+    backend
+        .run_all(&display, &mut app, &runtime, wlr::Until::Stop)
+        .expect("run_all");
+
+    assert_eq!(app.mapped.len(), 1, "the touch client's surface must map");
+    assert!(
+        app.injected_down
+            .expect("the drive must have attempted the inject")
+            .is_some(),
+        "mapped surface under (10, 10)"
+    );
+    assert_eq!(
+        app.points_after_drive,
+        Some(vec![7]),
+        "the cancel precondition — a live point with a client — must hold"
+    );
+    let events = app
+        .client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+    assert_eq!(
+        events.downs,
+        vec![7],
+        "the cancel precondition — a live point with a client — must hold"
+    );
+    assert_eq!(
+        events.cancels, 0,
+        "nothing headless emits a cancel, so none may arrive"
+    );
 }

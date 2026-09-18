@@ -22,7 +22,7 @@ use std::os::unix::net::UnixStream;
 use wayland_client::globals::{BindError, GlobalList, GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
     wl_buffer, wl_compositor, wl_output, wl_registry, wl_seat, wl_shm, wl_shm_pool,
-    wl_subcompositor, wl_subsurface, wl_surface,
+    wl_subcompositor, wl_subsurface, wl_surface, wl_touch,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle};
 use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
@@ -93,6 +93,20 @@ pub struct ClientEvents {
     /// counterpart to [`feedback_discarded`](Self::feedback_discarded),
     /// which the drop-without-send path produces instead.
     pub feedback_presented: bool,
+}
+
+/// What a `wl_touch`-holding client observed, returned by
+/// [`spawn_touch_client`] and [`spawn_touch_client_until_up`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TouchClientEvents {
+    /// `wl_touch.down` ids in arrival order — the wire ids the server's
+    /// down announcements carry, matching the touch-point ids the server
+    /// reports.
+    pub downs: Vec<i32>,
+    /// `wl_touch.up` ids in arrival order.
+    pub ups: Vec<i32>,
+    /// `wl_touch.cancel` events observed.
+    pub cancels: u32,
 }
 
 /// What a `zwlr_foreign_toplevel_manager_v1` client observed, returned by
@@ -220,6 +234,9 @@ pub struct ClientState {
     /// What an `ext-session-lock` client observed; returned by
     /// [`spawn_session_lock`].
     pub session_lock: SessionLockEvents,
+    /// What a `wl_touch`-holding client observed; returned by
+    /// [`spawn_touch_client`] and [`spawn_touch_client_until_up`].
+    pub touch: TouchClientEvents,
 }
 
 impl ClientState {
@@ -911,6 +928,151 @@ pub fn spawn_mapped(socket: &str) -> std::thread::JoinHandle<ClientEvents> {
         // closed, so a crashed run cannot leave a stale file behind.
         let _ = std::fs::remove_file(&shm_path);
         state.events
+    })
+}
+
+/// Like [`spawn_mapped`], but the client also binds `wl_seat`, takes a
+/// `wl_touch` object, and parks until it observes a touch down.
+///
+/// The two-phase mapped flow is unchanged — role plus bufferless commit
+/// first (the `Dispatch<xdg_surface>` impl acks the configure), shm-backed
+/// map second — so the server observes the same map as under `spawn_mapped`.
+/// After the map the client takes `wl_touch` and round-trips so the server
+/// creates the resource, which is what lets the server's touch notifies grow
+/// a point for this client's surface (see `enable_test_touch`'s doc on the
+/// server side). It then parks until the first down arrives — sweeping the
+/// queue on a short sleep with an overall deadline, never a blocking socket
+/// wait — so the test thread can inject touch traffic while this connection
+/// — and so its `wl_touch` resource — stays alive.
+///
+/// Every handle is held until the wait ends, so nothing is torn down before
+/// the server has injected. A silent server ends the wait at the deadline
+/// rather than hanging the join: the caller then fails its assertion on the
+/// returned (empty) events instead of hanging CI.
+// Shared harness: not every test binary binds touch, so binaries that never
+// call this would warn without the allow (see module docs).
+#[allow(dead_code)]
+pub fn spawn_touch_client(socket: &str) -> std::thread::JoinHandle<TouchClientEvents> {
+    spawn_touch_client_until(socket, false)
+}
+
+/// Like [`spawn_touch_client`], but parks until the first touch up instead of
+/// the first down (the down arrives first anyway) — for tests that drive a
+/// down/up round trip before asserting.
+// Shared harness: see `spawn_touch_client` above.
+#[allow(dead_code)]
+pub fn spawn_touch_client_until_up(socket: &str) -> std::thread::JoinHandle<TouchClientEvents> {
+    spawn_touch_client_until(socket, true)
+}
+
+fn spawn_touch_client_until(
+    socket: &str,
+    wait_for_up: bool,
+) -> std::thread::JoinHandle<TouchClientEvents> {
+    let path = crate::common::isolated_runtime_dir().join(socket);
+    // Built before the thread starts: `socket` is a borrow that cannot cross
+    // into the `'static` thread, and the closure needs an owned path anyway.
+    let shm_path = crate::common::shm_path_for(&format!("{socket}-touch-mapped"));
+    let stream = crate::common::connect_socket(&path);
+    std::thread::spawn(move || {
+        let (_conn, globals, mut queue, mut state) = ClientState::fresh(stream);
+        let qh = queue.handle();
+
+        let compositor: wl_compositor::WlCompositor =
+            globals.bind(&qh, 1..=6, ()).expect("bind wl_compositor");
+        let wm_base: xdg_wm_base::XdgWmBase =
+            globals.bind(&qh, 1..=6, ()).expect("bind xdg_wm_base");
+        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).expect("bind wl_shm");
+        // Required: the test created the seat, so a missing bind is a
+        // harness bug, not an optional path. The range negotiates down to
+        // whatever the server advertises; `wl_touch` itself is version 1.
+        let seat: wl_seat::WlSeat = globals
+            .bind(&qh, 1..=9, ())
+            .expect("bind wl_seat for wl_touch");
+        state.compositor = Some(compositor.clone());
+        state.wm_base = Some(wm_base.clone());
+        state.seat = Some(seat.clone());
+
+        // Phase 1: role + bufferless commit, then a round-trip so the server's
+        // initial configure arrives and is acked.
+        let surface = compositor.create_surface(&qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+        let _toplevel = xdg_surface.get_toplevel(&qh, ());
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the initial configure is dispatched and acked");
+
+        // Phase 2: an shm buffer, attached and committed — same shape as
+        // `spawn_mapped`, so the server maps the same 64x64 surface.
+        const W: i32 = 64;
+        const H: i32 = 64;
+        const STRIDE: i32 = W * 4;
+        let size = STRIDE * H;
+        let file = crate::common::create_shm_backing(&shm_path, size as u64);
+        let pool = shm.create_pool(file.as_fd(), size, &qh, ());
+        let buffer = pool.create_buffer(0, W, H, STRIDE, wl_shm::Format::Argb8888, &qh, ());
+        surface.attach(Some(&buffer), 0, 0);
+        surface.damage(0, 0, W, H);
+        surface.commit();
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server sees the buffered commit and maps");
+
+        // Take `wl_touch` now that the surface is mapped, and round-trip so
+        // the server creates the resource before the test injects: without
+        // it the server's down notify grows no point for this client.
+        let touch = seat.get_touch(&qh, ());
+        queue
+            .roundtrip(&mut state)
+            .expect("roundtrip so the server creates the wl_touch resource");
+
+        // Park until the observed traffic meets the caller's exit: the test
+        // thread injects while this connection stays alive. No lap blocks on
+        // the socket — one `dispatch_pending` sweep plus a single
+        // non-blocking read (`WouldBlock` on silence is the normal outcome)
+        // — and a deadline bounds the whole wait, so a server that never
+        // injects fails the caller's assertion instead of hanging the join.
+        // (`blocking_dispatch` cannot park here: it blocks in `poll`
+        // waiting for the server, and the socket timeouts only bound
+        // `read`, not the poll ahead of it.)
+        let deadline = std::time::Instant::now() + crate::common::IO_TIMEOUT;
+        while state.touch.downs.is_empty() || (wait_for_up && state.touch.ups.is_empty()) {
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            queue
+                .dispatch_pending(&mut state)
+                .expect("dispatch pending touch events");
+            if !(state.touch.downs.is_empty() || (wait_for_up && state.touch.ups.is_empty())) {
+                break;
+            }
+            if let Some(guard) = queue.prepare_read() {
+                // Any outcome — events read, silence, or a real error — is
+                // handled by the next lap (dispatch, deadline, or caller
+                // assertion); nothing here may block.
+                let _ = guard.read();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        // Keep every handle alive until the wait above has ended, then drop
+        // them here — after the server injected, not before it.
+        drop((
+            surface,
+            xdg_surface,
+            _toplevel,
+            touch,
+            seat,
+            buffer,
+            pool,
+            shm,
+            file,
+        ));
+        // Best-effort: the backing file is unlinked now that every handle is
+        // closed, so a crashed run cannot leave a stale file behind.
+        let _ = std::fs::remove_file(&shm_path);
+        state.touch
     })
 }
 
@@ -2067,6 +2229,28 @@ impl Dispatch<wl_seat::WlSeat, ()> for ClientState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<wl_touch::WlTouch, ()> for ClientState {
+    /// Records the touch traffic the server injects at this client's mapped
+    /// surface, so the touch integration tests can assert the wire exchange
+    /// happened — down and up ids, any cancel — rather than only that the
+    /// server grew a point.
+    fn event(
+        state: &mut Self,
+        _proxy: &wl_touch::WlTouch,
+        event: wl_touch::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_touch::Event::Down { id, .. } => state.touch.downs.push(id),
+            wl_touch::Event::Up { id, .. } => state.touch.ups.push(id),
+            wl_touch::Event::Cancel => state.touch.cancels += 1,
+            _ => {}
+        }
     }
 }
 

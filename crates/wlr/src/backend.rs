@@ -12309,6 +12309,11 @@ unsafe fn touch_layout_hit(
 ///
 /// `false` with no seat: points live on the seat, so a seatless runtime has
 /// none to name.
+///
+/// Test-only: the relays gate on [`touch_point_forwardable`] (existence plus
+/// the client half); this existence half survives for the fabricated-point
+/// fixtures, which pin resolve-then-unlink without driving a forward.
+#[cfg(test)]
 fn touch_point_known(runtime: &Runtime, touch_id: i32) -> bool {
     let Some(seat) = runtime.seat_ptr() else {
         return false;
@@ -12318,6 +12323,33 @@ fn touch_point_known(runtime: &Runtime, touch_id: i32) -> bool {
     // the seat, and the table borrow ended inside `seat_ptr`, so no borrow
     // crosses this call.
     unsafe { !sys::wlr_seat_touch_get_point(seat.as_ptr(), touch_id).is_null() }
+}
+
+/// Whether `touch_id` names a live touch point with a non-null client — the
+/// gate the up and motion relays check before forwarding.
+///
+/// Existence alone ([`touch_point_known`]) is not enough on those paths: the
+/// up/motion notifies address the point's client, so a live point with a null
+/// client would follow null into wlroots. This mirrors the pre-notify client
+/// check inside [`TouchFrame::send_cancel`] (whose own doc gives the
+/// wlroots-sets-it-at-creation rationale), except a miss here skips silently
+/// — unlike the cancel relay, which must still clear the compositor — exactly
+/// like the unknown-point arm: neither the forward nor the event happens.
+///
+/// `false` with no seat (points live on the seat), for an unknown id, or for
+/// a clientless point.
+fn touch_point_forwardable(runtime: &Runtime, touch_id: i32) -> bool {
+    let Some(seat) = runtime.seat_ptr() else {
+        return false;
+    };
+    // SAFETY: `seat` is this runtime's own live seat, as for
+    // `touch_point_known`; the lookup only reads the seat, `client` is
+    // compared and never dereferenced, and the table borrow ended inside
+    // `seat_ptr`, so no borrow crosses this call.
+    unsafe {
+        let point = sys::wlr_seat_touch_get_point(seat.as_ptr(), touch_id);
+        !point.is_null() && !(*point).client.is_null()
+    }
 }
 
 /// A touch point went down — a finger landed. Forwards the down through
@@ -12386,6 +12418,13 @@ unsafe extern "C" fn on_touch_down<S: Handlers>(
 /// token; no handler event — a touch's middle is client traffic, and the
 /// compositor already learned of the point from its down.
 ///
+/// The point is resolved before anything else, on the same terms as
+/// `on_touch_up` ([`touch_point_forwardable`]): a motion for an id never
+/// announced — or for a live point with no client — skips the focus update
+/// and the forward alike, rather than handing wlroots' notify a null client
+/// to follow. Checked before the hit test so the miss needs no cursor and no
+/// scene.
+///
 /// The point's focus is re-resolved every motion, on the same terms as
 /// `Runtime::inject_touch_motion` (whose own doc gives the drag rationale):
 /// wlroots' own refocus is a no-op when the surface already matches, so
@@ -12408,11 +12447,18 @@ unsafe extern "C" fn on_touch_motion<S: Handlers>(
         let ev = data.cast::<sys::wlr_touch_motion_event>();
         let runtime = (*session).runtime;
         runtime.notify_seat_activity();
+        let time_msec = (*ev).time_msec;
+        let touch_id = (*ev).touch_id;
+
+        // Unknown or clientless point: neither the focus update nor the
+        // forward happens — the same skip as the up relay's miss arm.
+        if !touch_point_forwardable(runtime, touch_id) {
+            return;
+        }
+
         let Some(touch) = NonNull::new((*ev).touch) else {
             return;
         };
-        let time_msec = (*ev).time_msec;
-        let touch_id = (*ev).touch_id;
 
         // Normalised 0..1 to layout plus the hit test, shared with
         // `on_touch_down`.
@@ -12440,11 +12486,13 @@ unsafe extern "C" fn on_touch_motion<S: Handlers>(
 /// nothing — the point is gone but the wire frame for it is a separate
 /// device signal), then announces it (`Event::TouchUp`).
 ///
-/// The point is resolved before anything else, with the same lookup
-/// [`TouchFrame::send_cancel`] uses: unlike the down (which gates on a
-/// surface hit), an up for an id never announced would otherwise forward and
-/// announce a point nothing knows. An unknown id skips BOTH the forward and
-/// the event.
+/// The point is resolved before anything else, with the existence half of the
+/// lookup [`TouchFrame::send_cancel`] uses plus its client half
+/// ([`touch_point_forwardable`]): unlike the down (which gates on a surface
+/// hit), an up for an id never announced would otherwise forward and announce
+/// a point nothing knows — and an up for a live point with no client would
+/// hand wlroots' notify a null client to follow. Either miss skips BOTH the
+/// forward and the event, exactly like the unknown-point arm.
 ///
 /// The device plays no role here: the forward goes through the seat by
 /// `touch_id` ([`TouchFrame::send_up`] takes no device), so a null
@@ -12465,9 +12513,9 @@ unsafe extern "C" fn on_touch_up<S: Handlers>(
         let time_msec = (*ev).time_msec;
         let touch_id = (*ev).touch_id;
 
-        // Unknown point (never announced, or already gone): neither the
-        // forward nor the event happens.
-        if !touch_point_known(runtime, touch_id) {
+        // Unknown point (never announced, or already gone) or a live point
+        // with no client: neither the forward nor the event happens.
+        if !touch_point_forwardable(runtime, touch_id) {
             return;
         }
 
@@ -12900,31 +12948,29 @@ fn deliver<S: OutputHandler>(session: &Session<'_, S>, state: &mut S, ev: Event)
     }
 }
 
-/// Build a `Session` over `runtime` with `deliver` as its sink and a null
-/// dispatcher state, for delivery tests whose event arms carry everything
-/// they read — no tables, no live state.
+/// Build a `Session` over `runtime` with `dispatcher` and `deliver` as its
+/// routing, for tests.
 ///
-/// The one construction site the three `*_delivery_tests` modules share
-/// (plus the `Legacy` literals inside two of them), instead of four copies
-/// of the same sixteen-field literal. The dispatcher's state pointer is
-/// deliberately null: a non-null one would alias the `&mut S` the tests hand
-/// to `deliver_all` alongside the session.
-///
-/// Tests that drive callbacks directly — where the relay emits through the
-/// dispatcher into a live recorder — use `tests::test_session` instead,
-/// which wires a live state pointer. The two helpers differ in arity, so
-/// each module resolves its own `test_session` by name.
+/// The one construction site behind both `test_session` helpers, which differ
+/// only in the dispatcher they pass: a null state pointer for delivery tests
+/// whose event arms carry everything they read (a non-null one would alias
+/// the `&mut S` the tests hand to `deliver_all` alongside the session), a
+/// live one for tests that drive a callback directly (so a relay that emits
+/// through the dispatcher delivers inline rather than queueing). The two
+/// helpers differ in arity, so each module resolves its own `test_session`
+/// by name.
 ///
 /// `S` needs no bound here: nothing is delivered through this session
 /// itself, so the `Handlers` obligation sits with the `deliver` fn pointer
 /// the caller passes.
 #[cfg(test)]
-fn test_session<S>(
-    runtime: &Runtime,
+fn session_with_dispatcher<'r, S>(
+    dispatcher: Dispatcher<S>,
+    runtime: &'r Runtime,
     deliver: fn(&Session<'_, S>, &mut S, Event),
-) -> Session<'_, S> {
+) -> Session<'r, S> {
     Session {
-        dispatcher: Dispatcher::new(std::ptr::null_mut()),
+        dispatcher,
         outputs: RefCell::new(HashMap::new()),
         toplevels: RefCell::new(HashMap::new()),
         decorations: RefCell::new(HashMap::new()),
@@ -12948,6 +12994,25 @@ fn test_session<S>(
         runtime,
         deliver,
     }
+}
+
+/// Build a `Session` over `runtime` with `deliver` as its sink and a null
+/// dispatcher state, for delivery tests whose event arms carry everything
+/// they read — no tables, no live state.
+///
+/// The one construction site the three `*_delivery_tests` modules share
+/// (plus the `Legacy` literals inside two of them), instead of four copies
+/// of the same sixteen-field literal. See [`session_with_dispatcher`].
+///
+/// Tests that drive callbacks directly — where the relay emits through the
+/// dispatcher into a live recorder — use `tests::test_session` instead,
+/// which wires a live state pointer.
+#[cfg(test)]
+fn test_session<S>(
+    runtime: &Runtime,
+    deliver: fn(&Session<'_, S>, &mut S, Event),
+) -> Session<'_, S> {
+    session_with_dispatcher(Dispatcher::new(std::ptr::null_mut()), runtime, deliver)
 }
 
 #[cfg(test)]
@@ -13365,6 +13430,7 @@ mod tests {
     /// that emits through it delivers inline rather than queueing. The
     /// null-dispatcher delivery tests use the top-level `test_session`
     /// instead; the two helpers differ in arity, so each resolves its own.
+    /// Both are thin wrappers over [`session_with_dispatcher`](super::session_with_dispatcher).
     ///
     /// # Safety
     ///
@@ -13376,31 +13442,7 @@ mod tests {
         runtime: &'r Runtime,
         deliver: fn(&Session<'_, S>, &mut S, Event),
     ) -> Session<'r, S> {
-        Session {
-            dispatcher: Dispatcher::new(state),
-            outputs: RefCell::new(HashMap::new()),
-            toplevels: RefCell::new(HashMap::new()),
-            decorations: RefCell::new(HashMap::new()),
-            layers: RefCell::new(HashMap::new()),
-            popups: RefCell::new(HashMap::new()),
-            surfaces: RefCell::new(HashMap::new()),
-            inputs: RefCell::new(HashMap::new()),
-            drags: RefCell::new(HashMap::new()),
-            idle_inhibitors: RefCell::new(HashMap::new()),
-            shortcuts_inhibitors: RefCell::new(HashMap::new()),
-            tablet_tools: RefCell::new(HashMap::new()),
-            transient_seats: RefCell::new(HashMap::new()),
-            session_locks: RefCell::new(HashMap::new()),
-            lock_surfaces: RefCell::new(HashMap::new()),
-            scene_buffers: RefCell::new(HashMap::new()),
-            pointer_constraints: RefCell::new(HashMap::new()),
-            #[cfg(wlr_has_xwayland)]
-            xwayland_surfaces: RefCell::new(HashMap::new()),
-            last_key_consumed: Cell::new(false),
-            applied_heads: RefCell::new(VecDeque::new()),
-            runtime,
-            deliver,
-        }
+        super::session_with_dispatcher(Dispatcher::new(state), runtime, deliver)
     }
 
     /// Records what the gesture/touch/switch/relative relays delivered, so
@@ -13558,29 +13600,51 @@ mod tests {
         }
     }
 
-    /// A swipe begin/end with no gestures manager and no seat: no forward is
-    /// possible, but both handler events still fire — the specified degraded
-    /// behaviour [`GesturePhase::of`](crate::runtime::GesturePhase) documents,
-    /// driven here through linked listeners and fabricated signals rather
-    /// than asserted on the token. The update between them carries no handler
-    /// event and has no manager to forward through; driving it pins the quiet
-    /// middle.
-    #[test]
-    fn swipe_begin_and_end_emit_without_a_manager_or_seat() {
-        let runtime = Runtime::new().expect("runtime");
+    /// Shared scaffold for the swipe/pinch/hold begin/end relay tests: a
+    /// scratch pointer device, fabricated begin/end signals linked through a
+    /// live session, the two emissions with gesture-specific traffic between
+    /// them, and teardown.
+    ///
+    /// `begin_notify`/`end_notify` are the link fns; `make_begin`/`make_end`
+    /// build each test's own event structs (emitted here); `emit_middle`
+    /// carries gesture-specific traffic between them — the swipe update
+    /// (which links its own signal off `session_ptr`), a no-op for pinch
+    /// and hold. Each test keeps only its distinct wiring (these five
+    /// arguments) plus its asserts; the harness owns the alloc, the signal
+    /// init, the links, both emissions and the free, and hands back the
+    /// announced [`GestureId`].
+    ///
+    /// The forward every event would travel is skipped for lack of a manager
+    /// before anything could read the scratch pointer, whose address is only
+    /// ever compared (as the id) and null-checked, never dereferenced.
+    ///
+    /// # Safety
+    ///
+    /// `runtime` must outlive the call; `state` must be exclusively borrowed
+    /// — the dispatcher carries a raw pointer to it and each emission
+    /// delivers inline, so no handler may be on the stack and no reference
+    /// to `state` may exist for the call.
+    unsafe fn drive_gesture_begin_end<B, E>(
+        runtime: &Runtime,
+        state: &mut RelayRecorder,
+        begin_notify: sys::wl_notify_func_t,
+        end_notify: sys::wl_notify_func_t,
+        make_begin: impl FnOnce(*mut sys::wlr_pointer) -> B,
+        emit_middle: impl FnOnce(*mut sys::wlr_pointer, *const ()),
+        make_end: impl FnOnce(*mut sys::wlr_pointer) -> E,
+    ) -> GestureId {
         assert!(
-            GesturePhase::of(&runtime).is_none(),
+            GesturePhase::of(runtime).is_none(),
             "no manager and no seat: nothing to forward through"
         );
-        let mut state = RelayRecorder::default();
-        let p = &raw mut state;
-
-        // SAFETY: `p` is a live, exclusively-derived pointer to `state` and
-        // no reference to `state` exists; `runtime` outlives the session.
-        // Each emission below runs with no handler on the stack, so
-        // `Dispatcher::emit` delivers it inline rather than queueing it.
+        let p: *mut RelayRecorder = &raw mut *state;
+        // SAFETY: `p` is derived from the exclusive `state` borrow and no
+        // reference to `state` exists while the session below is alive;
+        // `runtime` outlives the call per the contract. Each emission runs
+        // with no handler on the stack, so `Dispatcher::emit` delivers it
+        // inline rather than queueing it.
         unsafe {
-            let session = test_session(p, &runtime, deliver_all::<RelayRecorder>);
+            let session = test_session(p, runtime, deliver_all::<RelayRecorder>);
             let session_ptr = (&raw const session).cast::<()>();
 
             // SAFETY: non-zero layout; null-checked below; a scratch pointer
@@ -13595,10 +13659,8 @@ mod tests {
             // SAFETY: live stack locals, initialised below, outliving the
             // registrations linked into them.
             let mut sig_begin: sys::wl_signal = std::mem::zeroed();
-            let mut sig_update: sys::wl_signal = std::mem::zeroed();
             let mut sig_end: sys::wl_signal = std::mem::zeroed();
             sys::wl_signal_init(&mut sig_begin);
-            sys::wl_signal_init(&mut sig_update);
             sys::wl_signal_init(&mut sig_end);
             // SAFETY: the signals above are initialised and outlive the
             // registrations; `session_ptr` names the live session for the `S`
@@ -13608,58 +13670,92 @@ mod tests {
             // delivers inline.
             let _begin = Registration::link_bare(
                 &mut sig_begin,
-                on_pointer_swipe_begin::<RelayRecorder>,
+                begin_notify,
                 session_ptr,
                 std::ptr::null(),
             );
-            let _update = Registration::link_bare(
-                &mut sig_update,
-                on_pointer_swipe_update::<RelayRecorder>,
-                session_ptr,
-                std::ptr::null(),
-            );
-            let _end = Registration::link_bare(
-                &mut sig_end,
-                on_pointer_swipe_end::<RelayRecorder>,
-                session_ptr,
-                std::ptr::null(),
-            );
+            let _end =
+                Registration::link_bare(&mut sig_end, end_notify, session_ptr, std::ptr::null());
 
-            let mut begin = sys::wlr_pointer_swipe_begin_event {
-                pointer,
-                time_msec: 10,
-                fingers: 3,
-            };
+            let mut begin = make_begin(pointer);
             sys::wl_signal_emit_mutable(
                 &mut sig_begin,
                 (&raw mut begin).cast::<std::ffi::c_void>(),
             );
-            let mut update = sys::wlr_pointer_swipe_update_event {
-                pointer,
-                time_msec: 11,
-                fingers: 3,
-                dx: 1.0,
-                dy: 2.0,
-            };
-            sys::wl_signal_emit_mutable(
-                &mut sig_update,
-                (&raw mut update).cast::<std::ffi::c_void>(),
-            );
-            let mut end = sys::wlr_pointer_swipe_end_event {
-                pointer,
-                time_msec: 12,
-                cancelled: false,
-            };
+            emit_middle(pointer, session_ptr);
+            let mut end = make_end(pointer);
             sys::wl_signal_emit_mutable(&mut sig_end, (&raw mut end).cast::<std::ffi::c_void>());
 
             let id = GestureId(pointer as usize);
-            assert_eq!(state.began, vec![id], "begin must announce the pointer");
-            assert_eq!(state.ended, vec![id], "end must announce the pointer");
 
             // SAFETY: no registration names this allocation (only transient
             // event addresses did); same layout as allocated.
             dealloc(pointer.cast(), Layout::new::<sys::wlr_pointer>());
+            id
         }
+    }
+
+    /// A swipe begin/end with no gestures manager and no seat: no forward is
+    /// possible, but both handler events still fire — the specified degraded
+    /// behaviour [`GesturePhase::of`](crate::runtime::GesturePhase) documents,
+    /// driven here through linked listeners and fabricated signals rather
+    /// than asserted on the token. The update between them carries no handler
+    /// event and has no manager to forward through; driving it pins the quiet
+    /// middle.
+    #[test]
+    fn swipe_begin_and_end_emit_without_a_manager_or_seat() {
+        let runtime = Runtime::new().expect("runtime");
+        let mut state = RelayRecorder::default();
+
+        // SAFETY: `state` is exclusively borrowed for the call, `runtime`
+        // outlives it, and no handler is on the stack — the harness's own
+        // contract.
+        let id = unsafe {
+            drive_gesture_begin_end(
+                &runtime,
+                &mut state,
+                on_pointer_swipe_begin::<RelayRecorder>,
+                on_pointer_swipe_end::<RelayRecorder>,
+                |pointer| sys::wlr_pointer_swipe_begin_event {
+                    pointer,
+                    time_msec: 10,
+                    fingers: 3,
+                },
+                |pointer, session_ptr| {
+                    // SAFETY: live stack local, initialised below,
+                    // outliving the registration linked into it; session
+                    // and dispatcher state as for the harness. No `unsafe`
+                    // block of its own: this closure is lexically inside
+                    // the test's `unsafe` block, which already covers it.
+                    let mut sig_update: sys::wl_signal = std::mem::zeroed();
+                    sys::wl_signal_init(&mut sig_update);
+                    let _update = Registration::link_bare(
+                        &mut sig_update,
+                        on_pointer_swipe_update::<RelayRecorder>,
+                        session_ptr,
+                        std::ptr::null(),
+                    );
+                    let mut update = sys::wlr_pointer_swipe_update_event {
+                        pointer,
+                        time_msec: 11,
+                        fingers: 3,
+                        dx: 1.0,
+                        dy: 2.0,
+                    };
+                    sys::wl_signal_emit_mutable(
+                        &mut sig_update,
+                        (&raw mut update).cast::<std::ffi::c_void>(),
+                    );
+                },
+                |pointer| sys::wlr_pointer_swipe_end_event {
+                    pointer,
+                    time_msec: 12,
+                    cancelled: false,
+                },
+            )
+        };
+        assert_eq!(state.began, vec![id], "begin must announce the pointer");
+        assert_eq!(state.ended, vec![id], "end must announce the pointer");
     }
 
     /// A pinch begin/end with no gestures manager and no seat: same
@@ -13667,71 +13763,35 @@ mod tests {
     #[test]
     fn pinch_begin_and_end_emit_without_a_manager_or_seat() {
         let runtime = Runtime::new().expect("runtime");
-        assert!(
-            GesturePhase::of(&runtime).is_none(),
-            "no manager and no seat: nothing to forward through"
-        );
         let mut state = RelayRecorder::default();
-        let p = &raw mut state;
 
-        // SAFETY: as for the swipe test — live exclusive state pointer,
-        // outliving runtime, inline delivery.
-        unsafe {
-            let session = test_session(p, &runtime, deliver_all::<RelayRecorder>);
-            let session_ptr = (&raw const session).cast::<()>();
-
-            // SAFETY: as for the swipe test — compared and null-checked,
-            // never dereferenced.
-            let pointer =
-                alloc_zeroed(Layout::new::<sys::wlr_pointer>()).cast::<sys::wlr_pointer>();
-            assert!(!pointer.is_null(), "allocation failed");
-
-            // SAFETY: as for the swipe test.
-            let mut sig_begin: sys::wl_signal = std::mem::zeroed();
-            let mut sig_end: sys::wl_signal = std::mem::zeroed();
-            sys::wl_signal_init(&mut sig_begin);
-            sys::wl_signal_init(&mut sig_end);
-            // SAFETY: as for the swipe test.
-            let _begin = Registration::link_bare(
-                &mut sig_begin,
+        // SAFETY: as for the swipe test — exclusive state, outliving
+        // runtime, inline delivery.
+        let id = unsafe {
+            drive_gesture_begin_end(
+                &runtime,
+                &mut state,
                 on_pointer_pinch_begin::<RelayRecorder>,
-                session_ptr,
-                std::ptr::null(),
-            );
-            let _end = Registration::link_bare(
-                &mut sig_end,
                 on_pointer_pinch_end::<RelayRecorder>,
-                session_ptr,
-                std::ptr::null(),
-            );
-
-            let mut begin = sys::wlr_pointer_pinch_begin_event {
-                pointer,
-                time_msec: 20,
-                fingers: 2,
-            };
-            sys::wl_signal_emit_mutable(
-                &mut sig_begin,
-                (&raw mut begin).cast::<std::ffi::c_void>(),
-            );
-            let mut end = sys::wlr_pointer_pinch_end_event {
-                pointer,
-                time_msec: 21,
-                cancelled: true,
-            };
-            sys::wl_signal_emit_mutable(&mut sig_end, (&raw mut end).cast::<std::ffi::c_void>());
-
-            let id = GestureId(pointer as usize);
-            assert_eq!(state.began, vec![id], "begin must announce the pointer");
-            assert_eq!(
-                state.ended,
-                vec![id],
-                "a cancelled end must announce like a completed one"
-            );
-
-            // SAFETY: as for the swipe test.
-            dealloc(pointer.cast(), Layout::new::<sys::wlr_pointer>());
-        }
+                |pointer| sys::wlr_pointer_pinch_begin_event {
+                    pointer,
+                    time_msec: 20,
+                    fingers: 2,
+                },
+                |_, _| {},
+                |pointer| sys::wlr_pointer_pinch_end_event {
+                    pointer,
+                    time_msec: 21,
+                    cancelled: true,
+                },
+            )
+        };
+        assert_eq!(state.began, vec![id], "begin must announce the pointer");
+        assert_eq!(
+            state.ended,
+            vec![id],
+            "a cancelled end must announce like a completed one"
+        );
     }
 
     /// A hold begin/end with no gestures manager and no seat: same shape as
@@ -13739,67 +13799,31 @@ mod tests {
     #[test]
     fn hold_begin_and_end_emit_without_a_manager_or_seat() {
         let runtime = Runtime::new().expect("runtime");
-        assert!(
-            GesturePhase::of(&runtime).is_none(),
-            "no manager and no seat: nothing to forward through"
-        );
         let mut state = RelayRecorder::default();
-        let p = &raw mut state;
 
-        // SAFETY: as for the swipe test — live exclusive state pointer,
-        // outliving runtime, inline delivery.
-        unsafe {
-            let session = test_session(p, &runtime, deliver_all::<RelayRecorder>);
-            let session_ptr = (&raw const session).cast::<()>();
-
-            // SAFETY: as for the swipe test — compared and null-checked,
-            // never dereferenced.
-            let pointer =
-                alloc_zeroed(Layout::new::<sys::wlr_pointer>()).cast::<sys::wlr_pointer>();
-            assert!(!pointer.is_null(), "allocation failed");
-
-            // SAFETY: as for the swipe test.
-            let mut sig_begin: sys::wl_signal = std::mem::zeroed();
-            let mut sig_end: sys::wl_signal = std::mem::zeroed();
-            sys::wl_signal_init(&mut sig_begin);
-            sys::wl_signal_init(&mut sig_end);
-            // SAFETY: as for the swipe test.
-            let _begin = Registration::link_bare(
-                &mut sig_begin,
+        // SAFETY: as for the swipe test — exclusive state, outliving
+        // runtime, inline delivery.
+        let id = unsafe {
+            drive_gesture_begin_end(
+                &runtime,
+                &mut state,
                 on_pointer_hold_begin::<RelayRecorder>,
-                session_ptr,
-                std::ptr::null(),
-            );
-            let _end = Registration::link_bare(
-                &mut sig_end,
                 on_pointer_hold_end::<RelayRecorder>,
-                session_ptr,
-                std::ptr::null(),
-            );
-
-            let mut begin = sys::wlr_pointer_hold_begin_event {
-                pointer,
-                time_msec: 30,
-                fingers: 1,
-            };
-            sys::wl_signal_emit_mutable(
-                &mut sig_begin,
-                (&raw mut begin).cast::<std::ffi::c_void>(),
-            );
-            let mut end = sys::wlr_pointer_hold_end_event {
-                pointer,
-                time_msec: 31,
-                cancelled: false,
-            };
-            sys::wl_signal_emit_mutable(&mut sig_end, (&raw mut end).cast::<std::ffi::c_void>());
-
-            let id = GestureId(pointer as usize);
-            assert_eq!(state.began, vec![id], "begin must announce the pointer");
-            assert_eq!(state.ended, vec![id], "end must announce the pointer");
-
-            // SAFETY: as for the swipe test.
-            dealloc(pointer.cast(), Layout::new::<sys::wlr_pointer>());
-        }
+                |pointer| sys::wlr_pointer_hold_begin_event {
+                    pointer,
+                    time_msec: 30,
+                    fingers: 1,
+                },
+                |_, _| {},
+                |pointer| sys::wlr_pointer_hold_end_event {
+                    pointer,
+                    time_msec: 31,
+                    cancelled: false,
+                },
+            )
+        };
+        assert_eq!(state.began, vec![id], "begin must announce the pointer");
+        assert_eq!(state.ended, vec![id], "end must announce the pointer");
     }
 
     /// A touch down with no cursor: the mapping has nothing to map with, so
@@ -13815,7 +13839,9 @@ mod tests {
     /// hold `wl_touch` (see `enable_test_touch`'s doc). Cursor and seat do
     /// exist in unit scope (`create_seat` makes both), so the cursorless and
     /// seatless gates are pinned here and in integration; the hit and the
-    /// tail are covered in integration. This pins the gate.
+    /// tail are covered in integration by
+    /// `touch_down_announces_with_id_to_a_wl_touch_client` (pointer.rs).
+    /// This pins the gate.
     #[test]
     fn touch_down_without_a_cursor_is_a_quiet_no_op() {
         let runtime = Runtime::new().expect("runtime");
@@ -13905,31 +13931,128 @@ mod tests {
         }
     }
 
-    /// An up for an id the seat never announced: the resolve-first lookup
-    /// names nothing, so neither the forward nor the event happens — with a
-    /// live device attached to the event or a null one (a device that died
+    /// A touch motion for an unknown id — and for a known id with no client:
+    /// the point gate sits before the hit test, so both miss with no cursor
+    /// and no scene involved. Motion carries no handler event, so the oracle
+    /// is the absence of any delivery at all through the shared dispatcher —
+    /// the same skip as the up relay's miss arms.
+    ///
+    /// The clientless arm drives a fabricated point (null client by
+    /// construction) through the relay itself — sound because the gate
+    /// returns before the focus update or wlroots' notify could follow the
+    /// null client, which is exactly what the gate exists to guarantee.
+    #[test]
+    fn touch_motion_for_an_unknown_or_clientless_point_forwards_nothing() {
+        let _guard = crate::test_support::test_display_guard();
+        let display = crate::Display::new().expect("display");
+        let runtime = Runtime::new().expect("runtime");
+        runtime.create_seat(&display, "seat0").expect("seat");
+        let seat = runtime.seat_ptr().expect("seat was just created");
+        let mut state = RelayRecorder::default();
+        let p = &raw mut state;
+
+        // SAFETY: live exclusive state pointer, outliving runtime, inline
+        // delivery — as for the gesture tests.
+        unsafe {
+            let session = test_session(p, &runtime, deliver_all::<RelayRecorder>);
+            let session_ptr = (&raw const session).cast::<()>();
+
+            // SAFETY: non-zero layout; null-checked below; a scratch device
+            // whose address is only ever carried by the event — the point
+            // gate returns before the hit test could read it.
+            let touch = alloc_zeroed(Layout::new::<sys::wlr_touch>()).cast::<sys::wlr_touch>();
+            assert!(!touch.is_null(), "allocation failed");
+
+            // SAFETY: live stack signal, initialised below, outliving the
+            // registration; session and dispatcher state as above.
+            let mut sig: sys::wl_signal = std::mem::zeroed();
+            sys::wl_signal_init(&mut sig);
+            let _motion = Registration::link_bare(
+                &mut sig,
+                on_touch_motion::<RelayRecorder>,
+                session_ptr,
+                std::ptr::null(),
+            );
+
+            // Unknown id: neither focus update nor forward.
+            let mut ev = sys::wlr_touch_motion_event {
+                touch,
+                time_msec: 11,
+                touch_id: 4242,
+                x: 0.5,
+                y: 0.5,
+            };
+            sys::wl_signal_emit_mutable(&mut sig, (&raw mut ev).cast::<std::ffi::c_void>());
+            assert!(
+                state.downs.is_empty() && state.ups.is_empty() && state.cancelled == 0,
+                "a motion for an unknown point must deliver nothing"
+            );
+
+            // Known id with no client: the client half of the gate misses,
+            // so the same skip — the focus update must never run with a
+            // null client behind the point either.
+            //
+            // SAFETY: `seat` is this runtime's own live seat, outliving the
+            // guard; the guard unlinks + frees on drop (including on
+            // unwind), so the seat never outlives the entry.
+            let fabricated = FabricatedPointGuard::link(seat, 7);
+            assert!(
+                fabricated.resolves(&runtime, 7),
+                "the fabricated entry must resolve through the seat's own lookup"
+            );
+            let mut ev_clientless = sys::wlr_touch_motion_event {
+                touch,
+                time_msec: 12,
+                touch_id: 7,
+                x: 0.5,
+                y: 0.5,
+            };
+            sys::wl_signal_emit_mutable(
+                &mut sig,
+                (&raw mut ev_clientless).cast::<std::ffi::c_void>(),
+            );
+            // Unlinked before asserting, with the entry held locally by the
+            // guard: an assert failure below cannot skip the cleanup (and
+            // the guard's `Drop` covers the unwind path too).
+            drop(fabricated);
+            assert!(
+                state.downs.is_empty() && state.ups.is_empty() && state.cancelled == 0,
+                "a motion for a clientless point must deliver nothing, like an unknown one"
+            );
+
+            // SAFETY: nothing registered names this allocation (only
+            // transient event addresses did); same layout as allocated.
+            dealloc(touch.cast(), Layout::new::<sys::wlr_touch>());
+        }
+    }
+
+    /// An up for an id the seat never announced — or for a live point with
+    /// no client: the resolve-first lookup misses (or the client half of it
+    /// does), so neither the forward nor the event happens — with a live
+    /// device attached to the event or a null one (a device that died
     /// mid-gesture takes the same gate: the forward goes through the seat by
     /// id and [`TouchFrame::send_up`] takes no device).
     ///
     /// Driven against a live seat (not merely a seatless runtime) so the
     /// `wlr_seat_touch_get_point` lookup itself runs and reports the miss; a
-    /// seatless runtime takes the same exit one step earlier. Gap note (not
-    /// silence): the known-point positive — forward plus emit, on either
-    /// device state, with the non-zero serial the tail gates on — needs a
-    /// live touch point, which needs a client holding `wl_touch` (see
-    /// `enable_test_touch`'s doc for why a headless seat cannot make one).
-    /// A fabricated clientless point cannot stand in here the way it does
-    /// for the cancel relay: `send_up` hands the point to wlroots' notify
-    /// with no client check of its own (unlike `send_cancel`'s pre-notify
-    /// check), so driving it would hand wlroots a null client to follow —
-    /// unsound. It is covered in integration, and the uniform code path by
-    /// inspection above (one forward-gated shape, no arms left to diverge).
+    /// seatless runtime takes the same exit one step earlier. The clientless
+    /// arm drives a fabricated point (null client by construction) through
+    /// the relay itself — sound because the relay's client gate returns
+    /// before wlroots' notify could follow the null client, which is exactly
+    /// what the gate exists to guarantee. Gap note (not silence): the
+    /// known-with-client positive — forward plus emit, on either device
+    /// state, with the non-zero serial the tail gates on — needs a live
+    /// touch point with a client, which needs a client holding `wl_touch`
+    /// (see `enable_test_touch`'s doc for why a headless seat cannot make
+    /// one). It is covered in integration by
+    /// `touch_up_announces_for_the_known_point` (pointer.rs).
     #[test]
     fn touch_up_for_an_unknown_point_announces_nothing() {
         let _guard = crate::test_support::test_display_guard();
         let display = crate::Display::new().expect("display");
         let runtime = Runtime::new().expect("runtime");
         runtime.create_seat(&display, "seat0").expect("seat");
+        let seat = runtime.seat_ptr().expect("seat was just created");
         let mut state = RelayRecorder::default();
         let p = &raw mut state;
 
@@ -13981,6 +14104,36 @@ mod tests {
             assert!(
                 state.ups.is_empty(),
                 "an up with neither device nor point must announce nothing"
+            );
+
+            // Live device, KNOWN id with no client: the client half of the
+            // gate misses, so the same skip — the forward must never reach
+            // wlroots' notify with a null client to follow.
+            //
+            // SAFETY: `seat` is this runtime's own live seat, outliving the
+            // guard; the guard unlinks + frees on drop (including on
+            // unwind), so the seat never outlives the entry.
+            let fabricated = FabricatedPointGuard::link(seat, 7);
+            assert!(
+                fabricated.resolves(&runtime, 7),
+                "the fabricated entry must resolve through the seat's own lookup"
+            );
+            let mut ev_clientless = sys::wlr_touch_up_event {
+                touch,
+                time_msec: 14,
+                touch_id: 7,
+            };
+            sys::wl_signal_emit_mutable(
+                &mut sig,
+                (&raw mut ev_clientless).cast::<std::ffi::c_void>(),
+            );
+            // Unlinked before asserting, with the entry held locally by the
+            // guard: an assert failure below cannot skip the cleanup (and
+            // the guard's `Drop` covers the unwind path too).
+            drop(fabricated);
+            assert!(
+                state.ups.is_empty(),
+                "an up for a clientless point must announce nothing, like an unknown one"
             );
 
             // SAFETY: nothing registered names this allocation (only
@@ -14070,15 +14223,21 @@ mod tests {
     /// its resolve half pinned in both modes
     /// (`touch_cancel_with_a_null_device_resolves_fabricated_entry`).
     /// DOCUMENTED ONLY: the [`CancelOutcome::Cancelled`] arm — the forward
-    /// genuinely notified — needs a live touch point *with a client*, which
-    /// wlroots only grows when a real Wayland client binds the seat and
-    /// holds a `wl_touch` resource (see `enable_test_touch`'s doc).
+    /// genuinely notified — needs a live touch point *with a client* plus a
+    /// headless cancel trigger, and only the first half has since been
+    /// built: `tests/common/client.rs` now offers the `wl_touch`-binding,
+    /// mapped-surface helper (`spawn_touch_client`, driving the down, up,
+    /// and cancel-precondition legs in pointer.rs), but nothing headless
+    /// emits the cancel itself — no touch device for the hardware signal
+    /// (no virtual-touch protocol, so `on_new_input` has no touch arm) and
+    /// no public inject (`TouchFrame::send_cancel` is `pub(crate)`,
+    /// `inject_touch_*` offers down/motion/up only). See
+    /// `touch_cancel_has_no_headless_driver` for the precise missing piece.
     /// Fabricating either pointer is unsound: a dangling `wlr_seat_client`
     /// is dereferenced by the notify, and a point fabricated with a null
     /// client exercises the *clientless* arm instead (see
     /// `send_cancel_reports_each_miss_distinctly` and the resolve test's gap
-    /// note). That arm awaits a `wl_touch`-binding client helper
-    /// `tests/common/client.rs` does not offer; until then the relay's
+    /// note). Until a headless cancel source exists, the relay's
     /// `Cancelled` match arm is reached on no unit path, and the emit below
     /// it is pinned by the three miss arms above.
     #[test]
@@ -14148,11 +14307,12 @@ mod tests {
     /// exactly what `wlr_seat_touch_get_point` walks — genuinely resolves
     /// (pinned via [`touch_point_known`]), and dropping the guard unlinks it
     /// again. The null client is compared, never followed, because
-    /// `send_cancel` checks it before notifying; that pre-notify check is
-    /// also what keeps this sound where the up half is not: `send_up` hands
-    /// the point to wlroots' notify with no client check of its own, so a
-    /// fabricated point there would hand wlroots a null client to follow
-    /// (see the up test's gap note).
+    /// `send_cancel` checks it before notifying; the up and motion relays
+    /// gate on the same null the same way ([`touch_point_forwardable`]), so
+    /// a fabricated point drives those relays soundly too (see
+    /// `touch_up_for_an_unknown_point_announces_nothing`'s clientless arm) —
+    /// only the cancel relay is left undriven here, for the unwind reason
+    /// below rather than a soundness one.
     ///
     /// Why this test drives NO relay: a live point with no client is a
     /// programming error wlroots rules out at creation, so driving the
@@ -14448,12 +14608,28 @@ mod tests {
     /// `dx`/`udx`.
     ///
     /// A seat is required: seatless, the relay skips both, and there would
-    /// be nothing to observe. The full `on_pointer_motion` relay needs a
-    /// cursor and a scene on top of the seat (integration); this pins the
-    /// tail both relays share, NaN guard included. The forward-observable
-    /// leg — a relative-pointer manager witnessing what clients got — is
-    /// documented-only for the same reason: unit scope has no manager, so
-    /// "no forward" below is read off the shared gate, never observed.
+    /// be nothing to observe (pinned instead by
+    /// `seatless_relative_motion_delivers_nothing` below). The full
+    /// `on_pointer_motion` relay needs a cursor and a scene on top of the
+    /// seat (integration); this pins the tail both relays share, NaN guard
+    /// included. The forward-observable leg — a relative-pointer manager
+    /// witnessing what clients got — is documented-only for the same
+    /// reason: unit scope has no manager, so "no forward" below is read off
+    /// the shared gate, never observed. It stays documented-only in
+    /// integration too, and deliberately: driving finite deltas at a real
+    /// relative-pointer client needs a headless pointer-motion source
+    /// reaching the motion relays, and none exists — the hardware
+    /// `wlr_pointer.events.motion` signal has no safe-API device headless
+    /// (pointer injection is touch-only: `inject_touch_*`), and the one
+    /// motion source a harness could build (a `wlr_virtual_pointer`
+    /// protocol leg driving `create_virtual_pointer_manager`) is a second
+    /// protocol object `tests/common/client.rs` does not speak. The
+    /// manager-plus-`get_relative_pointer` client half is constructible
+    /// today, but with nothing to move the pointer it could only assert
+    /// silence — the same nothing the shared gate already pins. Until a
+    /// headless motion source exists, the forward is inferred from that
+    /// gate: it sits before both the client forward and the announce, so
+    /// every drop pinned below dropped the forward too.
     #[test]
     fn relative_motion_relay_quantizes_and_guards() {
         let _guard = crate::test_support::test_display_guard();
@@ -14553,6 +14729,60 @@ mod tests {
             assert_eq!(
                 state.relative, pinned,
                 "exactly-2^63 milli magnitude must drop at the i64-range guard"
+            );
+            // The `udy`-alone mirrors of the `udx`-alone pins above: a
+            // huge-but-finite `udy` with a small `udx` must drop at the same
+            // guard — either member of the unaccelerated pair drops the
+            // whole motion, not just a corrupt `udx`.
+            emit_relative_motion(session_ptr, 19, 1.0, 1.0, 0.5, 1e300);
+            assert_eq!(
+                state.relative, pinned,
+                "huge-but-finite udy alone must drop at the i64-range guard"
+            );
+            emit_relative_motion(session_ptr, 20, 1.0, 1.0, 0.5, 9.223372036854776e15);
+            assert_eq!(
+                state.relative, pinned,
+                "exactly-2^63 udy milli magnitude must drop at the i64-range guard"
+            );
+            emit_relative_motion(session_ptr, 21, 1.0, 1.0, 0.5, -9.223372036854776e15);
+            assert_eq!(
+                state.relative, pinned,
+                "exactly-(-2^63) udy milli magnitude must drop at the i64-range guard"
+            );
+        }
+    }
+
+    /// A relative motion with no seat: the shared tail skips both the forward
+    /// and the announce, so finite in-range deltas deliver nothing — the
+    /// seatless half of the relay's contract (the seated half is
+    /// `relative_motion_relay_quantizes_and_guards` above). Needs no display:
+    /// with no seat there is nothing to forward to, and the event would name
+    /// motion no client saw.
+    #[test]
+    fn seatless_relative_motion_delivers_nothing() {
+        let runtime = Runtime::new().expect("runtime");
+        assert!(
+            runtime.seat_ptr().is_none(),
+            "no seat was ever created on this runtime"
+        );
+        let mut state = RelayRecorder::default();
+        let p = &raw mut state;
+
+        // SAFETY: live exclusive state pointer, outliving runtime; no
+        // handler is on the stack, so the call below delivers inline rather
+        // than queueing.
+        unsafe {
+            let session = test_session(p, &runtime, deliver_all::<RelayRecorder>);
+            let session_ptr = &raw const session;
+
+            // SAFETY: `session_ptr` names the live harness session above —
+            // the `S` this helper's contract requires — whose runtime and
+            // dispatcher outlive the call. Finite and in range: the missing
+            // seat, not any delta guard, is what must skip this.
+            emit_relative_motion(session_ptr, 7, 1.5, -2.5, 0.25, 0.75);
+            assert!(
+                state.relative.is_empty(),
+                "a seatless motion must announce nothing, however finite its deltas"
             );
         }
     }
