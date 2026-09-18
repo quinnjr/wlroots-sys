@@ -38,7 +38,8 @@ use crate::dispatch::{Dispatcher, DisplayPinGuard, Event};
 use crate::id::{SourceId, attach_id, ensure_surface_id_raw, find_id, find_surface_id};
 use crate::layer::Layer;
 use crate::runtime::{
-    GesturePhase, PointerFrame, PointerGrab, SceneObserver, TouchFrame, copy_nullable_string,
+    CancelOutcome, GesturePhase, PointerFrame, PointerGrab, SceneObserver, TouchFrame,
+    copy_nullable_string,
 };
 use crate::seat::{
     AxisRelativeDirection, AxisSource, KeyEvent, Modifiers, PointerAxis, SwitchType,
@@ -11583,7 +11584,10 @@ unsafe fn pointer_motion_to_focus<S: Handlers>(
 /// Non-finite deltas are dropped before either the forward or the
 /// milli-quantizing below: an `as i64` cast saturates infinities to the
 /// extremes and maps `NaN` to zero, so without this a corrupt device delta
-/// would announce a wild jump (and forward one to clients).
+/// would announce a wild jump (and forward one to clients). The check runs
+/// post-scale: `udx * 1000.0` can overflow to infinity for huge-but-finite
+/// input (e.g. `1e300`), which would saturate the cast the same way — the
+/// pre-scale value is finite, so only the scaled one catches it.
 ///
 /// A missing seat skips both — the forward has nowhere to go, and the event
 /// would name motion no client saw.
@@ -11599,7 +11603,13 @@ unsafe fn emit_relative_motion<S: Handlers>(
     udx: f64,
     udy: f64,
 ) {
-    if !dx.is_finite() || !dy.is_finite() || !udx.is_finite() || !udy.is_finite() {
+    // Post-scale, so a huge-but-finite delta whose milli-scaling overflows
+    // to infinity drops here rather than saturating the cast below. This
+    // subsumes the pre-scale check for the unaccelerated pair (`NaN` and
+    // infinity stay non-finite through the scaling); `dx`/`dy` travel
+    // unscaled to the forward, so they are still checked raw.
+    let (udx_milli, udy_milli) = (udx * 1000.0, udy * 1000.0);
+    if !dx.is_finite() || !dy.is_finite() || !udx_milli.is_finite() || !udy_milli.is_finite() {
         return;
     }
     // SAFETY: `session` is live per this function's contract; `runtime`
@@ -11619,8 +11629,8 @@ unsafe fn emit_relative_motion<S: Handlers>(
         (*session).dispatcher.emit(
             &*session,
             Event::RelativeMotion {
-                dx_milli: (udx * 1000.0) as i64,
-                dy_milli: (udy * 1000.0) as i64,
+                dx_milli: udx_milli as i64,
+                dy_milli: udy_milli as i64,
                 time_msec,
             },
             deliver,
@@ -12476,12 +12486,12 @@ unsafe extern "C" fn on_touch_up<S: Handlers>(
 /// forward no-ops inside `send_cancel`, while the event still tells the
 /// compositor to clear.
 ///
-/// A `false` answer from `send_cancel` still emits below: the cancel notify
-/// addresses the point's client, so `false` (the seat lost after the send
-/// started, or a clientless point — see `send_cancel`'s own doc) means the
-/// client forward degraded, not that the compositor should keep state it was
-/// told to clear. The event is the specified degraded outcome, not a second
-/// forward.
+/// A [`CancelOutcome`] other than `Cancelled` from `send_cancel` still
+/// emits below: the cancel notify addresses the point's client, so a miss
+/// (the seat lost after the send started, or a clientless point — see
+/// `send_cancel`'s own doc) means the client forward degraded, not that the
+/// compositor should keep state it was told to clear. The event is the
+/// specified degraded outcome, not a second forward.
 unsafe extern "C" fn on_touch_cancel<S: Handlers>(
     l: *mut sys::wl_listener,
     data: *mut std::ffi::c_void,
@@ -12503,7 +12513,7 @@ unsafe extern "C" fn on_touch_cancel<S: Handlers>(
         // nothing and the forward no-ops inside `send_cancel`, while the
         // event still tells the compositor to clear.
         let frame = TouchFrame::of(runtime);
-        let _forwarded = frame.send_cancel(touch_id);
+        let _forwarded: CancelOutcome = frame.send_cancel(touch_id);
 
         (*session)
             .dispatcher
@@ -13757,9 +13767,17 @@ mod tests {
     /// A touch down with no cursor: the mapping has nothing to map with, so
     /// the relay returns before resolving anything and no down is announced.
     ///
-    /// The positive path — mapping, hit test, forward, announce — needs a
-    /// cursor, a scene and a seat, none of which exist in unit scope; it is
-    /// covered in integration. This pins the gate.
+    /// Gap note (not silence): the hit (`touch_layout_hit` `Some`) plus the
+    /// gated forward-and-announce tail stay undriven in unit scope. The hit
+    /// needs a scene holding a surface-backed node under the mapped point —
+    /// a scene needs `init_graphics` over a real backend, and a
+    /// surface-backed node needs a mapped client surface, neither of which
+    /// unit scope has. The tail needs more still: the forward must mint a
+    /// point with a non-zero serial, which needs that surface's client to
+    /// hold `wl_touch` (see `enable_test_touch`'s doc). Cursor and seat do
+    /// exist in unit scope (`create_seat` makes both), so the cursorless and
+    /// seatless gates are pinned here and in integration; the hit and the
+    /// tail are covered in integration. This pins the gate.
     #[test]
     fn touch_down_without_a_cursor_is_a_quiet_no_op() {
         let runtime = Runtime::new().expect("runtime");
@@ -13805,7 +13823,8 @@ mod tests {
     /// the oracle is the absence of any delivery at all through the shared
     /// dispatcher.
     ///
-    /// As for the down, the positive path needs a cursor, a scene and a seat
+    /// As for the down, the hit plus the focus-and-forward tail needs a scene
+    /// with a surface-backed node and a `wl_touch`-holding client
     /// (integration); this pins the gate.
     #[test]
     fn touch_motion_without_a_cursor_is_a_quiet_no_op() {
@@ -13856,13 +13875,17 @@ mod tests {
     ///
     /// Driven against a live seat (not merely a seatless runtime) so the
     /// `wlr_seat_touch_get_point` lookup itself runs and reports the miss; a
-    /// seatless runtime takes the same exit one step earlier. The known-point
-    /// positive — forward plus emit, on either device state — needs a live
-    /// touch point, which needs a client holding `wl_touch` (see
-    /// `enable_test_touch`'s doc for why a headless seat cannot make one,
-    /// and `send_cancel_reports_whether_the_notify_was_emitted` for why a
-    /// fabricated point cannot stand in); it is covered in integration, and
-    /// the uniform code path by inspection above.
+    /// seatless runtime takes the same exit one step earlier. Gap note (not
+    /// silence): the known-point positive — forward plus emit, on either
+    /// device state, with the non-zero serial the tail gates on — needs a
+    /// live touch point, which needs a client holding `wl_touch` (see
+    /// `enable_test_touch`'s doc for why a headless seat cannot make one).
+    /// A fabricated clientless point cannot stand in here the way it does
+    /// for the cancel relay: `send_up` hands the point to wlroots' notify
+    /// with no client check of its own (unlike `send_cancel`'s pre-notify
+    /// check), so driving it would hand wlroots a null client to follow —
+    /// unsound. It is covered in integration, and the uniform code path by
+    /// inspection above (one forward-gated shape, no arms left to diverge).
     #[test]
     fn touch_up_for_an_unknown_point_announces_nothing() {
         let _guard = crate::test_support::test_display_guard();
@@ -13933,15 +13956,20 @@ mod tests {
     /// takes no device), so a null `(*ev).touch` is not special-cased — a
     /// device that died mid-gesture releases the seat point exactly like a
     /// live one. For an unknown id the forward no-ops inside `send_cancel`
-    /// while the event still tells the compositor to clear, on both device
-    /// states alike; this pins that uniformity.
+    /// (a [`CancelOutcome::UnknownPoint`]) while the event still tells the
+    /// compositor to clear, on both device states alike; this pins that
+    /// uniformity.
     ///
-    /// The known-point positive — the notify actually emitted (`true`) —
-    /// needs a live point *with a client*, which needs a `wl_touch`-holding
-    /// Wayland client (see `enable_test_touch`'s doc, and
-    /// `send_cancel_reports_whether_the_notify_was_emitted` for why a
-    /// fabricated clientless point cannot stand in); it is covered in
-    /// integration, and the uniform code path by inspection above.
+    /// The known-point positive — [`CancelOutcome::Cancelled`], the forward
+    /// actually attempted and the event still emitted — is pinned by
+    /// `touch_cancel_with_a_null_device_still_clears_a_known_point` below
+    /// (release drives the relay; debug pins the resolve, see its doc for
+    /// why the relay itself cannot run there). The notified arm with a live
+    /// client needs a `wl_touch`-holding Wayland client (see
+    /// `enable_test_touch`'s doc, and
+    /// `send_cancel_reports_each_miss_distinctly` for why a
+    /// fabricated clientless point cannot stand in for it); that arm is
+    /// covered in integration.
     #[test]
     fn touch_cancel_flows_through_one_path_whatever_the_device() {
         let _guard = crate::test_support::test_display_guard();
@@ -14001,6 +14029,114 @@ mod tests {
 
             // SAFETY: as for the up test.
             dealloc(touch.cast(), Layout::new::<sys::wlr_touch>());
+        }
+    }
+
+    /// A cancel for a KNOWN point with a null device: the forward is
+    /// attempted — resolved through the seat by id, device-independent —
+    /// and the event still emits. The live question on the uniform path now
+    /// that the null-device special cases are gone (one forward-gated shape,
+    /// no arms left to diverge).
+    ///
+    /// The point is honestly constructible: a zeroed `wlr_touch_point`
+    /// linked into the seat's own `touch_points` list, which is exactly what
+    /// `wlr_seat_touch_get_point` walks — so the resolve genuinely hits
+    /// (pinned below via [`touch_point_known`]), and the null client is
+    /// compared, never followed, because `send_cancel` checks it before
+    /// notifying. That pre-notify check is also what keeps this sound where
+    /// the up half is not: `send_up` hands the point to wlroots' notify
+    /// with no client check of its own, so a fabricated point there would
+    /// hand wlroots a null client to follow (see the up test's gap note).
+    ///
+    /// Debug builds stop at the clientless gate instead of emitting: a live
+    /// point with no client is a programming error wlroots rules out at
+    /// creation, so the gate fires loud. That panic would unwind inside the
+    /// relay's `extern "C"` listener — across wlroots' C emit frames, where
+    /// unwinding is unsound to catch — so debug pins the resolve plus the
+    /// token-level gate
+    /// (`send_cancel_reports_a_clientless_point_as_unemitted`) and drives no
+    /// relay. Release drives the whole relay: the forward quietly misses
+    /// ([`CancelOutcome::ClientlessPoint`]) and the event still clears.
+    #[test]
+    fn touch_cancel_with_a_null_device_still_clears_a_known_point() {
+        let _guard = crate::test_support::test_display_guard();
+        let display = crate::Display::new().expect("display");
+        let runtime = Runtime::new().expect("runtime");
+        runtime.create_seat(&display, "seat0").expect("seat");
+        let seat = runtime.seat_ptr().expect("seat was just created");
+        let mut state = RelayRecorder::default();
+        let p = &raw mut state;
+
+        // SAFETY: `wlr_touch_point` is non-zero-sized, so `alloc_zeroed`
+        // returns either null (checked below) or a suitably aligned, zeroed
+        // allocation of exactly that size; `touch_id` is the only field
+        // written, the client stays null by construction.
+        let point = unsafe { alloc_zeroed(Layout::new::<sys::wlr_touch_point>()) }
+            .cast::<sys::wlr_touch_point>();
+        assert!(!point.is_null(), "allocation failed");
+        // SAFETY: `point` is live and exclusively owned; `seat` is this
+        // runtime's own live seat with an initialised `touch_points` head.
+        // The entry is unlinked again below before any assertion can fail
+        // and skip the cleanup, so the seat never outlives it.
+        unsafe {
+            (*point).touch_id = 7;
+            sys::wayland_sys::server::wl_list_insert(
+                &raw mut (*seat.as_ptr()).touch_state.touch_points,
+                &raw mut (*point).link,
+            );
+        }
+        assert!(
+            touch_point_known(&runtime, 7),
+            "the fabricated entry must resolve through the seat's own lookup"
+        );
+
+        // SAFETY: live exclusive state pointer, outliving runtime, inline
+        // delivery — as for the up test.
+        unsafe {
+            let session = test_session(p, &runtime, deliver_all::<RelayRecorder>);
+            let session_ptr = (&raw const session).cast::<()>();
+
+            // SAFETY: live stack signal, initialised below, outliving the
+            // registration; session and dispatcher state as above.
+            let mut sig: sys::wl_signal = std::mem::zeroed();
+            sys::wl_signal_init(&mut sig);
+            let _cancel = Registration::link_bare(
+                &mut sig,
+                on_touch_cancel::<RelayRecorder>,
+                session_ptr,
+                std::ptr::null(),
+            );
+
+            // Release only: in debug the clientless gate fires inside the
+            // relay, and that panic would unwind across wlroots' C emit
+            // frames — unsound to drive, let alone catch. See this test's
+            // doc for the full argument.
+            #[cfg(not(debug_assertions))]
+            {
+                let mut ev_null = sys::wlr_touch_cancel_event {
+                    touch: std::ptr::null_mut(),
+                    time_msec: 14,
+                    touch_id: 7,
+                };
+                sys::wl_signal_emit_mutable(
+                    &mut sig,
+                    (&raw mut ev_null).cast::<std::ffi::c_void>(),
+                );
+            }
+            #[cfg(not(debug_assertions))]
+            let cleared = state.cancelled;
+            // SAFETY: the entry was linked above and nothing unlinked it
+            // (the release emit touches no list; debug emitted nothing at
+            // all); removing it restores the seat before the assert below
+            // can fail and skip the cleanup. Same layout as allocated.
+            sys::wayland_sys::server::wl_list_remove(&raw mut (*point).link);
+            dealloc(point.cast(), Layout::new::<sys::wlr_touch_point>());
+            #[cfg(not(debug_assertions))]
+            assert_eq!(
+                cleared, 1,
+                "a null device on a known point: the forward quietly misses \
+                 and the event still clears"
+            );
         }
     }
 
@@ -14128,6 +14264,15 @@ mod tests {
     /// milli-quantized, while a non-finite delta in either pair drops the
     /// whole motion before either.
     ///
+    /// The accelerated and unaccelerated pairs are DISTINCT on purpose: the
+    /// event announces the unaccelerated pair, so identical pairs would let
+    /// a dx/udx swap pass. A sub-milli case pins the truncation toward zero.
+    /// A huge-but-finite case pins the post-scale guard: `1e306` is finite
+    /// pre-scale but overflows to infinity when milli-quantized, so it must
+    /// drop with no announce — and no forward either, the single gate sitting
+    /// before both (the forward itself is unobservable here for lack of a
+    /// relative-pointer manager, so the shared gate is the oracle for it).
+    ///
     /// A seat is required: seatless, the relay skips both, and there would
     /// be nothing to observe. The full `on_pointer_motion` relay needs a
     /// cursor and a scene on top of the seat (integration); this pins the
@@ -14151,19 +14296,32 @@ mod tests {
             // SAFETY: `session_ptr` names the live harness session above —
             // the `S` this helper's contract requires — whose runtime and
             // dispatcher outlive the calls.
-            emit_relative_motion(session_ptr, 7, 1.5, -2.5, 1.5, -2.5);
+            emit_relative_motion(session_ptr, 7, 1.5, -2.5, 0.25, 0.75);
             assert_eq!(
                 state.relative,
-                vec![(1.5, -2.5, 7)],
-                "finite deltas must announce milli-quantized"
+                vec![(0.25, 0.75, 7)],
+                "the event must announce the unaccelerated pair, not the accelerated one"
             );
 
-            emit_relative_motion(session_ptr, 8, f64::NAN, 0.0, 0.0, 0.0);
-            emit_relative_motion(session_ptr, 9, 1.0, 1.0, f64::INFINITY, 1.0);
+            emit_relative_motion(session_ptr, 8, 0.0, 0.0, 1.2349, -1.2349);
             assert_eq!(
                 state.relative,
-                vec![(1.5, -2.5, 7)],
-                "non-finite deltas must drop before the forward and the announce"
+                vec![(0.25, 0.75, 7), (1.234, -1.234, 8)],
+                "milli-quantizing must truncate toward zero (1234 milli announces 1.234)"
+            );
+
+            emit_relative_motion(session_ptr, 9, f64::NAN, 0.0, 0.0, 0.0);
+            emit_relative_motion(session_ptr, 10, 1.0, 1.0, f64::INFINITY, 1.0);
+            // `1e300` would NOT trip this: `1e300 * 1000.0` is `1e303`,
+            // still finite, so it announces saturated exactly as before —
+            // only a scaling that actually overflows (`1e306 * 1000.0` is
+            // `1e309`, past `f64::MAX`) drops.
+            emit_relative_motion(session_ptr, 11, 1.0, 1.0, 1e306, 1e306);
+            assert_eq!(
+                state.relative,
+                vec![(0.25, 0.75, 7), (1.234, -1.234, 8)],
+                "non-finite deltas — and finite ones whose milli-scaling overflows — \
+                 must drop before the forward and the announce"
             );
         }
     }
@@ -16779,8 +16937,9 @@ mod touch_switch_delivery_tests {
         );
         frame.send_motion(1, 7, 2.0, 3.0);
         assert_eq!(frame.send_up(1, 7), 0);
-        assert!(
-            !frame.send_cancel(7),
+        assert_eq!(
+            frame.send_cancel(7),
+            CancelOutcome::NoSeat,
             "no seat, so no cancel notify could have been emitted"
         );
         TouchFrame::of(&runtime).send_frame();

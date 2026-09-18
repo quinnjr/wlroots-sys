@@ -2217,22 +2217,23 @@ impl TouchFrame {
     /// no role on the relay path (`send_cancel` takes no device), so a null
     /// device flows through this same shape.
     ///
-    /// Returns whether the cancel notify was emitted: `false` when there is
-    /// no seat, when `touch_id` names no live point, or when the point
+    /// Returns which miss fired, or [`CancelOutcome::Cancelled`] when the
+    /// notify went out: `NoSeat` when there is no seat, `UnknownPoint` when
+    /// `touch_id` names no live point, `ClientlessPoint` when the point
     /// names no client (a live point always has one — wlroots sets it at
     /// creation — so that last miss is a programming error, loud in debug
     /// builds and a quiet miss in release). Callers that only need the
     /// fire-and-forget shape keep ignoring the answer.
-    pub(crate) fn send_cancel(self, touch_id: i32) -> bool {
+    pub(crate) fn send_cancel(self, touch_id: i32) -> CancelOutcome {
         let Some(seat) = self.runtime.seat_ptr() else {
-            return false;
+            return CancelOutcome::NoSeat;
         };
         // SAFETY: `seat` as for `send_down`. The lookup only reads the seat;
         // a null answer (unknown point) misses below. The table borrow ended
         // inside `seat_ptr`, so no borrow crosses either call.
         let point = unsafe { sys::wlr_seat_touch_get_point(seat.as_ptr(), touch_id) };
         if point.is_null() {
-            return false;
+            return CancelOutcome::UnknownPoint;
         }
         // SAFETY: `point` names a live touch point per the lookup's own
         // contract (null was checked); `client` is only handed to the cancel
@@ -2243,12 +2244,34 @@ impl TouchFrame {
                 false,
                 "a live touch point with no client: wlroots sets it at creation"
             );
-            return false;
+            return CancelOutcome::ClientlessPoint;
         }
         // SAFETY: `seat` as above; `client` is the point's live client.
         unsafe { sys::wlr_seat_touch_notify_cancel(seat.as_ptr(), client) };
-        true
+        CancelOutcome::Cancelled
     }
+}
+
+/// What [`TouchFrame::send_cancel`] did with the cancel: the notify went
+/// out, or exactly which of the three misses fired.
+///
+/// `bool` conflated all three misses, and a caller clearing compositor state
+/// after a degraded forward could not tell "no seat" from "stale id" from
+/// "programming error". `pub(crate)`-only like the frame itself, so this
+/// names no published surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub(crate) enum CancelOutcome {
+    /// The cancel notify went out to the point's client.
+    Cancelled,
+    /// No seat: nothing to emit on.
+    NoSeat,
+    /// `touch_id` names no live point (never announced, or already gone).
+    UnknownPoint,
+    /// The point names no client — a programming error (wlroots sets the
+    /// client at creation), loud in debug builds and a quiet miss in
+    /// release.
+    ClientlessPoint,
 }
 
 pub(crate) struct RuntimeInner {
@@ -14481,13 +14504,13 @@ mod tests {
         );
     }
 
-    /// `send_cancel` answers whether the cancel notify went out: `false`
-    /// with no seat (nothing to emit on) and `false` for a stale touch id
-    /// on a live seat (no such point — nothing went out, so no client could
+    /// `send_cancel` answers what the cancel forward did: `NoSeat` with no
+    /// seat (nothing to emit on) and `UnknownPoint` for a stale touch id on
+    /// a live seat (no such point — nothing went out, so no client could
     /// have been notified). The `TouchCancelled` handler event is delivered
     /// regardless; this answers only the client-forward half.
     ///
-    /// The `true` arm is deliberately unpinned here: it needs a live touch
+    /// The `Cancelled` arm is deliberately unpinned here: it needs a live touch
     /// point *with a client* — `send_cancel` resolves the point through
     /// `wlr_seat_touch_get_point` and notifies its `wlr_seat_client`, which
     /// wlroots only creates when a real Wayland client binds the seat and
@@ -14499,19 +14522,21 @@ mod tests {
     /// (pinned by `send_cancel_reports_a_clientless_point_as_unemitted`).
     /// An integration leg would need a `wl_touch`-binding, mapped-surface
     /// client helper that `tests/common/client.rs` does not offer, so the
-    /// `true` arm stays documented-until-covered rather than faked.
+    /// `Cancelled` arm stays documented-until-covered rather than faked.
     #[test]
-    fn send_cancel_reports_whether_the_notify_was_emitted() {
+    fn send_cancel_reports_each_miss_distinctly() {
         let _guard = crate::test_support::test_display_guard();
         let display = crate::Display::new().expect("display");
         let runtime = Runtime::new().expect("runtime");
-        assert!(
-            !TouchFrame::of(&runtime).send_cancel(7),
+        assert_eq!(
+            TouchFrame::of(&runtime).send_cancel(7),
+            CancelOutcome::NoSeat,
             "no seat, so no cancel notify could have been emitted"
         );
         runtime.create_seat(&display, "seat0").expect("seat");
-        assert!(
-            !TouchFrame::of(&runtime).send_cancel(7),
+        assert_eq!(
+            TouchFrame::of(&runtime).send_cancel(7),
+            CancelOutcome::UnknownPoint,
             "no touch point with this id, so nothing was emitted"
         );
     }
@@ -14529,7 +14554,7 @@ mod tests {
     /// wlroots frees later ever names it. No garbage pointer is
     /// dereferenced: the lookup reads only the list links and the `touch_id`
     /// this test wrote, and the null client is compared, never followed.
-    /// The `true` arm needs the same list entry with a *live*
+    /// The `Cancelled` arm needs the same list entry with a *live*
     /// `wlr_seat_client`, which only a real Wayland client grows — that is
     /// why it stays documented-only (see the test above).
     #[test]
@@ -14583,8 +14608,9 @@ mod tests {
                 "the gate names the fault: {message}"
             );
         } else {
-            assert!(
-                !attempt.expect("no panic in release"),
+            assert_eq!(
+                attempt.expect("no panic in release"),
+                CancelOutcome::ClientlessPoint,
                 "a clientless point names nothing to notify"
             );
         }
