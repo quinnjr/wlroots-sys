@@ -12423,11 +12423,10 @@ unsafe extern "C" fn on_touch_motion<S: Handlers>(
 /// announce a point nothing knows. An unknown id skips BOTH the forward and
 /// the event.
 ///
-/// The null device splits two ways, and the two cases are distinct: a null
-/// `(*ev).touch` with a KNOWN point means the device died mid-gesture — the
-/// forward is skipped (there is no device to forward through) but the event
-/// still fires, because the compositor must clear the point. A null device
-/// with an UNKNOWN point skips both, as above.
+/// The device plays no role here: the forward goes through the seat by
+/// `touch_id` ([`TouchFrame::send_up`] takes no device), so a null
+/// `(*ev).touch` — the device died mid-gesture — flows through the same
+/// path: the seat point is released and the event clears the compositor's.
 unsafe extern "C" fn on_touch_up<S: Handlers>(
     l: *mut sys::wl_listener,
     data: *mut std::ffi::c_void,
@@ -12450,15 +12449,6 @@ unsafe extern "C" fn on_touch_up<S: Handlers>(
         }
 
         let deliver = (*session).deliver;
-        if (*ev).touch.is_null() {
-            // Known point, dead device: no forward is possible, but the
-            // compositor must still clear the point, so the event fires
-            // without one.
-            (*session)
-                .dispatcher
-                .emit(&*session, Event::TouchUp(TouchId(touch_id)), deliver);
-            return;
-        }
 
         // The forward settles first; the event after it names the finished
         // up. The up serial cites nothing here and is discarded, as for
@@ -12479,13 +12469,12 @@ unsafe extern "C" fn on_touch_up<S: Handlers>(
 /// the [`TouchFrame`] session, exactly like a frame consumes one), then
 /// announces it (`Event::TouchCancelled`).
 ///
-/// The `touch_id` is read before the device null check: a null device with a
-/// KNOWN point skips the forward (there is no device to forward through) but
-/// still emits, so the compositor clears the point — `on_touch_up`'s
-/// known-point arm, applied here. A null device with an UNKNOWN point skips
-/// both. The live-device path below is unchanged: a stale id resolves to
-/// nothing and the forward no-ops inside `send_cancel`, while the event
-/// still tells the compositor to clear.
+/// The device plays no role here either: the forward resolves the point
+/// through the seat by `touch_id` ([`TouchFrame::send_cancel`] takes no
+/// device), so a null `(*ev).touch` — the device died mid-gesture — flows
+/// through the same path below. A stale id resolves to nothing and the
+/// forward no-ops inside `send_cancel`, while the event still tells the
+/// compositor to clear.
 ///
 /// A `false` answer from `send_cancel` still emits below: the cancel notify
 /// addresses the point's client, so `false` (the seat lost after the send
@@ -12508,17 +12497,6 @@ unsafe extern "C" fn on_touch_cancel<S: Handlers>(
         let touch_id = (*ev).touch_id;
 
         let deliver = (*session).deliver;
-        if (*ev).touch.is_null() {
-            // Dead device: no forward is possible. Emit only when the id
-            // names a live point, so the compositor clears it; an unknown
-            // id skips both, on the same terms as `on_touch_up`.
-            if touch_point_known(runtime, touch_id) {
-                (*session)
-                    .dispatcher
-                    .emit(&*session, Event::TouchCancelled, deliver);
-            }
-            return;
-        }
 
         // The cancel forward (consuming the session) settles first; the
         // event after it names the finished clear. A stale id resolves to
@@ -13871,16 +13849,20 @@ mod tests {
     }
 
     /// An up for an id the seat never announced: the resolve-first lookup
-    /// names nothing, so neither the forward nor the event happens — even
-    /// with a live device attached to the event.
+    /// names nothing, so neither the forward nor the event happens — with a
+    /// live device attached to the event or a null one (a device that died
+    /// mid-gesture takes the same gate: the forward goes through the seat by
+    /// id and [`TouchFrame::send_up`] takes no device).
     ///
     /// Driven against a live seat (not merely a seatless runtime) so the
     /// `wlr_seat_touch_get_point` lookup itself runs and reports the miss; a
     /// seatless runtime takes the same exit one step earlier. The known-point
-    /// arms — emit-without-forward on a dead device, forward plus emit on a
-    /// live one — need a live touch point, which needs a client holding
-    /// `wl_touch` (see `enable_test_touch`'s doc for why a headless seat
-    /// cannot make one); they are covered in integration.
+    /// positive — forward plus emit, on either device state — needs a live
+    /// touch point, which needs a client holding `wl_touch` (see
+    /// `enable_test_touch`'s doc for why a headless seat cannot make one,
+    /// and `send_cancel_reports_whether_the_notify_was_emitted` for why a
+    /// fabricated point cannot stand in); it is covered in integration, and
+    /// the uniform code path by inspection above.
     #[test]
     fn touch_up_for_an_unknown_point_announces_nothing() {
         let _guard = crate::test_support::test_display_guard();
@@ -13946,18 +13928,22 @@ mod tests {
         }
     }
 
-    /// A cancel on a dead device for an id nothing announced: no forward is
-    /// possible and no point exists to clear, so nothing emits. A cancel on
-    /// a live device for an unknown id keeps the old contract — the forward
-    /// no-ops inside `send_cancel` while the event still tells the
-    /// compositor to clear — pinned here so the null-device change cannot
-    /// silently widen to it.
+    /// A cancel flows through one path whatever the device: the forward
+    /// resolves the point through the seat by id ([`TouchFrame::send_cancel`]
+    /// takes no device), so a null `(*ev).touch` is not special-cased — a
+    /// device that died mid-gesture releases the seat point exactly like a
+    /// live one. For an unknown id the forward no-ops inside `send_cancel`
+    /// while the event still tells the compositor to clear, on both device
+    /// states alike; this pins that uniformity.
     ///
-    /// As for the up test, the known-point null-device arm (emit without
-    /// forward) needs a live touch point, hence a `wl_touch`-holding client,
-    /// and is covered in integration.
+    /// The known-point positive — the notify actually emitted (`true`) —
+    /// needs a live point *with a client*, which needs a `wl_touch`-holding
+    /// Wayland client (see `enable_test_touch`'s doc, and
+    /// `send_cancel_reports_whether_the_notify_was_emitted` for why a
+    /// fabricated clientless point cannot stand in); it is covered in
+    /// integration, and the uniform code path by inspection above.
     #[test]
-    fn touch_cancel_without_device_or_point_announces_nothing() {
+    fn touch_cancel_flows_through_one_path_whatever_the_device() {
         let _guard = crate::test_support::test_display_guard();
         let display = crate::Display::new().expect("display");
         let runtime = Runtime::new().expect("runtime");
@@ -13971,7 +13957,7 @@ mod tests {
             let session_ptr = (&raw const session).cast::<()>();
 
             // SAFETY: as for the up test — really allocated, never
-            // dereferenced on the silent path.
+            // dereferenced on these unknown-id paths.
             let touch = alloc_zeroed(Layout::new::<sys::wlr_touch>()).cast::<sys::wlr_touch>();
             assert!(!touch.is_null(), "allocation failed");
 
@@ -13985,7 +13971,9 @@ mod tests {
                 std::ptr::null(),
             );
 
-            // Dead device, unknown id: silent.
+            // Dead device, unknown id: the forward no-ops inside
+            // `send_cancel`, but the event still fires — the uniform path,
+            // exactly as on a live device.
             let mut ev_null = sys::wlr_touch_cancel_event {
                 touch: std::ptr::null_mut(),
                 time_msec: 14,
@@ -13993,13 +13981,13 @@ mod tests {
             };
             sys::wl_signal_emit_mutable(&mut sig, (&raw mut ev_null).cast::<std::ffi::c_void>());
             assert_eq!(
-                state.cancelled, 0,
-                "a cancel with neither device nor point must emit nothing"
+                state.cancelled, 1,
+                "a null device takes the same path: the forward no-ops and the event still clears"
             );
 
             // Live device, unknown id: the forward no-ops inside
             // `send_cancel`, but the event still fires — the preserved
-            // contract, not the null-device change.
+            // contract, identical to the null-device arm above.
             let mut ev = sys::wlr_touch_cancel_event {
                 touch,
                 time_msec: 15,
@@ -14007,7 +13995,7 @@ mod tests {
             };
             sys::wl_signal_emit_mutable(&mut sig, (&raw mut ev).cast::<std::ffi::c_void>());
             assert_eq!(
-                state.cancelled, 1,
+                state.cancelled, 2,
                 "a cancel on a live device must still clear the compositor"
             );
 

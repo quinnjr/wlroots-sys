@@ -2213,8 +2213,9 @@ impl TouchFrame {
     /// conventional path to `send_cancel`. The cancel notify addresses the
     /// point's *client*, so the point is resolved first — a stale id (the
     /// point already up, or never down) resolves to nothing and this no-ops,
-    /// while the `TouchCancelled` event is still delivered on the live-device
-    /// path (a dead device with an unknown id emits nothing at all).
+    /// while the `TouchCancelled` event is still delivered. The device plays
+    /// no role on the relay path (`send_cancel` takes no device), so a null
+    /// device flows through this same shape.
     ///
     /// Returns whether the cancel notify was emitted: `false` when there is
     /// no seat, when `touch_id` names no live point, or when the point
