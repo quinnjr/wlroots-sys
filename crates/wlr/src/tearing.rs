@@ -386,6 +386,24 @@ mod tests {
         assert_eq!(other_found.pending_hint(), TearingHint::Async);
     }
 
+    /// A control whose surface field is null names no surface: the miss a
+    /// control outliving its surface (or built against none) degrades to,
+    /// rather than an addon read through null.
+    #[test]
+    fn a_control_with_a_null_surface_names_no_surface() {
+        let control = new_control(
+            std::ptr::null_mut(),
+            TearingHint::Vsync,
+            TearingHint::Vsync,
+            TearingHint::Vsync,
+        );
+        // SAFETY: `control` is live and this is its only handle.
+        let handle = TearingControl::from_non_null(
+            NonNull::new(control.ptr).expect("scratch control is non-null"),
+        );
+        assert_eq!(handle.surface_id(), None);
+    }
+
     #[test]
     fn control_accessors_read_the_current_pending_and_previous_hints() {
         let surface_scratch = ScratchSurface::new();

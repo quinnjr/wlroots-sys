@@ -528,7 +528,9 @@ impl<'h> LayerSurface<'h> {
     }
 
     /// Shared body of the two hit-tests, which differ only in which wlroots
-    /// walk they call. The null-check/id/handle tail lives in
+    /// walk they call. The walk preamble lives in
+    /// [`crate::Surface::walk_surface_at`](crate::Surface::walk_surface_at)
+    /// and the null-check/id/handle tail in
     /// [`crate::Surface::finish_surface_at`](crate::Surface::finish_surface_at),
     /// shared with every other `surface_at_impl` in the crate.
     fn surface_at_impl(
@@ -543,14 +545,12 @@ impl<'h> LayerSurface<'h> {
         sx: f64,
         sy: f64,
     ) -> Option<(crate::Surface<'_>, f64, f64)> {
-        let mut sub_x = 0.0;
-        let mut sub_y = 0.0;
-        // SAFETY: the handle's lifetime guarantees the layer surface is live;
-        // both out-parameters are live locals that outlive the call, and
-        // wlroots only reads the coordinates. The walk returns null or a live
-        // surface of this same tree, which is what `finish_surface_at` takes.
+        // SAFETY: the handle's lifetime guarantees the layer surface is live,
+        // so it is the root this walk expects; the hit is consumed through
+        // `finish_surface_at`, which is what that function's contract takes.
         unsafe {
-            let raw = walk(self.raw.as_ptr(), sx, sy, &raw mut sub_x, &raw mut sub_y);
+            let (raw, sub_x, sub_y) =
+                crate::Surface::walk_surface_at(self.raw.as_ptr(), walk, sx, sy);
             crate::Surface::finish_surface_at(raw, sub_x, sub_y)
         }
     }

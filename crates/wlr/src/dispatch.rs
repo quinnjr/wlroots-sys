@@ -357,19 +357,8 @@ pub(crate) enum Event {
     /// track. Nothing is re-read at delivery: the event's fields are pointers
     /// that do not outlive the callback.
     ///
-    /// Privileged: this carries no client identity, so per-client allow/deny
-    /// is impossible here. Gate the `xdg_system_bell_v1` global
-    /// ([`crate::Runtime::create_xdg_system_bell`]) at bind time with a
-    /// [`crate::Runtime::lookup_security_context`]-based filter and
-    /// default-deny — allow only clients whose context you trust, deny the
-    /// rest:
-    ///
-    /// ```ignore
-    /// // Allow only a known panel to ring the bell; deny everyone else.
-    /// let allowed = unsafe { runtime.lookup_security_context(client) }
-    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.panel"));
-    /// // return `allowed` from the display's global filter.
-    /// ```
+    /// Privileged: gate the `xdg_system_bell_v1` global — see the rule in
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     SystemBellRing(Option<SurfaceId>),
 
     /// A client asked, through `zwlr_foreign_toplevel_management_v1`, to
@@ -378,84 +367,68 @@ pub(crate) enum Event {
     /// client's seat is deliberately not carried — this crate has no seat id,
     /// and focus policy is the compositor's.
     ///
-    /// Privileged: like [`Event::SystemBellRing`], this carries no client
-    /// identity. Gate the `zwlr_foreign_toplevel_manager_v1` global
-    /// ([`crate::Runtime::create_foreign_toplevel_manager`]) at bind time
-    /// with a [`crate::Runtime::lookup_security_context`]-based filter and
-    /// default-deny; the same rule covers `Close`, `Maximize`, `Minimize`,
-    /// `Fullscreen` and `SetRectangle` below.
+    /// Privileged: gate the `zwlr_foreign_toplevel_manager_v1` global — see the
+    /// rule in [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     ForeignToplevelActivate(ForeignToplevelId),
     /// A client asked that an exported toplevel be closed.
     ///
-    /// Privileged: see [`Event::ForeignToplevelActivate`] — gate the
-    /// `zwlr_foreign_toplevel_manager_v1` global with a
-    /// [`crate::Runtime::lookup_security_context`]-based filter and
-    /// default-deny.
+    /// Privileged: gate the `zwlr_foreign_toplevel_manager_v1` global — see the
+    /// rule in [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     ForeignToplevelClose(ForeignToplevelId),
     /// A client asked to (un)maximize an exported toplevel; the bool is the
     /// requested target, read at emission time.
     ///
-    /// Privileged: see [`Event::ForeignToplevelActivate`] — gate the
-    /// `zwlr_foreign_toplevel_manager_v1` global with a
-    /// [`crate::Runtime::lookup_security_context`]-based filter and
-    /// default-deny.
+    /// Privileged: gate the `zwlr_foreign_toplevel_manager_v1` global — see the
+    /// rule in [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     ForeignToplevelMaximize(ForeignToplevelId, bool),
     /// A client asked to (un)minimize an exported toplevel; as
     /// [`Event::ForeignToplevelMaximize`].
     ///
-    /// Privileged: see [`Event::ForeignToplevelActivate`] — gate the
-    /// `zwlr_foreign_toplevel_manager_v1` global with a
-    /// [`crate::Runtime::lookup_security_context`]-based filter and
-    /// default-deny.
+    /// Privileged: gate the `zwlr_foreign_toplevel_manager_v1` global — see the
+    /// rule in [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     ForeignToplevelMinimize(ForeignToplevelId, bool),
     /// A client asked to (un)fullscreen an exported toplevel; as
     /// [`Event::ForeignToplevelMaximize`].
     ///
-    /// Privileged: see [`Event::ForeignToplevelActivate`] — gate the
-    /// `zwlr_foreign_toplevel_manager_v1` global with a
-    /// [`crate::Runtime::lookup_security_context`]-based filter and
-    /// default-deny.
+    /// Privileged: gate the `zwlr_foreign_toplevel_manager_v1` global — see the
+    /// rule in [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     ForeignToplevelFullscreen(ForeignToplevelId, bool),
     /// A client set a rectangle on one of an exported toplevel's surfaces. The
     /// surface is resolved to this crate's own id at emission time (`None` when
     /// untracked); the rectangle is copied.
     ///
-    /// Privileged: see [`Event::ForeignToplevelActivate`] — gate the
-    /// `zwlr_foreign_toplevel_manager_v1` global with a
-    /// [`crate::Runtime::lookup_security_context`]-based filter and
-    /// default-deny.
+    /// Privileged: gate the `zwlr_foreign_toplevel_manager_v1` global — see the
+    /// rule in [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     ForeignToplevelSetRectangle(ForeignToplevelId, Option<SurfaceId>, i32, i32, i32, i32),
 
     /// A client committed a batch of `ext_workspace_v1` requests. The batch is
     /// copied into owned [`WorkspaceRequest`]s at emission time, because the
     /// wlroots request list is freed the instant the commit emission returns;
-    /// it may therefore be delivered later (a deferred delivery still carries
-    /// what the client asked for) and holds no wlroots pointer.
+    /// a deferred delivery still carries what the client asked for.
+    ///
+    /// The ids in the batch are wlroots addresses, valid only while their
+    /// handles are alive: consume the batch before destroying or recreating
+    /// any workspace or group it names, and never match its ids against
+    /// handles created after this emission — a recreated handle may reuse a
+    /// freed address.
     ///
     /// Entries that named a workspace destroyed before the commit drained
     /// arrive as [`WorkspaceRequest::Stale`](crate::WorkspaceRequest::Stale)
     /// rather than being dropped — as does any unknown request discriminant —
     /// so an all-stale batch is distinguishable from an empty commit.
     ///
-    /// Privileged: this carries no client identity, so per-client allow/deny
-    /// is impossible here. Gate the `ext_workspace_manager_v1` global
-    /// ([`crate::Runtime::create_ext_workspace_manager`]) at bind time with a
-    /// [`crate::Runtime::lookup_security_context`]-based filter and
-    /// default-deny — allow only clients whose context you trust, deny the
-    /// rest:
-    ///
-    /// ```ignore
-    /// // Allow only a known pager to drive workspaces; deny everyone else.
-    /// let allowed = unsafe { runtime.lookup_security_context(client) }
-    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.pager"));
-    /// // return `allowed` from the display's global filter.
-    /// ```
+    /// Privileged: gate the `ext_workspace_manager_v1` global — see the rule in
+    /// [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
     WorkspaceCommit(Vec<WorkspaceRequest>),
 
     /// A sandbox client committed a `wp_security_context_v1`. The metadata is
     /// copied out of wlroots' state at emission time, so the owned
     /// [`SecurityContext`] may be delivered later and outlives the client that
-    /// produced it.
+    /// produced it. The committing-client identity travels with it
+    /// ([`SecurityContext::committing_client`](crate::SecurityContext::committing_client)):
+    /// the metadata strings are a self-asserted claim, so correlate before
+    /// trusting — see [`SecurityContext`](crate::SecurityContext)'s docs for
+    /// the trust model.
     SecurityContextCommitted(SecurityContext),
 
     /// A `zwlr_gamma_control_manager_v1` client set a gamma ramp for an
@@ -1127,6 +1100,73 @@ mod tests {
             state.seen,
             vec![Event::OutputFrame(OutputId(1)), scroll],
             "the scroll must arrive after the outer handler returns, and              carry the same axis, delta, source and direction it was emitted              with"
+        );
+    }
+
+    /// A tag deferred behind another handler must arrive with its string
+    /// intact — the same queue-survival property the axis test pins, for a
+    /// heap payload rather than scalars.
+    #[test]
+    fn a_deferred_toplevel_tag_survives_the_queue_unchanged() {
+        let tag = Event::ToplevelTagChanged(crate::ToplevelId(9), Some("editor".to_string()));
+
+        let mut state = Recorder {
+            seen: Vec::new(),
+            reenter_with: Cell::new(Some(tag.clone())),
+            dispatcher: std::ptr::null(),
+        };
+        // One provenance throughout, as in the tests above.
+        let p = &raw mut state;
+        let d = Dispatcher::new(p);
+        // SAFETY: as in the tests above.
+        unsafe { (*p).dispatcher = &raw const d };
+
+        // SAFETY: as above.
+        unsafe { d.emit(&(), Event::OutputFrame(OutputId(1)), deliver) };
+
+        assert_eq!(
+            state.seen,
+            vec![Event::OutputFrame(OutputId(1)), tag],
+            "the tag must arrive after the outer handler returns, carrying the same id and string it was emitted with"
+        );
+    }
+
+    /// A multi-entry workspace batch deferred behind another handler must
+    /// arrive with its order and discriminants intact — including a
+    /// [`WorkspaceRequest::Stale`] entry, which is what distinguishes an
+    /// all-stale batch from an empty commit.
+    #[test]
+    fn a_deferred_workspace_commit_survives_the_queue_unchanged() {
+        use crate::{StaleRequestKind, WorkspaceGroupId, WorkspaceId};
+
+        let batch = Event::WorkspaceCommit(vec![
+            WorkspaceRequest::Activate(WorkspaceId(1)),
+            WorkspaceRequest::Stale {
+                kind: StaleRequestKind::Remove,
+                workspace: None,
+                group: Some(WorkspaceGroupId(2)),
+            },
+            WorkspaceRequest::Remove(WorkspaceId(3)),
+        ]);
+
+        let mut state = Recorder {
+            seen: Vec::new(),
+            reenter_with: Cell::new(Some(batch.clone())),
+            dispatcher: std::ptr::null(),
+        };
+        // One provenance throughout, as in the tests above.
+        let p = &raw mut state;
+        let d = Dispatcher::new(p);
+        // SAFETY: as in the tests above.
+        unsafe { (*p).dispatcher = &raw const d };
+
+        // SAFETY: as above.
+        unsafe { d.emit(&(), Event::OutputFrame(OutputId(1)), deliver) };
+
+        assert_eq!(
+            state.seen,
+            vec![Event::OutputFrame(OutputId(1)), batch],
+            "the batch must arrive after the outer handler returns, with every entry in order and the stale entry still stale"
         );
     }
 

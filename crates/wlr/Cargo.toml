@@ -96,21 +96,25 @@ rustix = { version = "1", features = ["pipe", "std"] }
 # A real client for the client-driven harness: the six-leg standard had no
 # way to connect a Wayland client to the display, so commit/ack sequencing
 # could not be reached. Dev-dependency only; the crate wraps the server.
-# `=`-pinned: the workspace is a library set with no committed root
-# `Cargo.lock` (see root `.gitignore`), so a caret range would float across
-# unreviewed patch releases in CI. Re-pin deliberately when bumping.
+# `=`-pinned: the workspace is a library set whose root `Cargo.lock` is
+# force-added as a deliberate policy exception (not the gitignored default),
+# so the lock records reviewed revisions for CI — but downstream consumers
+# never see it, and for them a caret range would float across unreviewed
+# patch releases. Re-pin deliberately when bumping.
 wayland-client = "=0.31.15"
 # xdg-shell client bindings for the seed toplevel test. `client` selects the
 # client-side generated code; xdg-shell itself is stable, so it comes from the
-# ungated `xdg` module and needs no `unstable` feature (which would only add
-# the deprecated `z`-prefixed protocols).
+# ungated `xdg` module. (`unstable` is enabled below, for xdg-decoration.)
 # `staging` adds the staging protocols the client-driven tests drive —
 # xdg-activation-v1 (Task 5) plus xdg-toplevel-icon-v1 and
-# xdg-toplevel-tag-v1 (Task 6). 0.32 is the first line that carries the
+# xdg-toplevel-tag-v1 (Task 6). `unstable` adds the one unstable protocol a
+# client leg drives: xdg-decoration-unstable-v1, for the live decoration
+# negotiation test. 0.32 is the first line that carries the
 # icon/tag bindings; its own MSRV is 1.86, inside the workspace's 1.88 floor.
 # Dev-dependency only, like the rest. `=`-pinned for the same reason as
-# `wayland-client` above (no committed lockfile): re-pin deliberately.
-wayland-protocols = { version = "=0.32.13", features = ["client", "staging"] }
+# `wayland-client` above (the committed lockfile does not reach downstream):
+# re-pin deliberately.
+wayland-protocols = { version = "=0.32.13", features = ["client", "staging", "unstable"] }
 # wlr-protocols client bindings (foreign-toplevel-management) for the
 # client-driven export/request tests. `wlr-protocols` is not part of
 # wayland-protocols; this companion crate carries the wlroots extensions.

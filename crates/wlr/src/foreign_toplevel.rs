@@ -1,6 +1,26 @@
 //! `zwlr_foreign_toplevel_management_v1`: a compositor exports the toplevels it
 //! manages, and taskbars, docks and window switchers observe and drive them.
 //!
+//! # Privileged: this global broadcasts window state to whoever binds it
+//!
+//! Every client that binds the manager receives a handle for **every** exported
+//! window together with its current title, app id and state — and keeps
+//! receiving updates for as long as it stays bound. That is sensitive
+//! cross-app data (which windows exist, what they are titled, which is
+//! focused), readable by any process that can connect, and a ready-made
+//! sandbox-enumeration primitive. The other direction is just as open: a bound
+//! client may ask to close or activate any exported window, and those requests
+//! land on the defaulted `ToplevelHandler::foreign_toplevel_*` methods with no
+//! client identity attached — wlroots applies none of them, but it also stops
+//! none of them, so every one is the compositor's to allow or refuse, exactly
+//! like `SeatHandler::request_activate`.
+//!
+//! Gate the manager global at bind time — see the rule in
+//! [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
+//! The six request handlers
+//! are defaulted, and the default ignores every request — keep that posture
+//! until a request arrives from a client you vetted at bind time.
+//!
 //! The protocol splits the two directions:
 //!
 //! * The compositor **exports** a window with
@@ -43,7 +63,7 @@ use std::ptr::NonNull;
 
 use crate::backend::{Registration, bound_session, remove_listener};
 use crate::id::find_surface_id;
-use crate::runtime::copy_nullable_string;
+use crate::runtime::{RuntimeInner, copy_nullable_string};
 use crate::{Display, Error, Output, Result, Runtime, SurfaceId, sys};
 
 /// Identifies one exported toplevel while the compositor holds its handle.
@@ -129,6 +149,17 @@ pub(crate) enum ForeignToplevelRequest {
     },
     /// `set_rectangle`: the surface and the rectangle the client wants the
     /// compositor to treat as the window's interactive area.
+    ///
+    /// `surface` is `None` when the client named a surface this crate does
+    /// not track. A wire-null surface never reaches this far: wlroots calls
+    /// `wlr_surface_from_resource` on it unconditionally, which asserts (and
+    /// dereferences) rather than returning null, so a null kills the
+    /// compositor before this event exists — the null arm of the mapping is
+    /// defensive only. In practice, then, `None` means "a real surface this
+    /// crate never tracked", and a compositor must treat it as "no verified
+    /// surface": fall back to the policy default rather than assuming the
+    /// rectangle was cleared. See
+    /// [`ToplevelHandler::foreign_toplevel_set_rectangle`](crate::ToplevelHandler::foreign_toplevel_set_rectangle).
     SetRectangle {
         id: ForeignToplevelId,
         surface: Option<SurfaceId>,
@@ -137,6 +168,20 @@ pub(crate) enum ForeignToplevelRequest {
         width: i32,
         height: i32,
     },
+}
+
+impl ForeignToplevelRequest {
+    /// The protocol request this value carries, for diagnostics.
+    fn name(&self) -> &'static str {
+        match self {
+            ForeignToplevelRequest::Activate { .. } => "activate",
+            ForeignToplevelRequest::Close { .. } => "close",
+            ForeignToplevelRequest::Maximize { .. } => "maximize",
+            ForeignToplevelRequest::Minimize { .. } => "minimize",
+            ForeignToplevelRequest::Fullscreen { .. } => "fullscreen",
+            ForeignToplevelRequest::SetRectangle { .. } => "set_rectangle",
+        }
+    }
 }
 
 /// The live run's ability to deliver a foreign-toplevel request to its handler.
@@ -302,17 +347,21 @@ impl ForeignToplevelHandle {
             ForeignToplevelState {
                 title: copy_nullable_string((*handle).title as *const _),
                 app_id: copy_nullable_string((*handle).app_id as *const _),
-                maximized: (*handle).state
-                    & sys::wlr_foreign_toplevel_handle_v1_state::WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MAXIMIZED.0
+                maximized: ((*handle).state
+                    & sys::wlr_foreign_toplevel_handle_v1_state::WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MAXIMIZED
+                        .0)
                     != 0,
-                minimized: (*handle).state
-                    & sys::wlr_foreign_toplevel_handle_v1_state::WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MINIMIZED.0
+                minimized: ((*handle).state
+                    & sys::wlr_foreign_toplevel_handle_v1_state::WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_MINIMIZED
+                        .0)
                     != 0,
-                activated: (*handle).state
-                    & sys::wlr_foreign_toplevel_handle_v1_state::WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_ACTIVATED.0
+                activated: ((*handle).state
+                    & sys::wlr_foreign_toplevel_handle_v1_state::WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_ACTIVATED
+                        .0)
                     != 0,
-                fullscreen: (*handle).state
-                    & sys::wlr_foreign_toplevel_handle_v1_state::WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_FULLSCREEN.0
+                fullscreen: ((*handle).state
+                    & sys::wlr_foreign_toplevel_handle_v1_state::WLR_FOREIGN_TOPLEVEL_HANDLE_V1_STATE_FULLSCREEN
+                        .0)
                     != 0,
                 parent: if parent.is_null() {
                     None
@@ -323,8 +372,15 @@ impl ForeignToplevelHandle {
         }
     }
 
-    /// Set the window title clients see. `None` for an inert handle or a title
-    /// containing an interior NUL, which cannot be passed to wlroots.
+    /// Set the window title clients see.
+    ///
+    /// `None` for two distinct misses, both silent by design (there is no
+    /// [`Error`](crate::Error) variant that names one without stretching its
+    /// documented semantics, and this signature is frozen within the 0.20.x
+    /// line): the handle is inert — its manager died with the display — or
+    /// `title` contains an interior NUL, which cannot be passed to wlroots and
+    /// is refused rather than truncated. A refused NUL leaves the previous
+    /// title in place.
     pub fn set_title(&self, title: &str) -> Option<()> {
         let raw = self.raw()?;
         let title = CString::new(title).ok()?;
@@ -334,8 +390,13 @@ impl ForeignToplevelHandle {
         Some(())
     }
 
-    /// Set the application id clients see. `None` for an inert handle or an id
-    /// containing an interior NUL.
+    /// Set the application id clients see.
+    ///
+    /// `None` for two distinct misses, both silent by design (see
+    /// [`set_title`](Self::set_title) for why no [`Error`](crate::Error) is
+    /// reported): the handle is inert, or `app_id` contains an interior NUL
+    /// and is refused rather than truncated, leaving the previous id in
+    /// place.
     pub fn set_app_id(&self, app_id: &str) -> Option<()> {
         let raw = self.raw()?;
         let app_id = CString::new(app_id).ok()?;
@@ -377,16 +438,39 @@ impl ForeignToplevelHandle {
         Some(())
     }
 
-    /// Set (or clear, with `None`) this window's parent. `None` for an inert
-    /// handle, or when `parent` names one.
+    /// Set (or clear, with `None`) this window's parent.
+    ///
+    /// Parenting is manager-scoped: `parent` must come from the same
+    /// [`Runtime`] (and therefore the same manager) as `self`. A parent from
+    /// another runtime is refused with `None` — wlroots would otherwise link
+    /// two handles whose managers die independently, leaving the child naming
+    /// freed memory once the parent's manager is torn down while this handle
+    /// stays live. Runtime identity is compared with `Rc::ptr_eq` on the two
+    /// handles' stored runtimes, so clones of one [`Runtime`] parent freely.
+    ///
+    /// `None` for an inert handle (either side), for a cross-runtime parent,
+    /// or when `parent` names an inert handle.
     pub fn set_parent(&self, parent: Option<&ForeignToplevelHandle>) -> Option<()> {
         let raw = self.raw()?;
         let parent = match parent {
-            Some(parent) => parent.raw()?.as_ptr(),
+            Some(parent) => {
+                if !std::rc::Rc::ptr_eq(
+                    &self.listeners.runtime.inner,
+                    &parent.listeners.runtime.inner,
+                ) {
+                    // A caller mistake with a defined miss contract, like an
+                    // interior-NUL title: silent `None` rather than a
+                    // `debug_assert`, so debug builds (this crate's own test
+                    // suite included) can pin the refusal without trapping.
+                    return None;
+                }
+                parent.raw()?.as_ptr()
+            }
             None => std::ptr::null_mut(),
         };
-        // SAFETY: `raw` is live and `parent` is either null or a live handle;
-        // wlroots only reads both and sends protocol events.
+        // SAFETY: `raw` is live and `parent` is either null or a live handle
+        // from the same manager (same runtime, checked above); wlroots only
+        // reads both and sends protocol events.
         unsafe { sys::wlr_foreign_toplevel_handle_v1_set_parent(raw.as_ptr(), parent) };
         Some(())
     }
@@ -463,6 +547,27 @@ impl Runtime {
         let raw =
             NonNull::new(raw).ok_or(Error::Create("wlr_foreign_toplevel_manager_v1_create"))?;
         *self.inner.foreign_toplevel_manager.borrow_mut() = Some(raw);
+        // Link the teardown watch before returning: the manager dies with the
+        // display, and without this the stored pointer would dangle across
+        // display teardown. The watch clears the pointer and the liveness
+        // flag from inside the manager's own `destroy` emission, while the
+        // manager memory is still valid.
+        self.inner.foreign_toplevel_manager_alive.set(true);
+        // SAFETY: `raw` is a live manager with initialised signals, and
+        // `self.inner` (the session pointer and the `alive` cell) outlives
+        // the registration: both live in the same `Rc`-allocated
+        // `RuntimeInner`, whose heap address never moves, and the callback
+        // unlinks itself before either can go stale. `link_watched`'s
+        // contract otherwise forwarded verbatim.
+        let watch = unsafe {
+            Registration::link_watched(
+                &raw mut (*raw.as_ptr()).events.destroy,
+                on_foreign_toplevel_manager_destroy,
+                std::rc::Rc::as_ptr(&self.inner).cast::<()>(),
+                &self.inner.foreign_toplevel_manager_alive as *const _,
+            )
+        };
+        *self.inner.foreign_toplevel_manager_destroy.borrow_mut() = Some(watch);
         Ok(())
     }
 
@@ -478,19 +583,80 @@ impl Runtime {
     /// The handle is registered with the manager immediately, so every bound
     /// client sees it (and its current title/app id/state) at once; keep it for
     /// as long as the window lives and drive it through the `set_*` mutators.
-    /// `None` when no manager was created, or when wlroots could not allocate
-    /// the handle.
+    ///
+    /// `None` for three distinct misses, all silent by design (there is no
+    /// [`Error`](crate::Error) variant that names one without stretching its
+    /// documented semantics, and this signature is frozen within the 0.20.x
+    /// line): no manager was ever created; the manager died with its display
+    /// (the teardown watch linked at creation cleared the stored pointer, so a
+    /// post-teardown call misses rather than dereferencing freed memory); or
+    /// wlroots returned null for a live manager, which is an allocation
+    /// failure the test suite asserts never happens
+    /// (`debug_assert!(false, ...)` fires there, with no release behavior
+    /// change).
     ///
     /// Drop the handle before the display: see [`ForeignToplevelHandle`].
     pub fn create_foreign_toplevel(&self) -> Option<ForeignToplevelHandle> {
+        if !self.inner.foreign_toplevel_manager_alive.get() {
+            return None;
+        }
         let manager = self.foreign_toplevel_manager_ptr()?;
-        // SAFETY: `manager` is live and owned by the display; the returned
-        // handle is freshly allocated and linked into the manager's list.
+        // SAFETY: the liveness flag above is true, so the manager's `destroy`
+        // has not fired and the display-owned `manager` is still live; the
+        // returned handle is freshly allocated and linked into its list.
         let raw = unsafe { sys::wlr_foreign_toplevel_handle_v1_create(manager.as_ptr()) };
-        let raw = NonNull::new(raw)?;
+        let raw = match NonNull::new(raw) {
+            Some(raw) => raw,
+            // Unexpected: the manager is live, so only an allocation failure
+            // explains a null return. Asserted in debug like the other
+            // should-never-fire arms in this crate; still a silent miss,
+            // never trapped.
+            None => {
+                debug_assert!(
+                    false,
+                    "wlr_foreign_toplevel_handle_v1_create returned null with a live manager"
+                );
+                return None;
+            }
+        };
         // SAFETY: `raw` is a fresh handle with initialised signals and this is
         // its only owner; `from_non_null` links the request listeners.
         Some(unsafe { ForeignToplevelHandle::from_non_null(self.clone(), raw) })
+    }
+}
+
+/// The foreign-toplevel manager is being destroyed (display teardown, before
+/// the manager itself is freed).
+///
+/// Clears the stored manager pointer and the liveness flag while the manager
+/// memory is still valid, so a later [`Runtime::create_foreign_toplevel`]
+/// returns `None` instead of dereferencing freed memory, and unlinks this
+/// listener so wlroots' post-destroy empty-signal assertion holds. A later
+/// `RuntimeInner` drop then finds the flag false and the registration gone,
+/// and never touches the freed signal list.
+///
+/// This is the manager side of the teardown story; each owned
+/// [`ForeignToplevelHandle`]'s own watch (see `on_manager_destroy`) marks
+/// that handle inert at the same emission.
+unsafe extern "C" fn on_foreign_toplevel_manager_destroy(
+    l: *mut sys::wl_listener,
+    _data: *mut c_void,
+) {
+    // SAFETY: linked by `create_foreign_toplevel_manager` into a live
+    // manager's `events.destroy` with a `session` pointing at the owning
+    // `RuntimeInner`, which outlives the registration. Every call below is
+    // infallible and cannot unwind out of this `extern "C"` frame.
+    unsafe {
+        let session = bound_session(l);
+        if session.is_null() {
+            return;
+        }
+        let inner = &*session.cast::<RuntimeInner>();
+        inner.foreign_toplevel_manager_alive.set(false);
+        *inner.foreign_toplevel_manager.borrow_mut() = None;
+        remove_listener(l);
+        let registration = inner.foreign_toplevel_manager_destroy.borrow_mut().take();
+        drop(registration);
     }
 }
 
@@ -571,11 +737,20 @@ unsafe fn ctx_of<'a>(l: *mut sys::wl_listener) -> Option<&'a HandleListeners> {
 
 /// Hand a request to the live run, or drop it when no run is on the stack.
 ///
-/// A request can only fire from inside a run's event loop, so the observer is
-/// always installed here; the null check covers a handle created before any run
-/// (its listener fires only once a run is dispatching) and is defensive.
+/// Requests only fire inside a run with an installed observer: the observer
+/// exists for exactly the duration of one
+/// [`Backend::run_all`](crate::Backend::run_all) call, and a request listener
+/// can only emit while that call is dispatching. The miss arm below is
+/// defensive — a handle created before any run whose listener fires outside
+/// one — and stays a silent drop in release, with a `debug_assert!(false,
+/// ...)` naming the request variant so a test run says which one was lost.
 fn deliver(ctx: &HandleListeners, request: ForeignToplevelRequest) {
     let Some(observer) = ctx.runtime.inner.foreign_toplevel_observer.get() else {
+        debug_assert!(
+            false,
+            "foreign-toplevel {} request delivered with no run installed",
+            request.name()
+        );
         return;
     };
     // SAFETY: the observer was installed by the live run this callback is

@@ -59,7 +59,18 @@ jobs:
           restore-keys: |
             fuzz-corpus-operations-
 
-      - run: cargo +nightly-2026-09-12 fuzz run operations -- -max_total_time=300
+      # `seeds/operations` holds the checked-in seed inputs, passed as a second
+      # libFuzzer corpus directory: `fuzz/corpus/` (the cache above) is
+      # gitignored and cold-starts empty, so without this the nightly would
+      # start every run from nothing. Directory order matters: libFuzzer loads
+      # every corpus dir but writes new coverage only to the first, so the
+      # checked-in seeds stay pristine while the run accumulates into the
+      # cached corpus. `-max_len` caps input bytes; the per-operation turn
+      # budgets inside the target keep the work per input finite and
+      # deterministic.
+      - run: |
+          mkdir -p corpus/operations
+          cargo +nightly-2026-09-12 fuzz run operations corpus/operations seeds/operations -- -max_total_time=300 -max_len=2048
         working-directory: fuzz
 
       # A crash writes its reproducer under fuzz/artifacts/, which is gitignored

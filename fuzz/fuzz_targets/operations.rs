@@ -24,10 +24,16 @@
 //!   *fresh* compositor, not the accumulated one. The reachable operation set
 //!   is chosen to be miss-safe and idempotent, so the dependence is weak — but
 //!   it is real, and the artifact is a starting point, not a complete repro.
-//! * **The create guards saturate.** Once any input creates a manager global,
-//!   every later `Create*` op returns `Err`; only the double-create refusal
-//!   stays live, and the successful-create path is reached at most once per
-//!   process.
+//!   Timeout-skips add a second, load-dependent nondeterminism of the same
+//!   kind: a client op that connects on an idle machine may hit
+//!   `CLIENT_IO_TIMEOUT` and skip on a loaded one, so two runs of the same
+//!   corpus can drive different live-op sets.
+//! * **The create guards saturate — accepted.** Once any input creates a
+//!   manager global, every later `Create*` op returns `Err`; only the
+//!   double-create refusal stays live, and the successful-create path runs at
+//!   most once per process. The checked-in seeds (see below) order each
+//!   `Create*` before its dependents so the success path is still reached
+//!   deterministically; later inputs pin the refusal half of the contract.
 //!
 //! # Why the operations drive from Rust, never from a handler
 //!
@@ -73,10 +79,39 @@
 //! to hand the wrappers. The run has returned by the time they execute, so the
 //! id is stale by design: those operations prove the documented
 //! stale-id-misses-cleanly boundary rather than configuring a live output.
+//!
+//! # What the integration tests own, and what this target owns
+//!
+//! The positive paths — live toplevels, popups, layers, surfaces, foreign
+//! handles, workspaces, activation tokens, presentation feedback — belong to
+//! the integration tests (`crates/wlr/tests/toplevels.rs`, `popups.rs`,
+//! `layers.rs`, `surfaces.rs`, `foreign_toplevel.rs`, `ext_protocols.rs`,
+//! `presentation.rs`, `xdg_protocols.rs`, `xdg_remainder.rs`), which are the
+//! logic oracle for this target. What those tests cannot do is run under
+//! AddressSanitizer against adversarial *sequences*: that split is explicit
+//! and deliberate. This target pins the other half — the frozen
+//! unknown-id-misses-cleanly and double-create-refused contracts
+//! (`debug_assert!`s at every call site, active under the fuzzer's
+//! debug-assertions build) — and otherwise asserts nothing at runtime;
+//! survival plus ASan is the oracle.
+//!
+//! # Seed corpus and input budget
+//!
+//! `fuzz/seeds/operations/` holds checked-in seed inputs (`fuzz/corpus/` is
+//! gitignored and cold-starts empty in CI, so seeds live outside it). Each
+//! file decodes to one dependency-ordered sequence — lifecycle, burst, each
+//! `Create*` before its dependents, the tearing/presentation trio — and
+//! `fuzz.yml` passes the directory as an extra libFuzzer corpus argument.
+//! Input length is capped by `-max_len` there; inside an op every count folds
+//! to a small bound (`extra_rounds` to 0..=2, bursts to 1..=4 toplevels,
+//! names to [`MAX_NAME_LEN`] chars, icon sizes to five entries), and every
+//! pump is a bounded `Until::Turns` run, so the work per input is finite and
+//! deterministic.
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use std::cell::OnceCell;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use wayland_client::protocol::{wl_compositor, wl_registry, wl_surface};
 use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
@@ -116,7 +151,11 @@ use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_ba
 ///
 /// Field names name the argument, not the C call: `nth` selects a reserved
 /// dangling id for the by-id mutators, and carries no meaning beyond giving a
-/// sequence several distinct unknown ids.
+/// sequence several distinct unknown ids. `name`/`handle` carry a
+/// fuzzer-chosen token or workspace name, folded to [`MAX_NAME_LEN`] chars
+/// (the fixed `"fuzz-*"` values stay on as seed-corpus inputs); `variant`
+/// selects one of a few bounded icon-size lists, covering `&[]`,
+/// `&[16, 32, 64]` and extremes.
 #[derive(Arbitrary, Debug)]
 enum Operation {
     // --- xdg-shell global (double-create guard only; the toplevel/popup
@@ -300,9 +339,13 @@ enum Operation {
     /// included. A client-driven `set_icon` needs a connected client, so the
     /// event path is not reachable here.
     CreateXdgToplevelIconManager,
-    /// `Runtime::set_toplevel_icon_sizes` with a small preference list. A no-op
-    /// until the icon manager exists, and free of any client.
-    SetToplevelIconSizes,
+    /// `Runtime::set_toplevel_icon_sizes` with a fuzzer-chosen size list,
+    /// folded to a small bound: 0 selects `&[]`, 1 selects `&[16, 32, 64]`,
+    /// 2 selects extremes (`&[0, -1, 1, i32::MAX, i32::MIN]`), and any other
+    /// value selects a two-entry list derived from the byte itself. A no-op
+    /// until the icon manager exists, and free of any client. The fixed
+    /// preference list stays on as a seed-corpus input.
+    SetToplevelIconSizes { variant: u8 },
     /// `Runtime::create_xdg_toplevel_tag_manager`; double-create guard
     /// included. As the icon manager, the tag/description event paths need a
     /// connected client.
@@ -314,18 +357,41 @@ enum Operation {
     CreateForeignV1,
     /// `Runtime::create_xdg_foreign_v2`; as `CreateForeignV1`.
     CreateForeignV2,
-    /// `Runtime::add_activation_token` then drop. Mints and releases a token
-    /// without a client, exercising the owned handle's destroy path; a miss
-    /// when no activation manager exists.
-    AddActivationToken,
-    /// `Runtime::find_activation_token` for a name nothing registered.
-    FindActivationToken,
-    /// `Runtime::find_foreign_exported` for a handle nothing registered.
-    FindForeignExported,
-    /// `Runtime::export_foreign` against a dangling toplevel id, then drop. A
-    /// live toplevel needs a connected client, so this stays on the miss path;
-    /// it exercises the id lookup and the null-guarded return.
-    ExportForeign,
+    /// `Runtime::add_activation_token` under a fuzzer-chosen name (folded to
+    /// [`MAX_NAME_LEN`] chars; an interior NUL is refused, never truncated),
+    /// then drop. Mints and releases a token without a client, exercising the
+    /// owned handle's destroy path; a miss when no activation manager exists.
+    /// The fixed `"fuzz-token"` name stays on as a seed-corpus input.
+    AddActivationToken { name: String },
+    /// `Runtime::find_activation_token` for a fuzzer-chosen name (folded like
+    /// above); a miss unless a live token holds that name. This target never
+    /// keeps a token handle alive, so every lookup here misses.
+    FindActivationToken { name: String },
+    /// `Runtime::find_foreign_exported` for a fuzzer-chosen handle (folded
+    /// like above); a miss unless a live export holds that handle. Exports
+    /// are dropped immediately, so every lookup here misses.
+    FindForeignExported { handle: String },
+    /// `Runtime::export_foreign` against a fuzzer-chosen dangling toplevel id,
+    /// then drop. A live toplevel needs a connected client, so this stays on
+    /// the miss path; it exercises the id lookup and the null-guarded return.
+    ExportForeign { nth: u64 },
+
+    // --- Activation token mint + presentation wiring: the client-free
+    // owned-handle paths ---
+    /// `Runtime::create_activation_token` then drop. The activation manager is
+    /// created idempotently first (the pattern `connect_live_client` uses for
+    /// `create_xdg_shell`), so the mint path runs regardless of input order;
+    /// the handle's `Drop` runs here, exercising the destroy path under ASan.
+    CreateActivationToken,
+    /// `Runtime::create_presentation` (double-create guard included) followed
+    /// by `Runtime::set_scene_presentation`, the call every scene compositor
+    /// makes after creating presentation. Both are free of any client.
+    CreatePresentation,
+    /// `Runtime::dialog_of` against a dangling surface id plus
+    /// `Runtime::dialog` against a dangling toplevel id. A live dialog needs
+    /// a connected client, so both stay on the miss path here; the live-id
+    /// half additionally runs in `stale_miss_subset` against the announced id.
+    DialogOf { nth: u64, surface_nth: u64 },
 
     // --- Foreign-toplevel management (M9): manager create guard and the
     // owned handle's client-free lifecycle ---
@@ -334,7 +400,9 @@ enum Operation {
     /// Create two owned handles, drive every mutator, set one as the other's
     /// parent, and drop them in the order the input picks. No client is needed:
     /// the requests flow the other direction. Exercises the handle's destroy
-    /// path under ASan, including wlroots' parent-rewrite on destroy.
+    /// path under ASan, including wlroots' parent-rewrite on destroy. The
+    /// manager is created idempotently first, so the live path runs regardless
+    /// of input order; without it both creates miss and the op is a no-op.
     ForeignToplevelHandles { parent_first: bool },
 
     // --- ext-foreign-toplevel-list (M9): manager create guard and the owned
@@ -345,25 +413,32 @@ enum Operation {
     CreateExtForeignToplevelList,
     /// Create two owned handles, set and update their state, and drop them in
     /// the order the input picks. Exercises the handle's destroy path under
-    /// ASan.
+    /// ASan. The list is created idempotently first, so the live path runs
+    /// regardless of input order; without it both creates miss.
     ExtForeignToplevelHandles { first_first: bool },
 
     // --- ext-workspace (M9): manager create guard and the owned
     // group/workspace lifecycle ---
     /// `Runtime::create_ext_workspace_manager`; double-create guard included.
     CreateExtWorkspaceManager,
-    /// Create a group and two workspaces, assign one to the group, drive every
+    /// Create a group and two workspaces under fuzzer-chosen ids (folded to
+    /// [`MAX_NAME_LEN`] chars), assign one to the group, drive every
     /// workspace mutator, then drop the group and workspaces in the order the
     /// input picks. No client is needed: the commit requests flow the other
     /// direction. Exercises both destroy paths under ASan, including wlroots'
-    /// group-rewrite of the workspace's group pointer.
-    ExtWorkspaceHandles { group_first: bool },
+    /// group-rewrite of the workspace's group pointer. The manager is created
+    /// idempotently first, so the live path runs regardless of input order.
+    ExtWorkspaceHandles {
+        group_first: bool,
+        name_a: String,
+        name_b: String,
+    },
 
     // --- wlr_surface operations (M9b): `surface.rs` by-id reads and mutators.
     // A live `wlr_surface` needs a connected client, so these stay on the
     // surface lookup's miss path; the wrappers are covered positively by the
     // client-driven `tests/surfaces.rs`.
-    /// `Surface::{extents,effective_damage,buffer_source_box,point_accepts_input}`.
+    /// `Surface::{extents,effective_damage,buffer_source_box,point_accepts_input,surface_at}`.
     SurfaceProbe { nth: u64, x: f64, y: f64 },
     /// `Surface::root_id`.
     SurfaceRoot { nth: u64 },
@@ -383,8 +458,9 @@ enum Operation {
     // connection against the harness socket. These mint REAL toplevels —
     // `wl_surface` + `xdg_surface` + `xdg_toplevel`, committed, configured,
     // acked, destroyed — so the announcement/commit/configure/ack/destroy
-    // machinery runs on live objects under ASan. See `drive_client` for the
-    // interleaving (client flush / server `run_all` turns / client
+    // machinery runs on live objects under ASan. See `drive_client_lifecycle`
+    // and `drive_client_burst` for the interleaving (client flush / server
+    // `run_all` turns / client
     // `dispatch_pending`); every count below is folded to a small bound, so
     // the work per input is deterministic and finite.
     /// Create one live toplevel, commit it, pump the server so it is
@@ -556,16 +632,108 @@ fn compositor() -> Option<&'static Compositor> {
     })
 }
 
+/// Process-wide client-attempt accounting: the silent-skip guard.
+///
+/// A broken socket path makes every client op skip its input, which reads as
+/// a green run with zero live coverage. `connect_client` bumps `ATTEMPTED` on
+/// every call and `CONNECTED` on every successful connect; both reset at each
+/// fuzz-input start, and the end of the input panics when attempts happened
+/// but nothing ever connected — failing the run like a bring-up failure. A
+/// healthy socket never trips this: every attempt connects.
+static ATTEMPTED: AtomicUsize = AtomicUsize::new(0);
+static CONNECTED: AtomicUsize = AtomicUsize::new(0);
+
 fuzz_target!(|ops: Vec<Operation>| {
+    ATTEMPTED.store(0, Ordering::Relaxed);
+    CONNECTED.store(0, Ordering::Relaxed);
     let Some(compositor) = compositor() else { return; };
     for op in &ops {
         apply(compositor, op);
     }
+    // No live client for the whole input means the live ops all skipped: fail
+    // the run rather than banking a green input that fuzzed nothing live.
+    let attempted = ATTEMPTED.load(Ordering::Relaxed);
+    let connected = CONNECTED.load(Ordering::Relaxed);
+    assert!(
+        attempted == 0 || connected > 0,
+        "fuzz harness produced no live client: \
+         {attempted} connect attempts, {connected} successes"
+    );
 });
 
-/// Drive one operation. Every wrapper call's result is discarded — the fuzz
-/// target asserts nothing at runtime; its only oracle is that the process
-/// survives and ASan sees no invalid access.
+/// Fold a fuzzer-supplied name to a small bound.
+///
+/// `Arbitrary` strings are unbounded; wlroots copies the bytes it needs at
+/// creation, so length only buys allocator work, never coverage. Truncating
+/// to [`MAX_NAME_LEN`] chars keeps the work per input bounded while still
+/// covering empty, interior-NUL (refused by `CString::new`, never truncated)
+/// and multi-byte shapes. The fixed `"fuzz-*"` values stay on as
+/// seed-corpus inputs.
+const MAX_NAME_LEN: usize = 24;
+
+/// See [`MAX_NAME_LEN`].
+fn fold_name(name: &str) -> String {
+    name.chars().take(MAX_NAME_LEN).collect()
+}
+
+/// Assert the frozen unknown-id-miss contract.
+///
+/// A reserved-band dangling id (or a stale id past its announcing pump) never
+/// resolves, so the call must report a miss. A `Some` here means the wrapper
+/// resolved an id it could not own — the memory-safety boundary this target
+/// exists to watch. The integration tests named in the header docs are the
+/// logic oracle for the positive paths; this pins the miss half under ASan.
+fn expect_miss<T>(result: Option<T>, what: &'static str) {
+    debug_assert!(
+        result.is_none(),
+        "frozen contract violated: `{what}` resolved an id that must miss"
+    );
+}
+
+/// Assert a miss reported as an empty collection (`popups_of`, `popup_chain`:
+/// a dangling parent has no children).
+fn expect_empty<T>(items: &[T], what: &'static str) {
+    debug_assert!(
+        items.is_empty(),
+        "frozen contract violated: `{what}` listed children of an id that must miss"
+    );
+}
+
+/// Assert a miss reported as a zero destroy count (`dismiss_popup`,
+/// `dismiss_popups_of`: nothing live under a dangling id).
+fn expect_zero(destroyed: usize, what: &'static str) {
+    debug_assert!(
+        destroyed == 0,
+        "frozen contract violated: `{what}` destroyed under an id that must miss"
+    );
+}
+
+/// Assert a miss reported as `false` (`configure_popup`, `popup_is_grabbing`).
+fn expect_false(hit: bool, what: &'static str) {
+    debug_assert!(
+        !hit,
+        "frozen contract violated: `{what}` hit an id that must miss"
+    );
+}
+
+/// Assert the frozen double-create-refusal contract.
+///
+/// The first create in each arm may succeed (fresh process) or fail (an
+/// earlier input already created the global); either way a second immediate
+/// create must be refused, because no state changed in between except the
+/// first call itself. A succeeding second call means the guard regressed.
+fn expect_double_create_refused<T, E>(second: Result<T, E>, what: &'static str) {
+    debug_assert!(
+        second.is_err(),
+        "frozen contract violated: second `{what}` create succeeded"
+    );
+}
+
+/// Drive one operation. Results that carry no contract are discarded; results
+/// that do feed the frozen-contract `debug_assert!`s (`expect_miss`,
+/// `expect_double_create_refused` and friends) — the only runtime assertions
+/// in the target. Beyond those, its oracle is that the process survives and
+/// ASan sees no invalid access.
 fn apply(compositor: &Compositor, op: &Operation) {
     use wlr::{
         Box2D, DecorationMode, ExtForeignToplevelState, LayerSurfaceId, PopupId, PopupParent,
@@ -582,37 +750,62 @@ fn apply(compositor: &Compositor, op: &Operation) {
     match op {
         Operation::CreateXdgShell => {
             let _ = runtime.create_xdg_shell(display, 6);
+            expect_double_create_refused(runtime.create_xdg_shell(display, 6), "create_xdg_shell");
         }
 
         Operation::SetToplevelSize { nth, width, height } => {
-            let _ = runtime.set_toplevel_size(toplevel(*nth), *width, *height);
+            expect_miss(
+                runtime.set_toplevel_size(toplevel(*nth), *width, *height),
+                "set_toplevel_size",
+            );
         }
         Operation::SetToplevelActivated { nth, activated } => {
-            let _ = runtime.set_toplevel_activated(toplevel(*nth), *activated);
+            expect_miss(
+                runtime.set_toplevel_activated(toplevel(*nth), *activated),
+                "set_toplevel_activated",
+            );
         }
         Operation::SetToplevelMaximized { nth, maximized } => {
-            let _ = runtime.set_toplevel_maximized(toplevel(*nth), *maximized);
+            expect_miss(
+                runtime.set_toplevel_maximized(toplevel(*nth), *maximized),
+                "set_toplevel_maximized",
+            );
         }
         Operation::SetToplevelFullscreen { nth, fullscreen } => {
-            let _ = runtime.set_toplevel_fullscreen(toplevel(*nth), *fullscreen);
+            expect_miss(
+                runtime.set_toplevel_fullscreen(toplevel(*nth), *fullscreen),
+                "set_toplevel_fullscreen",
+            );
         }
         Operation::SetToplevelPosition { nth, x, y } => {
-            let _ = runtime.set_toplevel_position(toplevel(*nth), *x, *y);
+            expect_miss(
+                runtime.set_toplevel_position(toplevel(*nth), *x, *y),
+                "set_toplevel_position",
+            );
         }
         Operation::SetToplevelVisible { nth, visible } => {
-            let _ = runtime.set_toplevel_visible(toplevel(*nth), *visible);
+            expect_miss(
+                runtime.set_toplevel_visible(toplevel(*nth), *visible),
+                "set_toplevel_visible",
+            );
         }
         Operation::RaiseToplevel { nth } => {
-            let _ = runtime.raise_toplevel(toplevel(*nth));
+            expect_miss(runtime.raise_toplevel(toplevel(*nth)), "raise_toplevel");
         }
         Operation::ConfigureToplevel { nth } => {
-            let _ = runtime.configure_toplevel(toplevel(*nth));
+            expect_miss(
+                runtime.configure_toplevel(toplevel(*nth)),
+                "configure_toplevel",
+            );
         }
         Operation::CloseToplevel { nth } => {
-            let _ = runtime.close_toplevel(toplevel(*nth));
+            expect_miss(runtime.close_toplevel(toplevel(*nth)), "close_toplevel");
         }
         Operation::SetToplevelBounds { nth, width, height } => {
-            let _ = runtime.set_toplevel_bounds(toplevel(*nth), *width, *height);
+            expect_miss(
+                runtime.set_toplevel_bounds(toplevel(*nth), *width, *height),
+                "set_toplevel_bounds",
+            );
         }
         Operation::SetToplevelConstrained {
             nth,
@@ -621,24 +814,36 @@ fn apply(compositor: &Compositor, op: &Operation) {
             left,
             right,
         } => {
-            let _ = runtime.set_toplevel_constrained(
-                toplevel(*nth),
-                wlr::Edges {
-                    top: *top,
-                    bottom: *bottom,
-                    left: *left,
-                    right: *right,
-                },
+            expect_miss(
+                runtime.set_toplevel_constrained(
+                    toplevel(*nth),
+                    wlr::Edges {
+                        top: *top,
+                        bottom: *bottom,
+                        left: *left,
+                        right: *right,
+                    },
+                ),
+                "set_toplevel_constrained",
             );
         }
         Operation::SetToplevelParent { nth, parent_nth } => {
-            let _ = runtime.set_toplevel_parent(toplevel(*nth), Some(toplevel(*parent_nth)));
+            expect_miss(
+                runtime.set_toplevel_parent(toplevel(*nth), Some(toplevel(*parent_nth))),
+                "set_toplevel_parent",
+            );
         }
         Operation::SetToplevelResizing { nth, resizing } => {
-            let _ = runtime.set_toplevel_resizing(toplevel(*nth), *resizing);
+            expect_miss(
+                runtime.set_toplevel_resizing(toplevel(*nth), *resizing),
+                "set_toplevel_resizing",
+            );
         }
         Operation::SetToplevelSuspended { nth, suspended } => {
-            let _ = runtime.set_toplevel_suspended(toplevel(*nth), *suspended);
+            expect_miss(
+                runtime.set_toplevel_suspended(toplevel(*nth), *suspended),
+                "set_toplevel_suspended",
+            );
         }
         Operation::SetToplevelTiled {
             nth,
@@ -647,14 +852,17 @@ fn apply(compositor: &Compositor, op: &Operation) {
             left,
             right,
         } => {
-            let _ = runtime.set_toplevel_tiled(
-                toplevel(*nth),
-                wlr::Edges {
-                    top: *top,
-                    bottom: *bottom,
-                    left: *left,
-                    right: *right,
-                },
+            expect_miss(
+                runtime.set_toplevel_tiled(
+                    toplevel(*nth),
+                    wlr::Edges {
+                        top: *top,
+                        bottom: *bottom,
+                        left: *left,
+                        right: *right,
+                    },
+                ),
+                "set_toplevel_tiled",
             );
         }
         Operation::SetToplevelWmCapabilities { nth, caps } => {
@@ -671,13 +879,19 @@ fn apply(compositor: &Compositor, op: &Operation) {
             if caps & 8 != 0 {
                 c |= WmCapabilities::MINIMIZE;
             }
-            let _ = runtime.set_toplevel_wm_capabilities(toplevel(*nth), c);
+            expect_miss(
+                runtime.set_toplevel_wm_capabilities(toplevel(*nth), c),
+                "set_toplevel_wm_capabilities",
+            );
         }
         Operation::DecorationState { nth } => {
-            let _ = runtime.decoration_state(toplevel(*nth));
+            expect_miss(runtime.decoration_state(toplevel(*nth)), "decoration_state");
         }
         Operation::DecorationConfigure { nth } => {
-            let _ = runtime.decoration_configure(toplevel(*nth));
+            expect_miss(
+                runtime.decoration_configure(toplevel(*nth)),
+                "decoration_configure",
+            );
         }
         Operation::SetDecorationMode { nth, server_side } => {
             let mode = if *server_side {
@@ -685,23 +899,35 @@ fn apply(compositor: &Compositor, op: &Operation) {
             } else {
                 DecorationMode::ClientSide
             };
-            let _ = runtime.set_decoration_mode(toplevel(*nth), mode);
+            expect_miss(
+                runtime.set_decoration_mode(toplevel(*nth), mode),
+                "set_decoration_mode",
+            );
         }
         Operation::FocusToplevelKeyboard { nth } => {
-            let _ = runtime.focus_toplevel_keyboard(toplevel(*nth));
+            expect_miss(
+                runtime.focus_toplevel_keyboard(toplevel(*nth)),
+                "focus_toplevel_keyboard",
+            );
         }
         Operation::ToplevelAt { x, y } => {
             let _ = runtime.toplevel_at(*x, *y);
         }
 
         Operation::PopupParentOf { nth } => {
-            let _ = runtime.popup_parent(popup(*nth));
+            expect_miss(runtime.popup_parent(popup(*nth)), "popup_parent");
         }
         Operation::PopupsOf { nth } => {
-            let _ = runtime.popups_of(PopupParent::Popup(popup(*nth)));
+            expect_empty(
+                &runtime.popups_of(PopupParent::Popup(popup(*nth))),
+                "popups_of",
+            );
         }
         Operation::PopupChain { nth } => {
-            let _ = runtime.popup_chain(PopupParent::Popup(popup(*nth)));
+            expect_empty(
+                &runtime.popup_chain(PopupParent::Popup(popup(*nth))),
+                "popup_chain",
+            );
         }
         Operation::ConfigurePopup {
             nth,
@@ -710,75 +936,123 @@ fn apply(compositor: &Compositor, op: &Operation) {
             width,
             height,
         } => {
-            let _ = runtime.configure_popup(popup(*nth), &Box2D::new(*x, *y, *width, *height));
+            expect_false(
+                runtime.configure_popup(popup(*nth), &Box2D::new(*x, *y, *width, *height)),
+                "configure_popup",
+            );
         }
         Operation::PopupPosition { nth } => {
-            let _ = runtime.popup_position(popup(*nth));
+            expect_miss(runtime.popup_position(popup(*nth)), "popup_position");
         }
         Operation::DismissPopup { nth } => {
-            let _ = runtime.dismiss_popup(popup(*nth));
+            expect_zero(runtime.dismiss_popup(popup(*nth)), "dismiss_popup");
         }
         Operation::DismissPopupsOf { nth } => {
-            let _ = runtime.dismiss_popups_of(PopupParent::Popup(popup(*nth)));
+            expect_zero(
+                runtime.dismiss_popups_of(PopupParent::Popup(popup(*nth))),
+                "dismiss_popups_of",
+            );
         }
         Operation::PopupIsGrabbing { nth } => {
-            let _ = runtime.popup_is_grabbing(popup(*nth));
+            expect_false(runtime.popup_is_grabbing(popup(*nth)), "popup_is_grabbing");
         }
 
         Operation::CreateLayerShell => {
             let _ = runtime.create_layer_shell(display, 4);
+            expect_double_create_refused(
+                runtime.create_layer_shell(display, 4),
+                "create_layer_shell",
+            );
         }
         Operation::ConfigureLayerSurface { width, height } => {
-            let _ = runtime.configure_layer_surface(
-                LayerSurfaceId::dangling_for_test(),
-                *width,
-                *height,
+            expect_miss(
+                runtime.configure_layer_surface(
+                    LayerSurfaceId::dangling_for_test(),
+                    *width,
+                    *height,
+                ),
+                "configure_layer_surface",
             );
         }
         Operation::SetLayerSurfacePosition { x, y } => {
-            let _ = runtime.set_layer_surface_position(LayerSurfaceId::dangling_for_test(), *x, *y);
+            expect_miss(
+                runtime.set_layer_surface_position(LayerSurfaceId::dangling_for_test(), *x, *y),
+                "set_layer_surface_position",
+            );
         }
         Operation::FocusLayerKeyboard => {
-            let _ = runtime.focus_layer_keyboard(LayerSurfaceId::dangling_for_test());
+            expect_miss(
+                runtime.focus_layer_keyboard(LayerSurfaceId::dangling_for_test()),
+                "focus_layer_keyboard",
+            );
         }
         Operation::SetLayerSurfaceOutput => {
             if let Some(output) = output {
-                let _ =
-                    runtime.set_layer_surface_output(LayerSurfaceId::dangling_for_test(), output);
+                expect_miss(
+                    runtime.set_layer_surface_output(LayerSurfaceId::dangling_for_test(), output),
+                    "set_layer_surface_output",
+                );
             }
         }
 
         Operation::CreateActivationManager => {
             let _ = runtime.create_xdg_activation_manager(display);
+            expect_double_create_refused(
+                runtime.create_xdg_activation_manager(display),
+                "create_xdg_activation_manager",
+            );
         }
 
         Operation::CreateSessionLockManager => {
             let _ = runtime.create_session_lock_manager(display);
+            expect_double_create_refused(
+                runtime.create_session_lock_manager(display),
+                "create_session_lock_manager",
+            );
         }
         Operation::QuerySessionLocked => {
             let _ = runtime.is_session_locked();
         }
         Operation::LockSurfaceOf { nth } => {
-            let _ = runtime.lock_surface(SurfaceId::dangling_nth_for_test(*nth));
+            expect_miss(
+                runtime.lock_surface(SurfaceId::dangling_nth_for_test(*nth)),
+                "lock_surface",
+            );
         }
 
         Operation::CreateSecurityContextManager => {
             let _ = runtime.create_security_context_manager(display);
+            expect_double_create_refused(
+                runtime.create_security_context_manager(display),
+                "create_security_context_manager",
+            );
         }
         Operation::LookupSecurityContext => {
             // SAFETY: null is the explicit "no client" case, refused before
             // any wlroots call.
-            let _ = unsafe { runtime.lookup_security_context(std::ptr::null()) };
+            expect_miss(
+                unsafe { runtime.lookup_security_context(std::ptr::null()) },
+                "lookup_security_context",
+            );
         }
         Operation::CreateFixes => {
             let _ = runtime.create_fixes(display, 1);
+            expect_double_create_refused(runtime.create_fixes(display, 1), "create_fixes");
         }
 
         Operation::CreateTextInputManager => {
             let _ = runtime.create_text_input_manager(display);
+            expect_double_create_refused(
+                runtime.create_text_input_manager(display),
+                "create_text_input_manager",
+            );
         }
         Operation::CreateInputMethodManager => {
             let _ = runtime.create_input_method_manager(display);
+            expect_double_create_refused(
+                runtime.create_input_method_manager(display),
+                "create_input_method_manager",
+            );
         }
         Operation::InputMethodActive => {
             let _ = runtime.input_method_active();
@@ -792,6 +1066,10 @@ fn apply(compositor: &Compositor, op: &Operation) {
 
         Operation::CreateOutputManager => {
             let _ = runtime.create_output_manager(display);
+            expect_double_create_refused(
+                runtime.create_output_manager(display),
+                "create_output_manager",
+            );
         }
         Operation::UpdateOutputManagerState => {
             runtime.update_output_manager_state();
@@ -801,97 +1079,212 @@ fn apply(compositor: &Compositor, op: &Operation) {
         }
         Operation::OutputLayoutBox => {
             if let Some(output) = output {
-                let _ = runtime.output_layout_box(output);
+                expect_miss(runtime.output_layout_box(output), "output_layout_box");
             }
         }
         Operation::SetOutputPosition { x, y } => {
             if let Some(output) = output {
-                let _ = runtime.set_output_position(output, *x, *y);
+                expect_miss(
+                    runtime.set_output_position(output, *x, *y),
+                    "set_output_position",
+                );
             }
         }
         Operation::ScheduleFrame => {
             if let Some(output) = output {
-                let _ = runtime.schedule_frame(output);
+                expect_miss(runtime.schedule_frame(output), "schedule_frame");
             }
         }
 
         Operation::CreateTearingControlManager => {
             let _ = runtime.create_tearing_control_manager(display, 1);
+            expect_double_create_refused(
+                runtime.create_tearing_control_manager(display, 1),
+                "create_tearing_control_manager",
+            );
         }
         Operation::SamplePresentation { nth } => {
-            let _ = runtime.sample_presentation(SurfaceId::dangling_nth_for_test(*nth));
+            expect_miss(
+                runtime.sample_presentation(SurfaceId::dangling_nth_for_test(*nth)),
+                "sample_presentation",
+            );
         }
         Operation::TearingHint { nth } => {
-            let _ = runtime.tearing_hint(SurfaceId::dangling_nth_for_test(*nth));
+            expect_miss(
+                runtime.tearing_hint(SurfaceId::dangling_nth_for_test(*nth)),
+                "tearing_hint",
+            );
         }
         Operation::TearingControlOf { nth } => {
-            let _ = runtime.tearing_control(SurfaceId::dangling_nth_for_test(*nth));
+            expect_miss(
+                runtime.tearing_control(SurfaceId::dangling_nth_for_test(*nth)),
+                "tearing_control",
+            );
         }
 
         Operation::SubsurfaceParentId { nth } => {
-            let _ = runtime
-                .surface(SurfaceId::dangling_nth_for_test(*nth))
-                .map(|surface| surface.subsurface_parent_id());
+            expect_miss(
+                runtime
+                    .surface(SurfaceId::dangling_nth_for_test(*nth))
+                    .map(|surface| surface.subsurface_parent_id()),
+                "subsurface_parent_id",
+            );
         }
         Operation::SubsurfaceParentState { nth } => {
-            let _ = runtime
-                .surface(SurfaceId::dangling_nth_for_test(*nth))
-                .map(|surface| surface.subsurface_parent_state());
+            expect_miss(
+                runtime
+                    .surface(SurfaceId::dangling_nth_for_test(*nth))
+                    .map(|surface| surface.subsurface_parent_state()),
+                "subsurface_parent_state",
+            );
         }
         Operation::ToplevelOf { nth } => {
-            let _ = runtime.toplevel_of(SurfaceId::dangling_nth_for_test(*nth));
+            expect_miss(
+                runtime.toplevel_of(SurfaceId::dangling_nth_for_test(*nth)),
+                "toplevel_of",
+            );
         }
         Operation::PopupOf { nth } => {
-            let _ = runtime.popup_of(SurfaceId::dangling_nth_for_test(*nth));
+            expect_miss(
+                runtime.popup_of(SurfaceId::dangling_nth_for_test(*nth)),
+                "popup_of",
+            );
         }
 
         Operation::CreateXdgDialogManager => {
             let _ = runtime.create_xdg_dialog_manager(display, 1);
+            expect_double_create_refused(
+                runtime.create_xdg_dialog_manager(display, 1),
+                "create_xdg_dialog_manager",
+            );
         }
         Operation::CreateXdgSystemBell => {
             let _ = runtime.create_xdg_system_bell(display, 1);
+            expect_double_create_refused(
+                runtime.create_xdg_system_bell(display, 1),
+                "create_xdg_system_bell",
+            );
         }
         Operation::CreateXdgToplevelIconManager => {
             let _ = runtime.create_xdg_toplevel_icon_manager(display, 1);
+            expect_double_create_refused(
+                runtime.create_xdg_toplevel_icon_manager(display, 1),
+                "create_xdg_toplevel_icon_manager",
+            );
         }
-        Operation::SetToplevelIconSizes => {
-            runtime.set_toplevel_icon_sizes(&[16, 32, 64]);
+        Operation::SetToplevelIconSizes { variant } => {
+            // Folded to a small bound; the fixed preference list stays a seed
+            // input, and `&[]`/extremes are covered deterministically.
+            let _ = match variant % 4 {
+                0 => runtime.set_toplevel_icon_sizes(&[]),
+                1 => runtime.set_toplevel_icon_sizes(&[16, 32, 64]),
+                2 => runtime.set_toplevel_icon_sizes(&[0, -1, 1, i32::MAX, i32::MIN]),
+                _ => runtime.set_toplevel_icon_sizes(&[(*variant as i32).wrapping_mul(0x9E37), 16]),
+            };
         }
         Operation::CreateXdgToplevelTagManager => {
             let _ = runtime.create_xdg_toplevel_tag_manager(display, 1);
+            expect_double_create_refused(
+                runtime.create_xdg_toplevel_tag_manager(display, 1),
+                "create_xdg_toplevel_tag_manager",
+            );
         }
         Operation::CreateForeignRegistry => {
             let _ = runtime.create_xdg_foreign_registry(display);
+            expect_double_create_refused(
+                runtime.create_xdg_foreign_registry(display),
+                "create_xdg_foreign_registry",
+            );
         }
         Operation::CreateForeignV1 => {
             let _ = runtime.create_xdg_foreign_v1(display);
+            expect_double_create_refused(
+                runtime.create_xdg_foreign_v1(display),
+                "create_xdg_foreign_v1",
+            );
         }
         Operation::CreateForeignV2 => {
             let _ = runtime.create_xdg_foreign_v2(display);
+            expect_double_create_refused(
+                runtime.create_xdg_foreign_v2(display),
+                "create_xdg_foreign_v2",
+            );
         }
-        Operation::AddActivationToken => {
+        Operation::AddActivationToken { name } => {
             // The handle is dropped here, running its `Drop` immediately; a
             // miss (no manager) is discarded like every other result.
-            let _ = runtime.add_activation_token("fuzz-token");
+            let _ = runtime.add_activation_token(&fold_name(name));
         }
-        Operation::FindActivationToken => {
-            let _ = runtime.find_activation_token("fuzz-token");
+        Operation::FindActivationToken { name } => {
+            expect_miss(
+                runtime.find_activation_token(&fold_name(name)),
+                "find_activation_token",
+            );
         }
-        Operation::FindForeignExported => {
-            let _ = runtime.find_foreign_exported("fuzz-handle");
+        Operation::FindForeignExported { handle } => {
+            expect_miss(
+                runtime.find_foreign_exported(&fold_name(handle)),
+                "find_foreign_exported",
+            );
         }
-        Operation::ExportForeign => {
-            let _ = runtime.export_foreign(toplevel(0));
+        Operation::ExportForeign { nth } => {
+            expect_miss(runtime.export_foreign(toplevel(*nth)), "export_foreign");
+        }
+
+        Operation::CreateActivationToken => {
+            let _ = runtime.create_xdg_activation_manager(display);
+            // Mint + drop: the handle's `Drop` runs here, exercising the
+            // destroy path under ASan. After the idempotent create above, a
+            // miss is a genuine allocation failure only.
+            let minted = runtime.create_activation_token();
+            debug_assert!(
+                minted.is_some(),
+                "create_activation_token missed after its manager create: allocation failure"
+            );
+        }
+        Operation::CreatePresentation => {
+            let _ = runtime.create_presentation(display, &compositor._backend);
+            expect_double_create_refused(
+                runtime.create_presentation(display, &compositor._backend),
+                "create_presentation",
+            );
+            // The call every scene compositor makes after creating
+            // presentation; safe to repeat, free of any client.
+            let _ = runtime.set_scene_presentation();
+        }
+        Operation::DialogOf { nth, surface_nth } => {
+            expect_miss(
+                runtime.dialog_of(SurfaceId::dangling_nth_for_test(*surface_nth)),
+                "dialog_of",
+            );
+            expect_miss(runtime.dialog(toplevel(*nth)), "dialog");
         }
 
         Operation::CreateForeignToplevelManager => {
             let _ = runtime.create_foreign_toplevel_manager(display);
+            expect_double_create_refused(
+                runtime.create_foreign_toplevel_manager(display),
+                "create_foreign_toplevel_manager",
+            );
         }
         Operation::ForeignToplevelHandles { parent_first } => {
+            // Idempotent prerequisite (the pattern `connect_live_client` uses
+            // for `create_xdg_shell`): the double-create guard makes repeats a
+            // no-op, so the live path runs regardless of input order. After
+            // it, `None` is a genuine allocation failure only.
+            let _ = runtime.create_foreign_toplevel_manager(display);
             let Some(a) = runtime.create_foreign_toplevel() else {
+                debug_assert!(
+                    false,
+                    "create_foreign_toplevel missed after its manager create: allocation failure"
+                );
                 return;
             };
             let Some(b) = runtime.create_foreign_toplevel() else {
+                debug_assert!(
+                    false,
+                    "create_foreign_toplevel missed after its manager create: allocation failure"
+                );
                 return;
             };
             let _ = a.set_title("fuzz");
@@ -914,8 +1307,15 @@ fn apply(compositor: &Compositor, op: &Operation) {
 
         Operation::CreateExtForeignToplevelList => {
             let _ = runtime.create_ext_foreign_toplevel_list(display, 1);
+            expect_double_create_refused(
+                runtime.create_ext_foreign_toplevel_list(display, 1),
+                "create_ext_foreign_toplevel_list",
+            );
         }
         Operation::ExtForeignToplevelHandles { first_first } => {
+            // Idempotent prerequisite, as above: after it, `None` is a
+            // genuine allocation failure only.
+            let _ = runtime.create_ext_foreign_toplevel_list(display, 1);
             // `ExtForeignToplevelState` is `#[non_exhaustive]`, so a downstream
             // crate cannot use a struct literal at all — build via `default()`
             // plus field assignment, as the integration tests do.
@@ -923,11 +1323,19 @@ fn apply(compositor: &Compositor, op: &Operation) {
             state_a.title = Some("fuzz-a".to_owned());
             state_a.app_id = Some("fuzz.app".to_owned());
             let Some(a) = runtime.create_ext_foreign_toplevel(&state_a) else {
+                debug_assert!(
+                    false,
+                    "create_ext_foreign_toplevel missed after its list create: allocation failure"
+                );
                 return;
             };
             let mut state_b = ExtForeignToplevelState::default();
             state_b.title = Some("fuzz-b".to_owned());
             let Some(b) = runtime.create_ext_foreign_toplevel(&state_b) else {
+                debug_assert!(
+                    false,
+                    "create_ext_foreign_toplevel missed after its list create: allocation failure"
+                );
                 return;
             };
             let _ = a.state();
@@ -947,29 +1355,60 @@ fn apply(compositor: &Compositor, op: &Operation) {
 
         Operation::CreateExtWorkspaceManager => {
             let _ = runtime.create_ext_workspace_manager(display, 1);
+            expect_double_create_refused(
+                runtime.create_ext_workspace_manager(display, 1),
+                "create_ext_workspace_manager",
+            );
         }
-        Operation::ExtWorkspaceHandles { group_first } => {
+        Operation::ExtWorkspaceHandles {
+            group_first,
+            name_a,
+            name_b,
+        } => {
+            // Idempotent prerequisite, as above: after it, `None` is a
+            // genuine allocation failure only.
+            let _ = runtime.create_ext_workspace_manager(display, 1);
             let Some(group) = runtime
                 .create_workspace_group(WorkspaceGroupCapabilities::CREATE_WORKSPACE)
             else {
+                debug_assert!(
+                    false,
+                    "create_workspace_group missed after its manager create: allocation failure"
+                );
                 return;
             };
             let caps = WorkspaceCapabilities::ACTIVATE
                 | WorkspaceCapabilities::DEACTIVATE
                 | WorkspaceCapabilities::ASSIGN
                 | WorkspaceCapabilities::REMOVE;
-            let Some(a) = runtime.create_workspace("fuzz-a", caps) else {
+            let id_a = fold_name(name_a);
+            let id_b = fold_name(name_b);
+            let Some(a) = runtime.create_workspace(&id_a, caps) else {
+                // An interior NUL is refused before any wlroots call (a
+                // third miss reason besides the manager and allocation
+                // ones); only a NUL-free miss is an allocation failure.
+                debug_assert!(
+                    id_a.contains('\0'),
+                    "create_workspace missed after its manager create with a NUL-free id: \
+                     allocation failure"
+                );
                 return;
             };
-            let Some(b) = runtime.create_workspace("fuzz-b", caps) else {
+            let Some(b) = runtime.create_workspace(&id_b, caps) else {
+                debug_assert!(
+                    id_b.contains('\0'),
+                    "create_workspace missed after its manager create with a NUL-free id: \
+                     allocation failure"
+                );
                 return;
             };
-            let _ = a.set_name("fuzz");
+            let _ = a.set_name(&id_a);
             let _ = a.set_coordinates(&[1, 2, 3]);
             let _ = a.set_active(true);
             let _ = a.set_urgent(true);
             let _ = a.set_hidden(true);
             let _ = a.set_group(Some(&group));
+            let _ = b.set_name(&id_b);
             let _ = b.set_group(Some(&group));
             // The order is the input's; both must be double-free safe, and the
             // group's own destroy rewrites the workspaces' group pointers.
@@ -985,41 +1424,59 @@ fn apply(compositor: &Compositor, op: &Operation) {
         }
 
         Operation::SurfaceProbe { nth, x, y } => {
-            let _ = runtime
-                .surface(SurfaceId::dangling_nth_for_test(*nth))
-                .map(|surface| {
-                    let _ = surface.extents();
-                    let _ = surface.effective_damage();
-                    let _ = surface.buffer_source_box();
-                    let _ = surface.point_accepts_input(*x, *y);
-                    let _ = surface.surface_at(*x, *y);
-                });
+            expect_miss(
+                runtime
+                    .surface(SurfaceId::dangling_nth_for_test(*nth))
+                    .map(|surface| {
+                        let _ = surface.extents();
+                        let _ = surface.effective_damage();
+                        let _ = surface.buffer_source_box();
+                        let _ = surface.point_accepts_input(*x, *y);
+                        let _ = surface.surface_at(*x, *y);
+                    }),
+                "surface probe",
+            );
         }
         Operation::SurfaceRoot { nth } => {
-            let _ = runtime
-                .surface(SurfaceId::dangling_nth_for_test(*nth))
-                .map(|surface| surface.root_id());
+            expect_miss(
+                runtime
+                    .surface(SurfaceId::dangling_nth_for_test(*nth))
+                    .map(|surface| surface.root_id()),
+                "surface root_id",
+            );
         }
         Operation::SurfaceAcceptsTouch { nth } => {
-            let _ = runtime
-                .surface(SurfaceId::dangling_nth_for_test(*nth))
-                .map(|surface| surface.accepts_touch());
+            expect_miss(
+                runtime
+                    .surface(SurfaceId::dangling_nth_for_test(*nth))
+                    .map(|surface| surface.accepts_touch()),
+                "surface accepts_touch",
+            );
         }
         Operation::SurfaceLockPending { nth } => {
-            let _ = runtime
-                .surface(SurfaceId::dangling_nth_for_test(*nth))
-                .map(|surface| {
-                    let lock = surface.lock_pending();
-                    let _ = surface.unlock_cached(lock);
-                });
+            expect_miss(
+                runtime
+                    .surface(SurfaceId::dangling_nth_for_test(*nth))
+                    .map(|surface| {
+                        let lock = surface.lock_pending();
+                        let _ = surface.unlock_cached(lock);
+                    }),
+                "surface lock_pending",
+            );
         }
         Operation::SurfaceUnmap { nth } => {
-            let _ = runtime
-                .surface(SurfaceId::dangling_nth_for_test(*nth))
-                .map(|surface| surface.unmap());
+            expect_miss(
+                runtime
+                    .surface(SurfaceId::dangling_nth_for_test(*nth))
+                    .map(|surface| surface.unmap()),
+                "surface unmap",
+            );
         }
         Operation::DestroyLayerSurface => {
-            let _ = runtime.destroy_layer_surface(LayerSurfaceId::dangling_for_test());
+            expect_miss(
+                runtime.destroy_layer_surface(LayerSurfaceId::dangling_for_test()),
+                "destroy_layer_surface",
+            );
         }
 
         Operation::ClientToplevelLifecycle {
@@ -1046,21 +1503,18 @@ fn apply(compositor: &Compositor, op: &Operation) {
 /// the driver ignores (skipping the input) instead of a hung fuzz run.
 const CLIENT_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// Pump the server without blocking: exactly `turns` zero-timeout turns.
-/// Failures are ignored — the driver is best-effort; ASan is the oracle.
-fn pump(compositor: &Compositor, turns: u32) {
-    let mut recorder = Recorder::default();
-    let _ = compositor._backend.run_all(
-        compositor._display,
-        &mut recorder,
-        &compositor.runtime,
-        wlr::Until::Turns(turns),
-    );
+/// Pump the server without blocking: exactly `turns` zero-timeout turns, and
+/// report the first toplevel announced during the pump.
+///
+/// Failures are ignored — the driver is best-effort; ASan is the oracle. The
+/// id is stale by the time the pump returns (tables are per-run), so callers
+/// use it only for the documented stale-miss boundary.
+fn pump(compositor: &Compositor, turns: u32) -> Option<wlr::ToplevelId> {
+    pump_capture(compositor, turns)
 }
 
-/// Pump the server and report the first toplevel announced during the pump.
-/// The id is stale by the time the pump returns (tables are per-run), so
-/// callers use it only for the documented stale-miss boundary.
+/// The pump itself: run the server and capture the announced toplevel.
+/// [`pump`] is the same call with the id kept by the caller.
 fn pump_capture(compositor: &Compositor, turns: u32) -> Option<wlr::ToplevelId> {
     let mut recorder = Recorder::default();
     let _ = compositor._backend.run_all(
@@ -1183,10 +1637,12 @@ fn socket_path(compositor: &Compositor) -> Option<std::path::PathBuf> {
 /// Connect with bounded I/O. Any failure (no server, bad socket, timeout
 /// setup) is a deterministic skip of the input.
 fn connect_client(compositor: &Compositor) -> Option<std::os::unix::net::UnixStream> {
+    ATTEMPTED.fetch_add(1, Ordering::Relaxed);
     let path = socket_path(compositor)?;
     let stream = std::os::unix::net::UnixStream::connect(path).ok()?;
     stream.set_read_timeout(Some(CLIENT_IO_TIMEOUT)).ok()?;
     stream.set_write_timeout(Some(CLIENT_IO_TIMEOUT)).ok()?;
+    CONNECTED.fetch_add(1, Ordering::Relaxed);
     Some(stream)
 }
 
@@ -1206,16 +1662,18 @@ fn read_and_dispatch(
 
 /// One flush/pump/read/dispatch turn. Never blocks: `flush` sends what fits
 /// (bounded by the write timeout), `run_all(Turns)` never waits, `read` never
-/// waits, `dispatch_pending` only drains what arrived.
+/// waits, `dispatch_pending` only drains what arrived. Returns the first
+/// toplevel the pump announced, so drivers keep it across announce turns.
 fn client_server_turn(
     compositor: &Compositor,
     conn: &Connection,
     queue: &mut wayland_client::EventQueue<FuzzClient>,
     state: &mut FuzzClient,
-) {
+) -> Option<wlr::ToplevelId> {
     let _ = conn.flush();
-    pump(compositor, 4);
+    let announced = pump(compositor, 4);
     read_and_dispatch(conn, queue, state);
+    announced
 }
 
 /// A connected client with bound `wl_compositor` + `xdg_wm_base`, or `None`
@@ -1249,7 +1707,7 @@ fn connect_live_client(compositor: &Compositor) -> Option<LiveClient> {
     // single thread until the server runs, which it cannot do mid-call.
     for _ in 0..10 {
         let _ = conn.flush();
-        pump(compositor, 4);
+        let _ = pump(compositor, 4);
         read_and_dispatch(&conn, &mut queue, &mut state);
         let has_compositor = state
             .globals
@@ -1290,7 +1748,7 @@ fn connect_live_client(compositor: &Compositor) -> Option<LiveClient> {
     // Drain the binds without blocking; failures just mean fewer events.
     let mut state = FuzzClient::default();
     for _ in 0..2 {
-        client_server_turn(compositor, &conn, &mut queue, &mut state);
+        let _ = client_server_turn(compositor, &conn, &mut queue, &mut state);
     }
     Some(LiveClient {
         conn,
@@ -1309,10 +1767,19 @@ fn stale_miss_subset(compositor: &Compositor, id: Option<wlr::ToplevelId>) {
     use wlr::ToplevelId;
     let id = id.unwrap_or_else(|| ToplevelId::dangling_nth_for_test(0));
     let runtime = &compositor.runtime;
-    let _ = runtime.set_toplevel_size(id, 800, 600);
-    let _ = runtime.set_toplevel_activated(id, true);
-    let _ = runtime.configure_toplevel(id);
-    let _ = runtime.close_toplevel(id);
+    // Every id here is stale by design (its announcing pump returned) or
+    // dangling, so each call must take the documented stale-miss path.
+    expect_miss(
+        runtime.set_toplevel_size(id, 800, 600),
+        "stale set_toplevel_size",
+    );
+    expect_miss(
+        runtime.set_toplevel_activated(id, true),
+        "stale set_toplevel_activated",
+    );
+    expect_miss(runtime.configure_toplevel(id), "stale configure_toplevel");
+    expect_miss(runtime.close_toplevel(id), "stale close_toplevel");
+    expect_miss(runtime.dialog(id), "stale dialog");
 }
 
 /// Create one live toplevel, commit it, pump so it is announced and
@@ -1334,6 +1801,12 @@ fn drive_client_lifecycle(
     };
     let qh = client.queue.handle();
     let mut state = FuzzClient::default();
+    // The first id announced across these turns is kept. Every announcing
+    // `pump` used to discard its Recorder while a trailing `pump_capture`
+    // ran after the objects were gone; keeping the first `Some` here fixes
+    // that staleness gap. The id is stale by design (its pump returned),
+    // which is exactly the boundary the trailing by-id subset exercises.
+    let mut announced: Option<wlr::ToplevelId> = None;
 
     let surface = client.compositor.create_surface(&qh, ());
     let xdg_surface = client.wm_base.get_xdg_surface(&surface, &qh, ());
@@ -1349,36 +1822,41 @@ fn drive_client_lifecycle(
     // drain and ack whatever configures arrived. Repeated so a slow announce
     // still lands within the bound.
     for _ in 0..4 {
-        client_server_turn(compositor, &client.conn, &mut client.queue, &mut state);
+        announced = announced.or(client_server_turn(
+            compositor,
+            &client.conn,
+            &mut client.queue,
+            &mut state,
+        ));
     }
     for _ in 0..extra_rounds {
         surface.commit();
         for _ in 0..2 {
-            client_server_turn(compositor, &client.conn, &mut client.queue, &mut state);
+            announced = announced.or(client_server_turn(
+                compositor,
+                &client.conn,
+                &mut client.queue,
+                &mut state,
+            ));
         }
     }
-
-    // Capture the announced id while the objects are still alive; the id is
-    // already stale (its pump returned), which is exactly the boundary the
-    // trailing by-id subset exercises.
-    let announced = pump_capture(compositor, 2);
 
     if destroy {
         toplevel.destroy();
         xdg_surface.destroy();
         surface.destroy();
         for _ in 0..3 {
-            client_server_turn(compositor, &client.conn, &mut client.queue, &mut state);
+            let _ = client_server_turn(compositor, &client.conn, &mut client.queue, &mut state);
         }
         drop((surface, xdg_surface, toplevel));
         drop(client);
-        pump(compositor, 4);
+        let _ = pump(compositor, 4);
     } else {
         // Disconnect destroys: drop the connection without role destroys and
         // let the server observe the disconnect.
         drop((surface, xdg_surface, toplevel));
         drop(client);
-        pump(compositor, 4);
+        let _ = pump(compositor, 4);
     }
 
     stale_miss_subset(compositor, announced);
@@ -1394,6 +1872,8 @@ fn drive_client_burst(compositor: &Compositor, count: u8, destroy_each: bool) {
     };
     let qh = client.queue.handle();
     let mut state = FuzzClient::default();
+    // Kept across the announce turns, as in `drive_client_lifecycle`.
+    let mut announced: Option<wlr::ToplevelId> = None;
     let mut live: Vec<(
         wl_surface::WlSurface,
         xdg_surface::XdgSurface,
@@ -1406,7 +1886,12 @@ fn drive_client_burst(compositor: &Compositor, count: u8, destroy_each: bool) {
         let toplevel = xdg_surface.get_toplevel(&qh, ());
         surface.commit();
         for _ in 0..2 {
-            client_server_turn(compositor, &client.conn, &mut client.queue, &mut state);
+            announced = announced.or(client_server_turn(
+                compositor,
+                &client.conn,
+                &mut client.queue,
+                &mut state,
+            ));
         }
         live.push((surface, xdg_surface, toplevel));
         if destroy_each {
@@ -1415,22 +1900,22 @@ fn drive_client_burst(compositor: &Compositor, count: u8, destroy_each: bool) {
                 xdg_surface.destroy();
                 surface.destroy();
                 for _ in 0..2 {
-                    client_server_turn(compositor, &client.conn, &mut client.queue, &mut state);
+                    let _ =
+                        client_server_turn(compositor, &client.conn, &mut client.queue, &mut state);
                 }
             }
         }
     }
-    let announced = pump_capture(compositor, 2);
     for (surface, xdg_surface, toplevel) in live.drain(..) {
         toplevel.destroy();
         xdg_surface.destroy();
         surface.destroy();
     }
     for _ in 0..3 {
-        client_server_turn(compositor, &client.conn, &mut client.queue, &mut state);
+        let _ = client_server_turn(compositor, &client.conn, &mut client.queue, &mut state);
     }
     drop(client);
-    pump(compositor, 4);
+    let _ = pump(compositor, 4);
 
     stale_miss_subset(compositor, announced);
 }

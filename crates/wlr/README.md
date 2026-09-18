@@ -590,8 +590,9 @@ feedback, tearing control, the subsurface pair, the xdg-shell remainder, the
 activation/dialog/foreign/bell set, icon/tag, foreign-toplevel management,
 ext-foreign-toplevel-list, ext-workspace, security-context, `wl_fixes`, and the
 lock surface. The rest were re-pointed rather than left in the backlog: 16 to
-**M13** (`*_from_resource`, `wlr_compositor_set_renderer`, and the
-role/synced internals), 4 to **M10** (ext-image-capture-source), 1 to **M12**
+**M13** (`*_from_resource`, `wlr_compositor_set_renderer`, the
+role/synced internals, plus the `wlr_surface_reject_pending` variadic
+(`interface-impl-only`)), 4 to **M10** (ext-image-capture-source), 1 to **M12**
 (`wlr_surface_get_image_description_v1_data`), 1 to **M11**
 (`wlr_surface_get_content_type_v1`), and 23 to non-milestoned `internal`
 reasons. Zero `not-yet` rows tagged M9 remain.

@@ -64,6 +64,16 @@ struct App {
     /// the struck surface's `popup_of` named the live toplevel.
     popup_hit: Option<bool>,
     popup_hit_parent_ok: Option<bool>,
+    /// Whether the full-tree `surface_at` at the same popup point hit a
+    /// resolvable surface, and whether both hit-tests miss far outside the
+    /// tree.
+    surface_at_hit: Option<bool>,
+    surface_at_miss: Option<bool>,
+    popup_miss: Option<bool>,
+    /// Roles of committed surfaces `Toplevel::from_surface` refused: the
+    /// sub-surface child's commits land here, proving the downcast says no
+    /// on a real non-toplevel surface.
+    from_surface_misses: Vec<SurfaceRole>,
     client: Option<JoinHandle<common::client::ClientEvents>>,
 }
 
@@ -95,6 +105,10 @@ impl App {
             popup_nonroot_with_parent: 0,
             popup_hit: None,
             popup_hit_parent_ok: None,
+            surface_at_hit: None,
+            surface_at_miss: None,
+            popup_miss: None,
+            from_surface_misses: Vec::new(),
             client: None,
         }
     }
@@ -103,6 +117,33 @@ impl App {
 impl wlr::OutputHandler for App {}
 impl wlr::SeatHandler for App {}
 impl wlr::FdHandler for App {}
+
+/// Count-plus-resolve walk shared by the three surface-tree loops below.
+///
+/// Runs `walk` (a full-tree or popup-tree `for_each_*` call), counts every
+/// yielded surface, records whether each yielded id resolved through
+/// `Runtime::surface` — the regression for the role-id-versus-surface-id
+/// addon mix-up — and counts how many yields passed the per-loop `extra`
+/// check. Returns `(yielded, all_resolved, extra_hits)`.
+fn walk_stats(
+    runtime: &Runtime,
+    walk: impl FnOnce(&mut dyn FnMut(&wlr::Surface<'_>, i32, i32)),
+    mut extra: impl FnMut(SurfaceId) -> bool,
+) -> (usize, bool, usize) {
+    let mut count = 0usize;
+    let mut all_resolved = true;
+    let mut extra_hits = 0usize;
+    walk(&mut |surface: &wlr::Surface<'_>, _: i32, _: i32| {
+        count += 1;
+        if runtime.surface(surface.id()).is_none() {
+            all_resolved = false;
+        }
+        if extra(surface.id()) {
+            extra_hits += 1;
+        }
+    });
+    (count, all_resolved, extra_hits)
+}
 
 impl wlr::LoopHandler for App {
     fn should_stop(&mut self) -> bool {
@@ -152,14 +193,11 @@ impl wlr::ToplevelHandler for App {
         self.wm_caps_sample = Some(toplevel.wm_capabilities());
         toplevel.ping();
         self.pinged += 1;
-        let mut count = 0usize;
-        let mut all_resolved = true;
-        toplevel.for_each_surface(|surface, _x, _y| {
-            count += 1;
-            if self.runtime.surface(surface.id()).is_none() {
-                all_resolved = false;
-            }
-        });
+        let (count, all_resolved, _) = walk_stats(
+            &self.runtime,
+            |yield_| toplevel.for_each_surface(yield_),
+            |_| false,
+        );
         self.root_surfaces = count;
         self.walk_all_resolved = all_resolved;
     }
@@ -183,22 +221,17 @@ impl wlr::ToplevelHandler for App {
         }
         self.roles.push(surface.role());
         let Some(toplevel) = wlr::Toplevel::from_surface(surface) else {
+            self.from_surface_misses.push(surface.role());
             return;
         };
         self.downcast_toplevels += 1;
         let root = surface.id();
-        let mut visited = 0usize;
-        let mut all_resolved = true;
-        let mut visited_other = false;
-        toplevel.for_each_surface(|surface, _x, _y| {
-            visited += 1;
-            if self.runtime.surface(surface.id()).is_none() {
-                all_resolved = false;
-            }
-            if surface.id() != root {
-                visited_other = true;
-            }
-        });
+        let (visited, all_resolved, extra) = walk_stats(
+            &self.runtime,
+            |yield_| toplevel.for_each_surface(yield_),
+            |id| id != root,
+        );
+        let visited_other = extra > 0;
         if visited >= self.walk_visited {
             self.walk_visited = visited;
             self.walk_all_resolved = all_resolved;
@@ -218,22 +251,17 @@ impl wlr::ToplevelHandler for App {
             return;
         };
         let live = top.id();
-        let mut count = 0usize;
-        let mut all_resolved = true;
-        let mut nonroot_ok = 0usize;
-        top.for_each_popup_surface(|surface, _x, _y| {
-            count += 1;
-            if self.runtime.surface(surface.id()).is_none() {
-                all_resolved = false;
-            } else if surface.id() != root
-                && self
-                    .runtime
-                    .popup_of(surface.id())
-                    .is_some_and(|popup| popup.parent() == PopupParent::Toplevel(live))
-            {
-                nonroot_ok += 1;
-            }
-        });
+        let (count, all_resolved, nonroot_ok) = walk_stats(
+            &self.runtime,
+            |yield_| top.for_each_popup_surface(yield_),
+            |id| {
+                id != root
+                    && self
+                        .runtime
+                        .popup_of(id)
+                        .is_some_and(|popup| popup.parent() == PopupParent::Toplevel(live))
+            },
+        );
         self.popup_walk = count;
         self.popup_walk_resolved = all_resolved;
         self.popup_nonroot_with_parent = nonroot_ok;
@@ -257,11 +285,66 @@ impl wlr::ToplevelHandler for App {
                     self.popup_hit = Some(false);
                 }
             }
+            // The full-tree hit test covers the popup tree too, so the same
+            // point must hit a resolvable surface through it as well.
+            match top.surface_at(tx as f64, ty as f64) {
+                Some((hit, _, _)) => {
+                    self.surface_at_hit = Some(self.runtime.surface(hit.id()).is_some());
+                }
+                None => {
+                    self.surface_at_hit = Some(false);
+                }
+            }
         }
+        // Far outside the tree both hit-tests must miss.
+        self.surface_at_miss = Some(top.surface_at(1_000_000.0, 1_000_000.0).is_none());
+        self.popup_miss = Some(top.popup_surface_at(1_000_000.0, 1_000_000.0).is_none());
     }
 }
 
 fn run_client_round_trip() -> (App, common::client::ClientEvents) {
+    run_client_round_trip_with(|socket| {
+        common::client::spawn(socket, |state, qh| {
+            state.create_toplevel(qh);
+        })
+    })
+}
+
+/// How `run_with` retrieves the client thread to join after `run_all`
+/// returns: every app holds it in a `client` slot for `should_stop` to poll
+/// while the run is live, and hands it back once the run has stopped.
+trait HasClient {
+    fn take_client(&mut self) -> JoinHandle<common::client::ClientEvents>;
+}
+
+impl HasClient for App {
+    fn take_client(&mut self) -> JoinHandle<common::client::ClientEvents> {
+        self.client.take().expect("client handle")
+    }
+}
+
+impl HasClient for GateApp {
+    fn take_client(&mut self) -> JoinHandle<common::client::ClientEvents> {
+        self.client.take().expect("client handle")
+    }
+}
+
+/// Shared headless bootstrap for the client-driven legs below: display,
+/// backend, graphics, an xdg-shell of the requested version, one client,
+/// run to the client's disconnect, join.
+///
+/// `seat` names a seat to create before the shell (only the
+/// show-window-menu leg needs one); `make_app` builds the leg's app around
+/// the spawned client handle.
+fn run_with<A>(
+    version: u32,
+    seat: Option<&str>,
+    spawn: impl FnOnce(&str) -> JoinHandle<common::client::ClientEvents>,
+    make_app: impl FnOnce(Runtime, JoinHandle<common::client::ClientEvents>) -> A,
+) -> (A, common::client::ClientEvents)
+where
+    A: wlr::Handlers + HasClient,
+{
     let _serial = common::headless_guard();
     common::headless_env();
     common::isolated_runtime_dir();
@@ -269,27 +352,32 @@ fn run_client_round_trip() -> (App, common::client::ClientEvents) {
     let backend = Backend::autocreate(&display.event_loop()).expect("backend");
     let runtime = Runtime::new().expect("runtime");
     runtime.init_graphics(&display, &backend).expect("graphics");
-    runtime.create_xdg_shell(&display, 7).expect("xdg-shell");
+    if let Some(seat) = seat {
+        runtime.create_seat(&display, seat).expect("seat");
+    }
+    runtime
+        .create_xdg_shell(&display, version)
+        .expect("xdg-shell");
     let socket = display.add_socket_auto().expect("socket");
 
-    let mut app = App {
-        client: Some(common::client::spawn(&socket, |state, qh| {
-            state.create_toplevel(qh);
-        })),
-        ..App::new(runtime.clone())
-    };
-
+    let mut app = make_app(runtime.clone(), spawn(&socket));
     backend
         .run_all(&display, &mut app, &runtime, Until::Stop)
         .expect("run_all");
-
-    let events = app
-        .client
-        .take()
-        .expect("client handle")
-        .join()
-        .expect("client thread");
+    let events = app.take_client().join().expect("client thread");
     (app, events)
+}
+
+/// [`run_client_round_trip`] with the client driver supplied by the caller,
+/// so legs that need a different client (mapped buffers, state requests)
+/// share the same server-side observation.
+fn run_client_round_trip_with(
+    spawn_client: impl FnOnce(&str) -> JoinHandle<common::client::ClientEvents>,
+) -> (App, common::client::ClientEvents) {
+    run_with(7, None, spawn_client, |runtime, client| App {
+        client: Some(client),
+        ..App::new(runtime)
+    })
 }
 
 #[test]
@@ -339,7 +427,112 @@ fn a_live_toplevel_exposes_the_xdg_remainder() {
         Some((false, false, false)),
         "the client requested no states"
     );
-    assert!(app.wm_caps_sample.is_some(), "wm_capabilities() reads");
+    assert_eq!(
+        app.wm_caps_sample,
+        Some(WmCapabilities::MAXIMIZE | WmCapabilities::MINIMIZE),
+        "wm_capabilities() reads back exactly what was just configured"
+    );
+}
+
+/// A client that asks for maximized, fullscreen and minimized before its
+/// first commit: `requested()` reads every request back as true.
+#[test]
+fn requested_true_paths_read_back_client_requests() {
+    let (app, _events) = run_client_round_trip_with(|socket| {
+        common::client::spawn(socket, |state, qh| {
+            state.create_toplevel_with_requests(qh);
+        })
+    });
+
+    assert_eq!(
+        app.requested_sample,
+        Some((true, true, true)),
+        "maximized, minimized and fullscreen were all requested"
+    );
+}
+
+/// Staged configure state reads back through `state()` once the client has
+/// acked the configure and committed: the full scheduled → acked → current
+/// path, which is what `wm_capabilities()`' synchronous `scheduled` read
+/// never exercises.
+#[test]
+fn staged_configure_state_reads_back_after_map() {
+    struct ConfigureApp {
+        runtime: Runtime,
+        client: Option<JoinHandle<common::client::ClientEvents>>,
+        staged: Vec<Option<()>>,
+        mapped_state: Option<ToplevelState>,
+    }
+
+    impl wlr::OutputHandler for ConfigureApp {}
+    impl wlr::SeatHandler for ConfigureApp {}
+    impl wlr::FdHandler for ConfigureApp {}
+    impl wlr::LoopHandler for ConfigureApp {
+        fn should_stop(&mut self) -> bool {
+            self.client.as_ref().is_some_and(|h| h.is_finished())
+        }
+    }
+    impl wlr::ToplevelHandler for ConfigureApp {
+        fn initial_commit(&mut self, toplevel: &wlr::Toplevel<'_>) {
+            let id = toplevel.id();
+            self.staged = vec![
+                self.runtime.set_toplevel_size(id, 800, 600),
+                self.runtime.set_toplevel_maximized(id, true),
+                self.runtime.set_toplevel_fullscreen(id, true),
+                self.runtime.set_toplevel_tiled(
+                    id,
+                    wlr::Edges {
+                        top: true,
+                        ..Default::default()
+                    },
+                ),
+                self.runtime.set_toplevel_constrained(
+                    id,
+                    wlr::Edges {
+                        left: true,
+                        ..Default::default()
+                    },
+                ),
+            ];
+        }
+
+        fn mapped(&mut self, toplevel: &wlr::Toplevel<'_>) {
+            // The client's map commit applied the acked configure, so
+            // `current` — what `state()` reads — carries the staged values.
+            self.mapped_state = Some(toplevel.state());
+        }
+    }
+
+    impl HasClient for ConfigureApp {
+        fn take_client(&mut self) -> JoinHandle<common::client::ClientEvents> {
+            self.client.take().expect("client handle")
+        }
+    }
+
+    let (app, _events) = run_with(7, None, common::client::spawn_mapped, |runtime, client| {
+        ConfigureApp {
+            client: Some(client),
+            staged: Vec::new(),
+            mapped_state: None,
+            runtime,
+        }
+    });
+
+    assert!(
+        app.staged.iter().all(|r| *r == Some(())),
+        "every staged setter resolved the live toplevel: {:?}",
+        app.staged
+    );
+    let state = app.mapped_state.expect("the toplevel mapped");
+    assert!(state.maximized, "staged maximized reads back");
+    assert!(state.fullscreen, "staged fullscreen reads back");
+    assert!(state.tiled.top, "staged tiled.top reads back");
+    assert!(state.constrained.left, "staged constrained.left reads back");
+    assert_eq!(
+        (state.width, state.height),
+        (800, 600),
+        "the staged size reads back"
+    );
 }
 
 #[test]
@@ -399,29 +592,12 @@ fn toplevel_for_each_surface_visits_the_root() {
 /// handler sees both.
 #[test]
 fn mapped_then_destroyed_is_ordered() {
-    let _serial = common::headless_guard();
-    common::headless_env();
-    common::isolated_runtime_dir();
-    let display = Display::new().expect("display");
-    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
-    let runtime = Runtime::new().expect("runtime");
-    runtime.init_graphics(&display, &backend).expect("graphics");
-    runtime.create_xdg_shell(&display, 7).expect("xdg-shell");
-    let socket = display.add_socket_auto().expect("socket");
-
-    let mut app = App {
-        client: Some(common::client::spawn_mapped(&socket)),
-        ..App::new(runtime.clone())
-    };
-    backend
-        .run_all(&display, &mut app, &runtime, Until::Stop)
-        .expect("run_all");
-    let _events = app
-        .client
-        .take()
-        .expect("client handle")
-        .join()
-        .expect("join");
+    let (app, _events) = run_with(7, None, common::client::spawn_mapped, |runtime, client| {
+        App {
+            client: Some(client),
+            ..App::new(runtime)
+        }
+    });
 
     assert_eq!(app.mapped.len(), 1, "the surface mapped exactly once");
     assert!(
@@ -434,30 +610,15 @@ fn mapped_then_destroyed_is_ordered() {
 /// the new defaulted method, with the point it asked about.
 #[test]
 fn show_window_menu_reaches_the_handler() {
-    let _serial = common::headless_guard();
-    common::headless_env();
-    common::isolated_runtime_dir();
-    let display = Display::new().expect("display");
-    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
-    let runtime = Runtime::new().expect("runtime");
-    runtime.init_graphics(&display, &backend).expect("graphics");
-    runtime.create_seat(&display, "seat0").expect("seat");
-    runtime.create_xdg_shell(&display, 7).expect("xdg-shell");
-    let socket = display.add_socket_auto().expect("socket");
-
-    let mut app = App {
-        client: Some(common::client::spawn_show_window_menu(&socket, 11, 22)),
-        ..App::new(runtime.clone())
-    };
-    backend
-        .run_all(&display, &mut app, &runtime, Until::Stop)
-        .expect("run_all");
-    let _events = app
-        .client
-        .take()
-        .expect("client handle")
-        .join()
-        .expect("join");
+    let (app, _events) = run_with(
+        7,
+        Some("seat0"),
+        |socket| common::client::spawn_show_window_menu(socket, 11, 22),
+        |runtime, client| App {
+            client: Some(client),
+            ..App::new(runtime)
+        },
+    );
 
     assert_eq!(
         app.show_window_menus.len(),
@@ -480,29 +641,15 @@ fn show_window_menu_reaches_the_handler() {
 /// this witnesses both halves.
 #[test]
 fn traversal_yields_resolvable_ids_and_visits_a_subsurface() {
-    let _serial = common::headless_guard();
-    common::headless_env();
-    common::isolated_runtime_dir();
-    let display = Display::new().expect("display");
-    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
-    let runtime = Runtime::new().expect("runtime");
-    runtime.init_graphics(&display, &backend).expect("graphics");
-    runtime.create_xdg_shell(&display, 7).expect("xdg-shell");
-    let socket = display.add_socket_auto().expect("socket");
-
-    let mut app = App {
-        client: Some(common::client::spawn_subsurface_mapped(&socket)),
-        ..App::new(runtime.clone())
-    };
-    backend
-        .run_all(&display, &mut app, &runtime, Until::Stop)
-        .expect("run_all");
-    let _events = app
-        .client
-        .take()
-        .expect("client handle")
-        .join()
-        .expect("join");
+    let (app, _events) = run_with(
+        7,
+        None,
+        common::client::spawn_subsurface_mapped,
+        |runtime, client| App {
+            client: Some(client),
+            ..App::new(runtime)
+        },
+    );
 
     assert!(
         app.walk_visited >= 2,
@@ -516,6 +663,11 @@ fn traversal_yields_resolvable_ids_and_visits_a_subsurface() {
     assert!(
         app.walk_other_surface,
         "a non-root sub-surface was yielded, not skipped"
+    );
+    assert!(
+        app.from_surface_misses.contains(&SurfaceRole::None),
+        "the sub-surface child's commits miss the toplevel downcast: {:?}",
+        app.from_surface_misses
     );
 }
 
@@ -601,33 +753,19 @@ impl wlr::ToplevelHandler for GateApp {
 }
 
 fn gate_results(version: u32) -> GateApp {
-    let _serial = common::headless_guard();
-    common::headless_env();
-    common::isolated_runtime_dir();
-    let display = Display::new().expect("display");
-    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
-    let runtime = Runtime::new().expect("runtime");
-    runtime.init_graphics(&display, &backend).expect("graphics");
-    runtime
-        .create_xdg_shell(&display, version)
-        .expect("xdg-shell");
-    let socket = display.add_socket_auto().expect("socket");
-
-    let mut app = GateApp {
-        client: Some(common::client::spawn(&socket, |state, qh| {
-            state.create_toplevel(qh);
-        })),
-        ..GateApp::new(runtime.clone())
-    };
-    backend
-        .run_all(&display, &mut app, &runtime, Until::Stop)
-        .expect("run_all");
-    let _events = app
-        .client
-        .take()
-        .expect("client handle")
-        .join()
-        .expect("join");
+    let (app, _events) = run_with(
+        version,
+        None,
+        |socket| {
+            common::client::spawn(socket, |state, qh| {
+                state.create_toplevel(qh);
+            })
+        },
+        |runtime, client| GateApp {
+            client: Some(client),
+            ..GateApp::new(runtime)
+        },
+    );
     app
 }
 
@@ -889,29 +1027,10 @@ fn spawn_popup_client(socket: &str) -> JoinHandle<common::client::ClientEvents> 
 /// resolve against that toplevel.
 #[test]
 fn popup_tree_is_walkable_and_hittable_on_a_live_toplevel() {
-    let _serial = common::headless_guard();
-    common::headless_env();
-    common::isolated_runtime_dir();
-    let display = Display::new().expect("display");
-    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
-    let runtime = Runtime::new().expect("runtime");
-    runtime.init_graphics(&display, &backend).expect("graphics");
-    runtime.create_xdg_shell(&display, 7).expect("xdg-shell");
-    let socket = display.add_socket_auto().expect("socket");
-
-    let mut app = App {
-        client: Some(spawn_popup_client(&socket)),
-        ..App::new(runtime.clone())
-    };
-    backend
-        .run_all(&display, &mut app, &runtime, Until::Stop)
-        .expect("run_all");
-    let _events = app
-        .client
-        .take()
-        .expect("client handle")
-        .join()
-        .expect("join");
+    let (app, _events) = run_with(7, None, spawn_popup_client, |runtime, client| App {
+        client: Some(client),
+        ..App::new(runtime)
+    });
 
     let live = app
         .toplevels
@@ -941,5 +1060,20 @@ fn popup_tree_is_walkable_and_hittable_on_a_live_toplevel() {
         app.popup_hit_parent_ok,
         Some(true),
         "the struck surface's popup_of names the live toplevel"
+    );
+    assert_eq!(
+        app.surface_at_hit,
+        Some(true),
+        "surface_at hits the popup area through the full tree"
+    );
+    assert_eq!(
+        app.surface_at_miss,
+        Some(true),
+        "surface_at misses far outside the tree"
+    );
+    assert_eq!(
+        app.popup_miss,
+        Some(true),
+        "popup_surface_at misses far outside the tree"
     );
 }

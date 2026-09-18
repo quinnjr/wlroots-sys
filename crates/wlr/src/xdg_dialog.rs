@@ -56,6 +56,26 @@ impl<'h> Dialog<'h> {
         }
     }
 
+    /// Downcast a live toplevel to its dialog role, if it has one.
+    ///
+    /// The single `try_from` → null-check → wrap tail shared by
+    /// [`Toplevel::dialog`] and [`Runtime::dialog`](crate::Runtime::dialog),
+    /// so the unsafe downcast is named once rather than maintained twice.
+    ///
+    /// # Safety
+    ///
+    /// `raw` must be a live `wlr_xdg_toplevel`. Only reads.
+    pub(crate) unsafe fn from_toplevel_ptr(
+        raw: *mut sys::wlr_xdg_toplevel,
+        toplevel: ToplevelId,
+    ) -> Option<Dialog<'h>> {
+        // SAFETY: the caller guarantees `raw` is a live toplevel; the downcast
+        // is a read that returns null when no dialog is attached.
+        let dialog = unsafe { sys::wlr_xdg_dialog_v1_try_from_wlr_xdg_toplevel(raw) };
+        let dialog = NonNull::new(dialog)?;
+        Some(Dialog::from_non_null(dialog, toplevel))
+    }
+
     /// Whether the client marked this toplevel as modal.
     ///
     /// The flag is the client's most recent `set_modal`/`unset_modal`, which
@@ -84,11 +104,9 @@ impl Toplevel<'_> {
     /// The returned handle borrows this `Toplevel`, so it cannot outlive it.
     #[must_use]
     pub fn dialog(&self) -> Option<Dialog<'_>> {
-        // SAFETY: the handle's lifetime guarantees the toplevel is live; the
-        // downcast is a read that returns null when no dialog is attached.
-        let raw = unsafe { sys::wlr_xdg_dialog_v1_try_from_wlr_xdg_toplevel(self.as_ptr()) };
-        let raw = NonNull::new(raw)?;
-        Some(Dialog::from_non_null(raw, self.id()))
+        // SAFETY: the handle's lifetime guarantees the toplevel is live; see
+        // `from_toplevel_ptr` for what the downcast itself needs.
+        unsafe { Dialog::from_toplevel_ptr(self.as_ptr(), self.id()) }
     }
 }
 
@@ -124,12 +142,9 @@ impl Runtime {
     #[must_use]
     pub fn dialog(&self, id: ToplevelId) -> Option<Dialog<'_>> {
         let entry = self.toplevel_entry(id)?;
-        // SAFETY: `entry.raw` is a live toplevel the runtime tracks; the
-        // downcast is a read that returns null when no dialog is attached, and
-        // the raw pointer does not escape a bare handle.
-        let raw = unsafe { sys::wlr_xdg_dialog_v1_try_from_wlr_xdg_toplevel(entry.raw.as_ptr()) };
-        let raw = NonNull::new(raw)?;
-        Some(Dialog::from_non_null(raw, id))
+        // SAFETY: `entry.raw` is a live toplevel the runtime tracks, and the
+        // raw pointer does not escape a bare handle; see `from_toplevel_ptr`.
+        unsafe { Dialog::from_toplevel_ptr(entry.raw.as_ptr(), id) }
     }
 
     /// The dialog role for a surface, when that surface is a tracked toplevel

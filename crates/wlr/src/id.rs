@@ -8,7 +8,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::addon::{Addon, addon_kind};
+use crate::addon::{Addon, AddonImpl, addon_kind};
 use crate::sys;
 
 /// Identifies an output for as long as the consumer chooses to remember it.
@@ -23,6 +23,26 @@ use crate::sys;
 /// non-breaking; the reversible direction is to leave it out for now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OutputId(pub(crate) u64);
+
+impl OutputId {
+    /// An id no live output can have, for testing the "unknown id" path.
+    ///
+    /// Public for the same reason
+    /// [`ToplevelId::dangling_for_test`](crate::ToplevelId::dangling_for_test)
+    /// is: "every by-id operation reports a miss rather than dereferencing" is
+    /// a promise to consumers, and a promise nobody can write a test for is
+    /// not one. Ids come from the process-wide counter that backs every id in
+    /// this crate, which starts at 1, only increments and never reuses a
+    /// value, so `u64::MAX` cannot be handed to a real output.
+    ///
+    /// Not for production code. An id from a real output is the one
+    /// [`Output::id`](crate::Output::id) returns, and it stops resolving once
+    /// the [`Backend::run_all`](crate::Backend::run_all) call that announced
+    /// it has returned — at which point it behaves exactly like this one.
+    pub fn dangling_for_test() -> OutputId {
+        OutputId(dangling_test_id(0))
+    }
+}
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -85,6 +105,59 @@ addon_kind!(
     SURFACE_ID_ADDON_IMPL: u64 = c"wlr-rs-surface-id"
 );
 
+/// The one attach/find core behind both id kinds in this module.
+///
+/// `ID_ADDON_IMPL` (role ids: toplevels, outputs, popups, …) and
+/// `SURFACE_ID_ADDON_IMPL` (generic [`SurfaceId`](crate::SurfaceId)) differ
+/// only in which `(owner, impl)` pair they key on, so every operation below is
+/// this core with one of the two statics. The duplicate *policy* is not
+/// shared: it stays explicit in the thin wrappers — [`attach_id`] asserts
+/// (a duplicate on the role path is a programming error), while
+/// [`attach_surface_id`] reports `None` (a duplicate on the announce path
+/// must never abort the compositor) — so a reader sees the policy at the
+/// call site rather than behind a flag.
+///
+/// # Safety
+///
+/// The same contract every wrapper documents: `set` must point at an
+/// initialised `wlr_addon_set` belonging to a live object, and `kind` must be
+/// one of this module's two addon kinds paired with a `u64` payload.
+unsafe fn find_id_in(set: *const sys::wlr_addon_set, kind: &'static AddonImpl) -> Option<u64> {
+    // SAFETY: caller guarantees `set` is live and initialised. `wlr_addon_find`
+    // only reads the set (it walks the addon list looking for a match); its C
+    // signature takes `*mut wlr_addon_set` even though it performs no mutation,
+    // so the cast back to `*mut` inside `Addon::find` is not a soundness
+    // hazard.
+    unsafe {
+        let payload = Addon::<u64>::find(set, kind.owner(), kind);
+        if payload.is_null() {
+            return None;
+        }
+        Some(*Addon::data(payload))
+    }
+}
+
+/// Mint and attach a fresh id under `kind`, without checking for a duplicate.
+///
+/// The unchecked half of the core: the caller owns the duplicate policy and
+/// must have discharged it (an `assert!` in [`attach_id`], a `find_id_in`
+/// check in [`attach_surface_id`]) before calling. Split out rather than
+/// inlined so the "mint + attach" sequence exists exactly once.
+///
+/// # Safety
+///
+/// As for [`find_id_in`], plus: no addon may already be attached under
+/// `(kind.owner(), kind)` — wlroots aborts on a duplicate `wlr_addon_init`.
+unsafe fn attach_fresh_id(set: *mut sys::wlr_addon_set, kind: &'static AddonImpl) -> u64 {
+    let id = next_id();
+    // SAFETY: caller guarantees `set` is live and initialised, and that no
+    // addon under this kind is attached yet (the duplicate policy above).
+    unsafe {
+        Addon::attach(set, kind.owner(), kind, id);
+    }
+    id
+}
+
 /// Attach a fresh surface id to `set` and return it, or `None` if the set
 /// already carries one.
 ///
@@ -101,22 +174,16 @@ addon_kind!(
 pub(crate) unsafe fn attach_surface_id(set: *mut sys::wlr_addon_set) -> Option<u64> {
     // SAFETY: caller guarantees `set` is live and initialised. Reading it
     // through a shared alias here is fine for the identical reason
-    // `attach_id`'s own comment gives: `find_surface_id` only calls
+    // `attach_id`'s own comment gives: `find_id_in` only calls
     // `wlr_addon_find`, which does not mutate the set, and the read completes
-    // before this function's own `wlr_addon_init` call performs any mutation.
+    // before `attach_fresh_id`'s own `wlr_addon_init` call performs any
+    // mutation.
     unsafe {
-        if find_surface_id(set.cast_const()).is_some() {
+        if find_id_in(set.cast_const(), &SURFACE_ID_ADDON_IMPL).is_some() {
             return None;
         }
 
-        let id = next_id();
-        Addon::attach(
-            set,
-            SURFACE_ID_ADDON_IMPL.owner(),
-            &SURFACE_ID_ADDON_IMPL,
-            id,
-        );
-        Some(id)
+        Some(attach_fresh_id(set, &SURFACE_ID_ADDON_IMPL))
     }
 }
 
@@ -126,17 +193,10 @@ pub(crate) unsafe fn attach_surface_id(set: *mut sys::wlr_addon_set) -> Option<u
 ///
 /// `set` must point at an initialised `wlr_addon_set` belonging to a live object.
 pub(crate) unsafe fn find_surface_id(set: *const sys::wlr_addon_set) -> Option<u64> {
-    // SAFETY: caller guarantees `set` is live and initialised. `wlr_addon_find`
-    // only reads the set; see `find_id`'s own comment for why the `*mut` cast
-    // its C signature takes is not a soundness hazard.
-    unsafe {
-        let payload =
-            Addon::<u64>::find(set, SURFACE_ID_ADDON_IMPL.owner(), &SURFACE_ID_ADDON_IMPL);
-        if payload.is_null() {
-            return None;
-        }
-        Some(*Addon::data(payload))
-    }
+    // SAFETY: caller guarantees `set` is live and initialised; see
+    // `find_id_in`'s own comment for why the `*mut` cast is not a soundness
+    // hazard.
+    unsafe { find_id_in(set, &SURFACE_ID_ADDON_IMPL) }
 }
 
 /// The surface id attached to `set`, attaching a fresh one if absent.
@@ -154,26 +214,29 @@ pub(crate) unsafe fn ensure_surface_id_raw(set: *mut sys::wlr_addon_set) -> u64 
     // requires. Nothing can attach between the `find_surface_id` check and the
     // `attach_surface_id` call: the wlroots event loop, and therefore every
     // caller, is single-threaded — the same argument `backend.rs`'s
-    // `ensure_id_raw` makes — so the loop always terminates on its first two
-    // iterations, and no path aborts: a duplicate that somehow appeared
-    // between the two lookups is re-read as the id that is already there
-    // rather than tripping an `assert!` on the announce path.
+    // `ensure_id_raw` makes — so a duplicate can never appear between the two
+    // lookups, and no reachable path aborts: a duplicate there is re-read as
+    // the id that is already there rather than tripping an `assert!` on the
+    // announce path.
     unsafe {
-        loop {
-            if let Some(id) = find_surface_id(set.cast_const()) {
-                return id;
-            }
-            if let Some(id) = attach_surface_id(set) {
-                return id;
-            }
-            debug_assert!(
-                false,
-                "a surface id addon appeared between a find and an attach on the same thread"
-            );
+        if let Some(id) = find_surface_id(set.cast_const()) {
+            return id;
         }
+        if let Some(id) = attach_surface_id(set) {
+            return id;
+        }
+        // Unreachable single-threaded: the two returns above cover "present"
+        // and "absent then attached", so a triple miss means an addon appeared
+        // and vanished between two calls on the same thread. `expect` rather
+        // than `debug_assert!(false)` + retry: loud in all builds if the
+        // single-threaded threading invariant ever breaks, instead of an
+        // infinite loop in release.
+        find_surface_id(set.cast_const()).expect(
+            "a surface id addon changed under a find and an attach on the same thread: \
+             wlroots event-loop callers are single-threaded",
+        )
     }
 }
-
 /// Serialises every test that attaches or destroys *any* addon this crate
 /// declares, not only an id one.
 ///
@@ -209,19 +272,17 @@ pub(crate) fn id_test_lock() -> std::sync::MutexGuard<'static, ()> {
 /// object, and must not already carry one of our id addons.
 pub(crate) unsafe fn attach_id(set: *mut sys::wlr_addon_set) -> u64 {
     // SAFETY: caller guarantees `set` is live and initialised. Reading it
-    // through a shared alias here is fine: `find_id` only calls
+    // through a shared alias here is fine: `find_id_in` only calls
     // `wlr_addon_find`, which does not mutate the set, and the read completes
-    // (and its borrow ends) before this function's own `wlr_addon_init` call
+    // (and its borrow ends) before `attach_fresh_id`'s `wlr_addon_init` call
     // below performs any mutation.
     unsafe {
         assert!(
-            find_id(set.cast_const()).is_none(),
+            find_id_in(set.cast_const(), &ID_ADDON_IMPL).is_none(),
             "an id addon is already attached to this object"
         );
 
-        let id = next_id();
-        Addon::attach(set, ID_ADDON_IMPL.owner(), &ID_ADDON_IMPL, id);
-        id
+        attach_fresh_id(set, &ID_ADDON_IMPL)
     }
 }
 
@@ -231,17 +292,10 @@ pub(crate) unsafe fn attach_id(set: *mut sys::wlr_addon_set) -> u64 {
 ///
 /// `set` must point at an initialised `wlr_addon_set` belonging to a live object.
 pub(crate) unsafe fn find_id(set: *const sys::wlr_addon_set) -> Option<u64> {
-    // SAFETY: caller guarantees `set` is live and initialised. `wlr_addon_find`
-    // only reads the set (it walks the addon list looking for a match); its C
-    // signature takes `*mut wlr_addon_set` even though it performs no mutation,
-    // so the cast back to `*mut` here is not a soundness hazard.
-    unsafe {
-        let payload = Addon::<u64>::find(set, ID_ADDON_IMPL.owner(), &ID_ADDON_IMPL);
-        if payload.is_null() {
-            return None;
-        }
-        Some(*Addon::data(payload))
-    }
+    // SAFETY: caller guarantees `set` is live and initialised; see
+    // `find_id_in`'s own comment for why the `*mut` cast is not a soundness
+    // hazard.
+    unsafe { find_id_in(set, &ID_ADDON_IMPL) }
 }
 
 #[cfg(test)]

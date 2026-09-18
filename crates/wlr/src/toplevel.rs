@@ -341,7 +341,7 @@ impl<'h> Toplevel<'h> {
     /// Hit-test this toplevel's tree at a point in its own surface-local
     /// coordinates.
     ///
-    /// Returns the struck leaf surface, its id, and the point in that leaf's
+    /// Returns the struck leaf surface and the point in that leaf's
     /// coordinates; `None` for a miss. This wraps
     /// `wlr_xdg_surface_surface_at` — the walk includes the toplevel's
     /// sub-surfaces.
@@ -358,7 +358,9 @@ impl<'h> Toplevel<'h> {
     }
 
     /// Shared body of the two hit-tests, which differ only in which wlroots
-    /// walk they call. The null-check/id/handle tail lives in
+    /// walk they call. The walk preamble lives in
+    /// [`crate::Surface::walk_surface_at`](crate::Surface::walk_surface_at)
+    /// and the null-check/id/handle tail in
     /// [`crate::Surface::finish_surface_at`](crate::Surface::finish_surface_at),
     /// shared with every other `surface_at_impl` in the crate.
     fn surface_at_impl(
@@ -373,16 +375,13 @@ impl<'h> Toplevel<'h> {
         sx: f64,
         sy: f64,
     ) -> Option<(crate::Surface<'_>, f64, f64)> {
-        let mut sub_x = 0.0;
-        let mut sub_y = 0.0;
         // SAFETY: the handle's lifetime guarantees the toplevel is live, so
-        // `base` is live; both out-parameters are live locals that outlive the
-        // call, and wlroots only reads the coordinates. The walk returns null
-        // or a live surface of this same tree, which is what
-        // `finish_surface_at` takes.
+        // `base` is the live root this walk expects; the hit is consumed
+        // through `finish_surface_at`, which is what that function's contract
+        // takes.
         unsafe {
             let base = (*self.raw.as_ptr()).base;
-            let raw = walk(base, sx, sy, &raw mut sub_x, &raw mut sub_y);
+            let (raw, sub_x, sub_y) = crate::Surface::walk_surface_at(base, walk, sx, sy);
             crate::Surface::finish_surface_at(raw, sub_x, sub_y)
         }
     }
@@ -443,95 +442,30 @@ impl Edges {
     }
 }
 
-/// A `u32`-backed capability bitmask: named constants plus
-/// `contains`/`bits`/`from_raw` and `BitOr`/`BitOrAssign`.
-///
-/// Local to this module: no crate-wide `bitmask!` exists (a parallel review
-/// asked for one in `ext_workspace.rs`, but that module still hand-rolls its
-/// own masks), so the macro lives here, next to its single use. A second
-/// bitmask type should move this into a shared spot (e.g. `surface.rs`,
-/// which `layer.rs` and this module already both reach through
-/// `crate::surface::`) rather than growing a second copy.
-macro_rules! bitmask {
-    (
-        $(#[$ty_attr:meta])*
-        $name:ident {
-            $(
-                $(#[$c_attr:meta])*
-                $const:ident = $val:expr
-            ),* $(,)?
-        }
-    ) => {
-        $(#[$ty_attr])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-        pub struct $name(u32);
-
-        impl $name {
-            $(
-                $(#[$c_attr])*
-                pub const $const: $name = $name($val);
-            )*
-
-            /// Whether **every** bit of `other` is set here — not "any".
-            #[must_use]
-            pub fn contains(self, other: $name) -> bool {
-                self.0 & other.0 == other.0
-            }
-
-            /// The raw mask, as the protocol numbers it.
-            #[must_use]
-            pub fn bits(self) -> u32 {
-                self.0
-            }
-
-            /// Build from the raw protocol value.
-            ///
-            /// Unknown bits are kept, not dropped: the mask is handed straight
-            /// back to wlroots by the setter that interprets it, so silently
-            /// clearing a bit would change the caller's request rather than
-            /// merely fail to describe it.
-            pub(crate) fn from_raw(raw: u32) -> $name {
-                $name(raw)
-            }
-        }
-
-        impl std::ops::BitOr for $name {
-            type Output = $name;
-
-            fn bitor(self, rhs: $name) -> $name {
-                $name(self.0 | rhs.0)
-            }
-        }
-
-        impl std::ops::BitOrAssign for $name {
-            fn bitor_assign(&mut self, rhs: $name) {
-                self.0 |= rhs.0;
-            }
-        }
-    };
-}
-
-bitmask! {
+define_capability_mask! {
     /// The window-manager capabilities a compositor advertises to a toplevel.
     ///
-    /// A bitmask of `enum wlr_xdg_toplevel_wm_capabilities`, built with the
-    /// `bitmask!` macro above rather than a `bitflags` dependency following
-    /// [`ConstraintAdjustment`](crate::ConstraintAdjustment): the four bits are
-    /// the whole domain and are pinned against the generated constants by this
-    /// module's own tests.
-    WmCapabilities {
-        /// No capabilities advertised; the protocol's initial value, and
-        /// [`Default`].
-        NONE = 0,
-        /// The compositor can show a client window menu.
-        WINDOW_MENU = 1,
-        /// The compositor can maximize.
-        MAXIMIZE = 2,
-        /// The compositor can fullscreen.
-        FULLSCREEN = 4,
-        /// The compositor can minimize.
-        MINIMIZE = 8,
-    }
+    /// A `u32`-backed bitmask — named constants plus
+    /// `contains`/`bits`/`from_raw` and `BitOr`/`BitOrAssign` — hand-rolled
+    /// rather than a `bitflags` dependency, and generated by the shared
+    /// `define_capability_mask!` core in the private `capability_mask` module
+    /// together with
+    /// [`WorkspaceGroupCapabilities`](crate::WorkspaceGroupCapabilities) and
+    /// [`WorkspaceCapabilities`](crate::WorkspaceCapabilities), so the three
+    /// spellings of this shape cannot drift apart.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct WmCapabilities(u32);
+    /// No capabilities advertised; the protocol's initial value, and
+    /// [`Default`].
+    pub const NONE = 0,
+    /// The compositor can show a client window menu.
+    pub const WINDOW_MENU = 1,
+    /// The compositor can maximize.
+    pub const MAXIMIZE = 2,
+    /// The compositor can fullscreen.
+    pub const FULLSCREEN = 4,
+    /// The compositor can minimize.
+    pub const MINIMIZE = 8,
 }
 
 /// A snapshot of a toplevel's **current** state — what wlroots most recently
@@ -964,6 +898,21 @@ mod tests {
         assert!(both.contains(WmCapabilities::MAXIMIZE));
         assert!(both.contains(WmCapabilities::MINIMIZE));
         assert!(!WmCapabilities::MAXIMIZE.contains(WmCapabilities::MINIMIZE));
+    }
+
+    /// `Default` is the empty mask, and `BitOrAssign` accumulates exactly like
+    /// `BitOr`: the two spellings must agree, or a caller mixing them silently
+    /// advertises different capabilities.
+    #[test]
+    fn wm_capabilities_default_is_none_and_assign_accumulates() {
+        assert_eq!(WmCapabilities::default(), WmCapabilities::NONE);
+        assert_eq!(WmCapabilities::NONE.bits(), 0);
+        let mut caps = WmCapabilities::default();
+        caps |= WmCapabilities::MAXIMIZE;
+        assert_eq!(caps, WmCapabilities::MAXIMIZE);
+        caps |= WmCapabilities::MINIMIZE;
+        assert_eq!(caps, WmCapabilities::MAXIMIZE | WmCapabilities::MINIMIZE);
+        assert!(caps.contains(WmCapabilities::MAXIMIZE | WmCapabilities::MINIMIZE));
     }
 
     /// `Edges::to_xdg` is the exact inverse of `from_xdg` over the whole

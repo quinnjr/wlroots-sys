@@ -132,10 +132,11 @@ impl SurfaceRole {
 /// Outstanding [`PendingLock`]s, for the test-only leak check.
 ///
 /// Incremented by [`Surface::lock_pending`](crate::Surface::lock_pending) and
-/// decremented by [`Surface::unlock_cached`](crate::Surface::unlock_cached) on
-/// a real unlock. A refused unlock hands the token back, so it neither
-/// decrements here nor needs to: the caller still owns the lock. Unit tests
-/// assert this returns to its entry value; production code never reads it.
+/// decremented on a real unlock — by [`Surface::unlock_cached`](crate::Surface::unlock_cached),
+/// or by [`PendingLock`]'s `Drop` when a lock is dropped without unlocking.
+/// A refused unlock hands the token back, so it neither decrements here nor
+/// needs to: the caller still owns the lock. Unit tests assert this returns
+/// to its entry value; production code never reads it.
 #[cfg(test)]
 static PENDING_LOCKS_OUTSTANDING: AtomicU64 = AtomicU64::new(0);
 
@@ -174,15 +175,45 @@ fn pending_locks_outstanding() -> u64 {
 /// double-release of one token is stopped by move semantics (the token is
 /// consumed), not by a check here.
 ///
-/// The lifetime ties the token to the scope that produced it, and the pointer
-/// makes it `!Send`/`!Sync`.
+/// The lifetime ties the token to the scope that produced it. `!Send`/`!Sync`
+/// comes from the `_not_send` marker ([`Rc`](std::rc::Rc) is neither): the
+/// raw surface pointer alone would not do it, since every field here is
+/// otherwise `Send + Sync` and the token must never cross threads — wlroots'
+/// lock accounting lives on the event loop that minted it.
+///
+/// A dropped lock still unlocks (see the `Drop` impl below), but without
+/// [`unlock_cached`](Surface::unlock_cached)'s issuing-surface check, so
+/// releasing through `unlock_cached` stays the only correct path.
 #[derive(Debug)]
-#[must_use = "dropping or forgetting a pending lock stalls the surface: release it with unlock_cached"]
+#[must_use = "release a pending lock with unlock_cached: dropping it unlocks without the issuing-surface check"]
 pub struct PendingLock<'h> {
     seq: u32,
     surface: *mut sys::wlr_surface,
     id: SurfaceId,
     _scope: PhantomData<&'h ()>,
+    _not_send: PhantomData<std::rc::Rc<()>>,
+}
+
+/// A forgotten [`PendingLock`] would strand its surface — wlroots keeps the
+/// pending state cached until every lock is released, with no error anywhere
+/// — so dropping one unlocks rather than leaking it.
+///
+/// This is the backstop, not the path: unlike
+/// [`unlock_cached`](Surface::unlock_cached) it cannot refuse a token minted
+/// by another surface, it just releases. `unlock_cached` consumes the token
+/// with [`mem::forget`](std::mem::forget) after its own unlock precisely so
+/// this impl does not run twice for one lock.
+impl Drop for PendingLock<'_> {
+    fn drop(&mut self) {
+        // SAFETY: the token names a lock `lock_pending` took on this exact
+        // surface, and the token's scope lifetime keeps it from outliving the
+        // handler the issuing handle was built for — the surface is live for
+        // the whole scope, so the `cached_state_locks > 0` assert wlroots
+        // checks holds here exactly as it does in `unlock_cached`.
+        unsafe { sys::wlr_surface_unlock_cached(self.surface, self.seq) };
+        #[cfg(test)]
+        PENDING_LOCKS_OUTSTANDING.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// A surface, borrowed for the duration of a handler call.
@@ -247,6 +278,10 @@ impl<'h> Surface<'h> {
     ///
     /// `raw` must be a live `wlr_surface` whose addon set carries `id`, and the
     /// returned handle must not outlive the callback it was created for.
+    ///
+    /// The null check aborts deliberately: a null here is a programming error
+    /// at an infallible call site, not a miss. Nullable callers must use
+    /// [`from_raw_opt`](Self::from_raw_opt) instead.
     pub(crate) unsafe fn from_raw_with_id(
         raw: *mut sys::wlr_surface,
         id: SurfaceId,
@@ -395,8 +430,15 @@ impl<'h> Surface<'h> {
     /// callback is a `FnMut`, never a raw C function pointer, so a consumer
     /// never touches `wlr_surface_iterator_func_t`. The handle handed to `f`
     /// is built without a tearing manager (the iterator carries no runtime),
-    /// so [`Surface::tearing_hint`] on it reports the no-hint answer; every
-    /// other accessor reads the live surface normally.
+    /// so [`Surface::tearing_hint`] on it reports the no-hint answer, and
+    /// without a seat, so [`Surface::accepts_touch`] on it always reports
+    /// `false` — the same disclosure [`surface_at`](Surface::surface_at)
+    /// makes; every other accessor reads the live surface normally.
+    ///
+    /// A surface the crate never attached an id to is silently skipped rather
+    /// than visited with a fabricated one — reachable only for a surface built
+    /// outside the announce path, since every announced surface goes through
+    /// `install_surface_listeners`.
     ///
     /// wlroots walks the *current* committed tree synchronously inside this
     /// call, so `f` must not destroy any surface it is handed — the same
@@ -548,6 +590,39 @@ impl<'h> Surface<'h> {
         Some((surface, sub_x, sub_y))
     }
 
+    /// Shared walk preamble for the surface-tree hit-tests: run `walk` against
+    /// `root` and return the raw hit with the leaf-relative coordinates.
+    ///
+    /// Generic over the root-pointer type because each wlroots walk takes a
+    /// different one (`*mut wlr_surface` here, `*mut wlr_xdg_surface` and
+    /// `*mut wlr_layer_surface_v1` on the role handles) while returning the
+    /// same `*mut wlr_surface`. The per-type `surface_at_impl`s keep only
+    /// their root selection; this preamble and
+    /// [`finish_surface_at`](Surface::finish_surface_at)'s tail exist exactly
+    /// once.
+    ///
+    /// # Safety
+    ///
+    /// `root` must be a live root of the kind `walk` expects, `walk` must be
+    /// the matching wlroots hit-test for it (returning null or a live surface
+    /// of that same tree), and the returned raw pointer must be consumed
+    /// through `finish_surface_at` without outliving the tree the walk ran
+    /// against.
+    pub(crate) unsafe fn walk_surface_at<R>(
+        root: R,
+        walk: unsafe extern "C" fn(R, f64, f64, *mut f64, *mut f64) -> *mut sys::wlr_surface,
+        sx: f64,
+        sy: f64,
+    ) -> (*mut sys::wlr_surface, f64, f64) {
+        let mut sub_x = 0.0;
+        let mut sub_y = 0.0;
+        // SAFETY: the caller guarantees `root` is live and `walk` is its
+        // matching hit-test; both out-parameters are live locals that outlive
+        // the call, and wlroots only reads the coordinates.
+        let raw = unsafe { walk(root, sx, sy, &raw mut sub_x, &raw mut sub_y) };
+        (raw, sub_x, sub_y)
+    }
+
     /// Shared body of the surface-tree hit-tests, which differ only in which
     /// wlroots walk they call.
     fn surface_at_impl(
@@ -562,14 +637,11 @@ impl<'h> Surface<'h> {
         sx: f64,
         sy: f64,
     ) -> Option<(Surface<'_>, f64, f64)> {
-        let mut sub_x = 0.0;
-        let mut sub_y = 0.0;
-        // SAFETY: the handle borrows a live surface; both out-parameters are
-        // live locals that outlive the call, and wlroots only reads the
-        // coordinates. The walk returns null or a live surface of this same
-        // tree, which is what `finish_surface_at` takes.
+        // SAFETY: the handle borrows a live surface, which is the root this
+        // walk expects; the hit is consumed through `finish_surface_at`, which
+        // is what that function's contract takes.
         unsafe {
-            let raw = walk(self.raw.as_ptr(), sx, sy, &raw mut sub_x, &raw mut sub_y);
+            let (raw, sub_x, sub_y) = Self::walk_surface_at(self.raw.as_ptr(), walk, sx, sy);
             Self::finish_surface_at(raw, sub_x, sub_y)
         }
     }
@@ -663,15 +735,17 @@ impl<'h> Surface<'h> {
     /// surface's address and id, which is what lets `unlock_cached` hand back
     /// a token offered to the wrong surface instead of reaching that abort.
     ///
-    /// Forgetting the token stalls the surface silently. `#[must_use]` does
-    /// not catch `drop(lock)`, and an early return past the unlock is the same
-    /// leak — unlock before every exit, including the error paths:
+    /// `mem::forget`ting the token strands the surface silently — the `Drop`
+    /// backstop never runs. Dropping it (an early return past the unlock, a
+    /// `drop(lock)`) still releases the lock, but without the
+    /// issuing-surface check, so unlock before every exit, including the error
+    /// paths:
     ///
     /// ```ignore
     /// let lock = surface.lock_pending();
     /// if let Err(e) = prepare_frame(&surface) {
     ///     // The token is still owned here: hand it back before returning, or
-    ///     // the surface stops committing with no error anywhere.
+    ///     // the release skips the issuing-surface check.
     ///     let _ = surface.unlock_cached(lock);
     ///     return Err(e);
     /// }
@@ -688,6 +762,7 @@ impl<'h> Surface<'h> {
             surface: self.raw.as_ptr(),
             id: self.id,
             _scope: PhantomData,
+            _not_send: PhantomData,
         }
     }
 
@@ -712,6 +787,11 @@ impl<'h> Surface<'h> {
         unsafe { sys::wlr_surface_unlock_cached(self.raw.as_ptr(), lock.seq) };
         #[cfg(test)]
         PENDING_LOCKS_OUTSTANDING.fetch_sub(1, Ordering::Relaxed);
+        // The counter and the wlroots lock are both released: the token must
+        // not run them again. `Drop` would unlock a second time (and
+        // double-decrement the counter), aborting on wlroots'
+        // `cached_state_locks > 0` assert — so it is forgotten, not dropped.
+        std::mem::forget(lock);
         Ok(())
     }
 
@@ -807,8 +887,19 @@ pub(crate) unsafe fn for_each_surface_with<F>(
 
 #[cfg(test)]
 mod tests {
-    use super::SurfaceId;
+    use super::{SurfaceId, SurfaceRole};
     use crate::test_support::ScratchSurface;
+
+    /// `PendingLock` must never cross threads: wlroots' lock accounting lives
+    /// on the event loop that minted the token. The raw surface pointer alone
+    /// does not give that — every field would otherwise be `Send + Sync` —
+    /// so the `_not_send` marker carries it; this pins the marker's effect.
+    #[test]
+    fn a_pending_lock_neither_sends_nor_syncs() {
+        use static_assertions::assert_not_impl_any;
+
+        assert_not_impl_any!(super::PendingLock<'static>: Send, Sync);
+    }
 
     #[test]
     fn current_size_reads_the_committed_state() {
@@ -890,7 +981,6 @@ mod tests {
     /// on a value this build does not know.
     #[test]
     fn surface_role_from_raw_maps_unknown_discriminants_to_none() {
-        use super::SurfaceRole;
         use crate::sys;
         assert_eq!(
             SurfaceRole::from_raw(sys::wlr_xdg_surface_role(1)),
@@ -954,6 +1044,274 @@ mod tests {
             super::pending_locks_outstanding(),
             outstanding_before,
             "a refused unlock neither leaks nor double-releases"
+        );
+    }
+
+    /// Dropping a lock without unlocking still releases it: the `Drop`
+    /// backstop unlocks rather than stranding the surface, so the test-only
+    /// counter returns to its entry value with no `unlock_cached` call.
+    #[test]
+    fn dropping_a_pending_lock_without_unlocking_releases_it() {
+        let scratch = ScratchSurface::new();
+        let surface = unsafe { scratch.surface(SurfaceId(1)) };
+        let outstanding_before = super::pending_locks_outstanding();
+        {
+            let _lock = surface.lock_pending();
+            assert_eq!(
+                super::pending_locks_outstanding(),
+                outstanding_before + 1,
+                "the lock is outstanding while held"
+            );
+            // No `unlock_cached`: the end of this block drops the token.
+        }
+        assert_eq!(
+            super::pending_locks_outstanding(),
+            outstanding_before,
+            "dropping the token released the lock"
+        );
+    }
+
+    /// The success path unlocks exactly once: `unlock_cached` consumes the
+    /// token with `mem::forget` after its own unlock, so `Drop` must not run
+    /// a second unlock (and a second counter decrement) for the same lock.
+    #[test]
+    fn unlocking_a_pending_lock_balances_the_counter_exactly_once() {
+        let scratch = ScratchSurface::new();
+        let surface = unsafe { scratch.surface(SurfaceId(1)) };
+        let outstanding_before = super::pending_locks_outstanding();
+        let lock = surface.lock_pending();
+        assert!(surface.unlock_cached(lock).is_ok());
+        assert_eq!(
+            super::pending_locks_outstanding(),
+            outstanding_before,
+            "a released lock decrements exactly once — no double-unlock from Drop"
+        );
+    }
+
+    /// One half of the ABA pair is not enough: a token offered to a handle at
+    /// the same address but carrying a different id is refused, and the token
+    /// still unlocks the surface that minted it.
+    #[test]
+    fn unlock_cached_refuses_a_same_address_token_with_a_different_id() {
+        let scratch = ScratchSurface::new();
+        let minter = unsafe { scratch.surface(SurfaceId(1)) };
+        let impostor = unsafe { scratch.surface(SurfaceId(2)) };
+        let outstanding_before = super::pending_locks_outstanding();
+        let lock = minter.lock_pending();
+        let lock = match impostor.unlock_cached(lock) {
+            Err(lock) => lock,
+            Ok(()) => panic!("a same-address/different-id unlock must be refused"),
+        };
+        assert!(minter.unlock_cached(lock).is_ok());
+        assert_eq!(
+            super::pending_locks_outstanding(),
+            outstanding_before,
+            "the refused token still released exactly once, on its minter"
+        );
+    }
+
+    /// The other half: a token offered to a different surface that happens to
+    /// carry the same id value is refused too, and still unlocks its minter.
+    #[test]
+    fn unlock_cached_refuses_a_same_id_token_from_a_different_address() {
+        let a = ScratchSurface::new();
+        let b = ScratchSurface::new();
+        let surface_a = unsafe { a.surface(SurfaceId(1)) };
+        let surface_b = unsafe { b.surface(SurfaceId(1)) };
+        let outstanding_before = super::pending_locks_outstanding();
+        let lock = surface_a.lock_pending();
+        let lock = match surface_b.unlock_cached(lock) {
+            Err(lock) => lock,
+            Ok(()) => panic!("a different-address/same-id unlock must be refused"),
+        };
+        assert!(surface_a.unlock_cached(lock).is_ok());
+        assert_eq!(
+            super::pending_locks_outstanding(),
+            outstanding_before,
+            "the refused token still released exactly once, on its minter"
+        );
+    }
+
+    /// The null check in `from_raw_with_id` aborts deliberately: a null at an
+    /// infallible call site is a programming error, not a miss — nullable
+    /// callers must use `from_raw_opt`.
+    #[test]
+    #[should_panic(expected = "wlroots handed us a null surface")]
+    fn from_raw_with_id_aborts_on_null_deliberately() {
+        // SAFETY: none — null is the whole point; the abort is the contract.
+        unsafe {
+            super::Surface::from_raw_with_id(std::ptr::null_mut(), SurfaceId(0));
+        }
+    }
+
+    /// `from_raw_opt` is the nullable sibling: null reads `None` rather
+    /// than aborting, so nullable callers (hit-tests, `extern "C"` frames)
+    /// never abort through C.
+    #[test]
+    fn from_raw_opt_returns_none_on_null() {
+        // SAFETY: none — null is the whole point; `None` is the contract.
+        let got = unsafe { super::Surface::from_raw_opt(std::ptr::null_mut(), SurfaceId(0)) };
+        assert!(got.is_none(), "null must read None, not abort or fabricate");
+    }
+
+    /// `role()` on a surface with no xdg-surface role reads `None` rather
+    /// than faulting: wlroots' `try_from` answers null for a roleless surface
+    /// (a zeroed scratch has a null role), which is the ordinary "no role"
+    /// state, not a lookup failure.
+    #[test]
+    fn role_of_a_roleless_surface_is_none() {
+        let scratch = ScratchSurface::new();
+        let surface = unsafe { scratch.surface(SurfaceId(0)) };
+        assert_eq!(surface.role(), SurfaceRole::None);
+    }
+
+    /// Test ids stay inside the reserved band at the top of the id space no
+    /// matter how large `n` is: the modulo fold keeps even `u64::MAX` above
+    /// the band floor, so no test id can collide with a real surface's.
+    ///
+    /// `n = 2^32` aliases `dangling_for_test` by that same modulo rule
+    /// (`2^32 ≡ 0`), exactly as `n = 0` does — it is in-band but not
+    /// distinct, so callers wanting distinctness must pass `n >= 1` with
+    /// `n % 2^32 != 0`.
+    #[test]
+    fn surface_id_test_ids_stay_in_the_reserved_band_for_large_n() {
+        let floor = u64::MAX - ((1u64 << 32) - 1);
+        for n in [u64::MAX, u64::MAX - 1] {
+            let id = SurfaceId::dangling_nth_for_test(n);
+            assert!(
+                id.0 >= floor,
+                "dangling_nth_for_test({n}) = {} left the reserved band",
+                id.0
+            );
+            assert_ne!(
+                id,
+                SurfaceId::dangling_for_test(),
+                "dangling_nth_for_test({n}) must stay distinct from dangling_for_test"
+            );
+        }
+        let wrapped = SurfaceId::dangling_nth_for_test(1u64 << 32);
+        assert!(
+            wrapped.0 >= floor,
+            "dangling_nth_for_test(2^32) = {} left the reserved band",
+            wrapped.0
+        );
+        assert_eq!(
+            wrapped,
+            SurfaceId::dangling_for_test(),
+            "2^32 folds to 0, so it aliases dangling_for_test like n = 0 does"
+        );
+    }
+
+    /// Initialise the two child-list heads the C tree walks read, on a scratch
+    /// surface that is otherwise zeroed. Without this the walks would chase
+    /// null list links; with it an empty tree is exactly what the walk sees.
+    ///
+    /// # Safety
+    ///
+    /// `raw` must be a live, exclusively-owned scratch allocation.
+    unsafe fn init_walk_lists(raw: *mut crate::sys::wlr_surface) {
+        // SAFETY: the caller guarantees exclusive ownership; each initialiser
+        // writes only the `wl_list` head it owns, which then points at itself.
+        unsafe {
+            crate::sys::wayland_sys::server::wl_list_init(
+                &raw mut (*raw).current.subsurfaces_below,
+            );
+            crate::sys::wayland_sys::server::wl_list_init(
+                &raw mut (*raw).current.subsurfaces_above,
+            );
+        }
+    }
+
+    /// The tree walk visits a tracked root with its attached id at `(0, 0)`:
+    /// the `visit` thunk resolves the id from the surface's own addon set,
+    /// not from the handle the walk started from.
+    #[test]
+    fn for_each_surface_visits_a_tracked_root_with_its_own_id() {
+        let _serialised = crate::id::id_test_lock();
+        let scratch = ScratchSurface::new();
+        // SAFETY: `scratch` is exclusively owned here; the attach finishes
+        // with the set when `scratch` drops, while this lock is still held.
+        let attached = unsafe {
+            init_walk_lists(scratch.raw);
+            crate::id::attach_surface_id(&raw mut (*scratch.raw).addons)
+                .expect("first attach succeeds")
+        };
+        let surface = unsafe { scratch.surface(SurfaceId(0)) };
+        let mut visited = Vec::new();
+        surface.for_each_surface(|leaf, x, y| visited.push((leaf.id(), x, y)));
+        assert_eq!(
+            visited,
+            vec![(SurfaceId(attached), 0, 0)],
+            "the walk yields the root once, with the id from its addon set"
+        );
+    }
+
+    /// A surface the crate never attached an id to is silently skipped: the
+    /// closure never runs, and in particular no handle is fabricated for it.
+    #[test]
+    fn for_each_surface_skips_a_surface_without_an_id() {
+        let scratch = ScratchSurface::new();
+        // SAFETY: `scratch` is exclusively owned; no addon is attached, so no
+        // destroy hook runs at drop.
+        unsafe {
+            init_walk_lists(scratch.raw);
+        }
+        let surface = unsafe { scratch.surface(SurfaceId(0)) };
+        let mut visits = 0;
+        surface.for_each_surface(|_, _, _| visits += 1);
+        assert_eq!(visits, 0, "an id-less surface must be skipped, not visited");
+    }
+
+    /// The `visit` thunk refuses null surface/data pointers without running
+    /// the closure: a null here would be a dereference in an `extern "C"`
+    /// frame, so it is refused rather than dereferenced — and refusal must
+    /// not panic either, since a panic out of `extern "C"` aborts. Each
+    /// half is tripped separately.
+    #[test]
+    fn visit_refuses_null_pointers_without_running_the_closure() {
+        use std::ffi::c_void;
+        let scratch = crate::test_support::ScratchSurface::new();
+        let mut visits = 0;
+        let mut f = |_: &super::Surface<'_>, _: i32, _: i32| visits += 1;
+        // SAFETY: the stubs invoke the handed iterator synchronously with
+        // the pointers named; `scratch` outlives both calls, and neither
+        // call dereferences (that is the point under test).
+        unsafe {
+            super::for_each_surface_with(&mut f, |iterate, data| {
+                iterate.expect("iterator fn")(std::ptr::null_mut(), 0, 0, data);
+            });
+            super::for_each_surface_with(&mut f, |iterate, _| {
+                iterate.expect("iterator fn")(scratch.raw, 0, 0, std::ptr::null_mut::<c_void>());
+            });
+        }
+        assert_eq!(visits, 0, "null surface/data must skip the closure");
+        drop(scratch);
+    }
+
+    /// `surface_at` on a childless scratch surface misses through the real
+    /// wlroots walk (zeroed dimensions reject every non-negative point before
+    /// any region is touched), and the shared tail reports a live but
+    /// id-less raw pointer as a miss rather than fabricating a handle — the
+    /// no-invention rule every `surface_at` family in the crate shares.
+    #[test]
+    fn surface_at_on_an_untracked_leaf_misses_rather_than_fabricating() {
+        let scratch = ScratchSurface::new();
+        // SAFETY: `scratch` is exclusively owned; no addon is attached, so no
+        // destroy hook runs at drop.
+        unsafe {
+            init_walk_lists(scratch.raw);
+        }
+        let surface = unsafe { scratch.surface(SurfaceId(0)) };
+        assert!(
+            surface.surface_at(1.0, 1.0).is_none(),
+            "the real walk misses a zeroed childless surface"
+        );
+        // SAFETY: `scratch` is live and id-less, which is exactly the miss
+        // case under test; the returned handle (none) outlives nothing.
+        let tail = unsafe { super::Surface::finish_surface_at(scratch.raw, 0.0, 0.0) };
+        assert!(
+            tail.is_none(),
+            "an untracked leaf must miss, not resolve to an invented id"
         );
     }
 }

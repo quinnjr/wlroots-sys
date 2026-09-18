@@ -112,6 +112,23 @@ impl<'h> Output<'h> {
         ))
     }
 
+    /// This output's stable identity, or `None` when no id addon is attached.
+    ///
+    /// The non-panicking sibling of [`id`](Output::id): dispatch-built handles
+    /// carry the cached id and return it without touching FFI; handles built
+    /// by any other path re-read the addon set, mapping a missing addon to
+    /// `None` instead of panicking. [`PresentationEvent::from_output`](crate::PresentationEvent::from_output)
+    /// resolves through here so a held event never dereferences the output
+    /// after teardown.
+    pub(crate) fn try_id(&self) -> Option<OutputId> {
+        if let Some(id) = self.id {
+            return Some(id);
+        }
+        // SAFETY: the handle's lifetime guarantees the output is live, and
+        // `find_id` only reads the addon set.
+        unsafe { find_id(&raw const (*self.raw.as_ptr()).addons) }.map(OutputId)
+    }
+
     /// The output's name, as reported by the backend.
     pub fn name(&self) -> Option<String> {
         // SAFETY: the handle's lifetime guarantees the output is live. wlroots

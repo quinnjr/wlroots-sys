@@ -126,6 +126,16 @@ mod tests {
     /// rather than dereferencing anything. This is the same shape wlroots leaves
     /// the child surface in once the parent is destroyed, which the
     /// client-driven test in `tests/subsurfaces.rs` exercises for real.
+    ///
+    /// There is deliberately no live-role-null-parent unit test beside this
+    /// one: the downcast requires `surface->role` to equal wlroots' private
+    /// `subsurface_role` static (not exported, not in the headers) *and* a
+    /// live `wl_resource` carrying the sub-surface implementation as
+    /// `role_resource`, so a live role is unconstructible without a real
+    /// client and display. The closest equivalent is the roleless-parent
+    /// integration test in `tests/subsurfaces.rs`, which pins the observable
+    /// half of the untracked-parent case (the `(None, Some)` read itself is
+    /// unexpressible through the handler API — see that test).
     #[test]
     fn accessors_miss_on_a_surface_without_the_role() {
         let scratch = ScratchSurface::new();

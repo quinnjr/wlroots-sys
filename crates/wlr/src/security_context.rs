@@ -14,7 +14,27 @@
 //! client, so the crate copies the three strings out at emission time and
 //! delivers an owned [`SecurityContext`] to
 //! [`crate::ToplevelHandler::security_context_committed`]. The committed value
-//! therefore outlives the client that produced it.
+//! therefore outlives the client that produced it. The event's `parent_client`
+//! — the sandbox-engine connection that committed — is carried alongside as an
+//! opaque pointer (see [`SecurityContext::committing_client`]).
+//!
+//! # Trust model
+//!
+//! The three metadata strings are a self-asserted CLAIM by whoever holds the
+//! sandbox-engine connection: wlroots does not authenticate the engine name,
+//! the app id, or the instance id, and any client that can bind the manager
+//! global can commit any strings it likes. Metadata alone therefore
+//! authenticates nothing. A compositor that gates a privileged global on
+//! `app_id() == Some("...")` without correlating *which client* committed it
+//! lets any client claim that app id.
+//!
+//! The honest correlation is the committing-client identity this crate
+//! propagates: allow only the sandbox engine you launched (the connection you
+//! spawned and therefore recognise) to drive the privileged behaviour, and
+//! resolve the connections it accepted with
+//! [`Runtime::lookup_security_context`] from the display's global filter,
+//! default-denying every other client. Gate on correlated identity, never on
+//! bare metadata.
 
 use std::ptr::NonNull;
 
@@ -28,7 +48,11 @@ use crate::{Display, Error, Result, Runtime, sys};
 /// the value is safe to keep for as long as the caller likes. Each is `None`
 /// when the client did not set it — all three are optional in the protocol,
 /// though a well-behaved sandbox engine sets the sandbox-engine name.
+///
+/// See [`SecurityContext::committing_client`] for the trust model: these strings are a
+/// self-asserted claim, not an authenticated identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SecurityContextState {
     sandbox_engine: Option<String>,
     app_id: Option<String>,
@@ -58,16 +82,56 @@ impl SecurityContextState {
 ///
 /// The metadata is owned ([`state`](Self::state)), so a consumer can store the
 /// whole value and read it after the client and the display are gone. The
-/// convenience accessors forward to [`state`](Self::state).
+/// convenience accessors forward to [`state`](Self::state). The wrapper stays
+/// a distinct type rather than collapsing into [`SecurityContextState`]
+/// because it also carries the committing-client attribution
+/// ([`committing_client`](Self::committing_client)), which is not metadata.
+///
+/// See [`committing_client`](Self::committing_client) for the trust model: the metadata is a
+/// self-asserted claim, trustworthy only when correlated with the sandbox
+/// engine that committed it; gate privileged globals on that correlated
+/// identity, not on bare metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SecurityContext {
     state: SecurityContextState,
+    /// The `wl_client` that committed this context (the commit-event path) or
+    /// that this context was looked up for (the
+    /// [`Runtime::lookup_security_context`] path). Opaque: compare it only
+    /// against clients observed through the same run, never dereference it,
+    /// and never hold it past the call that delivered it — on the commit path
+    /// it is valid only for the duration of the
+    /// [`crate::ToplevelHandler::security_context_committed`] call, and on
+    /// the lookup path only while the queried client lives (both die with
+    /// their client, like every other raw client pointer in this crate).
+    committer: Option<NonNull<sys::wl_client>>,
 }
 
 impl SecurityContext {
     /// The context's metadata.
     pub fn state(&self) -> &SecurityContextState {
         &self.state
+    }
+
+    /// The client this context is attributed to, as an opaque pointer.
+    ///
+    /// On the commit path this is wlroots' commit-event `parent_client`: the
+    /// sandbox-engine connection that committed these strings. It is the
+    /// correlation handle the trust model (see [`SecurityContext`]) asks for:
+    /// the compositor recognises the engine it launched by its connection,
+    /// and can pass this pointer straight back into
+    /// [`Runtime::lookup_security_context`] while handling the commit. On the
+    /// lookup path it is the queried client itself.
+    ///
+    /// The pointer is only meaningful while its client lives: during the
+    /// `security_context_committed` call for a committed value, and while the
+    /// queried connection is connected for a looked-up one. Never
+    /// dereference it (this crate offers no API that takes it except
+    /// `lookup_security_context`, whose own contract governs), never store it
+    /// past the client, and never compare it across runs — a disconnected
+    /// client frees it, and a later connection may reuse the address.
+    pub fn committing_client(&self) -> Option<*mut sys::wl_client> {
+        self.committer.map(NonNull::as_ptr)
     }
 
     /// The sandbox engine's reverse-DNS name; see
@@ -91,13 +155,24 @@ impl SecurityContext {
 
 /// Copy a live security context's state out into an owned snapshot.
 ///
+/// `committer` is the client the snapshot is attributed to: the commit
+/// event's `parent_client` on the commit path, the queried client on the
+/// lookup path. Stored opaquely; see
+/// [`SecurityContext::committing_client`].
+///
 /// # Safety
 ///
 /// `state` must point at a live `wlr_security_context_v1_state`; each of its
-/// string fields must be null or a live NUL-terminated string.
-pub(crate) unsafe fn snapshot(state: *const sys::wlr_security_context_v1_state) -> SecurityContext {
+/// string fields must be null or a live NUL-terminated string. `committer`,
+/// when present, must be the live client the snapshot is attributed to — it
+/// is stored, never dereferenced here.
+pub(crate) unsafe fn snapshot(
+    state: *const sys::wlr_security_context_v1_state,
+    committer: Option<NonNull<sys::wl_client>>,
+) -> SecurityContext {
     // SAFETY: the caller guarantees `state` is live, and every field read is a
-    // null-or-NUL-terminated `char *` copied out here.
+    // null-or-NUL-terminated `char *` copied out here. `committer` is stored
+    // opaquely and never read.
     let state = unsafe {
         SecurityContextState {
             sandbox_engine: copy_nullable_string((*state).sandbox_engine),
@@ -105,7 +180,7 @@ pub(crate) unsafe fn snapshot(state: *const sys::wlr_security_context_v1_state) 
             instance_id: copy_nullable_string((*state).instance_id),
         }
     };
-    SecurityContext { state }
+    SecurityContext { state, committer }
 }
 
 impl Runtime {
@@ -171,6 +246,27 @@ impl Runtime {
     /// so, what metadata. `None` when no manager was created, when the manager
     /// died with its display, or when `client` has no attached context.
     ///
+    /// # Privileged globals
+    ///
+    /// Several protocol globals in this crate broadcast sensitive state or let
+    /// any bound client drive another client's windows — `xdg_system_bell_v1`,
+    /// `zwlr_foreign_toplevel_manager_v1`, `ext_workspace_manager_v1` — and the
+    /// events and handler methods for them carry no client identity, so
+    /// per-client allow/deny is impossible at the handler. Gate each such
+    /// global at bind time with a filter on the display built on this
+    /// function, and default-deny — allow only clients whose context you
+    /// trust, deny the rest:
+    ///
+    /// ```ignore
+    /// // Allow only a known client to bind the privileged global; deny the rest.
+    /// let allowed = unsafe { runtime.lookup_security_context(client) }
+    ///     .is_some_and(|ctx| ctx.app_id() == Some("org.example.trusted"));
+    /// // return `allowed` from the display's global filter.
+    /// ```
+    ///
+    /// Per-event docs name only which global to gate and point here for the
+    /// rule itself.
+    ///
     /// # Safety
     ///
     /// `client` must be null or a live `wl_client`. wlroots keys the lookup on
@@ -209,8 +305,12 @@ impl Runtime {
         if state.is_null() {
             return None;
         }
-        // SAFETY: the lookup returned a non-null live state pointer.
-        Some(unsafe { snapshot(state) })
+        // SAFETY: the lookup returned a non-null live state pointer. The
+        // snapshot is attributed to the queried client: this is the
+        // connection the metadata is attached to, which is what makes the
+        // returned value correlatable — see
+        // [`SecurityContext::committing_client`].
+        Some(unsafe { snapshot(state, Some(client)) })
     }
 }
 

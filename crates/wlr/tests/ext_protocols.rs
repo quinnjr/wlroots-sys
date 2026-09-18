@@ -146,12 +146,32 @@ fn ext_foreign_toplevel_handle_state_round_trips() {
     );
     assert_eq!(handle.state().title.as_deref(), Some("Second"));
 
+    // The app-id field refuses the same way, leaving the previous state in
+    // place.
+    let before = handle.state();
+    assert_eq!(
+        handle.update_state(&foreign_state(None, Some("bad\0id"))),
+        None,
+        "an app id with an interior NUL is refused"
+    );
+    assert_eq!(
+        handle.state(),
+        before,
+        "a refused update leaves the previous state in place"
+    );
+
     // Creation refuses a NUL title the same way the update path does.
     assert!(
         runtime
             .create_ext_foreign_toplevel(&foreign_state(Some("a\0b"), None))
             .is_none(),
         "a create with an interior-NUL title is refused"
+    );
+    assert!(
+        runtime
+            .create_ext_foreign_toplevel(&foreign_state(None, Some("a\0b")))
+            .is_none(),
+        "a create with an interior-NUL app id is refused"
     );
 }
 
@@ -217,6 +237,13 @@ fn ext_foreign_toplevel_display_death_makes_handle_inert() {
         None,
         "no mutator writes either"
     );
+    assert!(
+        runtime
+            .create_ext_foreign_toplevel(&foreign_state(Some("late"), None))
+            .is_none(),
+        "the list's death cleared the stored pointer, so a post-teardown \
+         create misses instead of dereferencing freed memory"
+    );
     drop(handle);
 }
 
@@ -272,6 +299,11 @@ fn a_client_observes_an_ext_foreign_toplevel() {
     assert!(
         events.identifier.is_some(),
         "the stable identifier event arrived"
+    );
+    assert!(
+        !events.saw_closed,
+        "the observed handle is never closed during the run, so no request \
+         is driven against it post-close"
     );
     drop(handle);
 }
@@ -361,6 +393,14 @@ fn workspace_mutators_round_trip() {
 
     workspace.set_coordinates(&[3, 4]).expect("coordinates");
     assert_eq!(workspace.coordinates(), vec![3, 4]);
+    // An empty slice clears the coordinates rather than leaving them in
+    // place.
+    workspace.set_coordinates(&[]).expect("clear coordinates");
+    assert_eq!(
+        workspace.coordinates(),
+        Vec::<u32>::new(),
+        "clearing the coordinates reads back as empty"
+    );
 
     workspace.set_active(true).expect("active");
     workspace.set_urgent(true).expect("urgent");
@@ -448,13 +488,180 @@ fn workspace_display_death_makes_handles_inert() {
     assert!(!group.is_alive(), "the manager's death was observed");
     assert!(!workspace.is_alive());
     assert_eq!(group.capabilities(), WorkspaceGroupCapabilities::NONE);
+    assert_eq!(workspace.id_string(), None, "the id string misses too");
     assert_eq!(workspace.name(), None);
+    assert_eq!(
+        workspace.coordinates(),
+        Vec::<u32>::new(),
+        "the coordinates miss too"
+    );
+    assert_eq!(
+        workspace.capabilities(),
+        WorkspaceCapabilities::NONE,
+        "the capabilities miss too"
+    );
     assert_eq!(workspace.group(), None);
     assert!(!workspace.active());
+    assert!(!workspace.urgent(), "the urgent bit misses too");
+    assert!(!workspace.hidden(), "the hidden bit misses too");
     assert_eq!(workspace.set_name("late"), None);
     assert_eq!(workspace.set_active(true), None);
+    assert_eq!(workspace.set_urgent(true), None);
+    assert_eq!(workspace.set_hidden(true), None);
+    assert_eq!(
+        workspace.set_coordinates(&[1, 2]),
+        None,
+        "no coordinate writes either"
+    );
     drop(workspace);
     drop(group);
+}
+
+/// Dropping the display clears the stored manager pointer, so a later create
+/// misses instead of dereferencing freed memory — and the double-create guard
+/// resets with it, so a fresh display can install a new manager on the same
+/// runtime.
+#[test]
+fn workspace_manager_teardown_clears_and_recreates() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    let display = Display::new().expect("display");
+    let runtime = Runtime::new().expect("runtime");
+    runtime
+        .create_ext_workspace_manager(&display, 1)
+        .expect("manager");
+    assert!(
+        runtime
+            .create_workspace_group(WorkspaceGroupCapabilities::CREATE_WORKSPACE)
+            .is_some(),
+        "the live manager creates groups"
+    );
+
+    drop(display);
+
+    assert!(
+        runtime
+            .create_workspace_group(WorkspaceGroupCapabilities::NONE)
+            .is_none(),
+        "the manager's death cleared the stored pointer, so a post-teardown \
+         group create misses instead of dereferencing freed memory"
+    );
+    assert!(
+        runtime
+            .create_workspace("late", WorkspaceCapabilities::ACTIVATE)
+            .is_none(),
+        "a post-teardown workspace create misses the same way"
+    );
+
+    // The cleared pointer resets the double-create guard: a fresh display
+    // installs a new manager, and it creates usable handles.
+    let display = Display::new().expect("fresh display");
+    runtime
+        .create_ext_workspace_manager(&display, 1)
+        .expect("a fresh display installs a new manager");
+    assert!(
+        runtime.create_ext_workspace_manager(&display, 1).is_err(),
+        "the guard is armed again once a manager exists"
+    );
+    let group = runtime
+        .create_workspace_group(WorkspaceGroupCapabilities::CREATE_WORKSPACE)
+        .expect("the new manager creates groups");
+    let workspace = runtime
+        .create_workspace("1", WorkspaceCapabilities::ACTIVATE)
+        .expect("the new manager creates workspaces");
+    workspace.set_group(Some(&group)).expect("assign");
+    assert_eq!(workspace.group(), Some(group.id()));
+    drop((workspace, group));
+}
+
+/// `set_group` refuses an inert or foreign group: grouping is
+/// manager-scoped, and a dead manager's pointer must never be touched.
+#[test]
+fn set_group_refuses_inert_and_foreign_groups() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    let display = Display::new().expect("display");
+    let runtime = Runtime::new().expect("runtime");
+    runtime
+        .create_ext_workspace_manager(&display, 1)
+        .expect("manager");
+    let old_group = runtime
+        .create_workspace_group(WorkspaceGroupCapabilities::CREATE_WORKSPACE)
+        .expect("group");
+    let old_workspace = runtime
+        .create_workspace("old", WorkspaceCapabilities::ASSIGN)
+        .expect("workspace");
+
+    // Kill the manager out from under both handles.
+    drop(display);
+    assert!(!old_group.is_alive() && !old_workspace.is_alive());
+
+    // A fresh display installs a new manager on the same runtime, with live
+    // handles of its own.
+    let display = Display::new().expect("fresh display");
+    runtime
+        .create_ext_workspace_manager(&display, 1)
+        .expect("fresh manager");
+    let group = runtime
+        .create_workspace_group(WorkspaceGroupCapabilities::CREATE_WORKSPACE)
+        .expect("group");
+    let workspace = runtime
+        .create_workspace("1", WorkspaceCapabilities::ASSIGN)
+        .expect("workspace");
+
+    // The control: two live handles from the same manager assign freely.
+    workspace.set_group(Some(&group)).expect("assign");
+    assert_eq!(workspace.group(), Some(group.id()));
+
+    // A live workspace against an inert group refuses — the group's own
+    // liveness fails before its freed manager is ever touched.
+    assert_eq!(
+        workspace.set_group(Some(&old_group)),
+        None,
+        "a group from the dead manager is refused"
+    );
+    assert_eq!(
+        workspace.group(),
+        Some(group.id()),
+        "the refused assign left the previous group in place"
+    );
+    // An inert workspace refuses everything, including clearing.
+    assert_eq!(
+        old_workspace.set_group(Some(&group)),
+        None,
+        "an inert workspace cannot be assigned"
+    );
+    assert_eq!(
+        old_workspace.set_group(Some(&old_group)),
+        None,
+        "two inert handles refuse each other"
+    );
+    assert_eq!(
+        old_workspace.set_group(None),
+        None,
+        "even clearing the group is refused once the workspace is inert"
+    );
+    // A group from another runtime is foreign even when both sides are live.
+    let foreign_runtime = Runtime::new().expect("foreign runtime");
+    let foreign_display = Display::new().expect("foreign display");
+    foreign_runtime
+        .create_ext_workspace_manager(&foreign_display, 1)
+        .expect("foreign manager");
+    let foreign_group = foreign_runtime
+        .create_workspace_group(WorkspaceGroupCapabilities::CREATE_WORKSPACE)
+        .expect("foreign group");
+    assert_eq!(
+        workspace.set_group(Some(&foreign_group)),
+        None,
+        "a group from another runtime is refused"
+    );
+    assert_eq!(
+        workspace.group(),
+        Some(group.id()),
+        "the refused foreign assign left the previous group in place"
+    );
+    drop((workspace, group, old_workspace, old_group));
+    drop((foreign_group, foreign_display, foreign_runtime));
 }
 
 /// `output_enter`/`output_leave` are safe against a live output, and the
@@ -481,8 +688,14 @@ fn workspace_group_output_enter_leave_are_safe() {
     impl wlr::OutputHandler for Probe {
         fn new_output(&mut self, output: &wlr::Output<'_>) {
             if let Some(group) = &self.group {
-                group.output_enter(output);
-                group.output_leave(output);
+                assert!(
+                    group.output_enter(output).is_some(),
+                    "output_enter reports the live group"
+                );
+                assert!(
+                    group.output_leave(output).is_some(),
+                    "output_leave reports the live group"
+                );
                 self.seen = true;
             }
         }
@@ -555,6 +768,18 @@ fn a_client_commits_workspace_requests() {
     assert_eq!(events.groups_seen, 1, "the client saw one group");
     assert_eq!(events.workspaces_seen, 1, "the client saw one workspace");
     assert!(events.saw_done, "the initial done event arrived");
+    assert!(
+        !events.saw_finished,
+        "the manager was never finished while requests were committed against it"
+    );
+    assert!(
+        !events.group_removed,
+        "the group was never removed while the client drove requests against it"
+    );
+    assert!(
+        !events.workspace_removed,
+        "the workspace was never removed while the client drove requests against it"
+    );
 
     assert_eq!(
         app.requests,
@@ -665,14 +890,24 @@ enum StagedDestroy {
     Workspace,
 }
 
-/// Stage one `assign` request, wait for the server to destroy `destroy`'s
-/// target, then commit. The commit — not the staging — is what the server
-/// drains, so wlroots has already NULLed the destroyed target when
-/// `collect_requests` walks the batch.
-fn spawn_staged_assign(
+/// Which single request the staged leg stages before the commit drains.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StagedRequest {
+    Assign,
+    Activate,
+    Deactivate,
+    Remove,
+}
+
+/// Stage one request, wait for the server to destroy `destroy`'s target,
+/// then commit. The commit — not the staging — is what the server drains, so
+/// wlroots has already NULLed the destroyed target when `collect_requests`
+/// walks the batch.
+fn spawn_staged_request(
     socket: &str,
     staged: std::sync::mpsc::Sender<()>,
     destroyed: std::sync::mpsc::Receiver<()>,
+    request: StagedRequest,
 ) -> JoinHandle<()> {
     let path = common::isolated_runtime_dir().join(socket);
     let stream = std::os::unix::net::UnixStream::connect(&path).expect("connect to wayland socket");
@@ -701,13 +936,18 @@ fn spawn_staged_assign(
             .clone()
             .expect("the manager replayed a workspace");
 
-        // Stage but do not commit: the assign is flushed so the server
+        // Stage but do not commit: the request is flushed so the server
         // receives it while the target is still live, and the commit that
         // drains it only follows once the server has destroyed the target.
         // The flush comes before the channel send because only socket
         // traffic wakes the server's blocking dispatch: a channel send
         // alone would leave the server asleep while this thread blocks.
-        workspace.assign(&group);
+        match request {
+            StagedRequest::Assign => workspace.assign(&group),
+            StagedRequest::Activate => workspace.activate(),
+            StagedRequest::Deactivate => workspace.deactivate(),
+            StagedRequest::Remove => workspace.remove(),
+        }
         conn.flush().expect("flush the staged assign");
         staged.send(()).expect("stage the assign");
         queue
@@ -734,6 +974,10 @@ fn spawn_staged_assign(
 struct StagedApp {
     client: Option<JoinHandle<()>>,
     requests: Vec<WorkspaceRequest>,
+    /// How many `workspace_commit` deliveries fired. The staged tests assert
+    /// on the delivered batch, so a run where the drain never fired must fail
+    /// here rather than passing vacuously on an empty vec.
+    commits: u32,
     staged: std::sync::mpsc::Receiver<()>,
     destroyed: Option<std::sync::mpsc::Sender<()>>,
     group: Option<WorkspaceGroupHandle>,
@@ -747,6 +991,7 @@ impl wlr::FdHandler for StagedApp {}
 
 impl ToplevelHandler for StagedApp {
     fn workspace_commit(&mut self, requests: &[WorkspaceRequest]) {
+        self.commits += 1;
         self.requests.extend_from_slice(requests);
     }
 }
@@ -801,8 +1046,14 @@ fn assign_with_destroyed_group_arrives_with_none_group() {
     let (staged_tx, staged_rx) = std::sync::mpsc::channel();
     let (destroyed_tx, destroyed_rx) = std::sync::mpsc::channel();
     let mut app = StagedApp {
-        client: Some(spawn_staged_assign(&socket, staged_tx, destroyed_rx)),
+        client: Some(spawn_staged_request(
+            &socket,
+            staged_tx,
+            destroyed_rx,
+            StagedRequest::Assign,
+        )),
         requests: Vec::new(),
+        commits: 0,
         staged: staged_rx,
         destroyed: Some(destroyed_tx),
         group: Some(group),
@@ -862,8 +1113,14 @@ fn assign_with_destroyed_workspace_arrives_stale() {
     let (staged_tx, staged_rx) = std::sync::mpsc::channel();
     let (destroyed_tx, destroyed_rx) = std::sync::mpsc::channel();
     let mut app = StagedApp {
-        client: Some(spawn_staged_assign(&socket, staged_tx, destroyed_rx)),
+        client: Some(spawn_staged_request(
+            &socket,
+            staged_tx,
+            destroyed_rx,
+            StagedRequest::Assign,
+        )),
         requests: Vec::new(),
+        commits: 0,
         staged: staged_rx,
         destroyed: Some(destroyed_tx),
         group: Some(group),
@@ -879,9 +1136,8 @@ fn assign_with_destroyed_workspace_arrives_stale() {
         .join()
         .expect("client thread");
 
-    // `StaleRequestKind` is not re-exported (and production code is out of
-    // scope here), so the kind is asserted through its `Debug` rather than
-    // named — the workspace/group payloads are asserted by value.
+    // The kind is matched exactly — the workspace/group payloads are asserted
+    // by value alongside it.
     assert_eq!(
         app.requests.len(),
         1,
@@ -910,4 +1166,209 @@ fn assign_with_destroyed_workspace_arrives_stale() {
             "the assign survived its workspace's destruction as Stale, keeping the live group: {other:?}"
         ),
     }
+}
+
+/// Stage one workspace-only request, have the server destroy the workspace
+/// before the commit drains, and return the delivered batch.
+///
+/// The deactivate leg pre-activates server-side first: a `deactivate`
+/// staged against an inactive workspace is a protocol no-op wlroots may
+/// legitimately drop before anything is queued, so pinning `Stale` on that
+/// path would test unspecified behavior. A deactivate staged against an
+/// ACTIVE workspace is a genuine state transition, and its survival past
+/// the destroy is the contract under test for every kind here.
+fn staged_workspace_destroy_delivers(request: StagedRequest) -> Vec<WorkspaceRequest> {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime
+        .create_ext_workspace_manager(&display, 1)
+        .expect("manager");
+
+    let group = runtime
+        .create_workspace_group(WorkspaceGroupCapabilities::CREATE_WORKSPACE)
+        .expect("group");
+    let workspace = runtime
+        .create_workspace(
+            "1",
+            WorkspaceCapabilities::ACTIVATE
+                | WorkspaceCapabilities::DEACTIVATE
+                | WorkspaceCapabilities::ASSIGN
+                | WorkspaceCapabilities::REMOVE,
+        )
+        .expect("workspace");
+    if request == StagedRequest::Deactivate {
+        workspace
+            .set_active(true)
+            .expect("pre-activate for deactivate");
+        assert!(
+            workspace.active(),
+            "the deactivate leg stages against an active workspace"
+        );
+    }
+
+    let socket = display.add_socket_auto().expect("socket");
+    let (staged_tx, staged_rx) = std::sync::mpsc::channel();
+    let (destroyed_tx, destroyed_rx) = std::sync::mpsc::channel();
+    let mut app = StagedApp {
+        client: Some(spawn_staged_request(
+            &socket,
+            staged_tx,
+            destroyed_rx,
+            request,
+        )),
+        requests: Vec::new(),
+        commits: 0,
+        staged: staged_rx,
+        destroyed: Some(destroyed_tx),
+        group: Some(group),
+        workspace: Some(workspace),
+        destroy: StagedDestroy::Workspace,
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Stop)
+        .expect("run_all");
+    app.client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+    assert!(
+        app.commits >= 1,
+        "the commit drained at least once: an empty final batch means \
+         the drain never fired, not an empty commit"
+    );
+    app.requests
+}
+
+/// An `activate` whose workspace the server destroyed after staging is
+/// preserved as `Stale` with exactly the activate kind — never silently
+/// dropped, so an all-stale batch is distinguishable from an empty commit.
+#[test]
+fn staged_activate_with_destroyed_workspace_arrives_stale() {
+    assert_eq!(
+        staged_workspace_destroy_delivers(StagedRequest::Activate),
+        vec![WorkspaceRequest::Stale {
+            kind: StaleRequestKind::Activate,
+            workspace: None,
+            group: None,
+        }],
+        "the activate survived its workspace's destruction as Stale"
+    );
+}
+
+/// A `deactivate` whose workspace the server destroyed after staging is
+/// preserved as `Stale` with exactly the deactivate kind.
+#[test]
+fn staged_deactivate_with_destroyed_workspace_arrives_stale() {
+    assert_eq!(
+        staged_workspace_destroy_delivers(StagedRequest::Deactivate),
+        vec![WorkspaceRequest::Stale {
+            kind: StaleRequestKind::Deactivate,
+            workspace: None,
+            group: None,
+        }],
+        "the deactivate survived its workspace's destruction as Stale"
+    );
+}
+
+/// A `remove` whose workspace the server destroyed after staging is preserved
+/// as `Stale` with exactly the remove kind.
+#[test]
+fn staged_remove_with_destroyed_workspace_arrives_stale() {
+    assert_eq!(
+        staged_workspace_destroy_delivers(StagedRequest::Remove),
+        vec![WorkspaceRequest::Stale {
+            kind: StaleRequestKind::Remove,
+            workspace: None,
+            group: None,
+        }],
+        "the remove survived its workspace's destruction as Stale"
+    );
+}
+
+/// The handler the empty-commit leg records into: one entry per commit, so an
+/// empty commit is visible instead of vanishing into a flat request list.
+struct CommitCountingApp {
+    client: Option<JoinHandle<common::client::ExtWorkspaceEvents>>,
+    commits: Vec<Vec<WorkspaceRequest>>,
+}
+
+impl wlr::OutputHandler for CommitCountingApp {}
+impl wlr::SeatHandler for CommitCountingApp {}
+impl wlr::FdHandler for CommitCountingApp {}
+
+impl ToplevelHandler for CommitCountingApp {
+    fn workspace_commit(&mut self, requests: &[WorkspaceRequest]) {
+        self.commits.push(requests.to_vec());
+    }
+}
+
+impl wlr::LoopHandler for CommitCountingApp {
+    fn should_stop(&mut self) -> bool {
+        self.client.as_ref().is_some_and(|h| h.is_finished())
+    }
+}
+
+/// Bind the manager and commit nothing: the server still emits one commit —
+/// an empty batch delivered exactly once — so an all-stale batch (one `Stale`
+/// entry) is distinguishable from an empty one (no entries).
+#[test]
+fn empty_commit_delivers_one_empty_batch() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime
+        .create_ext_workspace_manager(&display, 1)
+        .expect("manager");
+
+    let group = runtime
+        .create_workspace_group(WorkspaceGroupCapabilities::CREATE_WORKSPACE)
+        .expect("group");
+    let workspace = runtime
+        .create_workspace(
+            "1",
+            WorkspaceCapabilities::ACTIVATE
+                | WorkspaceCapabilities::DEACTIVATE
+                | WorkspaceCapabilities::ASSIGN
+                | WorkspaceCapabilities::REMOVE,
+        )
+        .expect("workspace");
+
+    let socket = display.add_socket_auto().expect("socket");
+    let mut app = CommitCountingApp {
+        client: Some(common::client::spawn_empty_commit(&socket)),
+        commits: Vec::new(),
+    };
+
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Stop)
+        .expect("run_all");
+    let events = app
+        .client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+
+    assert_eq!(events.groups_seen, 1, "the client bound and saw the group");
+    assert_eq!(
+        events.workspaces_seen, 1,
+        "the client bound and saw the workspace"
+    );
+    assert!(events.saw_done, "the initial done event arrived");
+    assert_eq!(
+        app.commits,
+        vec![Vec::new()],
+        "the empty commit was delivered exactly once, as an empty batch"
+    );
+    drop((workspace, group));
 }

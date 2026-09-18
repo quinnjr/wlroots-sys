@@ -2,8 +2,20 @@
 //! manages as protocol object handles, for a taskbar, a screen-share picker or
 //! any client that needs a handle before it can reach the toplevel's pixels.
 //!
-//! Unlike [`foreign_toplevel`](crate::foreign_toplevel), this protocol is
-//! observation only: the client cannot activate or close anything through it.
+//! # Privileged: this global broadcasts window state to whoever binds it
+//!
+//! The protocol carries no client requests — a bound client cannot activate or
+//! close anything through it — but that does not make it safe to expose. Every
+//! client that binds the list receives a handle for **every** exported window
+//! together with its current title, app id and identifier, and keeps receiving
+//! updates for as long as it stays bound. That is sensitive cross-app data
+//! (which windows exist, what they are titled), readable by any process that
+//! can connect, and a ready-made sandbox-enumeration primitive: "observation
+//! only" describes the request direction, not the exposure.
+//!
+//! Gate the list global at bind time — see the rule in
+//! [`Runtime::lookup_security_context`](crate::Runtime::lookup_security_context).
+//!
 //! A compositor calls [`Runtime::create_ext_foreign_toplevel_list`] once and
 //! then mints one owned [`ExtForeignToplevelHandle`] per window with
 //! [`Runtime::create_ext_foreign_toplevel`], updating it through
@@ -30,9 +42,9 @@
 use std::ffi::CString;
 use std::ptr::NonNull;
 
-use crate::backend::Registration;
+use crate::backend::{Registration, bound_session, remove_listener};
 use crate::owned_handle::{OwnedHandle, on_watched_destroy};
-use crate::runtime::copy_nullable_string;
+use crate::runtime::{RuntimeInner, copy_nullable_string};
 use crate::{Display, Error, Result, Runtime, sys};
 
 /// A snapshot of an exported toplevel's mutable state.
@@ -122,12 +134,12 @@ impl ExtForeignToplevelHandle {
     /// accessor and mutator then reports a miss rather than dereferencing freed
     /// memory.
     pub fn is_alive(&self) -> bool {
-        self.listeners.alive.get()
+        self.listeners.is_alive()
     }
 
     /// The live wlroots handle, or `None` once this handle is inert.
     fn raw(&self) -> Option<NonNull<sys::wlr_ext_foreign_toplevel_handle_v1>> {
-        self.is_alive().then_some(self.listeners.raw)
+        self.listeners.live_raw()
     }
 
     /// The handle's stable identifier, as the protocol reports it.
@@ -163,8 +175,14 @@ impl ExtForeignToplevelHandle {
         }
     }
 
-    /// Set the state clients see. `None` for an inert handle, or for a string
-    /// containing an interior NUL, which cannot be passed to wlroots.
+    /// Set the state clients see.
+    ///
+    /// `None` for two distinct misses, both silent by design (there is no
+    /// [`Error`](crate::Error) variant that names one without stretching its
+    /// documented semantics, and this signature is frozen within the 0.20.x
+    /// line): the handle is inert — its list died with the display — or a
+    /// field contains an interior NUL, which cannot be passed to wlroots and
+    /// is refused rather than truncated, leaving the previous state in place.
     ///
     /// wlroots copies both strings into its own storage, so the state's
     /// `String`s are only borrowed for the call.
@@ -213,6 +231,27 @@ impl Runtime {
         let raw =
             NonNull::new(raw).ok_or(Error::Create("wlr_ext_foreign_toplevel_list_v1_create"))?;
         *self.inner.ext_foreign_toplevel_list.borrow_mut() = Some(raw);
+        // Link the teardown watch before returning: the list dies with the
+        // display, and without this the stored pointer would dangle across
+        // display teardown. The watch clears the pointer and the liveness
+        // flag from inside the list's own `destroy` emission, while the list
+        // memory is still valid.
+        self.inner.ext_foreign_toplevel_list_alive.set(true);
+        // SAFETY: `raw` is a live list with initialised signals, and
+        // `self.inner` (the session pointer and the `alive` cell) outlives
+        // the registration: both live in the same `Rc`-allocated
+        // `RuntimeInner`, whose heap address never moves, and the callback
+        // unlinks itself before either can go stale. `link_watched`'s
+        // contract otherwise forwarded verbatim.
+        let watch = unsafe {
+            Registration::link_watched(
+                &raw mut (*raw.as_ptr()).events.destroy,
+                on_ext_foreign_toplevel_list_destroy,
+                std::rc::Rc::as_ptr(&self.inner).cast::<()>(),
+                &self.inner.ext_foreign_toplevel_list_alive as *const _,
+            )
+        };
+        *self.inner.ext_foreign_toplevel_list_destroy.borrow_mut() = Some(watch);
         Ok(())
     }
 
@@ -226,25 +265,89 @@ impl Runtime {
     /// Export a toplevel and return the owned handle for it.
     ///
     /// The handle is registered with the list immediately, so every bound
-    /// client sees it (and the state passed here) at once. `None` when no list
-    /// was created, or when wlroots could not allocate the handle.
+    /// client sees it (and the state passed here) at once.
+    ///
+    /// `None` for three distinct misses, all silent by design (there is no
+    /// [`Error`](crate::Error) variant that names one without stretching its
+    /// documented semantics, and this signature is frozen within the 0.20.x
+    /// line): no list was ever created; the list died with its display (the
+    /// teardown watch linked at creation cleared the stored pointer, so a
+    /// post-teardown call misses rather than dereferencing freed memory); or
+    /// a state field contains an interior NUL, which cannot be passed to
+    /// wlroots and is refused rather than truncated. A null return from
+    /// wlroots itself with a live list is an allocation failure the test
+    /// suite asserts never happens (`debug_assert!(false, ...)` fires there,
+    /// with no release behavior change).
     ///
     /// Drop the handle before the display: see [`ExtForeignToplevelHandle`].
     pub fn create_ext_foreign_toplevel(
         &self,
         state: &ExtForeignToplevelState,
     ) -> Option<ExtForeignToplevelHandle> {
+        if !self.inner.ext_foreign_toplevel_list_alive.get() {
+            return None;
+        }
         let list = self.ext_foreign_toplevel_list_ptr()?;
         let raw = with_raw_state(state, |state| {
-            // SAFETY: `list` is live and owned by the display, and `state` names
-            // the two NUL-terminated strings built for this call; the returned
-            // handle is freshly allocated and linked into the list.
+            // SAFETY: the liveness flag above is true, so the list's
+            // `destroy` has not fired and the display-owned `list` is still
+            // live, and `state` names the two NUL-terminated strings built
+            // for this call; the returned handle is freshly allocated and
+            // linked into the list.
             unsafe { sys::wlr_ext_foreign_toplevel_handle_v1_create(list.as_ptr(), state) }
         })?;
-        let raw = NonNull::new(raw)?;
+        let raw = match NonNull::new(raw) {
+            Some(raw) => raw,
+            // Unexpected: the list is live, so only an allocation failure
+            // explains a null return. Asserted in debug like the other
+            // should-never-fire arms in this crate; still a silent miss,
+            // never trapped.
+            None => {
+                debug_assert!(
+                    false,
+                    "wlr_ext_foreign_toplevel_handle_v1_create returned null with a live list"
+                );
+                return None;
+            }
+        };
         // SAFETY: `raw` is a fresh handle with initialised signals and this is
         // its only owner; `from_non_null` links the list-death watch.
         Some(unsafe { ExtForeignToplevelHandle::from_non_null(self.clone(), raw) })
+    }
+}
+
+/// The ext-foreign-toplevel list is being destroyed (display teardown, before
+/// the list itself is freed).
+///
+/// Clears the stored list pointer and the liveness flag while the list memory
+/// is still valid, so a later [`Runtime::create_ext_foreign_toplevel`]
+/// returns `None` instead of dereferencing freed memory, and unlinks this
+/// listener so wlroots' post-destroy empty-signal assertion holds. A later
+/// `RuntimeInner` drop then finds the flag false and the registration gone,
+/// and never touches the freed signal list.
+///
+/// This is the list side of the teardown story; each owned
+/// [`ExtForeignToplevelHandle`]'s own watch (the shared owned-handle
+/// list-death watch) marks that handle inert at the same emission.
+unsafe extern "C" fn on_ext_foreign_toplevel_list_destroy(
+    l: *mut sys::wl_listener,
+    _data: *mut std::ffi::c_void,
+) {
+    // SAFETY: linked by `create_ext_foreign_toplevel_list` into a live
+    // list's `events.destroy` with a `session` pointing at the owning
+    // `RuntimeInner`, which outlives the registration. Every call below is
+    // infallible and cannot unwind out of this `extern "C"` frame.
+    unsafe {
+        let session = bound_session(l);
+        if session.is_null() {
+            return;
+        }
+        let inner = &*session.cast::<RuntimeInner>();
+        inner.ext_foreign_toplevel_list_alive.set(false);
+        *inner.ext_foreign_toplevel_list.borrow_mut() = None;
+        remove_listener(l);
+        let registration = inner.ext_foreign_toplevel_list_destroy.borrow_mut().take();
+        drop(registration);
     }
 }
 

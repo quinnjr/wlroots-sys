@@ -136,6 +136,71 @@ impl wlr::LoopHandler for App {
     }
 }
 
+/// `Runtime::output` misses on a dangling id and on an id whose run ended —
+/// the by-id miss every id type in this crate promises, for outputs.
+#[test]
+fn runtime_output_misses_dangling_and_stale_ids() {
+    // Dangling half: no run at all, so no output could have this id.
+    {
+        let _serial = common::headless_guard();
+        common::headless_env();
+        let runtime = Runtime::new().expect("runtime");
+        assert!(
+            runtime.output(wlr::OutputId::dangling_for_test()).is_none(),
+            "a dangling output id must miss"
+        );
+    }
+
+    // Stale half, mirroring output_layout.rs's
+    // `layout_box_after_the_run_is_stale_and_misses_cleanly`: the id was
+    // announced by this run, so after `run_all` returns it is stale.
+    let _serial = common::headless_guard();
+    common::headless_env();
+    struct StaleApp {
+        ids: Vec<wlr::OutputId>,
+        runtime: Runtime,
+        live: Vec<bool>,
+    }
+    impl wlr::OutputHandler for StaleApp {
+        fn new_output(&mut self, output: &wlr::Output<'_>) {
+            let _ = output.enable_with_preferred_mode();
+            let _ = self.runtime.init_output(output);
+            let id = output.id();
+            self.live.push(self.runtime.output(id).is_some());
+            self.ids.push(id);
+        }
+    }
+    impl wlr::ToplevelHandler for StaleApp {}
+    impl wlr::SeatHandler for StaleApp {}
+    impl wlr::FdHandler for StaleApp {}
+    impl wlr::LoopHandler for StaleApp {
+        fn should_stop(&mut self) -> bool {
+            !self.ids.is_empty()
+        }
+    }
+    let display = Display::new().expect("display");
+    let runtime = Runtime::new().expect("runtime");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    let mut app = StaleApp {
+        ids: vec![],
+        runtime: runtime.clone(),
+        live: vec![],
+    };
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Turns(16))
+        .expect("run");
+    let stale = *app.ids.first().expect("at least one output announced");
+    assert!(
+        !app.live.is_empty() && app.live.iter().all(|v| *v),
+        "the announced id resolved while its run was live"
+    );
+    assert!(
+        runtime.output(stale).is_none(),
+        "an OutputId kept past its run must miss"
+    );
+}
+
 /// Atomic state stages fields and commits them together on a headless
 /// output; the accessors read back live truth.
 #[test]

@@ -38,21 +38,37 @@ struct Probe {
     damage_boxes: Vec<Box2D>,
     hits: Vec<Option<SurfaceId>>,
     root_id_always_self: bool,
-    point_accepts_input: Option<bool>,
-    accepts_touch: Option<bool>,
+    /// Per-commit `point_accepts_input` answers, so every commit's input
+    /// region is witnessed rather than just the last one's.
+    point_accepts_input: Vec<bool>,
+    /// Per-commit `accepts_touch` answers, for the same reason.
+    accepts_touch: Vec<bool>,
     as_layer_always_none: bool,
     locked_once: bool,
     unmapped_once: bool,
     /// Whether the same-surface `unlock_cached` succeeded. Recorded rather
     /// than asserted in the handler (a panic there would abort through C).
-    unlock_ok: Option<bool>,
+    unlock_ok: Vec<bool>,
     /// Far-outside hit-test: `surface_at` at a point no surface covers.
-    miss_at: Option<bool>,
+    miss_at: Vec<bool>,
     /// Far-outside input check at the same point.
-    miss_accepts_input: Option<bool>,
+    miss_accepts_input: Vec<bool>,
+    /// Per-commit `(committing id, visited ids)` from `for_each_surface`, so
+    /// the walk is witnessed on a live tree rather than just a scratch one.
+    for_each_visited: Vec<(SurfaceId, Vec<SurfaceId>)>,
+    /// `(parent, child)` pairs from `new_subsurface`, for the sub-surface
+    /// run below.
+    subsurface_pairs: Vec<(SurfaceId, SurfaceId)>,
+    /// `(child, child.root_id(), parent.root_id())` read live during
+    /// `new_subsurface`, while both surfaces are known alive.
+    subsurface_roots: Vec<(SurfaceId, SurfaceId, SurfaceId)>,
     /// `Surface::as_toplevel` on the live toplevel surface: every commit must
     /// resolve, and the resolved id must name the same surface.
     as_toplevel_matched: Vec<bool>,
+    /// `Runtime::surface` at each `surface_mapped`: the mapped id must
+    /// resolve while its run is live, so the post-run miss below proves
+    /// staleness rather than a surface that never resolved.
+    mapped_live: Vec<bool>,
 }
 
 impl Probe {
@@ -104,11 +120,13 @@ impl wlr::ToplevelHandler for App {
             .damage_boxes
             .push(surface.effective_damage().extents());
         self.probe.root_id_always_self &= surface.root_id() == id;
-        self.probe.point_accepts_input = Some(surface.point_accepts_input(1.0, 1.0));
+        self.probe
+            .point_accepts_input
+            .push(surface.point_accepts_input(1.0, 1.0));
         self.probe
             .hits
             .push(surface.surface_at(1.0, 1.0).map(|(leaf, _, _)| leaf.id()));
-        self.probe.accepts_touch = Some(surface.accepts_touch());
+        self.probe.accepts_touch.push(surface.accepts_touch());
         self.probe.as_layer_always_none &= surface.as_layer_surface().is_none();
         // The thin toplevel downcast: this surface is a live xdg-toplevel, so
         // both the handle downcast and the by-id downcast must resolve.
@@ -117,8 +135,18 @@ impl wlr::ToplevelHandler for App {
             .push(surface.as_toplevel().is_some() && self.runtime.toplevel_of(id).is_some());
         // A point far outside any surface misses cleanly rather than
         // hit-testing to something or claiming input.
-        self.probe.miss_at = Some(surface.surface_at(1e6, 1e6).is_none());
-        self.probe.miss_accepts_input = Some(surface.point_accepts_input(1e6, 1e6));
+        self.probe
+            .miss_at
+            .push(surface.surface_at(1e6, 1e6).is_none());
+        self.probe
+            .miss_accepts_input
+            .push(surface.point_accepts_input(1e6, 1e6));
+
+        // The tree walk visits the committing surface itself: on this run the
+        // tree is a single root, so the walk must yield exactly it.
+        let mut visited = Vec::new();
+        surface.for_each_surface(|leaf, _, _| visited.push(leaf.id()));
+        self.probe.for_each_visited.push((id, visited));
 
         // Mutators that send the client nothing observable (or, for the
         // preferred scale/transform, an event the client ignores here).
@@ -136,7 +164,9 @@ impl wlr::ToplevelHandler for App {
         if !self.probe.locked_once {
             self.probe.locked_once = true;
             let lock = surface.lock_pending();
-            self.probe.unlock_ok = Some(surface.unlock_cached(lock).is_ok());
+            self.probe
+                .unlock_ok
+                .push(surface.unlock_cached(lock).is_ok());
         }
 
         // Unmap once, after the surface is mapped. The queued
@@ -149,6 +179,9 @@ impl wlr::ToplevelHandler for App {
 
     fn surface_mapped(&mut self, id: SurfaceId) {
         self.probe.mapped.push(id);
+        self.probe
+            .mapped_live
+            .push(self.runtime.surface(id).is_some());
     }
 
     fn surface_unmapped(&mut self, id: SurfaceId) {
@@ -157,6 +190,22 @@ impl wlr::ToplevelHandler for App {
 
     fn surface_destroyed(&mut self, id: SurfaceId) {
         self.probe.destroyed.push(id);
+    }
+
+    fn new_subsurface(&mut self, parent: SurfaceId, child: SurfaceId) {
+        self.probe.subsurface_pairs.push((parent, child));
+        // Both surfaces are alive here: the child just joined the parent's
+        // state, so resolving the child's foreign root is the no-fabrication
+        // witness — it must name the tracked parent, not an invented id.
+        if let (Some(parent_surface), Some(child_surface)) =
+            (self.runtime.surface(parent), self.runtime.surface(child))
+        {
+            self.probe.subsurface_roots.push((
+                child,
+                child_surface.root_id(),
+                parent_surface.root_id(),
+            ));
+        }
     }
 }
 
@@ -292,15 +341,14 @@ fn a_real_client_surface_is_committed_mapped_and_destroyed() {
         probe.hits.iter().any(|hit| hit.is_some()),
         "a point inside the mapped surface hit-tests to a surface"
     );
-    assert_eq!(
-        probe.point_accepts_input,
-        Some(true),
-        "the default input region of a mapped surface accepts a point inside it"
+    assert!(
+        !probe.point_accepts_input.is_empty() && probe.point_accepts_input.iter().any(|v| *v),
+        "the default input region of the mapped surface accepts a point inside it; \
+         early bufferless commits legitimately report false"
     );
-    assert_eq!(
-        probe.accepts_touch,
-        Some(false),
-        "the client bound no touch device, so the surface accepts no touch"
+    assert!(
+        !probe.accepts_touch.is_empty() && probe.accepts_touch.iter().all(|v| !v),
+        "the client bound no touch device, so the surface accepts no touch on every commit"
     );
     assert!(
         probe.as_layer_always_none,
@@ -318,19 +366,17 @@ fn a_real_client_surface_is_committed_mapped_and_destroyed() {
     // covered by the `surface.rs` unit test, not this single-surface run.
     assert_eq!(
         probe.unlock_ok,
-        Some(true),
+        vec![true],
         "unlock_cached must succeed for the lock the same surface minted"
     );
 
     // Far-outside hit-testing misses cleanly.
-    assert_eq!(
-        probe.miss_at,
-        Some(true),
+    assert!(
+        !probe.miss_at.is_empty() && probe.miss_at.iter().all(|v| *v),
         "surface_at at a far-outside point must miss rather than hit-test to a surface"
     );
-    assert_eq!(
-        probe.miss_accepts_input,
-        Some(false),
+    assert!(
+        !probe.miss_accepts_input.is_empty() && probe.miss_accepts_input.iter().all(|v| !v),
         "point_accepts_input at a far-outside point must be false"
     );
     assert!(
@@ -338,4 +384,102 @@ fn a_real_client_surface_is_committed_mapped_and_destroyed() {
         "Surface::as_toplevel (and Runtime::toplevel_of) must resolve every \
          commit of the live toplevel surface"
     );
+
+    // The tree walk runs on a live tree with no sub-surfaces: every commit
+    // must visit exactly the committing surface itself.
+    assert_eq!(
+        probe.for_each_visited.len(),
+        probe.committed.len(),
+        "for_each_surface must run once per commit"
+    );
+    for (id, visited) in &probe.for_each_visited {
+        assert_eq!(
+            visited,
+            &vec![*id],
+            "the walk over a childless live tree visits exactly its root"
+        );
+    }
+    assert!(
+        !probe.mapped_live.is_empty() && probe.mapped_live.iter().all(|v| *v),
+        "the mapped id resolved while its run was live"
+    );
+    // Surface tables are per-run — the same rule output_layout.rs's
+    // `layout_box_after_the_run_is_stale_and_misses_cleanly` pins for
+    // outputs — so the mapped id, announced by this run, is stale now that
+    // `run_all` has returned and must miss rather than resolve freed memory.
+    assert!(
+        runtime.surface(mapped).is_none(),
+        "a SurfaceId kept past its run must miss"
+    );
+}
+
+/// A mapped child sub-surface resolves its foreign root to the tracked
+/// parent — not to an invented id — and the parent's tree walk yields it.
+///
+/// A foreign *untracked* root has no closer witness than this: every surface
+/// wlroots announces goes through `install_surface_listeners`, so a live
+/// root is always tracked, and a root for a scratch handle is always the
+/// handle itself (pinned by `root_id_of_a_roleless_surface_is_its_own_id`).
+/// The fabrication this guards against would show up here as the child
+/// resolving anywhere but the parent.
+#[test]
+fn a_mapped_subsurface_resolves_its_foreign_root_and_is_walked() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    common::isolated_runtime_dir();
+    let display = Display::new().expect("display");
+    let backend = Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime.create_xdg_shell(&display, 6).expect("xdg-shell");
+    runtime.create_seat(&display, "test-seat").expect("seat");
+    let socket = display.add_socket_auto().expect("socket");
+
+    let mut app = app(&runtime);
+    app.client = Some(common::client::spawn_subsurface_mapped(&socket));
+
+    backend
+        .run_all(&display, &mut app, &runtime, Until::Stop)
+        .expect("run_all");
+
+    let _ = app
+        .client
+        .take()
+        .expect("client handle")
+        .join()
+        .expect("client thread");
+    let probe = &app.probe;
+
+    assert_eq!(
+        app.toplevels, 1,
+        "the server should observe exactly one toplevel from the client"
+    );
+    assert_eq!(
+        probe.subsurface_pairs.len(),
+        1,
+        "the server should observe exactly one new_subsurface from the client"
+    );
+    let (parent, child) = probe.subsurface_pairs[0];
+    assert_ne!(parent, child, "parent and child are distinct surfaces");
+    assert_eq!(
+        probe.subsurface_roots,
+        vec![(child, parent, parent)],
+        "the child's foreign root must resolve to the tracked parent, \
+         and the parent must resolve to itself — never to an invented id"
+    );
+    assert!(
+        probe
+            .for_each_visited
+            .iter()
+            .any(|(id, visited)| *id == parent
+                && visited.contains(&parent)
+                && visited.contains(&child)),
+        "the parent's tree walk must yield the mapped child alongside the root"
+    );
+    for (id, visited) in &probe.for_each_visited {
+        assert!(
+            visited.contains(id),
+            "every walk visits its own committing root, got {visited:?} for {id:?}"
+        );
+    }
 }

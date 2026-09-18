@@ -10,10 +10,15 @@
 //! [`LockSurface`] is borrow-scoped like [`TearingControl`](crate::TearingControl):
 //! wlroots frees the `wlr_session_lock_surface_v1` when its client destroys the
 //! protocol object or the lock goes away, neither of which this crate controls.
-//! The downcast [`Surface::lock_surface`] uses,
+//! The borrow alone cannot see those client-driven frees, so every accessor
+//! re-runs the `try_from` downcast before touching the role: the downcast
+//! [`Surface::lock_surface`] uses,
 //! `wlr_session_lock_surface_v1_try_from_wlr_surface`, returns null once the
-//! lock surface is gone, so a later lookup misses rather than naming freed
-//! memory.
+//! lock surface is gone, so a later access misses with `None` rather than
+//! naming freed memory. (What the borrow still guarantees is the *surface*:
+//! the role cannot outlive the `Surface` handle it was resolved through, and
+//! the stored surface pointer is only ever handed back to that same downcast,
+//! never dereferenced directly.)
 
 use std::marker::PhantomData;
 use std::ptr::NonNull;
@@ -54,8 +59,13 @@ impl LockSurfaceState {
 
 /// A session lock surface, borrowed for the duration of the [`Surface`] handle
 /// it was looked up through.
+///
+/// The handle stores the surface — not the role pointer — so every accessor
+/// can re-validate liveness before touching the role: resolving once and
+/// reading a stored role pointer afterwards would dangle when the locker
+/// client destroys the role object while the surface lives.
 pub struct LockSurface<'h> {
-    raw: NonNull<sys::wlr_session_lock_surface_v1>,
+    surface: NonNull<sys::wlr_surface>,
     _scope: PhantomData<&'h ()>,
 }
 
@@ -69,54 +79,82 @@ impl std::fmt::Debug for LockSurface<'_> {
 }
 
 impl LockSurface<'_> {
-    /// Wrap a live lock surface.
+    /// Resolve the lock surface for `surface`, which the caller has already
+    /// downcast successfully.
     ///
     /// # Safety
     ///
-    /// `raw` must be a live `wlr_session_lock_surface_v1` that must not be
-    /// destroyed while the returned handle is alive.
-    pub(crate) unsafe fn from_non_null<'h>(
-        raw: NonNull<sys::wlr_session_lock_surface_v1>,
-    ) -> LockSurface<'h> {
+    /// `surface` must be a live `wlr_surface` borrowed for `'h` whose current
+    /// role is a live `wlr_session_lock_surface_v1` — i.e. the
+    /// `wlr_session_lock_surface_v1_try_from_wlr_surface` downcast on it just
+    /// returned non-null. The handle re-runs that downcast before every
+    /// access, so a later client-driven *role* destruction misses rather than
+    /// dangles; the *surface* itself must still outlive the handle, exactly as
+    /// for every other role handle in this crate.
+    pub(crate) unsafe fn from_surface<'h>(surface: NonNull<sys::wlr_surface>) -> LockSurface<'h> {
         LockSurface {
-            raw,
+            surface,
             _scope: PhantomData,
         }
+    }
+
+    /// The live role object, re-resolved on every access.
+    ///
+    /// `None` once wlroots has freed the role — the locker client destroyed
+    /// the protocol object or the lock went away — because the downcast then
+    /// returns null instead of the freed pointer. A `Some` value borrows the
+    /// surface for `'h` and is only used inside the calling accessor, never
+    /// stored.
+    fn live(&self) -> Option<NonNull<sys::wlr_session_lock_surface_v1>> {
+        // SAFETY: `surface` is borrowed live for `'h`; the downcast reads its
+        // role and returns null rather than a wrong object when the role is
+        // gone. The surface itself outliving the handle is the caller's
+        // `from_surface` contract, unchanged by this re-validation.
+        NonNull::new(unsafe {
+            sys::wlr_session_lock_surface_v1_try_from_wlr_surface(self.surface.as_ptr())
+        })
     }
 
     /// The size wlroots configured the lock surface to, `(width, height)`, in
     /// surface-local pixels.
     ///
-    /// `(0, 0)` before the first configure lands, which is what wlroots'
+    /// `None` once the role is gone — precisely, this is
+    /// [`state`](Self::state)'s `None`: the size is read through the state
+    /// snapshot so one accessor owns the field reads. `(0, 0)` inside the
+    /// `Some` before the first configure lands, which is what wlroots'
     /// `current` state starts at.
-    pub fn configured_size(&self) -> (u32, u32) {
-        // SAFETY: the handle borrows a live lock surface for `'h`; `current`
-        // is a plain embedded struct, always initialised.
-        let current = unsafe { &(*self.raw.as_ptr()).current };
-        (current.width, current.height)
+    pub fn configured_size(&self) -> Option<(u32, u32)> {
+        self.state().map(|state| (state.width(), state.height()))
     }
 
     /// The lock surface's last configured size and serial.
-    pub fn state(&self) -> LockSurfaceState {
-        // SAFETY: as in `configured_size`; `current` is a plain value.
-        let current: sys::wlr_session_lock_surface_v1_state =
-            unsafe { (*self.raw.as_ptr()).current };
-        LockSurfaceState {
+    ///
+    /// `None` once the role is gone: the downcast misses instead of reading a
+    /// freed `current`.
+    pub fn state(&self) -> Option<LockSurfaceState> {
+        let live = self.live()?;
+        // SAFETY: `live` is the role object the downcast just returned, and
+        // `current` is a plain embedded struct (not a pointer) that is always
+        // initialised once the role exists.
+        let current: sys::wlr_session_lock_surface_v1_state = unsafe { (*live.as_ptr()).current };
+        Some(LockSurfaceState {
             width: current.width,
             height: current.height,
             configure_serial: current.configure_serial,
-        }
+        })
     }
 
     /// The output this lock surface covers, when the crate tracks it.
     ///
-    /// `None` when wlroots has no output recorded for the surface (it nulls the
-    /// pointer when the output dies) or when the output was never registered
-    /// with this crate.
+    /// `None` when the role is gone (the downcast misses before anything is
+    /// read), when wlroots has no output recorded for the surface (it nulls
+    /// the pointer when the output dies), or when the output was never
+    /// registered with this crate.
     pub fn output(&self) -> Option<Output<'_>> {
-        // SAFETY: the handle borrows a live lock surface; `output` is null or a
-        // live output pointer.
-        let output = unsafe { (*self.raw.as_ptr()).output };
+        let live = self.live()?;
+        // SAFETY: `live` is the role object the downcast just returned;
+        // `output` is null or a live output pointer.
+        let output = unsafe { (*live.as_ptr()).output };
         if output.is_null() {
             return None;
         }
@@ -140,12 +178,20 @@ impl<'h> Surface<'h> {
         // SAFETY: the handle borrows a live surface; the downcast reads its
         // role and returns null rather than a wrong object when it is not a
         // lock surface, or when wlroots has already freed the role.
-        let raw = unsafe { sys::wlr_session_lock_surface_v1_try_from_wlr_surface(self.as_ptr()) };
-        NonNull::new(raw).map(|raw| {
-            // SAFETY: the downcast returned a non-null live lock surface, and
-            // it cannot be freed while the `Surface` borrow that produced it
-            // lives.
-            unsafe { LockSurface::from_non_null(raw) }
+        let is_lock_surface =
+            !unsafe { sys::wlr_session_lock_surface_v1_try_from_wlr_surface(self.as_ptr()) }
+                .is_null();
+        if !is_lock_surface {
+            return None;
+        }
+        // SAFETY: the downcast just returned non-null for this live surface,
+        // which is `from_surface`'s contract. Every later access re-runs the
+        // downcast, so a role destroyed after this point misses there instead
+        // of dangling here.
+        Some(unsafe {
+            LockSurface::from_surface(
+                NonNull::new(self.as_ptr()).expect("a live Surface is non-null"),
+            )
         })
     }
 }
@@ -162,63 +208,112 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use super::{LockSurface, LockSurfaceState};
+    use super::LockSurface;
     use crate::surface::SurfaceId;
     use crate::sys;
-    use crate::test_support::ScratchSurface;
-    use std::alloc::{Layout, alloc_zeroed, dealloc};
+    use crate::test_support::{Scratch, ScratchSurface};
     use std::ptr::NonNull;
 
-    /// A zeroed `wlr_session_lock_surface_v1` on the heap.
-    struct ScratchLockSurface(*mut sys::wlr_session_lock_surface_v1);
+    /// A no-op fini for scratch objects nothing needs to undo, exactly as in
+    /// `tearing.rs`.
+    fn noop_fini<T>(_: *mut T) {}
 
-    impl ScratchLockSurface {
-        fn new() -> Self {
-            let layout = Layout::new::<sys::wlr_session_lock_surface_v1>();
-            // SAFETY: the type is non-zero-sized.
-            let ptr = unsafe { alloc_zeroed(layout) }.cast::<sys::wlr_session_lock_surface_v1>();
-            assert!(!ptr.is_null(), "allocation failed");
-            Self(ptr)
-        }
+    /// A zeroed `wlr_session_lock_surface_v1`, shared via
+    /// [`Scratch`](crate::test_support::Scratch) exactly as `tearing.rs`
+    /// shares its manager/control objects. Zeroed is a valid initial state
+    /// here: no accessor touches the struct's fields without a live role, and
+    /// the downcast misses before any field is read.
+    fn new_lock_surface() -> Scratch<sys::wlr_session_lock_surface_v1> {
+        Scratch::new(|_| {}, noop_fini)
     }
 
-    impl Drop for ScratchLockSurface {
-        fn drop(&mut self) {
-            // SAFETY: allocated with this layout in `new`.
-            unsafe {
-                dealloc(
-                    self.0.cast::<u8>(),
-                    Layout::new::<sys::wlr_session_lock_surface_v1>(),
-                )
-            };
-        }
+    /// Initialise a zeroed scratch output's addon set, so `find_id` may read
+    /// it. The set stays empty — registered nowhere, carrying no id addon.
+    fn init_output_addons(ptr: *mut sys::wlr_output) {
+        // SAFETY: `ptr` is a live, exclusively-owned, zeroed output; the
+        // addon set is in bounds and untouched.
+        unsafe { sys::wlr_addon_set_init(&raw mut (*ptr).addons) };
     }
 
-    /// The configured size and serial read straight off the lock surface's
-    /// `current` state, and a null output misses.
-    #[test]
-    fn state_reads_the_current_configure() {
-        let scratch = ScratchLockSurface::new();
-        // SAFETY: `scratch` is live and exclusively owned.
+    /// Undo exactly what [`init_output_addons`] did.
+    fn fini_output_addons(ptr: *mut sys::wlr_output) {
+        // SAFETY: the addon set was initialised in `init_output_addons` and
+        // nothing else was attached to it.
+        unsafe { sys::wlr_addon_set_finish(&raw mut (*ptr).addons) };
+    }
+
+    /// A live output with an initialised but empty addon set: `find_id` may
+    /// read it, and finds no id because the output was never registered.
+    fn new_unregistered_output() -> Scratch<sys::wlr_output> {
+        Scratch::new(init_output_addons, fini_output_addons)
+    }
+
+    /// Resolve `surface` as a lock surface. The scratch surface carries no
+    /// role, so resolution itself succeeds structurally (the handle only
+    /// stores the surface) while every accessor must miss at the re-validated
+    /// downcast.
+    ///
+    /// # Safety
+    ///
+    /// `surface` must outlive the returned handle.
+    unsafe fn resolve_on(surface: &ScratchSurface) -> LockSurface<'_> {
+        // SAFETY: the caller upholds the lifetime bound; the scratch surface
+        // allocation is non-null.
         unsafe {
-            (*scratch.0).current.width = 1280;
-            (*scratch.0).current.height = 720;
-            (*scratch.0).current.configure_serial = 42;
+            LockSurface::from_surface(
+                NonNull::new(surface.raw).expect("scratch surface is non-null"),
+            )
         }
-        // SAFETY: `scratch` outlives the handle.
-        let handle = unsafe {
-            LockSurface::from_non_null(NonNull::new(scratch.0).expect("scratch is non-null"))
-        };
-        assert_eq!(handle.configured_size(), (1280, 720));
+    }
+
+    /// A resolved handle whose role is gone misses on every accessor instead
+    /// of touching freed memory.
+    ///
+    /// The scratch surface carries no role, which is exactly the observable
+    /// state wlroots leaves behind a destroyed role: on destroy it nulls the
+    /// role resource's user-data, so `try_from` returns null for a destroyed
+    /// role and for a never-roled surface alike (the same equivalence
+    /// `subsurface.rs` documents). A pre-fix handle — one that read a stored
+    /// role pointer directly — would dereference whatever the freed struct's
+    /// memory now holds; the re-validating accessors return `None`.
+    #[test]
+    fn accessors_miss_once_the_role_is_gone() {
+        let surface = ScratchSurface::new();
+        // SAFETY: `surface` outlives the handle.
+        let handle = unsafe { resolve_on(&surface) };
         assert_eq!(
-            handle.state(),
-            LockSurfaceState {
-                width: 1280,
-                height: 720,
-                configure_serial: 42,
-            }
+            handle.configured_size(),
+            None,
+            "no role, no configured size"
         );
-        assert!(handle.output().is_none(), "a null output misses");
+        assert_eq!(handle.state(), None, "no role, no state snapshot");
+        assert!(handle.output().is_none(), "no role, no output");
+    }
+
+    /// A scratch lock surface wired to a live but unregistered output still
+    /// misses: the `None` fires at the liveness re-validation above, before
+    /// the output pointer is ever read.
+    ///
+    /// The output arm itself (`find_id` finding no id addon) needs a live
+    /// role to reach, so it is client-driven by construction — same constraint
+    /// `subsurface.rs` documents for its live-role cases. The fixture still
+    /// wires a live unregistered output (rather than a null) so that arm, and
+    /// not the null-output arm, is what a future live-role harness would hit.
+    #[test]
+    fn output_misses_on_a_live_but_unregistered_output() {
+        let surface = ScratchSurface::new();
+        let output = new_unregistered_output();
+        let lock = new_lock_surface();
+        // SAFETY: both scratch objects are live and exclusively owned.
+        unsafe {
+            (*lock.ptr).output = output.ptr;
+        }
+        // SAFETY: `surface` outlives the handle.
+        let handle = unsafe { resolve_on(&surface) };
+        assert!(
+            handle.output().is_none(),
+            "an unregistered output resolves to no tracked output"
+        );
     }
 
     /// A surface whose role is null is not a lock surface, so the downcast
