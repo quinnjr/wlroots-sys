@@ -15874,7 +15874,10 @@ mod touch_switch_delivery_tests {
         );
         frame.send_motion(1, 7, 2.0, 3.0);
         assert_eq!(frame.send_up(1, 7), 0);
-        frame.send_cancel(7);
+        assert!(
+            !frame.send_cancel(7),
+            "no seat, so no cancel notify could have been emitted"
+        );
         TouchFrame::of(&runtime).send_frame();
     }
 }

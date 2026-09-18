@@ -52,6 +52,108 @@ use crate::{
 };
 use crate::{ColorEncoding, ColorRange, FilterMode, NamedPrimaries, TransferFunction};
 
+/// Mint one opaque id newtype: the struct, its `Debug`, and its test-only
+/// dangling constructor, all with byte-identical behavior to the hand-written
+/// blocks this replaces (same derives, same `Debug` strings, same banding).
+///
+/// Every arm shares one policy, stated once here instead of once per type:
+/// no `PartialOrd`/`Ord` (an opaque id's ordering would promise a
+/// creation-order semantics nobody asked for, and this API is frozen within
+/// the wlroots minor), a redacted `Debug` for address-keyed ids (the wrapped
+/// value is a heap address — printing it would hand out an ASLR oracle), and
+/// a dangling band parked where live values never sit. The per-type docs —
+/// what the id names, what keys its map, when it is evicted — stay at each
+/// call site, where a reader looking at one id finds them; only the repeated
+/// shape lives here.
+///
+/// The four arms are the four keyings this file needs, and no more:
+/// - `address, nth`: the wrapped value is an object address, `usize::MAX - n`
+///   can never be one handed out here (heap addresses never sit at the top
+///   of the address space), so no banding is needed. This is deliberately
+///   *not* the [`dangling_test_id`](crate::id::dangling_test_id) band: that
+///   band serves `u64` counter ids, and these spellings are frozen public API
+///   within the 0.20.x line (see `owned_handle.rs`'s own note).
+/// - `address, singleton`: the same keying, but the type's tests need only
+///   one dangling value (`n = 0` of the shape above).
+/// - `wire, nth`: the wrapped value is a small wire integer, not an address,
+///   so `Debug` is derived (printing it leaks no layout) and the band is
+///   `i32::MAX - n`, which no driver-issued slot reaches.
+/// - `address, generational`: the wrapped value is an address *plus* a
+///   runtime generation counter, so allocator reuse of a freed address mints
+///   a strictly new id and the old one still misses.
+macro_rules! opaque_id {
+    ($(#[ $struct_meta:meta ])* $name:ident, address, nth, $(#[ $dangling_meta:meta ])*) => {
+        $(#[$struct_meta])*
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct $name(pub(crate) usize);
+
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(concat!(stringify!($name), "(..)"))
+            }
+        }
+
+        impl $name {
+            $(#[$dangling_meta])*
+            #[doc(hidden)]
+            pub fn dangling_nth_for_test(n: usize) -> Self {
+                Self(usize::MAX - n)
+            }
+        }
+    };
+    ($(#[ $struct_meta:meta ])* $name:ident, address, singleton, $(#[ $dangling_meta:meta ])*) => {
+        $(#[$struct_meta])*
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct $name(pub(crate) usize);
+
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(concat!(stringify!($name), "(..)"))
+            }
+        }
+
+        impl $name {
+            $(#[$dangling_meta])*
+            #[doc(hidden)]
+            pub fn dangling() -> Self {
+                Self(usize::MAX)
+            }
+        }
+    };
+    ($(#[ $struct_meta:meta ])* $name:ident, wire, nth, $(#[ $dangling_meta:meta ])*) => {
+        $(#[$struct_meta])*
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+        pub struct $name(pub(crate) i32);
+
+        impl $name {
+            $(#[$dangling_meta])*
+            #[doc(hidden)]
+            pub fn dangling_nth_for_test(n: usize) -> Self {
+                Self(i32::MAX - n as i32)
+            }
+        }
+    };
+    ($(#[ $struct_meta:meta ])* $name:ident, address, generational, $(#[ $dangling_meta:meta ])*) => {
+        $(#[$struct_meta])*
+        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        pub struct $name(pub(crate) usize, pub(crate) u64);
+
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(concat!(stringify!($name), "(..)"))
+            }
+        }
+
+        impl $name {
+            $(#[$dangling_meta])*
+            #[doc(hidden)]
+            pub fn dangling_nth_for_test(n: usize) -> Self {
+                Self(usize::MAX - n, u64::MAX - n as u64)
+            }
+        }
+    };
+}
+
 /// The Wayland **implicit pointer grab**: the surface that owns pointer
 /// input for as long as a button is held, and the reference frame its
 /// surface-local coordinates are measured from.
@@ -169,43 +271,31 @@ pub(crate) struct InputMethodEntry {
     pub(crate) _listeners: Vec<crate::backend::Registration>,
 }
 
-/// A stable handle for one tracked `zwp_input_method_v2` popup surface — the key
-/// under which its `InputPopupEntry` lives in the runtime's `input_method_popups`
-/// table.
-///
-/// Opaque to consumers, exactly like [`PopupId`](crate::PopupId): the compositor
-/// receives one when a popup is announced and hands it back to the crate to
-/// place or query that popup. The wrapped value is the popup's destroy-listener
-/// address, which is what keys the map (the destroy handler recovers the same
-/// key from the firing listener), but that is an implementation detail the
-/// newtype hides.
-///
-/// Deliberately no `PartialOrd`/`Ord`, matching [`PopupId`](crate::PopupId): an
-/// opaque id's ordering would promise a creation-order semantics nobody asked
-/// for, and this API is frozen within the wlroots minor.
-///
-/// `Debug` is redacted on purpose: the wrapped value is a heap address (the
-/// popup's destroy-listener address, which keys the map), and every other id
-/// in this crate is a counter that leaks nothing — printing this one would
-/// hand out an ASLR/heap-layout oracle to anyone holding the logs.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct InputPopupSurfaceId(pub(crate) usize);
-
-impl std::fmt::Debug for InputPopupSurfaceId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("InputPopupSurfaceId(..)")
-    }
-}
-
-impl InputPopupSurfaceId {
+opaque_id! {
+    /// A stable handle for one tracked `zwp_input_method_v2` popup surface — the key
+    /// under which its `InputPopupEntry` lives in the runtime's `input_method_popups`
+    /// table.
+    ///
+    /// Opaque to consumers, exactly like [`PopupId`](crate::PopupId): the compositor
+    /// receives one when a popup is announced and hands it back to the crate to
+    /// place or query that popup. The wrapped value is the popup's destroy-listener
+    /// address, which is what keys the map (the destroy handler recovers the same
+    /// key from the firing listener), but that is an implementation detail the
+    /// newtype hides.
+    ///
+    /// Deliberately no `PartialOrd`/`Ord`, matching [`PopupId`](crate::PopupId): an
+    /// opaque id's ordering would promise a creation-order semantics nobody asked
+    /// for, and this API is frozen within the wlroots minor.
+    ///
+    /// `Debug` is redacted on purpose: the wrapped value is a heap address (the
+    /// popup's destroy-listener address, which keys the map), and every other id
+    /// in this crate is a counter that leaks nothing — printing this one would
+    /// hand out an ASLR/heap-layout oracle to anyone holding the logs.
+    InputPopupSurfaceId, address, nth,
     /// An id that names no popup, for negative tests: `usize::MAX - n` can
     /// never be a listener address handed out here (heap addresses never sit
     /// at the top of the address space). Mirrors
     /// `ToplevelId::dangling_nth_for_test`.
-    #[doc(hidden)]
-    pub fn dangling_nth_for_test(n: usize) -> Self {
-        Self(usize::MAX - n)
-    }
 }
 
 /// One tracked `zwp_input_method_v2` popup surface — a candidate-list surface an
@@ -534,41 +624,29 @@ impl PendingKeyboardState {
     }
 }
 
-/// A stable handle for one tracked `wlr_keyboard_group`.
-///
-/// Opaque to consumers, like [`InputPopupSurfaceId`]: the compositor receives
-/// one when a group is created and hands it back to query it. The wrapped value
-/// is the group's own address, which keys the map — creation names the object
-/// directly (`create_keyboard_group` mints the group itself, no signal `data`
-/// to recover), hiding that detail.
-///
-/// Eviction is explicit-destroy-only: the entry stands until
-/// [`Runtime::destroy_keyboard_group`] removes it (or the whole runtime
-/// drops). A `wlr_keyboard_group` exposes no public per-object destroy
-/// signal this crate listens on, so unlike the listener-keyed tables there
-/// is no destroy listener that could evict it — and a stale id misses
-/// cleanly for exactly that reason.
-///
-/// Deliberately no `PartialOrd`/`Ord`, matching [`InputPopupSurfaceId`]: an
-/// opaque id's ordering would promise creation-order semantics nobody asked for.
-///
-/// `Debug` is redacted: the wrapped value is a heap address and every other id
-/// is a counter that leaks nothing — printing this would hand out an ASLR oracle.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct KeyboardGroupId(pub(crate) usize);
-
-impl std::fmt::Debug for KeyboardGroupId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("KeyboardGroupId(..)")
-    }
-}
-
-impl KeyboardGroupId {
+opaque_id! {
+    /// A stable handle for one tracked `wlr_keyboard_group`.
+    ///
+    /// Opaque to consumers, like [`InputPopupSurfaceId`]: the compositor receives
+    /// one when a group is created and hands it back to query it. The wrapped value
+    /// is the group's own address, which keys the map — creation names the object
+    /// directly (`create_keyboard_group` mints the group itself, no signal `data`
+    /// to recover), hiding that detail.
+    ///
+    /// Eviction is explicit-destroy-only: the entry stands until
+    /// [`Runtime::destroy_keyboard_group`] removes it (or the whole runtime
+    /// drops). A `wlr_keyboard_group` exposes no public per-object destroy
+    /// signal this crate listens on, so unlike the listener-keyed tables there
+    /// is no destroy listener that could evict it — and a stale id misses
+    /// cleanly for exactly that reason.
+    ///
+    /// Deliberately no `PartialOrd`/`Ord`, matching [`InputPopupSurfaceId`]: an
+    /// opaque id's ordering would promise creation-order semantics nobody asked for.
+    ///
+    /// `Debug` is redacted: the wrapped value is a heap address and every other id
+    /// is a counter that leaks nothing — printing this would hand out an ASLR oracle.
+    KeyboardGroupId, address, nth,
     /// An id that names no group, for negative tests.
-    #[doc(hidden)]
-    pub fn dangling_nth_for_test(n: usize) -> Self {
-        Self(usize::MAX - n)
-    }
 }
 
 /// One tracked `wlr_keyboard_group`.
@@ -576,35 +654,23 @@ pub(crate) struct KeyboardGroupEntry {
     pub(crate) raw: NonNull<sys::wlr_keyboard_group>,
 }
 
-/// A stable handle for one tracked `wlr_keyboard_shortcuts_inhibitor_v1`.
-///
-/// Opaque to consumers, like [`KeyboardGroupId`]: the compositor receives one
-/// when an inhibitor is created and hands it back to query it. The wrapped
-/// value is the inhibitor's destroy-listener address, which keys the map
-/// (the destroy handler recovers the same key from the firing listener).
-///
-/// Deliberately no `PartialOrd`/`Ord`, matching [`KeyboardGroupId`]:
-/// an opaque id's ordering would promise creation-order semantics nobody
-/// asked for.
-///
-/// `Debug` is redacted: the wrapped value is a heap address and every other
-/// id is a counter that leaks nothing — printing this would hand out an
-/// ASLR oracle.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ShortcutsInhibitorId(pub(crate) usize);
-
-impl std::fmt::Debug for ShortcutsInhibitorId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ShortcutsInhibitorId(..)")
-    }
-}
-
-impl ShortcutsInhibitorId {
+opaque_id! {
+    /// A stable handle for one tracked `wlr_keyboard_shortcuts_inhibitor_v1`.
+    ///
+    /// Opaque to consumers, like [`KeyboardGroupId`]: the compositor receives one
+    /// when an inhibitor is created and hands it back to query it. The wrapped
+    /// value is the inhibitor's destroy-listener address, which keys the map
+    /// (the destroy handler recovers the same key from the firing listener).
+    ///
+    /// Deliberately no `PartialOrd`/`Ord`, matching [`KeyboardGroupId`]:
+    /// an opaque id's ordering would promise creation-order semantics nobody
+    /// asked for.
+    ///
+    /// `Debug` is redacted: the wrapped value is a heap address and every other
+    /// id is a counter that leaks nothing — printing this would hand out an
+    /// ASLR oracle.
+    ShortcutsInhibitorId, address, nth,
     /// An id that names no inhibitor, for negative tests.
-    #[doc(hidden)]
-    pub fn dangling_nth_for_test(n: usize) -> Self {
-        Self(usize::MAX - n)
-    }
 }
 
 /// Compatibility alias for the `InhibitorId` spelling
@@ -619,43 +685,31 @@ pub(crate) struct ShortcutsInhibitorEntry {
     pub(crate) active: bool,
 }
 
-/// A stable handle for one tracked tablet tool.
-///
-/// Opaque to consumers, like [`ShortcutsInhibitorId`]: the wrapped value is
-/// the hardware `wlr_tablet_tool`'s address — the identity every tablet-tool
-/// signal (`axis`, `proximity`, `tip`, `button`) carries in its event, so a
-/// handler recovers the id from the event itself rather than from a signal
-/// `data` that may be NULL (FIX-3, the same discipline the inhibitor ids
-/// follow).
-///
-/// Keyed by the hardware tool rather than the `wlr_tablet_v2_tablet_tool`
-/// the crate creates for it: the v2 object exposes no public destroy signal
-/// (only `set_cursor`), so nothing could evict a v2-keyed entry, while the
-/// hardware tool's lifetime ends with its tablet device's — whose destroy
-/// handler sweeps these entries synchronously.
-///
-/// Deliberately no `PartialOrd`/`Ord`, matching [`KeyboardGroupId`]: an
-/// opaque id's ordering would promise creation-order semantics nobody asked
-/// for.
-///
-/// `Debug` is redacted: the wrapped value is a heap address and every other
-/// id is a counter that leaks nothing — printing this would hand out an
-/// ASLR oracle.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TabletToolId(pub(crate) usize);
-
-impl std::fmt::Debug for TabletToolId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TabletToolId(..)")
-    }
-}
-
-impl TabletToolId {
+opaque_id! {
+    /// A stable handle for one tracked tablet tool.
+    ///
+    /// Opaque to consumers, like [`ShortcutsInhibitorId`]: the wrapped value is
+    /// the hardware `wlr_tablet_tool`'s address — the identity every tablet-tool
+    /// signal (`axis`, `proximity`, `tip`, `button`) carries in its event, so a
+    /// handler recovers the id from the event itself rather than from a signal
+    /// `data` that may be NULL (FIX-3, the same discipline the inhibitor ids
+    /// follow).
+    ///
+    /// Keyed by the hardware tool rather than the `wlr_tablet_v2_tablet_tool`
+    /// the crate creates for it: the v2 object exposes no public destroy signal
+    /// (only `set_cursor`), so nothing could evict a v2-keyed entry, while the
+    /// hardware tool's lifetime ends with its tablet device's — whose destroy
+    /// handler sweeps these entries synchronously.
+    ///
+    /// Deliberately no `PartialOrd`/`Ord`, matching [`KeyboardGroupId`]: an
+    /// opaque id's ordering would promise creation-order semantics nobody asked
+    /// for.
+    ///
+    /// `Debug` is redacted: the wrapped value is a heap address and every other
+    /// id is a counter that leaks nothing — printing this would hand out an
+    /// ASLR oracle.
+    TabletToolId, address, nth,
     /// An id that names no tool, for negative tests.
-    #[doc(hidden)]
-    pub fn dangling_nth_for_test(n: usize) -> Self {
-        Self(usize::MAX - n)
-    }
 }
 
 /// Compatibility alias for the `ToolId` spelling `tests/keyboard.rs`'s
@@ -663,132 +717,84 @@ impl TabletToolId {
 /// code should prefer. Kept through the 0.20.x line; remove in 0.21.
 pub type ToolId = TabletToolId;
 
-/// A stable handle for one tracked tablet pad.
-///
-/// Opaque to consumers, like [`TabletToolId`]: the wrapped value is the
-/// hardware `wlr_tablet_pad`'s address. Pad signals (`button`, `ring`,
-/// `strip`) carry no pad pointer in their events — unlike the tool signals,
-/// which name their tool — so per-pad listeners recover it from the
-/// listener slot set at link time instead (the same reason the text-input
-/// listeners carry their object there). Evicted
-/// synchronously by the pad device's own destroy handler.
-///
-/// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
-/// reasons [`TabletToolId`]'s doc gives.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TabletPadId(pub(crate) usize);
-
-impl std::fmt::Debug for TabletPadId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TabletPadId(..)")
-    }
-}
-
-impl TabletPadId {
+opaque_id! {
+    /// A stable handle for one tracked tablet pad.
+    ///
+    /// Opaque to consumers, like [`TabletToolId`]: the wrapped value is the
+    /// hardware `wlr_tablet_pad`'s address. Pad signals (`button`, `ring`,
+    /// `strip`) carry no pad pointer in their events — unlike the tool signals,
+    /// which name their tool — so per-pad listeners recover it from the
+    /// listener slot set at link time instead (the same reason the text-input
+    /// listeners carry their object there). Evicted
+    /// synchronously by the pad device's own destroy handler.
+    ///
+    /// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
+    /// reasons [`TabletToolId`]'s doc gives.
+    TabletPadId, address, nth,
     /// An id that names no pad, for negative tests.
-    #[doc(hidden)]
-    pub fn dangling_nth_for_test(n: usize) -> Self {
-        Self(usize::MAX - n)
-    }
 }
 
-/// A stable handle for one tracked `wlr_virtual_keyboard_v1`.
-///
-/// Opaque to consumers, like [`TabletToolId`]: the wrapped value is the
-/// virtual keyboard's own address — the identity the manager's
-/// `new_virtual_keyboard` signal carries in its `data`, so creation
-/// recovery needs no side channel. There is no public per-object destroy
-/// signal on a virtual keyboard (only the embedded keyboard's base input
-/// device emits `destroy`, watched by the run's input teardown), so the
-/// entry is evicted by the device-destroy sweep in
-/// `Runtime::forget_virtual_keyboards_for_keyboard`, the same backstop
-/// discipline the tablet-tool table uses.
-///
-/// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
-/// reasons [`TabletToolId`]'s doc gives.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VirtualKeyboardId(pub(crate) usize);
-
-impl std::fmt::Debug for VirtualKeyboardId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("VirtualKeyboardId(..)")
-    }
-}
-
-impl VirtualKeyboardId {
+opaque_id! {
+    /// A stable handle for one tracked `wlr_virtual_keyboard_v1`.
+    ///
+    /// Opaque to consumers, like [`TabletToolId`]: the wrapped value is the
+    /// virtual keyboard's own address — the identity the manager's
+    /// `new_virtual_keyboard` signal carries in its `data`, so creation
+    /// recovery needs no side channel. There is no public per-object destroy
+    /// signal on a virtual keyboard (only the embedded keyboard's base input
+    /// device emits `destroy`, watched by the run's input teardown), so the
+    /// entry is evicted by the device-destroy sweep in
+    /// `Runtime::forget_virtual_keyboards_for_keyboard`, the same backstop
+    /// discipline the tablet-tool table uses.
+    ///
+    /// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
+    /// reasons [`TabletToolId`]'s doc gives.
+    VirtualKeyboardId, address, nth,
     /// An id that names no virtual keyboard, for negative tests.
-    #[doc(hidden)]
-    pub fn dangling_nth_for_test(n: usize) -> Self {
-        Self(usize::MAX - n)
-    }
 }
 
-/// A stable handle for one tracked `wlr_virtual_pointer_v1`.
-///
-/// Opaque to consumers, like [`VirtualKeyboardId`]: the wrapped value is the
-/// virtual pointer's own address — the identity the manager's
-/// `new_virtual_pointer` signal carries inside its event `data` — and the
-/// entry is evicted by the device-destroy sweep in
-/// `Runtime::forget_virtual_pointers_for_pointer`, since a virtual
-/// pointer exposes no public per-object destroy signal of its own.
-///
-/// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
-/// reasons [`TabletToolId`]'s doc gives.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VirtualPointerId(pub(crate) usize);
-
-impl std::fmt::Debug for VirtualPointerId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("VirtualPointerId(..)")
-    }
-}
-
-impl VirtualPointerId {
+opaque_id! {
+    /// A stable handle for one tracked `wlr_virtual_pointer_v1`.
+    ///
+    /// Opaque to consumers, like [`VirtualKeyboardId`]: the wrapped value is the
+    /// virtual pointer's own address — the identity the manager's
+    /// `new_virtual_pointer` signal carries inside its event `data` — and the
+    /// entry is evicted by the device-destroy sweep in
+    /// `Runtime::forget_virtual_pointers_for_pointer`, since a virtual
+    /// pointer exposes no public per-object destroy signal of its own.
+    ///
+    /// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
+    /// reasons [`TabletToolId`]'s doc gives.
+    VirtualPointerId, address, nth,
     /// An id that names no virtual pointer, for negative tests.
-    #[doc(hidden)]
-    pub fn dangling_nth_for_test(n: usize) -> Self {
-        Self(usize::MAX - n)
-    }
 }
 
-/// A stable handle for one tracked `wlr_transient_seat_v1` seat request.
-///
-/// Opaque to consumers, like [`VirtualKeyboardId`]: the id carries the
-/// transient seat's own address *plus* a runtime generation counter — the
-/// address is the identity the manager's `create_seat` signal carries in
-/// its `data`, so creation recovery needs no side channel, and the
-/// generation is what makes the id safe against allocator reuse: wlroots
-/// may free a request and allocate the next one at the very same address,
-/// and a bare-address id would then still resolve — granting a new client's
-/// seat to whoever holds the old id. The generation is bumped on every
-/// record, so a re-recorded address mints a strictly new id and the old
-/// one misses. The id names the *pending request*, not a lasting object:
-/// answering it — [`Runtime::ready_transient_seat`] or
-/// [`Runtime::destroy_transient_seat`] — consumes the entry, and the id
-/// misses afterwards; so does a request whose client went away or whose
-/// manager died first (both evict — see `TransientSeatEntry`'s own doc).
-/// There is
-/// no public per-object destroy signal on a transient seat to evict
-/// anything by, which is exactly why the resource and manager listeners
-/// exist.
-///
-/// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
-/// reasons [`TabletToolId`]'s doc gives.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TransientSeatId(pub(crate) usize, pub(crate) u64);
-
-impl std::fmt::Debug for TransientSeatId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TransientSeatId(..)")
-    }
-}
-
-impl TransientSeatId {
+opaque_id! {
+    /// A stable handle for one tracked `wlr_transient_seat_v1` seat request.
+    ///
+    /// Opaque to consumers, like [`VirtualKeyboardId`]: the id carries the
+    /// transient seat's own address *plus* a runtime generation counter — the
+    /// address is the identity the manager's `create_seat` signal carries in
+    /// its `data`, so creation recovery needs no side channel, and the
+    /// generation is what makes the id safe against allocator reuse: wlroots
+    /// may free a request and allocate the next one at the very same address,
+    /// and a bare-address id would then still resolve — granting a new client's
+    /// seat to whoever holds the old id. The generation is bumped on every
+    /// record, so a re-recorded address mints a strictly new id and the old
+    /// one misses. The id names the *pending request*, not a lasting object:
+    /// answering it — [`Runtime::ready_transient_seat`] or
+    /// [`Runtime::destroy_transient_seat`] — consumes the entry, and the id
+    /// misses afterwards; so does a request whose client went away or whose
+    /// manager died first (both evict — see `TransientSeatEntry`'s own doc).
+    /// There is
+    /// no public per-object destroy signal on a transient seat to evict
+    /// anything by, which is exactly why the resource and manager listeners
+    /// exist.
+    ///
+    /// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
+    /// reasons [`TabletToolId`]'s doc gives.
+    TransientSeatId, address, generational,
     /// An id that names no transient seat, for negative tests.
-    #[doc(hidden)]
-    pub fn dangling_nth_for_test(n: usize) -> Self {
-        Self(usize::MAX - n, u64::MAX - n as u64)
-    }
 }
 
 /// What answering a pending transient-seat request settled as.
@@ -856,45 +862,33 @@ pub(crate) struct TransientSeatEntry {
     pub(crate) raw: NonNull<sys::wlr_transient_seat_v1>,
 }
 
-/// A stable handle for this runtime's `wlr_cursor`.
-///
-/// Opaque to consumers, like [`KeyboardGroupId`]: the wrapped value is the
-/// cursor's own address — the identity [`Runtime::create_seat`] minted it
-/// under, so creation names the object directly and lookup is a membership
-/// check, not a search. There is exactly one cursor per runtime (created
-/// alongside the seat), so the id is how a compositor names *that* cursor to
-/// [`Runtime::try_cursor`]; [`Runtime::cursor_state`] answers the same
-/// snapshot without one.
-///
-/// Evicted by `backend.rs`'s `on_seat_destroy` — the cursor is created with
-/// the seat and dies with it, and a `wlr_cursor` exposes no public
-/// per-object destroy signal of its own to listen on.
-///
-/// Deliberately no `PartialOrd`/`Ord`, matching [`KeyboardGroupId`]: an
-/// opaque id's ordering would promise creation-order semantics nobody asked
-/// for.
-///
-/// `Debug` is redacted: the wrapped value is a heap address and every other
-/// id is a counter that leaks nothing — printing this would hand out an
-/// ASLR oracle.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CursorId(pub(crate) usize);
-
-impl std::fmt::Debug for CursorId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("CursorId(..)")
-    }
-}
-
-impl CursorId {
+opaque_id! {
+    /// A stable handle for this runtime's `wlr_cursor`.
+    ///
+    /// Opaque to consumers, like [`KeyboardGroupId`]: the wrapped value is the
+    /// cursor's own address — the identity [`Runtime::create_seat`] minted it
+    /// under, so creation names the object directly and lookup is a membership
+    /// check, not a search. There is exactly one cursor per runtime (created
+    /// alongside the seat), so the id is how a compositor names *that* cursor to
+    /// [`Runtime::try_cursor`]; [`Runtime::cursor_state`] answers the same
+    /// snapshot without one.
+    ///
+    /// Evicted by `backend.rs`'s `on_seat_destroy` — the cursor is created with
+    /// the seat and dies with it, and a `wlr_cursor` exposes no public
+    /// per-object destroy signal of its own to listen on.
+    ///
+    /// Deliberately no `PartialOrd`/`Ord`, matching [`KeyboardGroupId`]: an
+    /// opaque id's ordering would promise creation-order semantics nobody asked
+    /// for.
+    ///
+    /// `Debug` is redacted: the wrapped value is a heap address and every other
+    /// id is a counter that leaks nothing — printing this would hand out an
+    /// ASLR oracle.
+    CursorId, address, singleton,
     /// An id that names no cursor, for negative tests: `usize::MAX` can
     /// never be a cursor address handed out here (heap addresses never sit
     /// at the top of the address space). Mirrors
     /// `InputPopupSurfaceId::dangling_nth_for_test`.
-    #[doc(hidden)]
-    pub fn dangling() -> Self {
-        Self(usize::MAX)
-    }
 }
 
 /// This runtime's tracked `wlr_cursor`: a borrowed wlroots pointer, never
@@ -989,44 +983,32 @@ impl CursorState {
     }
 }
 
-/// A stable handle for an xcursor theme this runtime loaded.
-///
-/// Opaque to consumers, like [`CursorId`]: the wrapped value is the theme's
-/// own address — the identity `wlr_xcursor_theme_load` returned, so creation
-/// names the object directly (the [`VirtualKeyboardId`] discipline) and
-/// lookup is a membership check. It names a theme held in this runtime's
-/// xcursor management (loaded by [`Runtime::load_xcursor_theme`], released
-/// by [`Runtime::destroy_xcursor_theme`]) — not the `wlr_xcursor_manager`
-/// [`Runtime::create_seat`] owns, which is singleton state and needs no id.
-///
-/// Eviction is explicit-destroy-only: a `wlr_xcursor_theme` exposes no
-/// public per-object destroy signal to listen on, so unlike the
-/// listener-keyed tables there is no destroy listener that could evict it —
-/// and a stale id misses cleanly for exactly that reason (the same shape as
-/// [`KeyboardGroupId`]).
-///
-/// Deliberately no `PartialOrd`/`Ord`, matching [`CursorId`]: an opaque id's
-/// ordering would promise creation-order semantics nobody asked for.
-///
-/// `Debug` is redacted: the wrapped value is a heap address — printing it
-/// would hand out an ASLR oracle.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct XcursorManagerId(pub(crate) usize);
-
-impl std::fmt::Debug for XcursorManagerId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("XcursorManagerId(..)")
-    }
-}
-
-impl XcursorManagerId {
+opaque_id! {
+    /// A stable handle for an xcursor theme this runtime loaded.
+    ///
+    /// Opaque to consumers, like [`CursorId`]: the wrapped value is the theme's
+    /// own address — the identity `wlr_xcursor_theme_load` returned, so creation
+    /// names the object directly (the [`VirtualKeyboardId`] discipline) and
+    /// lookup is a membership check. It names a theme held in this runtime's
+    /// xcursor management (loaded by [`Runtime::load_xcursor_theme`], released
+    /// by [`Runtime::destroy_xcursor_theme`]) — not the `wlr_xcursor_manager`
+    /// [`Runtime::create_seat`] owns, which is singleton state and needs no id.
+    ///
+    /// Eviction is explicit-destroy-only: a `wlr_xcursor_theme` exposes no
+    /// public per-object destroy signal to listen on, so unlike the
+    /// listener-keyed tables there is no destroy listener that could evict it —
+    /// and a stale id misses cleanly for exactly that reason (the same shape as
+    /// [`KeyboardGroupId`]).
+    ///
+    /// Deliberately no `PartialOrd`/`Ord`, matching [`CursorId`]: an opaque id's
+    /// ordering would promise creation-order semantics nobody asked for.
+    ///
+    /// `Debug` is redacted: the wrapped value is a heap address — printing it
+    /// would hand out an ASLR oracle.
+    XcursorManagerId, address, singleton,
     /// An id that names no theme, for negative tests: `usize::MAX` can
     /// never be a theme address handed out here. Mirrors
     /// [`CursorId::dangling`].
-    #[doc(hidden)]
-    pub fn dangling() -> Self {
-        Self(usize::MAX)
-    }
 }
 
 /// One theme loaded through [`Runtime::load_xcursor_theme`].
@@ -1040,79 +1022,55 @@ pub(crate) struct XcursorThemeEntry {
     pub(crate) raw: NonNull<sys::wlr_xcursor_theme>,
 }
 
-/// A stable handle for one tracked `wlr_pointer_constraint_v1`.
-///
-/// Opaque to consumers, like [`CursorId`]: the wrapped value is the
-/// constraint's own address — the identity `backend.rs`'s
-/// `on_new_pointer_constraint` recovers from the firing listener's matched
-/// entry (FIX-3), so creation names the object and no signal `data` is
-/// trusted. Notification-only: the handler learns *which* constraint
-/// committed through
-/// [`SeatHandler::pointer_constraint_committed`](crate::SeatHandler::pointer_constraint_committed),
-/// and a deferred delivery may name a constraint destroyed in between — the
-/// id then only tells the handler which one it was, exactly as
-/// [`InputPopupSurfaceId`] behaves after its entry is evicted. There is no
-/// resolver: the constraint table lives on the per-run `Session`, not on
-/// this runtime, so nothing outlives the run to resolve against.
-///
-/// Deliberately no `PartialOrd`/`Ord`, matching [`CursorId`]: an opaque id's
-/// ordering would promise creation-order semantics nobody asked for.
-///
-/// `Debug` is redacted: the wrapped value is a heap address — printing it
-/// would hand out an ASLR oracle.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ConstraintId(pub(crate) usize);
-
-impl std::fmt::Debug for ConstraintId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ConstraintId(..)")
-    }
-}
-
-impl ConstraintId {
+opaque_id! {
+    /// A stable handle for one tracked `wlr_pointer_constraint_v1`.
+    ///
+    /// Opaque to consumers, like [`CursorId`]: the wrapped value is the
+    /// constraint's own address — the identity `backend.rs`'s
+    /// `on_new_pointer_constraint` recovers from the firing listener's matched
+    /// entry (FIX-3), so creation names the object and no signal `data` is
+    /// trusted. Notification-only: the handler learns *which* constraint
+    /// committed through
+    /// [`SeatHandler::pointer_constraint_committed`](crate::SeatHandler::pointer_constraint_committed),
+    /// and a deferred delivery may name a constraint destroyed in between — the
+    /// id then only tells the handler which one it was, exactly as
+    /// [`InputPopupSurfaceId`] behaves after its entry is evicted. There is no
+    /// resolver: the constraint table lives on the per-run `Session`, not on
+    /// this runtime, so nothing outlives the run to resolve against.
+    ///
+    /// Deliberately no `PartialOrd`/`Ord`, matching [`CursorId`]: an opaque id's
+    /// ordering would promise creation-order semantics nobody asked for.
+    ///
+    /// `Debug` is redacted: the wrapped value is a heap address — printing it
+    /// would hand out an ASLR oracle.
+    ConstraintId, address, nth,
     /// An id that names no constraint, for negative tests: `usize::MAX - n`
     /// can never be a constraint address handed out here (heap addresses
     /// never sit at the top of the address space). Mirrors
     /// [`CursorId::dangling`].
-    #[doc(hidden)]
-    pub fn dangling_nth_for_test(n: usize) -> Self {
-        Self(usize::MAX - n)
-    }
 }
 
-/// A stable handle for a pointer gesture in flight — a swipe, pinch or hold
-/// a hardware pointer announced.
-///
-/// Opaque to consumers, like [`ConstraintId`]: the wrapped value is the
-/// announcing `wlr_pointer`'s own address — the identity every pointer-gesture
-/// signal (`swipe_begin`, `pinch_update`, `hold_end`, …) carries in its event,
-/// so a handler recovers the id from the event itself rather than from a
-/// signal `data` that may be NULL (FIX-3, the same discipline the tablet-tool
-/// ids follow). Notification-only: the handler learns that a gesture began or
-/// ended through [`SeatHandler::gesture_began`](crate::SeatHandler::gesture_began) /
-/// [`SeatHandler::gesture_ended`](crate::SeatHandler::gesture_ended), while the
-/// full-fidelity forward to gesture clients (kind, deltas, scale, rotation)
-/// goes through the `GesturePhase` token's `send_*`, driven separately.
-///
-/// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
-/// reasons [`ConstraintId`]'s doc gives.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct GestureId(pub(crate) usize);
-
-impl std::fmt::Debug for GestureId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("GestureId(..)")
-    }
-}
-
-impl GestureId {
+opaque_id! {
+    /// A stable handle for a pointer gesture in flight — a swipe, pinch or hold
+    /// a hardware pointer announced.
+    ///
+    /// Opaque to consumers, like [`ConstraintId`]: the wrapped value is the
+    /// announcing `wlr_pointer`'s own address — the identity every pointer-gesture
+    /// signal (`swipe_begin`, `pinch_update`, `hold_end`, …) carries in its event,
+    /// so a handler recovers the id from the event itself rather than from a
+    /// signal `data` that may be NULL (FIX-3, the same discipline the tablet-tool
+    /// ids follow). Notification-only: the handler learns that a gesture began or
+    /// ended through [`SeatHandler::gesture_began`](crate::SeatHandler::gesture_began) /
+    /// [`SeatHandler::gesture_ended`](crate::SeatHandler::gesture_ended), while the
+    /// full-fidelity forward to gesture clients (kind, deltas, scale, rotation)
+    /// goes through the `GesturePhase` token's `send_*`, driven separately.
+    ///
+    /// Deliberately no `PartialOrd`/`Ord`, and redacted `Debug`, for the same
+    /// reasons [`ConstraintId`]'s doc gives.
+    GestureId, address, nth,
     /// An id that names no gesture, for negative tests: `usize::MAX - n` can
     /// never be a pointer address handed out here. Mirrors
     /// [`ConstraintId::dangling_nth_for_test`].
-    #[doc(hidden)]
-    pub fn dangling_nth_for_test(n: usize) -> Self {
-        Self(usize::MAX - n)
-    }
 }
 
 /// One tracked hardware tablet tool: the tablet device that announced it,
@@ -1835,74 +1793,56 @@ impl GesturePhase {
     }
 }
 
-/// A stable handle for one touch point in flight — a finger down on a touch
-/// device.
-///
-/// Unlike every other id in this file this wraps the wire identity, not an
-/// object address: a `wlr_touch_point` is allocated by wlroots per down and
-/// freed per up, so its address aliases across sequential touches, while the
-/// `touch_id` the down/motion/up events carry is the protocol's own slot
-/// identity — the same value a client uses to match a down to its up. The
-/// handler learns *which* point moved through
-/// [`SeatHandler::touch_down`](crate::SeatHandler::touch_down) /
-/// [`SeatHandler::touch_up`](crate::SeatHandler::touch_up); there is no
-/// resolver, on the same notification-only terms as [`GestureId`].
-///
-/// Deliberately no `PartialOrd`/`Ord`, matching [`ConstraintId`]: an opaque
-/// id's ordering would promise a creation-order semantics nobody asked for.
-///
-/// `Debug` is *not* redacted, unlike every address-keyed id: the wrapped
-/// value is a small wire integer, not a heap address, so printing it leaks
-/// no layout.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct TouchId(pub(crate) i32);
-
-impl TouchId {
+opaque_id! {
+    /// A stable handle for one touch point in flight — a finger down on a touch
+    /// device.
+    ///
+    /// Unlike every other id in this file this wraps the wire identity, not an
+    /// object address: a `wlr_touch_point` is allocated by wlroots per down and
+    /// freed per up, so its address aliases across sequential touches, while the
+    /// `touch_id` the down/motion/up events carry is the protocol's own slot
+    /// identity — the same value a client uses to match a down to its up. The
+    /// handler learns *which* point moved through
+    /// [`SeatHandler::touch_down`](crate::SeatHandler::touch_down) /
+    /// [`SeatHandler::touch_up`](crate::SeatHandler::touch_up); there is no
+    /// resolver, on the same notification-only terms as [`GestureId`].
+    ///
+    /// Deliberately no `PartialOrd`/`Ord`, matching [`ConstraintId`]: an opaque
+    /// id's ordering would promise a creation-order semantics nobody asked for.
+    ///
+    /// `Debug` is *not* redacted, unlike every address-keyed id: the wrapped
+    /// value is a small wire integer, not a heap address, so printing it leaks
+    /// no layout.
+    TouchId, wire, nth,
     /// An id that names no live point, for negative tests: `i32::MAX - n`
     /// can never be a driver-issued touch id handed out here (drivers number
     /// slots from zero). Mirrors
     /// [`ConstraintId::dangling_nth_for_test`].
-    #[doc(hidden)]
-    pub fn dangling_nth_for_test(n: usize) -> Self {
-        Self(i32::MAX - n as i32)
-    }
 }
 
-/// A stable handle for one tracked switch device — a laptop lid, a
-/// tablet-mode hinge sensor, a keypad slide.
-///
-/// Opaque to consumers, like [`ConstraintId`]: the wrapped value is the
-/// `wlr_switch`'s own address — the identity `backend.rs`'s switch-toggle
-/// listener slot carries (FIX-3: a `wlr_switch_toggle_event` names no
-/// device at all, only time, type and state, so identity rides the listener
-/// set at link time, the same discipline the tablet-pad listeners keep).
-/// Notification-only: the handler learns the new position through
-/// [`SeatHandler::switch_toggled`](crate::SeatHandler::switch_toggled), and
-/// the aggregate through [`Runtime::switch_state`].
-///
-/// Deliberately no `PartialOrd`/`Ord`, matching [`ConstraintId`]: an opaque
-/// id's ordering would promise creation-order semantics nobody asked for.
-///
-/// `Debug` is redacted: the wrapped value is a heap address — printing it
-/// would hand out an ASLR oracle.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SwitchId(pub(crate) usize);
-
-impl std::fmt::Debug for SwitchId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SwitchId(..)")
-    }
-}
-
-impl SwitchId {
+opaque_id! {
+    /// A stable handle for one tracked switch device — a laptop lid, a
+    /// tablet-mode hinge sensor, a keypad slide.
+    ///
+    /// Opaque to consumers, like [`ConstraintId`]: the wrapped value is the
+    /// `wlr_switch`'s own address — the identity `backend.rs`'s switch-toggle
+    /// listener slot carries (FIX-3: a `wlr_switch_toggle_event` names no
+    /// device at all, only time, type and state, so identity rides the listener
+    /// set at link time, the same discipline the tablet-pad listeners keep).
+    /// Notification-only: the handler learns the new position through
+    /// [`SeatHandler::switch_toggled`](crate::SeatHandler::switch_toggled), and
+    /// the aggregate through [`Runtime::switch_state`].
+    ///
+    /// Deliberately no `PartialOrd`/`Ord`, matching [`ConstraintId`]: an opaque
+    /// id's ordering would promise creation-order semantics nobody asked for.
+    ///
+    /// `Debug` is redacted: the wrapped value is a heap address — printing it
+    /// would hand out an ASLR oracle.
+    SwitchId, address, nth,
     /// An id that names no switch, for negative tests: `usize::MAX - n` can
     /// never be a switch address handed out here (heap addresses never sit
     /// at the top of the address space). Mirrors
     /// [`ConstraintId::dangling_nth_for_test`].
-    #[doc(hidden)]
-    pub fn dangling_nth_for_test(n: usize) -> Self {
-        Self(usize::MAX - n)
-    }
 }
 
 /// One touch point down on the seat: the wire slot and the last position
@@ -2062,15 +2002,17 @@ impl ConstraintType {
     /// Decode the wire type. Total for the same reason as
     /// [`ConstraintLifetime::from_raw`]; an unknown value — which no
     /// wlroots 0.20 build can produce — falls back to
-    /// [`ConstraintType::Locked`], the fail-closed choice, matching the
-    /// enforcement in `backend.rs`'s motion paths (which freeze on
-    /// `LOCKED` and clamp on anything else).
+    /// [`ConstraintType::Confined`], matching the enforcement in
+    /// `backend.rs`'s motion paths (which freeze only on `LOCKED` and
+    /// clamp on anything else): the snapshot then agrees with what the
+    /// pointer actually does, instead of reporting a freeze the backend
+    /// will not apply.
     pub(crate) fn from_raw(raw: sys::wlr_pointer_constraint_v1_type) -> Self {
         use sys::wlr_pointer_constraint_v1_type as W;
         match raw {
-            W::WLR_POINTER_CONSTRAINT_V1_CONFINED => ConstraintType::Confined,
-            // Includes `WLR_POINTER_CONSTRAINT_V1_LOCKED` itself.
-            _ => ConstraintType::Locked,
+            W::WLR_POINTER_CONSTRAINT_V1_LOCKED => ConstraintType::Locked,
+            // Includes `WLR_POINTER_CONSTRAINT_V1_CONFINED` itself.
+            _ => ConstraintType::Confined,
         }
     }
 }
@@ -2124,8 +2066,13 @@ impl PointerConstraintState {
             region: Box2D::new(
                 extents.x1,
                 extents.y1,
-                extents.x2 - extents.x1,
-                extents.y2 - extents.y1,
+                // Saturated, exactly like `region.rs::box_from_pixman`: the
+                // extents corners are client-controlled, and the difference
+                // of two `i32` corners does not always fit in an `i32` — a
+                // plain subtraction panics in debug builds and wraps to a
+                // negative extent in release ones.
+                extents.x2.saturating_sub(extents.x1),
+                extents.y2.saturating_sub(extents.y1),
             ),
             cursor_hint: hint.enabled.then_some((hint.x, hint.y)),
         }
@@ -2264,26 +2211,38 @@ impl TouchFrame {
     /// point's *client*, so the point is resolved first — a stale id (the
     /// point already up, or never down) resolves to nothing and this no-ops,
     /// while the `TouchCancelled` event is still delivered.
-    pub(crate) fn send_cancel(self, touch_id: i32) {
+    ///
+    /// Returns whether the cancel notify was emitted: `false` when there is
+    /// no seat, when `touch_id` names no live point, or when the point
+    /// names no client (a live point always has one — wlroots sets it at
+    /// creation — so that last miss is a programming error, loud in debug
+    /// builds and a quiet miss in release). Callers that only need the
+    /// fire-and-forget shape keep ignoring the answer.
+    pub(crate) fn send_cancel(self, touch_id: i32) -> bool {
         let Some(seat) = self.runtime.seat_ptr() else {
-            return;
+            return false;
         };
         // SAFETY: `seat` as for `send_down`. The lookup only reads the seat;
         // a null answer (unknown point) misses below. The table borrow ended
         // inside `seat_ptr`, so no borrow crosses either call.
         let point = unsafe { sys::wlr_seat_touch_get_point(seat.as_ptr(), touch_id) };
         if point.is_null() {
-            return;
+            return false;
         }
         // SAFETY: `point` names a live touch point per the lookup's own
         // contract (null was checked); `client` is only handed to the cancel
         // below, never dereferenced here.
         let client = unsafe { (*point).client };
         if client.is_null() {
-            return;
+            debug_assert!(
+                false,
+                "a live touch point with no client: wlroots sets it at creation"
+            );
+            return false;
         }
         // SAFETY: `seat` as above; `client` is the point's live client.
         unsafe { sys::wlr_seat_touch_notify_cancel(seat.as_ptr(), client) };
+        true
     }
 }
 
@@ -13742,14 +13701,26 @@ impl Runtime {
     /// use (e.g. a grab cursor while moving a window — the
     /// `wlr_xcursor_theme_load` doc's own example), returning the handle
     /// [`destroy_xcursor_theme`](Runtime::destroy_xcursor_theme) releases.
-    /// `None` when the name contains a NUL or wlroots loads nothing (no
+    ///
+    /// `None` for two distinct reasons: the name contains a NUL (a
+    /// programming error — no Wayland string can carry one — loud in debug
+    /// builds and a quiet miss in release), or wlroots loads nothing (no
     /// theme installed, not even a fallback).
     ///
     /// The theme is owned by this runtime, independent of the seat and of
     /// any run: loading needs no seat, and the entry stands until
     /// explicitly destroyed.
     pub fn load_xcursor_theme(&self, name: &str, size: i32) -> Option<XcursorManagerId> {
-        let c_name = std::ffi::CString::new(name).ok()?;
+        let c_name = match std::ffi::CString::new(name) {
+            Ok(c_name) => c_name,
+            Err(_) => {
+                debug_assert!(
+                    false,
+                    "xcursor theme name contains a NUL: no Wayland string can carry one"
+                );
+                return None;
+            }
+        };
         // SAFETY: `c_name` is a live NUL-terminated string for the call;
         // `wlr_xcursor_theme_load` copies what it needs and returns an owned
         // theme or null on failure — null is the documented "no theme"
@@ -14114,8 +14085,11 @@ impl Runtime {
     /// [`touch_state`](Runtime::touch_state) and
     /// [`switch_state`](Runtime::switch_state) miss again from here on.
     ///
-    /// Returns `false` — destroying nothing — when there is no seat, or
-    /// when called from inside a handler. The handler refusal is the
+    /// Returns `false` — destroying nothing — for two distinct reasons:
+    /// there is no seat (nothing to destroy), or this is called from inside
+    /// a handler (an illegal context — defer the destroy until the run
+    /// returns instead; loud in debug builds, a quiet miss in release).
+    /// The handler refusal is the
     /// soundness gate, not an inconvenience: a run holds seat listeners
     /// with null liveness flags (the display-outlives-the-run reasoning in
     /// `backend.rs`'s registration hook), so destroying mid-run would leave
@@ -14137,6 +14111,10 @@ impl Runtime {
             return false;
         };
         if crate::dispatch::in_handler() {
+            debug_assert!(
+                false,
+                "destroy_seat called from inside a handler: defer it until the run returns"
+            );
             return false;
         }
         let cursor = self.cursor_ptr();
@@ -14158,6 +14136,15 @@ impl Runtime {
         true
     }
 
+    /// The live seat plus the caller's validated pointer behind every
+    /// seat-client query: `None` when there is no seat yet (or it was
+    /// destroyed) or the pointer is null. The four `seat_*` accessors share
+    /// this guard so "no seat" and "null" miss identically everywhere; what
+    /// differs per caller is only the wlroots lookup run afterwards.
+    fn live_seat_with<T>(&self, ptr: *mut T) -> Option<(NonNull<sys::wlr_seat>, NonNull<T>)> {
+        Some((self.seat_ptr()?, NonNull::new(ptr)?))
+    }
+
     /// Whether `client` has a client object on this runtime's seat — the
     /// thin check behind "is this client speaking to my seat".
     ///
@@ -14169,10 +14156,7 @@ impl Runtime {
     /// is only ever *read* by the lookup wlroots performs; the answer is
     /// compared, never dereferenced.
     pub unsafe fn seat_has_client(&self, client: *mut sys::wl_client) -> bool {
-        let Some(seat) = self.seat_ptr() else {
-            return false;
-        };
-        let Some(client) = NonNull::new(client) else {
+        let Some((seat, client)) = self.live_seat_with(client) else {
             return false;
         };
         // SAFETY: `client` is live per the caller's contract and `seat` is
@@ -14198,10 +14182,7 @@ impl Runtime {
         &self,
         resource: *mut sys::wl_resource,
     ) -> bool {
-        if self.seat_ptr().is_none() {
-            return false;
-        }
-        let Some(resource) = NonNull::new(resource) else {
+        let Some((_seat, resource)) = self.live_seat_with(resource) else {
             return false;
         };
         // SAFETY: `resource` is live per the caller's contract; the lookup
@@ -14225,8 +14206,7 @@ impl Runtime {
     /// `resource` must be null or point at a live `wl_resource`, on the same
     /// read-only terms as [`seat_has_client`](Runtime::seat_has_client).
     pub unsafe fn seat_client_next_serial(&self, resource: *mut sys::wl_resource) -> Option<u32> {
-        self.seat_ptr()?;
-        let resource = NonNull::new(resource)?;
+        let (_seat, resource) = self.live_seat_with(resource)?;
         // SAFETY: `resource` is live per the caller's contract; both lookups
         // only read, and a null answer at either hop (foreign resource)
         // misses below.
@@ -14254,10 +14234,7 @@ impl Runtime {
         resource: *mut sys::wl_resource,
         serial: u32,
     ) -> bool {
-        if self.seat_ptr().is_none() {
-            return false;
-        }
-        let Some(resource) = NonNull::new(resource) else {
+        let Some((_seat, resource)) = self.live_seat_with(resource) else {
             return false;
         };
         // SAFETY: as for
@@ -14380,7 +14357,113 @@ mod tests {
         );
         assert_eq!(
             ConstraintType::from_raw(sys::wlr_pointer_constraint_v1_type(99)),
-            ConstraintType::Locked
+            ConstraintType::Confined
+        );
+    }
+
+    /// The region extents are client-controlled corners, and the difference
+    /// of two `i32` corners does not always fit in an `i32`. A region
+    /// spanning nearly the whole coordinate space must saturate to a
+    /// non-negative extent — the same `saturating_sub` discipline
+    /// `region.rs::box_from_pixman` keeps — rather than panic in debug
+    /// builds or wrap to a negative extent in release ones.
+    #[test]
+    fn constraint_extents_saturate_rather_than_panic_or_wrap() {
+        use crate::test_support::Scratch;
+
+        let scratch = Scratch::<sys::wlr_pointer_constraint_v1>::new(
+            |ptr| {
+                // SAFETY: `ptr` is a fresh, exclusively-owned, zeroed
+                // allocation sized for a whole `wlr_pointer_constraint_v1`;
+                // only plain fields are written, and the allocation outlives
+                // the snapshot below.
+                unsafe {
+                    (*ptr).lifetime =
+                        sys::zwp_pointer_constraints_v1_lifetime::ZWP_POINTER_CONSTRAINTS_V1_LIFETIME_PERSISTENT;
+                    (*ptr).type_ =
+                        sys::wlr_pointer_constraint_v1_type::WLR_POINTER_CONSTRAINT_V1_CONFINED;
+                    (*ptr).current.region.extents = sys::pixman_box32 {
+                        x1: i32::MIN,
+                        y1: i32::MIN,
+                        x2: i32::MAX,
+                        y2: i32::MAX,
+                    };
+                }
+            },
+            |_| {},
+        );
+        let constraint = NonNull::new(scratch.ptr).expect("scratch allocation is non-null");
+        let state = PointerConstraintState::from_constraint(constraint);
+        assert_eq!(
+            state.region,
+            Box2D::new(i32::MIN, i32::MIN, i32::MAX, i32::MAX),
+            "a full-space region saturates to the widest representable extent"
+        );
+        assert!(
+            state.region.width >= 0 && state.region.height >= 0,
+            "saturated extents are never negative: {:?}",
+            state.region
+        );
+    }
+
+    /// The one policy the `opaque_id!` macro mints for every address-keyed
+    /// id: `dangling_nth_for_test(n)` is `usize::MAX - n`, and the
+    /// singletons are `n = 0` of that same shape. Two different id types
+    /// must agree on the wrapped value for the same `n` — if they ever
+    /// drift, the "one policy" claim in the macro docs is a lie — and the
+    /// redacted `Debug` strings must still name their own type.
+    #[test]
+    fn opaque_ids_share_one_dangling_band_policy() {
+        for n in [0usize, 1, 7, 100] {
+            assert_eq!(
+                ConstraintId::dangling_nth_for_test(n).0,
+                GestureId::dangling_nth_for_test(n).0,
+                "ConstraintId and GestureId share one band"
+            );
+            assert_eq!(
+                ConstraintId::dangling_nth_for_test(n).0,
+                SwitchId::dangling_nth_for_test(n).0,
+                "ConstraintId and SwitchId share one band"
+            );
+        }
+        assert_eq!(
+            CursorId::dangling().0,
+            ConstraintId::dangling_nth_for_test(0).0,
+            "the singleton is n = 0 of the nth shape"
+        );
+        assert_eq!(
+            XcursorManagerId::dangling().0,
+            ConstraintId::dangling_nth_for_test(0).0,
+            "the singleton is n = 0 of the nth shape"
+        );
+        assert_eq!(
+            format!("{:?}", ConstraintId::dangling_nth_for_test(1)),
+            "ConstraintId(..)"
+        );
+        assert_eq!(
+            format!("{:?}", GestureId::dangling_nth_for_test(1)),
+            "GestureId(..)"
+        );
+    }
+
+    /// `send_cancel` answers whether the cancel notify went out: `false`
+    /// with no seat (nothing to emit on) and `false` for a stale touch id
+    /// on a live seat (no such point — nothing went out, so no client could
+    /// have been notified). The `TouchCancelled` handler event is delivered
+    /// regardless; this answers only the client-forward half.
+    #[test]
+    fn send_cancel_reports_whether_the_notify_was_emitted() {
+        let _guard = crate::test_support::test_display_guard();
+        let display = crate::Display::new().expect("display");
+        let runtime = Runtime::new().expect("runtime");
+        assert!(
+            !TouchFrame::of(&runtime).send_cancel(7),
+            "no seat, so no cancel notify could have been emitted"
+        );
+        runtime.create_seat(&display, "seat0").expect("seat");
+        assert!(
+            !TouchFrame::of(&runtime).send_cancel(7),
+            "no touch point with this id, so nothing was emitted"
         );
     }
 

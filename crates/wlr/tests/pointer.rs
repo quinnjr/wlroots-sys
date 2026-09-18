@@ -72,7 +72,11 @@ fn xcursor_theme_destroy_roundtrip() {
         assert!(rt.destroy_xcursor_theme(id), "first destroy releases");
         assert!(!rt.destroy_xcursor_theme(id), "second destroy misses");
     }
-    // A NUL in the name can never load.
+    // A NUL in the name can never load. In debug builds that is a loud
+    // programming error — the `debug_assert!` in `load_xcursor_theme` fires
+    // before the `None` is reached — so only release builds can observe the
+    // quiet `None` here.
+    #[cfg(not(debug_assertions))]
     assert!(rt.load_xcursor_theme("def\0ault", 24).is_none());
 }
 
@@ -229,6 +233,573 @@ impl wlr::SeatHandler for LegacyTouchSwitchHandler {}
 #[test]
 fn touch_switch_hooks_are_additive() {
     let _legacy = LegacyTouchSwitchHandler;
+}
+
+/// M7 review (a): `map_cursor_to_output` misses without a seat and for an
+/// unknown output, and records a live mapping in the snapshot.
+#[test]
+fn cursor_output_mapping_misses_and_records() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+
+    let rt = wlr::Runtime::new().unwrap();
+    assert!(
+        rt.map_cursor_to_output(wlr::OutputId::dangling_for_test())
+            .is_none(),
+        "no seat cursor, so no mapping applies"
+    );
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let rt = wlr::Runtime::new().expect("runtime");
+    rt.init_graphics(&display, &backend).expect("graphics");
+    rt.create_seat(&display, "seat0").expect("seat");
+
+    // A seat with no announced output yet: a dangling id still misses, and
+    // nothing is recorded.
+    assert!(
+        rt.map_cursor_to_output(wlr::OutputId::dangling_for_test())
+            .is_none()
+    );
+    assert_eq!(rt.cursor_state().expect("cursor").mapped_output, None);
+
+    // Announce a real output through a run, mapping from inside the
+    // announcement handler: the output table is populated — and cleared —
+    // by the run that announced it (`clear_outputs`), so mapping after the
+    // run returns would miss by design. The recorded mapping itself lives
+    // in this crate's own cell, so it still reads back afterwards.
+    struct OutputProbe {
+        rt: wlr::Runtime,
+        outputs: Vec<wlr::OutputId>,
+        map_result: Option<Option<()>>,
+        turns: u32,
+    }
+    impl wlr::OutputHandler for OutputProbe {
+        fn new_output(&mut self, output: &wlr::Output<'_>) {
+            self.outputs.push(output.id());
+            self.map_result = Some(self.rt.map_cursor_to_output(output.id()));
+        }
+    }
+    impl wlr::ToplevelHandler for OutputProbe {}
+    impl wlr::FdHandler for OutputProbe {}
+    impl wlr::LoopHandler for OutputProbe {
+        fn should_stop(&mut self) -> bool {
+            self.turns += 1;
+            self.turns >= 4
+        }
+    }
+    impl wlr::SeatHandler for OutputProbe {}
+
+    let mut probe = OutputProbe {
+        rt: rt.clone(),
+        outputs: Vec::new(),
+        map_result: None,
+        turns: 0,
+    };
+    backend
+        .run_all(&display, &mut probe, &rt, wlr::Until::Turns(4))
+        .expect("run_all");
+    let live = probe
+        .outputs
+        .into_iter()
+        .next()
+        .expect("headless announces one output");
+    assert_eq!(
+        probe.map_result,
+        Some(Some(())),
+        "a live output of the current run maps"
+    );
+    assert_eq!(rt.cursor_state().expect("cursor").mapped_output, Some(live));
+}
+
+/// M7 review (b): `constraint_state_for_surface` misses with no seat, with
+/// no manager, and for an unknown surface of every role.
+///
+/// A live constraint's populated fields need a client that binds
+/// `zwp_pointer_constraints_v1` and commits a constraint on a mapped
+/// surface; `tests/common/client.rs` speaks xdg-shell, layer-shell and
+/// foreign-toplevel only, so no harness commits one — the populated shape
+/// is pinned instead by the `constraint_extents_saturate_rather_than_panic_or_wrap`
+/// unit test on `PointerConstraintState`.
+#[test]
+fn constraint_state_misses_cleanly() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+    use wlr::ConstraintSurface;
+
+    let rt = wlr::Runtime::new().unwrap();
+    assert!(
+        rt.constraint_state_for_surface(ConstraintSurface::Toplevel(
+            wlr::ToplevelId::dangling_for_test()
+        ))
+        .is_none(),
+        "no seat, so no constraint"
+    );
+
+    let display = wlr::Display::new().expect("display");
+    let rt = wlr::Runtime::new().expect("runtime");
+    rt.create_seat(&display, "seat0").expect("seat");
+    assert!(
+        rt.constraint_state_for_surface(ConstraintSurface::Toplevel(
+            wlr::ToplevelId::dangling_for_test()
+        ))
+        .is_none(),
+        "no pointer-constraints manager, so no constraint"
+    );
+
+    rt.create_pointer_constraints_manager(&display)
+        .expect("manager");
+    assert!(
+        rt.constraint_state_for_surface(ConstraintSurface::Toplevel(
+            wlr::ToplevelId::dangling_for_test()
+        ))
+        .is_none(),
+        "unknown toplevel names no surface"
+    );
+    assert!(
+        rt.constraint_state_for_surface(ConstraintSurface::Layer(
+            wlr::LayerSurfaceId::dangling_for_test()
+        ))
+        .is_none(),
+        "unknown layer surface names no surface"
+    );
+    assert!(
+        rt.constraint_state_for_surface(ConstraintSurface::Popup(
+            wlr::PopupId::dangling_nth_for_test(1)
+        ))
+        .is_none(),
+        "unknown popup names no surface"
+    );
+}
+
+/// M7 review (c): seat rename and serial guards miss cleanly with and
+/// without a seat. Null is the documented miss case for every one of these
+/// (each takes null-or-live), so null probes the shared guard without any
+/// hardware; only a real name on a live seat renames.
+#[test]
+fn seat_name_and_serial_guards_miss_cleanly() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+
+    let rt = wlr::Runtime::new().unwrap();
+    assert!(!rt.set_seat_name("seat0"), "no seat yet, so no rename");
+    assert!(!rt.set_seat_name("sea\0t0"), "no seat yet, so no rename");
+    // SAFETY: null is the documented miss case for each of these — a live
+    // pointer is only ever read, never dereferenced, and null misses first.
+    unsafe {
+        assert!(!rt.seat_has_client(std::ptr::null_mut()));
+        assert!(!rt.seat_has_client_for_pointer_resource(std::ptr::null_mut()));
+        assert!(rt.seat_client_next_serial(std::ptr::null_mut()).is_none());
+        assert!(!rt.seat_client_validate_serial(std::ptr::null_mut(), 1));
+    }
+
+    let display = wlr::Display::new().expect("display");
+    rt.create_seat(&display, "seat0").expect("seat");
+    assert!(rt.set_seat_name("seat1"), "a live seat renames");
+    assert!(!rt.set_seat_name("sea\0t1"), "a NUL name never renames");
+    // SAFETY: as above — null still misses with a live seat behind it.
+    unsafe {
+        assert!(!rt.seat_has_client(std::ptr::null_mut()));
+        assert!(!rt.seat_has_client_for_pointer_resource(std::ptr::null_mut()));
+        assert!(rt.seat_client_next_serial(std::ptr::null_mut()).is_none());
+        assert!(!rt.seat_client_validate_serial(std::ptr::null_mut(), 1));
+    }
+}
+
+/// M7 review (d), constraint group: the commit hook survives a real run
+/// without firing. Driving it needs a client that binds
+/// `zwp_pointer_constraints_v1` and commits a region on a mapped surface —
+/// `tests/common/client.rs` has no such helper (and the only emitters,
+/// `backend.rs`'s `on_new_pointer_constraint`/`on_constraint_commit`, run
+/// on client protocol traffic) — so headless cannot produce the event, and
+/// what this pins is that the hook is wired without synthesising one from
+/// nowhere. Routing itself is `backend::pointer_protocol_delivery_tests`.
+#[test]
+fn constraint_hook_survives_a_run_without_firing() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+
+    #[derive(Default)]
+    struct App {
+        turns: u32,
+        constraints: Vec<wlr::ConstraintId>,
+    }
+    impl wlr::OutputHandler for App {}
+    impl wlr::ToplevelHandler for App {}
+    impl wlr::FdHandler for App {}
+    impl wlr::LoopHandler for App {
+        fn should_stop(&mut self) -> bool {
+            self.turns += 1;
+            self.turns >= 4
+        }
+    }
+    impl wlr::SeatHandler for App {
+        fn pointer_constraint_committed(&mut self, id: wlr::ConstraintId) {
+            self.constraints.push(id);
+        }
+    }
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime.create_seat(&display, "seat0").expect("seat");
+    runtime
+        .create_pointer_constraints_manager(&display)
+        .expect("manager");
+
+    let mut app = App::default();
+    backend
+        .run_all(&display, &mut app, &runtime, wlr::Until::Turns(4))
+        .expect("run_all");
+
+    assert!(
+        app.constraints.is_empty(),
+        "no client committed a constraint, so none may have been reported"
+    );
+}
+
+/// M7 review (d), gesture group: the begin/end hooks survive a real run
+/// without firing. The only emitters are the hardware-pointer gesture
+/// signals (`backend.rs`'s swipe/pinch/hold handlers), and headless offers
+/// no pointer device through the safe API — the same limit `seat.rs`'s
+/// header note records for key presses — so the event is unproducible here.
+/// Routing itself is `backend::pointer_protocol_delivery_tests`.
+#[test]
+fn gesture_hooks_survive_a_run_without_firing() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+
+    #[derive(Default)]
+    struct App {
+        turns: u32,
+        began: Vec<wlr::GestureId>,
+        ended: Vec<wlr::GestureId>,
+    }
+    impl wlr::OutputHandler for App {}
+    impl wlr::ToplevelHandler for App {}
+    impl wlr::FdHandler for App {}
+    impl wlr::LoopHandler for App {
+        fn should_stop(&mut self) -> bool {
+            self.turns += 1;
+            self.turns >= 4
+        }
+    }
+    impl wlr::SeatHandler for App {
+        fn gesture_began(&mut self, id: wlr::GestureId) {
+            self.began.push(id);
+        }
+        fn gesture_ended(&mut self, id: wlr::GestureId) {
+            self.ended.push(id);
+        }
+    }
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime.create_seat(&display, "seat0").expect("seat");
+    runtime
+        .create_pointer_gestures_manager(&display)
+        .expect("manager");
+
+    let mut app = App::default();
+    backend
+        .run_all(&display, &mut app, &runtime, wlr::Until::Turns(4))
+        .expect("run_all");
+
+    assert!(app.began.is_empty() && app.ended.is_empty());
+}
+
+/// M7 review (d), touch group: real injection attempted through a real run,
+/// hooks asserting. `inject_touch_*` is the one injection surface this
+/// group has — but it drives the client-forward path (`TouchFrame`
+/// notifies), never the hardware-signal path the hooks relay, and with an
+/// empty scene the hit test misses before anything emits (`None`). So the
+/// vectors must stay empty *and* the injection must report its miss: both
+/// halves of "attempted for real, delivered nothing" are asserted.
+#[test]
+fn touch_hooks_survive_real_injection_without_firing() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+
+    #[derive(Default)]
+    struct App {
+        turns: u32,
+        downs: Vec<wlr::TouchId>,
+        ups: Vec<wlr::TouchId>,
+        cancelled: u32,
+    }
+    impl wlr::OutputHandler for App {}
+    impl wlr::ToplevelHandler for App {}
+    impl wlr::FdHandler for App {}
+    impl wlr::LoopHandler for App {
+        fn should_stop(&mut self) -> bool {
+            self.turns += 1;
+            self.turns >= 4
+        }
+    }
+    impl wlr::SeatHandler for App {
+        fn touch_down(&mut self, id: wlr::TouchId) {
+            self.downs.push(id);
+        }
+        fn touch_up(&mut self, id: wlr::TouchId) {
+            self.ups.push(id);
+        }
+        fn touch_cancelled(&mut self) {
+            self.cancelled += 1;
+        }
+    }
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime.create_seat(&display, "seat0").expect("seat");
+    runtime.enable_test_touch();
+
+    let mut app = App::default();
+    backend
+        .run_all(&display, &mut app, &runtime, wlr::Until::Turns(4))
+        .expect("run_all");
+
+    // Real injection, attempted: an empty scene has no surface under the
+    // cursor, so the down misses before emitting — and with no hardware
+    // touch signal either, no hook may have fired.
+    assert!(
+        runtime.inject_touch_down(64.0, 64.0, 0, 1).is_none(),
+        "nothing under the cursor, so the injection misses"
+    );
+    runtime.inject_touch_motion(65.0, 65.0, 0, 2);
+    runtime.inject_touch_up(0, 3);
+    assert!(app.downs.is_empty() && app.ups.is_empty());
+    assert_eq!(app.cancelled, 0);
+}
+
+/// M7 review (d), switch group: the toggle hook survives a real run without
+/// firing. The only emitter is the switch-hardware toggle signal, and
+/// headless has no switch device — nor any safe-API injection for one
+/// (`note_switch_toggle` is `pub(crate)`, reachable only from that signal)
+/// — so the event is unproducible here. Routing itself is
+/// `backend::touch_switch_delivery_tests`.
+#[test]
+fn switch_hook_survives_a_run_without_firing() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+
+    #[derive(Default)]
+    struct App {
+        turns: u32,
+        toggles: Vec<(wlr::SwitchId, bool)>,
+    }
+    impl wlr::OutputHandler for App {}
+    impl wlr::ToplevelHandler for App {}
+    impl wlr::FdHandler for App {}
+    impl wlr::LoopHandler for App {
+        fn should_stop(&mut self) -> bool {
+            self.turns += 1;
+            self.turns >= 4
+        }
+    }
+    impl wlr::SeatHandler for App {
+        fn switch_toggled(&mut self, id: wlr::SwitchId, on: bool) {
+            self.toggles.push((id, on));
+        }
+    }
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let runtime = wlr::Runtime::new().expect("runtime");
+    runtime.init_graphics(&display, &backend).expect("graphics");
+    runtime.create_seat(&display, "seat0").expect("seat");
+
+    let mut app = App::default();
+    backend
+        .run_all(&display, &mut app, &runtime, wlr::Until::Turns(4))
+        .expect("run_all");
+
+    assert!(app.toggles.is_empty());
+}
+
+/// M7 review (e): a mapped region is recorded in the snapshot.
+#[test]
+fn cursor_region_mapping_is_recorded_in_the_snapshot() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let rt = wlr::Runtime::new().expect("runtime");
+    rt.init_graphics(&display, &backend).expect("graphics");
+    rt.create_seat(&display, "seat0").expect("seat");
+
+    let region = wlr::Box2D::new(10, 20, 300, 200);
+    rt.map_cursor_to_region(region)
+        .expect("a seat cursor always maps a region");
+    assert_eq!(
+        rt.cursor_state().expect("cursor").mapped_region,
+        Some(region)
+    );
+}
+
+/// M7 review (e): the touch snapshot after a real inject down/up round trip.
+///
+/// Populating `points` needs a surface under the cursor *and* a client
+/// holding a `wl_touch` resource (wlroots' `touch_point_create` refuses
+/// otherwise) — an empty scene has neither, so the injection misses and the
+/// snapshot stays at rest. A populated-points assertion would need a client
+/// helper that binds `wl_touch`, which `tests/common/client.rs` has none
+/// of; this pins the reachable half (miss shape + resting snapshot) and
+/// records the gap.
+#[test]
+fn touch_snapshot_after_inject_down_and_up() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let rt = wlr::Runtime::new().expect("runtime");
+    rt.init_graphics(&display, &backend).expect("graphics");
+    rt.create_seat(&display, "seat0").expect("seat");
+    rt.enable_test_touch();
+
+    assert!(
+        rt.inject_touch_down(64.0, 64.0, 0, 1).is_none(),
+        "no surface under the cursor, so no point is created"
+    );
+    rt.inject_touch_up(0, 2);
+    let state = rt.touch_state().expect("touch-enabled seat snapshots");
+    assert!(
+        state.points.is_empty(),
+        "no point was ever created, so none is down"
+    );
+    assert!(!state.has_grab);
+}
+
+/// M7 review (e): the switch snapshot has no headless driver either.
+/// `switch_state` needs a tracked switch device plus an observed toggle;
+/// both arrive only on the switch-hardware signal, for which headless has
+/// no source — so this pins the miss shape, and the populated shape
+/// (`from_toggle`, including the lid derivation) is pinned by the
+/// `switch_state_derives_lid_closed_from_type_and_position` unit test.
+#[test]
+fn switch_snapshot_has_no_headless_driver() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let rt = wlr::Runtime::new().expect("runtime");
+    rt.init_graphics(&display, &backend).expect("graphics");
+    rt.create_seat(&display, "seat0").expect("seat");
+
+    assert!(
+        rt.switch_state().is_none(),
+        "no switch device and no toggle observed headless"
+    );
+}
+
+/// M7 review (f): destroying the seat drops every cursor reader back to a
+/// miss — the id, the aggregate snapshot, and the by-id resolver alike.
+#[test]
+fn cursor_misses_after_seat_destroy() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let rt = wlr::Runtime::new().expect("runtime");
+    rt.init_graphics(&display, &backend).expect("graphics");
+    rt.create_seat(&display, "seat0").expect("seat");
+
+    let id = rt.cursor_id().expect("seat brings a cursor");
+    assert!(rt.destroy_seat(), "a live seat destroys");
+    assert!(rt.cursor_id().is_none(), "the id misses again");
+    assert!(rt.cursor_state().is_none(), "the snapshot misses again");
+    assert!(rt.try_cursor(id).is_none(), "the saved id misses again");
+    assert!(!rt.destroy_seat(), "no seat left to destroy");
+}
+
+/// M7 review (g): destroying the seat from inside a dispatched handler is
+/// refused, and the seat still resolves afterwards.
+///
+/// The refusal is a programming error — `destroy_seat`'s `debug_assert!`
+/// fires in debug builds before the `false` is reached — so the attempt is
+/// caught inside the handler: debug observes the gate's message, release
+/// observes the `false` return, and both observe the seat still standing.
+#[test]
+fn destroy_seat_refused_inside_handler() {
+    let _serial = common::headless_guard();
+    common::headless_env();
+
+    let display = wlr::Display::new().expect("display");
+    let backend = wlr::Backend::autocreate(&display.event_loop()).expect("backend");
+    let rt = wlr::Runtime::new().expect("runtime");
+    rt.init_graphics(&display, &backend).expect("graphics");
+    rt.create_seat(&display, "seat0").expect("seat");
+
+    struct RefuseApp {
+        rt: wlr::Runtime,
+        turns: u32,
+        /// `Ok(false)` in release (the refusal return), `Err(message)` in
+        /// debug (the programming-error gate fires before returning).
+        outcome: std::cell::RefCell<Option<Result<bool, String>>>,
+    }
+    impl wlr::OutputHandler for RefuseApp {
+        fn new_output(&mut self, _output: &wlr::Output<'_>) {
+            let attempt =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.rt.destroy_seat()));
+            let recorded = attempt.map_err(|payload| {
+                payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                    .unwrap_or_else(|| "(non-string panic)".to_string())
+            });
+            *self.outcome.borrow_mut() = Some(recorded);
+        }
+    }
+    impl wlr::ToplevelHandler for RefuseApp {}
+    impl wlr::FdHandler for RefuseApp {}
+    impl wlr::LoopHandler for RefuseApp {
+        fn should_stop(&mut self) -> bool {
+            self.turns += 1;
+            self.turns >= 4
+        }
+    }
+    impl wlr::SeatHandler for RefuseApp {}
+
+    let mut app = RefuseApp {
+        rt: rt.clone(),
+        turns: 0,
+        outcome: std::cell::RefCell::new(None),
+    };
+    backend
+        .run_all(&display, &mut app, &rt, wlr::Until::Turns(4))
+        .expect("run_all");
+
+    let outcome = app
+        .outcome
+        .borrow()
+        .clone()
+        .expect("a headless run announces an output, running the handler");
+    if cfg!(debug_assertions) {
+        let message = outcome.expect_err("the debug gate must fire, not destroy");
+        assert!(
+            message.contains("defer it until the run returns"),
+            "the gate names the fix: {message}"
+        );
+    } else {
+        assert!(
+            !outcome.expect("no panic in release"),
+            "the in-handler destroy is refused"
+        );
+    }
+    assert!(
+        rt.cursor_id().is_some(),
+        "the refused destroy leaves the seat standing"
+    );
+    assert!(rt.cursor_state().is_some());
 }
 
 /// Touch and switch ids are plain values from outside the crate — which is
