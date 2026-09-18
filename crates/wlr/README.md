@@ -514,6 +514,60 @@ pre-map commit listener that calls the new
 `Runtime::schedule_frame_all(&self) -> usize` so XWayland's handshake frame
 callback is answered. Bounded to the handshake commits; never busy-loops.
 
+## 0.20.37 — M7 review pass: input-relay correctness
+
+A correctness pass over 0.20.35's input relays and 0.20.36's shell handles,
+from a multi-domain review loop. No trait was added and no public signature
+changed: every fix is behaviour, `pub(crate)`-internal, docs, or tests, so an
+empty `impl SeatHandler for MyState {}` against any earlier 0.20.x still
+compiles and existing callers are unaffected.
+
+### Fixed
+
+- **Touch relays no longer diverge from the seat's state.** `on_touch_up`
+  and `on_touch_motion` now gate on the same point-liveness *and* client
+  checks the cancel path uses, so an up/motion for a point that was never
+  announced (or whose device died mid-gesture) skips both the forward and
+  the handler event instead of handing wlroots a clientless point to follow.
+  `TouchFrame::send_cancel` returns a `CancelOutcome` (`Cancelled` /
+  `NoSeat` / `UnknownPoint` / `ClientlessPoint`) rather than a `bool` that
+  conflated the three misses.
+- **Relative-motion deltas are validated before they can become wild jumps.**
+  `emit_relative_motion` drops non-finite deltas and any whose milli-scaling
+  leaves the `i64` range (including the exact `2^63` boundary, where
+  `i64::MAX as f64` rounds up) before either the client forward or the
+  compositor announce, instead of saturating the cast into a huge jump.
+- **Unknown wire values fail toward what is enforced, not away from it.**
+  `ConstraintType::from_raw` and `SwitchType::from_raw` fall back to
+  `Confined` and `TabletMode`: `Confined` matches the motion path's
+  clamp-anything-not-`LOCKED` behaviour, and `TabletMode` cannot trip the
+  `lid_closed` derivation for a switch this crate does not recognise.
+- **Constraint-region extents saturate** (`saturating_sub`, matching
+  `region::box_from_pixman`) instead of overflowing `i32` on a
+  client-controlled region spanning most of the coordinate space.
+- `load_xcursor_theme` with a NUL in the name, and `destroy_seat` called
+  from inside a handler, are loud `debug_assert!`s in debug and quiet
+  documented misses in release.
+
+### Additive
+
+- Eleven opaque `*Id` types now share one `opaque_id!` definition (identical
+  derives, redacted `Debug`, and dangling-band behaviour); the seat-liveness
+  guard behind the client/serial queries is one helper; the gesture and
+  session test scaffolds are shared. `DmabufClient`-style harness additions
+  are test-only.
+
+### Coverage
+
+- Touch integration now drives a real `wl_touch` client: down and up
+  announce with the expected id, and the client-observed forward is asserted.
+- Relay-firing tests cover the gesture/touch/switch emits, the
+  relative-motion quantisation and its drop boundaries, and the
+  seatless/clientless/null-device early returns.
+- CI additionally runs the release-only touch-cancel clearing tests
+  (`debug_assertions` off), so behaviour pinned only in release builds is
+  not behaviour pinned nowhere.
+
 ## 0.20.36 — M9 shell completion
 
 The shell-completion milestone. A compositor can now take a handle on any
