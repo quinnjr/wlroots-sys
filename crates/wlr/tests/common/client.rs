@@ -105,8 +105,20 @@ pub struct TouchClientEvents {
     pub downs: Vec<i32>,
     /// `wl_touch.up` ids in arrival order.
     pub ups: Vec<i32>,
+    /// `wl_touch.motion` ids in arrival order — the forward the server's
+    /// touch-motion notify produces, proving the motion leg reached the
+    /// wire rather than only resolving server-side. `frame`/`shape`/
+    /// `orientation` carry no hook this harness observes and stay
+    /// unrecorded (see the `Dispatch<wl_touch>` impl).
+    pub motions: Vec<i32>,
     /// `wl_touch.cancel` events observed.
     pub cancels: u32,
+    /// The first park-loop socket read that failed with something other
+    /// than a retry (`WouldBlock`/`TimedOut` silence stays on the retry
+    /// path). Recorded rather than panicked in-thread so the test thread
+    /// — which owns the assertion context — names the transport failure
+    /// instead of joining through a dead thread.
+    pub transport_error: Option<String>,
 }
 
 /// What a `zwlr_foreign_toplevel_manager_v1` client observed, returned by
@@ -1048,10 +1060,23 @@ fn spawn_touch_client_until(
                 break;
             }
             if let Some(guard) = queue.prepare_read() {
-                // Any outcome — events read, silence, or a real error — is
-                // handled by the next lap (dispatch, deadline, or caller
-                // assertion); nothing here may block.
-                let _ = guard.read();
+                // `WouldBlock`/`TimedOut` on silence is the normal outcome
+                // and stays on the retry path; anything else is a transport
+                // failure — recorded and ending the wait, so a dead socket
+                // fails the caller's assertion instead of hanging the join.
+                // Nothing here may block.
+                match guard.read() {
+                    Ok(_) => {}
+                    Err(wayland_client::backend::WaylandError::Io(e))
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(e) => {
+                        state.touch.transport_error = Some(format!("touch park read: {e}"));
+                        break;
+                    }
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -2235,8 +2260,10 @@ impl Dispatch<wl_seat::WlSeat, ()> for ClientState {
 impl Dispatch<wl_touch::WlTouch, ()> for ClientState {
     /// Records the touch traffic the server injects at this client's mapped
     /// surface, so the touch integration tests can assert the wire exchange
-    /// happened — down and up ids, any cancel — rather than only that the
-    /// server grew a point.
+    /// happened — down, motion and up ids, any cancel — rather than only
+    /// that the server grew a point. `frame` carries no id (it delimits a
+    /// group) and `shape`/`orientation` refine a point no hook observes, so
+    /// all three stay unrecorded by design.
     fn event(
         state: &mut Self,
         _proxy: &wl_touch::WlTouch,
@@ -2247,6 +2274,7 @@ impl Dispatch<wl_touch::WlTouch, ()> for ClientState {
     ) {
         match event {
             wl_touch::Event::Down { id, .. } => state.touch.downs.push(id),
+            wl_touch::Event::Motion { id, .. } => state.touch.motions.push(id),
             wl_touch::Event::Up { id, .. } => state.touch.ups.push(id),
             wl_touch::Event::Cancel => state.touch.cancels += 1,
             _ => {}

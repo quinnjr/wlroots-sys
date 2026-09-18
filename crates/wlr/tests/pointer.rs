@@ -826,6 +826,13 @@ struct TouchApp {
     /// anywhere near the run — the assertions below read it after the run
     /// returns.
     injected_down: Option<Option<u32>>,
+    /// Misses on the retry path, counted separately so a stuck drive names
+    /// the stalled leg: `None` means no surface under the cursor yet (the
+    /// map has not settled), `Some(0)` means the surface resolved but the
+    /// client's `wl_touch` resource is not in place yet. Read in the
+    /// assertion messages below after the run returns.
+    miss_no_surface: u32,
+    miss_no_resource: u32,
     /// Server-side point ids read back synchronously right after the minted
     /// down — and right after the up when `inject_up` is set, in the same
     /// turn, before any flush, client exit, or disconnect can disturb them.
@@ -833,6 +840,12 @@ struct TouchApp {
     /// dispatched the disconnect, so a post-run snapshot can no longer
     /// prove anything about the drive.)
     points_after_drive: Option<Vec<i32>>,
+    /// When set, a motion for the same point follows a minted down
+    /// immediately — proving the motion forward reaches the wire. Asserted
+    /// via the client's observed motions only in the up leg: the down leg's
+    /// client exits on the down itself, so a motion still in flight there
+    /// stays unasserted by design rather than by gap.
+    drive_motion: bool,
     /// When set, the up for the same point follows a minted down
     /// immediately — the down/up round trip as one atomic drive.
     inject_up: bool,
@@ -843,8 +856,12 @@ struct TouchApp {
 
 impl wlr::OutputHandler for TouchApp {
     fn new_output(&mut self, output: &wlr::Output<'_>) {
-        let _ = output.enable_with_preferred_mode();
-        let _ = self.runtime.init_output(output);
+        output
+            .enable_with_preferred_mode()
+            .expect("headless output must enable with its preferred mode");
+        self.runtime
+            .init_output(output)
+            .expect("headless output must initialise for rendering");
     }
 }
 
@@ -861,17 +878,21 @@ impl wlr::LoopHandler for TouchApp {
         // Inject between turns, never inside `mapped`: during the map
         // emission the scene side has not settled (the hit test misses
         // there), while here every commit has been fully applied. Retried
-        // every turn until it mints: a zero serial means the surface
-        // resolved but the client's `wl_touch` resource is not in place
-        // yet — its get_touch round-trip is still in flight — so the next
-        // turn tries again. Failed attempts create nothing, so retrying
-        // with the same id is safe.
+        // every turn until it mints: `None` means no surface under the
+        // cursor yet, `Some(0)` means the surface resolved but the client's
+        // `wl_touch` resource is not in place yet — its get_touch
+        // round-trip is still in flight — so the next turn tries again and
+        // each miss is counted on its own leg. Failed attempts create
+        // nothing, so retrying with the same id is safe.
         if !self.mapped.is_empty() && self.injected_down.is_none() {
             match self.runtime.inject_touch_down(10.0, 10.0, 7, 1) {
                 Some(serial) if serial != 0 => {
                     self.injected_down = Some(Some(serial));
+                    if self.drive_motion {
+                        self.runtime.inject_touch_motion(12.0, 12.0, 7, 2);
+                    }
                     if self.inject_up {
-                        self.runtime.inject_touch_up(7, 2);
+                        self.runtime.inject_touch_up(7, 3);
                     }
                     self.points_after_drive = Some(
                         self.runtime
@@ -880,7 +901,12 @@ impl wlr::LoopHandler for TouchApp {
                             .unwrap_or_default(),
                     );
                 }
-                _ => {}
+                Some(_) => {
+                    self.miss_no_resource += 1;
+                }
+                None => {
+                    self.miss_no_surface += 1;
+                }
             }
         }
         self.client.as_ref().is_some_and(|h| h.is_finished())
@@ -917,7 +943,10 @@ fn touch_down_announces_with_id_to_a_wl_touch_client() {
         runtime: runtime.clone(),
         mapped: Vec::new(),
         injected_down: None,
+        miss_no_surface: 0,
+        miss_no_resource: 0,
         points_after_drive: None,
+        drive_motion: false,
         inject_up: false,
         client: Some(common::client::spawn_touch_client(&socket)),
     };
@@ -952,10 +981,21 @@ fn touch_down_announces_with_id_to_a_wl_touch_client() {
         .expect("client handle")
         .join()
         .expect("client thread");
+    assert!(
+        events.transport_error.is_none(),
+        "the touch park must see no transport failure, got {:?} \
+         (drive misses: no-surface={} no-resource={})",
+        events.transport_error,
+        app.miss_no_surface,
+        app.miss_no_resource
+    );
     assert_eq!(
         events.downs,
         vec![7],
-        "the client must observe the down with its id"
+        "the client must observe the down with its id \
+         (drive misses: no-surface={} no-resource={})",
+        app.miss_no_surface,
+        app.miss_no_resource
     );
 }
 
@@ -984,7 +1024,10 @@ fn touch_up_announces_for_the_known_point() {
         runtime: runtime.clone(),
         mapped: Vec::new(),
         injected_down: None,
+        miss_no_surface: 0,
+        miss_no_resource: 0,
         points_after_drive: None,
+        drive_motion: true,
         inject_up: true,
         client: Some(common::client::spawn_touch_client_until_up(&socket)),
     };
@@ -1014,10 +1057,30 @@ fn touch_up_announces_for_the_known_point() {
         .expect("client handle")
         .join()
         .expect("client thread");
+    assert!(
+        events.transport_error.is_none(),
+        "the touch park must see no transport failure, got {:?} \
+         (drive misses: no-surface={} no-resource={})",
+        events.transport_error,
+        app.miss_no_surface,
+        app.miss_no_resource
+    );
     assert_eq!(
         events.downs,
         vec![7],
-        "the client must observe the down with its id"
+        "the client must observe the down with its id \
+         (drive misses: no-surface={} no-resource={})",
+        app.miss_no_surface,
+        app.miss_no_resource
+    );
+    assert_eq!(
+        events.motions,
+        vec![7],
+        "the client must observe the driven motion with the point's id — \
+         the forward, not just the server-side point \
+         (drive misses: no-surface={} no-resource={})",
+        app.miss_no_surface,
+        app.miss_no_resource
     );
     assert_eq!(
         events.ups,
@@ -1061,7 +1124,10 @@ fn touch_cancel_has_no_headless_driver() {
         runtime: runtime.clone(),
         mapped: Vec::new(),
         injected_down: None,
+        miss_no_surface: 0,
+        miss_no_resource: 0,
         points_after_drive: None,
+        drive_motion: false,
         inject_up: false,
         client: Some(common::client::spawn_touch_client(&socket)),
     };
@@ -1093,6 +1159,11 @@ fn touch_cancel_has_no_headless_driver() {
         events.downs,
         vec![7],
         "the cancel precondition — a live point with a client — must hold"
+    );
+    assert!(
+        events.transport_error.is_none(),
+        "the touch park must see no transport failure, got {:?}",
+        events.transport_error
     );
     assert_eq!(
         events.cancels, 0,

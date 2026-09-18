@@ -13931,11 +13931,12 @@ mod tests {
         }
     }
 
-    /// A touch motion for an unknown id — and for a known id with no client:
-    /// the point gate sits before the hit test, so both miss with no cursor
-    /// and no scene involved. Motion carries no handler event, so the oracle
-    /// is the absence of any delivery at all through the shared dispatcher —
-    /// the same skip as the up relay's miss arms.
+    /// A touch motion for an unknown id — for a dead device with no point —
+    /// and for a known id with no client: the point gate sits before the hit
+    /// test, so all three miss with no cursor and no scene involved. Motion
+    /// carries no handler event, so the oracle is the absence of any delivery
+    /// at all through the shared dispatcher — the same skip as the up
+    /// relay's miss arms (including its null-device arm, mirrored here).
     ///
     /// The clientless arm drives a fabricated point (null client by
     /// construction) through the relay itself — sound because the gate
@@ -13988,6 +13989,23 @@ mod tests {
                 "a motion for an unknown point must deliver nothing"
             );
 
+            // Dead device, unknown id: likewise silent — the mirror of the
+            // up relay's null-device arm. The point gate misses before the
+            // device is ever read, so a device that died mid-gesture takes
+            // the same exit as a live one with nothing to resolve.
+            let mut ev_null = sys::wlr_touch_motion_event {
+                touch: std::ptr::null_mut(),
+                time_msec: 12,
+                touch_id: 4243,
+                x: 0.5,
+                y: 0.5,
+            };
+            sys::wl_signal_emit_mutable(&mut sig, (&raw mut ev_null).cast::<std::ffi::c_void>());
+            assert!(
+                state.downs.is_empty() && state.ups.is_empty() && state.cancelled == 0,
+                "a motion with neither device nor point must deliver nothing"
+            );
+
             // Known id with no client: the client half of the gate misses,
             // so the same skip — the focus update must never run with a
             // null client behind the point either.
@@ -14002,7 +14020,7 @@ mod tests {
             );
             let mut ev_clientless = sys::wlr_touch_motion_event {
                 touch,
-                time_msec: 12,
+                time_msec: 13,
                 touch_id: 7,
                 x: 0.5,
                 y: 0.5,
@@ -14139,6 +14157,49 @@ mod tests {
             // SAFETY: nothing registered names this allocation (only
             // transient event addresses did); same layout as allocated.
             dealloc(touch.cast(), Layout::new::<sys::wlr_touch>());
+        }
+    }
+
+    /// An up with no seat: the point gate misses before anything resolves,
+    /// so neither the forward nor the event happens — the seatless pair to
+    /// the live-seat unknown arm above, which takes the same exit one step
+    /// later. Needs no display: with no seat there is nothing to look up.
+    /// A null device is carried because no device exists seatless; the
+    /// relay returns before reading it either way.
+    #[test]
+    fn touch_up_without_a_seat_announces_nothing() {
+        let runtime = Runtime::new().expect("runtime");
+        assert!(
+            runtime.seat_ptr().is_none(),
+            "no seat was ever created on this runtime"
+        );
+        let mut state = RelayRecorder::default();
+        let p = &raw mut state;
+
+        // SAFETY: live exclusive state pointer, outliving runtime, inline
+        // delivery — as for the up test.
+        unsafe {
+            let session = test_session(p, &runtime, deliver_all::<RelayRecorder>);
+            let session_ptr = (&raw const session).cast::<()>();
+
+            // SAFETY: live stack signal, initialised below, outliving the
+            // registration; session and dispatcher state as above.
+            let mut sig: sys::wl_signal = std::mem::zeroed();
+            sys::wl_signal_init(&mut sig);
+            let _up = Registration::link_bare(
+                &mut sig,
+                on_touch_up::<RelayRecorder>,
+                session_ptr,
+                std::ptr::null(),
+            );
+
+            let mut ev = sys::wlr_touch_up_event {
+                touch: std::ptr::null_mut(),
+                time_msec: 12,
+                touch_id: 7,
+            };
+            sys::wl_signal_emit_mutable(&mut sig, (&raw mut ev).cast::<std::ffi::c_void>());
+            assert!(state.ups.is_empty(), "a seatless up must announce nothing");
         }
     }
 
