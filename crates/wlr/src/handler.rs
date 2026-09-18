@@ -1700,7 +1700,9 @@ pub trait SeatHandler {
     /// A touch point went up — the finger lifted. Notification only, on the
     /// same terms as [`touch_down`](SeatHandler::touch_down): the id names
     /// the point that went up, the up forward (which removes the point) has
-    /// already gone out, and an unknown id must be harmless.
+    /// already gone out, and an unknown id must be harmless. When the device
+    /// died mid-gesture the forward is skipped and only this notification
+    /// clears the point.
     ///
     /// Added additively — see the guarantee in [`crate`].
     fn touch_up(&mut self, _id: TouchId) {}
@@ -1709,7 +1711,9 @@ pub trait SeatHandler {
     /// cancel forward to the touch client has already gone out, so there is
     /// nothing left here for a handler to *forward* — clear whatever
     /// in-flight touch state the down/up notifications built. Carries no
-    /// id: the cancel names no single point.
+    /// id: the cancel names no single point. When the device died
+    /// mid-gesture the forward is skipped and only this notification clears
+    /// the state.
     ///
     /// Added additively — see the guarantee in [`crate`].
     fn touch_cancelled(&mut self) {}

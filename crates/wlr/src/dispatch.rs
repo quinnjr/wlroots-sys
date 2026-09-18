@@ -283,11 +283,19 @@ pub(crate) enum Event {
     /// is emitted. A deferred delivery may name a pointer whose device went
     /// away in between; the id then only tells the handler *which* pointer
     /// the gesture was on.
+    ///
+    /// With no gestures manager or no seat the forward is skipped and this
+    /// event still fires: that is specified degraded behaviour, not a bug —
+    /// shell-side gesture mapping works without gesture clients, on the same
+    /// terms as [`GesturePhase`](crate::runtime::GesturePhase)'s own
+    /// documentation.
     GestureBegan(GestureId),
 
     /// A pointer gesture ended — completed or cancelled. Same shape as
     /// `GestureBegan`: the end forward has already gone out, and a deferred
-    /// delivery may name a pointer whose device went away in between.
+    /// delivery may name a pointer whose device went away in between. As
+    /// there, a skipped forward (no manager or seat) still emits: shell-only
+    /// handling, by specification.
     GestureEnded(GestureId),
 
     /// A touch point went down — a finger landed. Carries the crate's own
@@ -305,6 +313,10 @@ pub(crate) enum Event {
     /// already gone; like `InputMethodPopupDestroyed`, the id then only
     /// tells the handler *which* point the up was for. Write this so an
     /// unknown id is harmless.
+    ///
+    /// When the device died mid-gesture the forward is skipped and only this
+    /// event clears the point; an up for an id never announced emits
+    /// nothing at all.
     TouchUp(TouchId),
 
     /// A touch gesture was cancelled wholesale — the compositor's cue to

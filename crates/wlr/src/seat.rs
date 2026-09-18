@@ -566,19 +566,23 @@ impl SwitchType {
     /// Decode a `wlr_switch_type` wire value. Total for the same reason as
     /// [`PointerAxis::from_raw`]; an unknown value — which no wlroots 0.20
     /// build can produce, the enum having exactly three values — falls back
-    /// to [`SwitchType::Lid`], the overwhelmingly common switch, so a future
-    /// header addition degrades to a mislabelled toggle rather than a dead
-    /// process.
+    /// to [`SwitchType::TabletMode`], so a future header addition degrades
+    /// to a mislabelled toggle rather than a dead process. Tablet mode is
+    /// the fallback rather than the lid deliberately: [`SwitchState`]'s
+    /// `lid_closed` derives from `switch_type == Lid && on`, which feeds the
+    /// session/lock paths, so a lid fallback would let a non-lid switch fire
+    /// lid side effects, while a tablet-mode fallback carries no such
+    /// derivation.
     ///
     /// There is no `to_raw`: switches only ever report inward (device to
     /// compositor), so nothing in this crate encodes one back out.
     pub(crate) fn from_raw(raw: sys::wlr_switch_type) -> SwitchType {
         use sys::wlr_switch_type as W;
         match raw {
-            W::WLR_SWITCH_TYPE_TABLET_MODE => SwitchType::TabletMode,
+            W::WLR_SWITCH_TYPE_LID => SwitchType::Lid,
             W::WLR_SWITCH_TYPE_KEYPAD_SLIDE => SwitchType::KeypadSlide,
-            // Includes `WLR_SWITCH_TYPE_LID` itself.
-            _ => SwitchType::Lid,
+            // Includes `WLR_SWITCH_TYPE_TABLET_MODE` itself.
+            _ => SwitchType::TabletMode,
         }
     }
 }
@@ -667,7 +671,7 @@ mod tests {
         );
         assert_eq!(
             SwitchType::from_raw(sys::wlr_switch_type(99)),
-            SwitchType::Lid
+            SwitchType::TabletMode
         );
     }
 
